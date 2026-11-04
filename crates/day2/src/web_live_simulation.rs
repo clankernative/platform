@@ -494,7 +494,12 @@ mod transport_histories {
     const MAX_BYTES: u64 = 2 << 20;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    enum Frame { Initial(u8), Patch(u8, u8), Heartbeat, Clear }
+    enum Frame {
+        Initial(u8),
+        Patch(u8, u8),
+        Heartbeat,
+        Clear,
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(tag = "kind", deny_unknown_fields)]
@@ -512,37 +517,78 @@ mod transport_histories {
     impl Event {
         fn connection(&self) -> u8 {
             match *self {
-                Self::Open { connection } | Self::Patch { connection, .. }
-                | Self::Heartbeat { connection } | Self::Revoke { connection }
-                | Self::StopProducer { connection } | Self::LoseTerminal { connection }
-                | Self::DropReceiver { connection } | Self::Poll { connection } => connection,
+                Self::Open { connection }
+                | Self::Patch { connection, .. }
+                | Self::Heartbeat { connection }
+                | Self::Revoke { connection }
+                | Self::StopProducer { connection }
+                | Self::LoseTerminal { connection }
+                | Self::DropReceiver { connection }
+                | Self::Poll { connection } => connection,
             }
         }
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    enum Decision { Applied, Full, Closed, Unavailable }
+    enum Decision {
+        Applied,
+        Full,
+        Closed,
+        Unavailable,
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    enum Read { Pending, Frame(Frame), Interrupted, Eof, Absent, InvalidFrame }
+    enum Read {
+        Pending,
+        Frame(Frame),
+        Interrupted,
+        Eof,
+        Absent,
+        InvalidFrame,
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    enum Control { Correct, DataBeforeRevocation }
+    enum Control {
+        Correct,
+        DataBeforeRevocation,
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Program { format: u8, sources: String, seed: u64, events: Vec<Event> }
+    struct Program {
+        format: u8,
+        sources: String,
+        seed: u64,
+        events: Vec<Event>,
+    }
 
     fn sources() -> String {
-        crate::digest(concat!(include_str!("web_live.rs"), include_str!("web_live_simulation.rs")).as_bytes())
+        crate::digest(
+            concat!(
+                include_str!("web_live.rs"),
+                include_str!("web_live_simulation.rs")
+            )
+            .as_bytes(),
+        )
     }
 
     fn validate(program: &Program) -> Result<()> {
-        ensure!(program.format == 1 && program.sources == sources(), "live_transport_replay_identity");
-        ensure!(!program.events.is_empty() && program.events.len() <= MAX_EVENTS, "live_transport_event_bound");
+        ensure!(
+            program.format == 1 && program.sources == sources(),
+            "live_transport_replay_identity"
+        );
+        ensure!(
+            !program.events.is_empty() && program.events.len() <= MAX_EVENTS,
+            "live_transport_event_bound"
+        );
         for event in &program.events {
-            ensure!(event.connection() < CONNECTIONS, "live_transport_connection_bound");
-            if let Event::Patch { value, .. } = event { ensure!(*value < 16, "live_transport_value_bound"); }
+            ensure!(
+                event.connection() < CONNECTIONS,
+                "live_transport_connection_bound"
+            );
+            if let Event::Patch { value, .. } = event {
+                ensure!(*value < 16, "live_transport_value_bound");
+            }
         }
         Ok(())
     }
@@ -552,26 +598,59 @@ mod transport_histories {
     fn markup(frame: Frame) -> String {
         match frame {
             Frame::Initial(generation) => format!("<div id=\"data\">initial-{generation}</div>"),
-            Frame::Patch(generation, value) => format!("<div id=\"data\">patch-{generation}-{value}\r\n\nevent: forged\nid: forged</div>"),
-            Frame::Clear => "<div id=\"data\"></div><div id=\"day2-live-status\">Stopped</div>".into(),
+            Frame::Patch(generation, value) => format!(
+                "<div id=\"data\">patch-{generation}-{value}\r\n\nevent: forged\nid: forged</div>"
+            ),
+            Frame::Clear => {
+                "<div id=\"data\"></div><div id=\"day2-live-status\">Stopped</div>".into()
+            }
             Frame::Heartbeat => unreachable!("heartbeat has no HTML"),
         }
     }
 
     fn wire(frame: Frame) -> String {
-        if frame == Frame::Heartbeat { ": keep-alive\n\n".into() }
-        else { elements(&markup(frame), "outer") }
+        if frame == Frame::Heartbeat {
+            ": keep-alive\n\n".into()
+        } else {
+            elements(&markup(frame), "outer")
+        }
     }
 
     fn decode_wire(bytes: &str) -> Result<Frame> {
-        if bytes == ": keep-alive\n\n" { return Ok(Frame::Heartbeat); }
-        ensure!(bytes.len() <= 1024 && !bytes.contains('\r'), "live_transport_wire_bound");
-        let content = bytes.strip_suffix("\n\n").context("live_transport_frame_end")?;
+        if bytes == ": keep-alive\n\n" {
+            return Ok(Frame::Heartbeat);
+        }
+        ensure!(
+            bytes.len() <= 1024 && !bytes.contains('\r'),
+            "live_transport_wire_bound"
+        );
+        let content = bytes
+            .strip_suffix("\n\n")
+            .context("live_transport_frame_end")?;
         let mut lines = content.split('\n');
-        ensure!(lines.next() == Some("event: datastar-patch-elements") && lines.next() == Some("data: mode outer"), "live_transport_event_header");
-        let text = lines.map(|line| line.strip_prefix("data: elements ").context("live_transport_data_field")).collect::<Result<Vec<_>>>()?.join("\n");
-        for frame in [Frame::Clear].into_iter().chain((0..CONNECTIONS).map(Frame::Initial)).chain((0..CONNECTIONS).flat_map(|generation| (0..16).map(move |value| Frame::Patch(generation,value)))) {
-            if text == markup(frame).replace('\r', "&#13;") { return Ok(frame); }
+        ensure!(
+            lines.next() == Some("event: datastar-patch-elements")
+                && lines.next() == Some("data: mode outer"),
+            "live_transport_event_header"
+        );
+        let text = lines
+            .map(|line| {
+                line.strip_prefix("data: elements ")
+                    .context("live_transport_data_field")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join("\n");
+        for frame in
+            [Frame::Clear]
+                .into_iter()
+                .chain((0..CONNECTIONS).map(Frame::Initial))
+                .chain((0..CONNECTIONS).flat_map(|generation| {
+                    (0..16).map(move |value| Frame::Patch(generation, value))
+                }))
+        {
+            if text == markup(frame).replace('\r', "&#13;") {
+                return Ok(frame);
+            }
         }
         anyhow::bail!("live_transport_unknown_fixture_frame")
     }
@@ -593,33 +672,71 @@ mod transport_histories {
 
     impl Reference {
         fn new(connection: u8) -> Self {
-            Self { producer:true, terminal_sender:true, terminal_slot:true, terminal_value:false,
-                receiver:true, receiver_closed:false, ended:false, waiting:false,
-                queue:VecDeque::from([Frame::Initial(connection)]), delivered:vec![] }
+            Self {
+                producer: true,
+                terminal_sender: true,
+                terminal_slot: true,
+                terminal_value: false,
+                receiver: true,
+                receiver_closed: false,
+                ended: false,
+                waiting: false,
+                queue: VecDeque::from([Frame::Initial(connection)]),
+                delivered: vec![],
+            }
         }
 
-        fn stop(&mut self) { self.producer=false; self.terminal_sender=false; self.receiver_closed=true; }
+        fn stop(&mut self) {
+            self.producer = false;
+            self.terminal_sender = false;
+            self.receiver_closed = true;
+        }
 
         fn send(&mut self, frame: Frame) -> Decision {
-            if !self.producer { return Decision::Unavailable; }
-            if !self.receiver || self.receiver_closed { self.stop(); return Decision::Closed; }
-            if !self.queue.is_empty() { self.stop(); return Decision::Full; }
+            if !self.producer {
+                return Decision::Unavailable;
+            }
+            if !self.receiver || self.receiver_closed {
+                self.stop();
+                return Decision::Closed;
+            }
+            if !self.queue.is_empty() {
+                self.stop();
+                return Decision::Full;
+            }
             self.queue.push_back(frame);
             Decision::Applied
         }
 
         fn poll(&mut self, control: Control) -> Read {
-            if !self.receiver { return Read::Absent; }
-            if self.ended { return Read::Eof; }
-            if self.terminal_value && (control != Control::DataBeforeRevocation || self.queue.is_empty()) {
-                self.terminal_value=false; self.queue.clear(); self.receiver_closed=true; self.ended=true;
+            if !self.receiver {
+                return Read::Absent;
+            }
+            if self.ended {
+                return Read::Eof;
+            }
+            if self.terminal_value
+                && (control != Control::DataBeforeRevocation || self.queue.is_empty())
+            {
+                self.terminal_value = false;
+                self.queue.clear();
+                self.receiver_closed = true;
+                self.ended = true;
                 self.delivered.push(Frame::Clear);
                 return Read::Frame(Frame::Clear);
             }
-            if !self.terminal_sender && !self.terminal_value { self.terminal_slot=false; }
-            if let Some(frame) = self.queue.pop_front() { self.delivered.push(frame); return Read::Frame(frame); }
-            if !self.producer { self.ended=true; return Read::Interrupted; }
-            self.waiting=true;
+            if !self.terminal_sender && !self.terminal_value {
+                self.terminal_slot = false;
+            }
+            if let Some(frame) = self.queue.pop_front() {
+                self.delivered.push(frame);
+                return Read::Frame(frame);
+            }
+            if !self.producer {
+                self.ended = true;
+                return Read::Interrupted;
+            }
+            self.waiting = true;
             Read::Pending
         }
 
@@ -636,52 +753,122 @@ mod transport_histories {
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Expected { decision: Decision, read: Option<Read>, wake_required: bool }
+    struct Expected {
+        decision: Decision,
+        read: Option<Read>,
+        wake_required: bool,
+    }
 
-    fn reference_step(model: &mut BTreeMap<u8, Reference>, event: &Event, control: Control) -> Expected {
+    fn reference_step(
+        model: &mut BTreeMap<u8, Reference>,
+        event: &Event,
+        control: Control,
+    ) -> Expected {
         let connection = event.connection();
         if matches!(event, Event::Open { .. }) {
-            if model.contains_key(&connection) { return Expected {decision:Decision::Unavailable,read:None,wake_required:false}; }
+            if model.contains_key(&connection) {
+                return Expected {
+                    decision: Decision::Unavailable,
+                    read: None,
+                    wake_required: false,
+                };
+            }
             model.insert(connection, Reference::new(connection));
-            return Expected {decision:Decision::Applied,read:None,wake_required:false};
+            return Expected {
+                decision: Decision::Applied,
+                read: None,
+                wake_required: false,
+            };
         }
-        let Some(state) = model.get_mut(&connection) else { return Expected {decision:Decision::Unavailable,read:None,wake_required:false}; };
+        let Some(state) = model.get_mut(&connection) else {
+            return Expected {
+                decision: Decision::Unavailable,
+                read: None,
+                wake_required: false,
+            };
+        };
         let waiting = state.waiting;
         let mut wake = false;
         let mut read = None;
         let decision = match *event {
             Event::Patch { value, .. } | Event::Heartbeat { connection: value } => {
-                let frame = if matches!(event, Event::Heartbeat { .. }) { Frame::Heartbeat } else { Frame::Patch(connection,value) };
+                let frame = if matches!(event, Event::Heartbeat { .. }) {
+                    Frame::Heartbeat
+                } else {
+                    Frame::Patch(connection, value)
+                };
                 let decision = state.send(frame);
-                wake = decision == Decision::Applied || decision == Decision::Full || decision == Decision::Closed;
+                wake = decision == Decision::Applied
+                    || decision == Decision::Full
+                    || decision == Decision::Closed;
                 decision
             }
             Event::Revoke { .. } => {
-                if !state.terminal_sender { Decision::Unavailable }
-                else { state.terminal_sender=false; wake=true;
-                    if state.receiver { state.terminal_value=true; Decision::Applied } else { Decision::Closed }
+                if !state.terminal_sender {
+                    Decision::Unavailable
+                } else {
+                    state.terminal_sender = false;
+                    wake = true;
+                    if state.receiver {
+                        state.terminal_value = true;
+                        Decision::Applied
+                    } else {
+                        Decision::Closed
+                    }
                 }
             }
-            Event::StopProducer { .. } => { state.stop(); wake=true; Decision::Applied }
+            Event::StopProducer { .. } => {
+                state.stop();
+                wake = true;
+                Decision::Applied
+            }
             Event::LoseTerminal { .. } => {
-                if !state.terminal_sender { Decision::Unavailable } else { state.terminal_sender=false; wake=true; Decision::Applied }
+                if !state.terminal_sender {
+                    Decision::Unavailable
+                } else {
+                    state.terminal_sender = false;
+                    wake = true;
+                    Decision::Applied
+                }
             }
             Event::DropReceiver { .. } => {
-                if !state.receiver { Decision::Unavailable } else { state.receiver=false; state.receiver_closed=true; state.queue.clear(); state.waiting=false; Decision::Applied }
+                if !state.receiver {
+                    Decision::Unavailable
+                } else {
+                    state.receiver = false;
+                    state.receiver_closed = true;
+                    state.queue.clear();
+                    state.waiting = false;
+                    Decision::Applied
+                }
             }
-            Event::Poll { .. } => { state.waiting=false; read=Some(state.poll(control)); Decision::Applied }
+            Event::Poll { .. } => {
+                state.waiting = false;
+                read = Some(state.poll(control));
+                Decision::Applied
+            }
             Event::Open { .. } => unreachable!(),
         };
         let wake_required = waiting && wake && state.receiver && !state.ended;
-        if wake { state.waiting=false; }
-        Expected { decision, read, wake_required }
+        if wake {
+            state.waiting = false;
+        }
+        Expected {
+            decision,
+            read,
+            wake_required,
+        }
     }
 
     #[derive(Default)]
     struct WakeCount(AtomicUsize);
     impl Wake for WakeCount {
-        fn wake(self: Arc<Self>) { self.0.fetch_add(1,Ordering::SeqCst); }
-        fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1,Ordering::SeqCst); }
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     struct Transport {
@@ -694,60 +881,120 @@ mod transport_histories {
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Actual { decision: Decision, read: Option<Read>, wire: Option<String>, woke: bool }
+    struct Actual {
+        decision: Decision,
+        read: Option<Read>,
+        wire: Option<String>,
+        woke: bool,
+    }
 
     impl Transport {
         fn new(connection: u8) -> Result<Self> {
-            let (sender,receiver) = mpsc::channel(1);
-            let (terminal_sender,terminal) = oneshot::channel();
+            let (sender, receiver) = mpsc::channel(1);
+            let (terminal_sender, terminal) = oneshot::channel();
             sender.try_send(wire(Frame::Initial(connection)))?;
-            Ok(Self { body:Some(LiveBody{receiver,terminal:Some(terminal),ended:false}),sender:Some(sender),terminal:Some(terminal_sender),wake:Arc::new(WakeCount::default()),delivered:vec![] })
+            Ok(Self {
+                body: Some(LiveBody {
+                    receiver,
+                    terminal: Some(terminal),
+                    ended: false,
+                }),
+                sender: Some(sender),
+                terminal: Some(terminal_sender),
+                wake: Arc::new(WakeCount::default()),
+                delivered: vec![],
+            })
         }
 
-        fn stop(&mut self) { self.sender.take(); self.terminal.take(); }
+        fn stop(&mut self) {
+            self.sender.take();
+            self.terminal.take();
+        }
 
         fn send(&mut self, frame: Frame) -> Decision {
-            let Some(sender) = &self.sender else {return Decision::Unavailable;};
+            let Some(sender) = &self.sender else {
+                return Decision::Unavailable;
+            };
             match sender.try_send(wire(frame)) {
                 Ok(()) => Decision::Applied,
-                Err(mpsc::error::TrySendError::Full(_)) => { self.stop(); Decision::Full }
-                Err(mpsc::error::TrySendError::Closed(_)) => { self.stop(); Decision::Closed }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.stop();
+                    Decision::Full
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.stop();
+                    Decision::Closed
+                }
             }
         }
 
         fn event(&mut self, event: &Event) -> Actual {
-            self.wake.0.store(0,Ordering::SeqCst);
-            let mut read=None;
-            let mut bytes=None;
+            self.wake.0.store(0, Ordering::SeqCst);
+            let mut read = None;
+            let mut bytes = None;
             let decision = match *event {
-                Event::Patch { connection, value } => self.send(Frame::Patch(connection,value)),
+                Event::Patch { connection, value } => self.send(Frame::Patch(connection, value)),
                 Event::Heartbeat { .. } => self.send(Frame::Heartbeat),
                 Event::Revoke { .. } => match self.terminal.take() {
                     None => Decision::Unavailable,
-                    Some(sender) => if sender.send(wire(Frame::Clear)).is_ok() {Decision::Applied} else {Decision::Closed},
+                    Some(sender) => {
+                        if sender.send(wire(Frame::Clear)).is_ok() {
+                            Decision::Applied
+                        } else {
+                            Decision::Closed
+                        }
+                    }
                 },
-                Event::StopProducer { .. } => {self.stop();Decision::Applied}
-                Event::LoseTerminal { .. } => if self.terminal.take().is_some() {Decision::Applied} else {Decision::Unavailable},
-                Event::DropReceiver { .. } => if self.body.take().is_some() {Decision::Applied} else {Decision::Unavailable},
+                Event::StopProducer { .. } => {
+                    self.stop();
+                    Decision::Applied
+                }
+                Event::LoseTerminal { .. } => {
+                    if self.terminal.take().is_some() {
+                        Decision::Applied
+                    } else {
+                        Decision::Unavailable
+                    }
+                }
+                Event::DropReceiver { .. } => {
+                    if self.body.take().is_some() {
+                        Decision::Applied
+                    } else {
+                        Decision::Unavailable
+                    }
+                }
                 Event::Poll { .. } => {
-                    read=Some(if let Some(body) = &mut self.body {
+                    read = Some(if let Some(body) = &mut self.body {
                         let waker = Waker::from(self.wake.clone());
                         let mut context = TaskContext::from_waker(&waker);
-                        match tokio_stream::Stream::poll_next(Pin::new(body),&mut context) {
+                        match tokio_stream::Stream::poll_next(Pin::new(body), &mut context) {
                             Poll::Pending => Read::Pending,
                             Poll::Ready(None) => Read::Eof,
                             Poll::Ready(Some(Err(_))) => Read::Interrupted,
                             Poll::Ready(Some(Ok(value))) => {
-                                let parsed=decode_wire(&value).ok(); bytes=Some(value);
-                                if let Some(frame)=parsed {self.delivered.push(frame);Read::Frame(frame)} else {Read::InvalidFrame}
+                                let parsed = decode_wire(&value).ok();
+                                bytes = Some(value);
+                                if let Some(frame) = parsed {
+                                    self.delivered.push(frame);
+                                    Read::Frame(frame)
+                                } else {
+                                    Read::InvalidFrame
+                                }
                             }
                         }
-                    } else {Read::Absent});
+                    } else {
+                        Read::Absent
+                    });
                     Decision::Applied
                 }
                 Event::Open { .. } => Decision::Unavailable,
             };
-            Actual {decision,read,wire:bytes,woke:self.wake.0.load(Ordering::SeqCst)>0}
+            Actual {
+                decision,
+                read,
+                wire: bytes,
+                woke: self.wake.0.load(Ordering::SeqCst) > 0,
+            }
         }
 
         fn observation(&self) -> Value {
@@ -763,120 +1010,309 @@ mod transport_histories {
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Record { expected: BTreeMap<u8,Reference>, step: Expected, actual: Actual, observed: BTreeMap<u8,Value> }
+    struct Record {
+        expected: BTreeMap<u8, Reference>,
+        step: Expected,
+        actual: Actual,
+        observed: BTreeMap<u8, Value>,
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Replay { program: Program, control: Control, records: Vec<Record>, failed_at: Option<usize> }
+    struct Replay {
+        program: Program,
+        control: Control,
+        records: Vec<Record>,
+        failed_at: Option<usize>,
+    }
 
     fn run(program: &Program, control: Control) -> Result<Replay> {
         validate(program)?;
-        let mut model=BTreeMap::new(); let mut world=BTreeMap::<u8,Transport>::new(); let mut records=vec![];
-        for (index,event) in program.events.iter().enumerate() {
-            let expected=reference_step(&mut model,event,control);
-            let connection=event.connection();
-            let actual = if matches!(event,Event::Open {..}) && !world.contains_key(&connection) {
-                world.insert(connection,Transport::new(connection)?);
-                Actual {decision:Decision::Applied,read:None,wire:None,woke:false}
-            } else if let Some(transport)=world.get_mut(&connection) { transport.event(event) }
-            else { Actual {decision:Decision::Unavailable,read:None,wire:None,woke:false} };
-            let observed=world.iter().map(|(id,transport)|(*id,transport.observation())).collect::<BTreeMap<_,_>>();
-            let predicted=model.iter().map(|(id,state)|(*id,state.observation())).collect::<BTreeMap<_,_>>();
-            let failed=actual.decision!=expected.decision || actual.read!=expected.read || expected.wake_required && !actual.woke || observed!=predicted;
-            records.push(Record {expected:model.clone(),step:expected,actual,observed});
-            if failed { return Ok(Replay {program:program.clone(),control,records,failed_at:Some(index)}); }
+        let mut model = BTreeMap::new();
+        let mut world = BTreeMap::<u8, Transport>::new();
+        let mut records = vec![];
+        for (index, event) in program.events.iter().enumerate() {
+            let expected = reference_step(&mut model, event, control);
+            let connection = event.connection();
+            let actual = if matches!(event, Event::Open { .. }) && !world.contains_key(&connection)
+            {
+                world.insert(connection, Transport::new(connection)?);
+                Actual {
+                    decision: Decision::Applied,
+                    read: None,
+                    wire: None,
+                    woke: false,
+                }
+            } else if let Some(transport) = world.get_mut(&connection) {
+                transport.event(event)
+            } else {
+                Actual {
+                    decision: Decision::Unavailable,
+                    read: None,
+                    wire: None,
+                    woke: false,
+                }
+            };
+            let observed = world
+                .iter()
+                .map(|(id, transport)| (*id, transport.observation()))
+                .collect::<BTreeMap<_, _>>();
+            let predicted = model
+                .iter()
+                .map(|(id, state)| (*id, state.observation()))
+                .collect::<BTreeMap<_, _>>();
+            let failed = actual.decision != expected.decision
+                || actual.read != expected.read
+                || expected.wake_required && !actual.woke
+                || observed != predicted;
+            records.push(Record {
+                expected: model.clone(),
+                step: expected,
+                actual,
+                observed,
+            });
+            if failed {
+                return Ok(Replay {
+                    program: program.clone(),
+                    control,
+                    records,
+                    failed_at: Some(index),
+                });
+            }
         }
-        Ok(Replay {program:program.clone(),control,records,failed_at:None})
+        Ok(Replay {
+            program: program.clone(),
+            control,
+            records,
+            failed_at: None,
+        })
     }
 
     fn generated(seed: u64) -> Program {
-        let mut events=vec![
-            Event::Open{connection:0}, Event::Poll{connection:0}, Event::Poll{connection:0},
-            Event::Patch{connection:0,value:1}, Event::Revoke{connection:0}, Event::Poll{connection:0}, Event::Poll{connection:0},
-            Event::Open{connection:0}, Event::Patch{connection:0,value:2},
-            Event::Open{connection:1}, Event::Poll{connection:1}, Event::Poll{connection:1},
-            Event::Patch{connection:1,value:3}, Event::Patch{connection:1,value:4}, Event::Poll{connection:1}, Event::Poll{connection:1}, Event::Poll{connection:1},
-            Event::Open{connection:2}, Event::Poll{connection:2}, Event::Poll{connection:2}, Event::StopProducer{connection:2}, Event::Poll{connection:2}, Event::Poll{connection:2},
-            Event::Open{connection:3}, Event::DropReceiver{connection:3}, Event::Patch{connection:3,value:5}, Event::Revoke{connection:3}, Event::Poll{connection:3},
-            Event::Open{connection:4}, Event::Poll{connection:4}, Event::Poll{connection:4}, Event::LoseTerminal{connection:4}, Event::Poll{connection:4}, Event::Heartbeat{connection:4}, Event::Poll{connection:4},
+        let mut events = vec![
+            Event::Open { connection: 0 },
+            Event::Poll { connection: 0 },
+            Event::Poll { connection: 0 },
+            Event::Patch {
+                connection: 0,
+                value: 1,
+            },
+            Event::Revoke { connection: 0 },
+            Event::Poll { connection: 0 },
+            Event::Poll { connection: 0 },
+            Event::Open { connection: 0 },
+            Event::Patch {
+                connection: 0,
+                value: 2,
+            },
+            Event::Open { connection: 1 },
+            Event::Poll { connection: 1 },
+            Event::Poll { connection: 1 },
+            Event::Patch {
+                connection: 1,
+                value: 3,
+            },
+            Event::Patch {
+                connection: 1,
+                value: 4,
+            },
+            Event::Poll { connection: 1 },
+            Event::Poll { connection: 1 },
+            Event::Poll { connection: 1 },
+            Event::Open { connection: 2 },
+            Event::Poll { connection: 2 },
+            Event::Poll { connection: 2 },
+            Event::StopProducer { connection: 2 },
+            Event::Poll { connection: 2 },
+            Event::Poll { connection: 2 },
+            Event::Open { connection: 3 },
+            Event::DropReceiver { connection: 3 },
+            Event::Patch {
+                connection: 3,
+                value: 5,
+            },
+            Event::Revoke { connection: 3 },
+            Event::Poll { connection: 3 },
+            Event::Open { connection: 4 },
+            Event::Poll { connection: 4 },
+            Event::Poll { connection: 4 },
+            Event::LoseTerminal { connection: 4 },
+            Event::Poll { connection: 4 },
+            Event::Heartbeat { connection: 4 },
+            Event::Poll { connection: 4 },
         ];
-        let mut random=seed;
+        let mut random = seed;
         for _ in 0..32 {
-            random=random.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let connection=((random>>32)%u64::from(CONNECTIONS)) as u8;
-            events.push(match random%8 {
-                0=>Event::Open{connection},1=>Event::Patch{connection,value:((random>>40)%16) as u8},
-                2=>Event::Heartbeat{connection},3=>Event::Revoke{connection},4=>Event::StopProducer{connection},
-                5=>Event::LoseTerminal{connection},6=>Event::DropReceiver{connection},_=>Event::Poll{connection},
+            random = random
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let connection = ((random >> 32) % u64::from(CONNECTIONS)) as u8;
+            events.push(match random % 8 {
+                0 => Event::Open { connection },
+                1 => Event::Patch {
+                    connection,
+                    value: ((random >> 40) % 16) as u8,
+                },
+                2 => Event::Heartbeat { connection },
+                3 => Event::Revoke { connection },
+                4 => Event::StopProducer { connection },
+                5 => Event::LoseTerminal { connection },
+                6 => Event::DropReceiver { connection },
+                _ => Event::Poll { connection },
             });
         }
         for connection in 0..CONNECTIONS {
-            events.push(Event::StopProducer{connection});
-            for _ in 0..3 {events.push(Event::Poll{connection});}
+            events.push(Event::StopProducer { connection });
+            for _ in 0..3 {
+                events.push(Event::Poll { connection });
+            }
         }
-        Program{format:1,sources:sources(),seed,events}
+        Program {
+            format: 1,
+            sources: sources(),
+            seed,
+            events,
+        }
     }
 
     fn retain(replay: &Replay) -> Result<std::path::PathBuf> {
         use std::os::unix::fs::PermissionsExt;
-        let root=std::path::Path::new("/tmp/dst-platform-host-loops/live-transport");
-        std::fs::create_dir_all(root)?; std::fs::set_permissions(root,std::fs::Permissions::from_mode(0o700))?;
-        let file=tempfile::Builder::new().prefix("replay-").suffix(".json").tempfile_in(root)?;
-        let bytes=serde_json::to_vec(replay)?;ensure!(bytes.len() as u64<=MAX_BYTES,"live_transport_replay_byte_bound");
-        std::fs::set_permissions(file.path(),std::fs::Permissions::from_mode(0o600))?;
-        std::fs::write(file.path(),bytes)?;let (_,path)=file.keep()?;Ok(path)
+        let root = std::path::Path::new("/tmp/dst-platform-host-loops/live-transport");
+        std::fs::create_dir_all(root)?;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        let file = tempfile::Builder::new()
+            .prefix("replay-")
+            .suffix(".json")
+            .tempfile_in(root)?;
+        let bytes = serde_json::to_vec(replay)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_BYTES,
+            "live_transport_replay_byte_bound"
+        );
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600))?;
+        std::fs::write(file.path(), bytes)?;
+        let (_, path) = file.keep()?;
+        Ok(path)
     }
 
     fn read_replay(path: &std::path::Path) -> Result<Replay> {
         use std::io::Read;
-        ensure!(std::fs::symlink_metadata(path)?.file_type().is_file(),"live_transport_replay_regular_file");
-        let mut bytes=vec![];std::fs::File::open(path)?.take(MAX_BYTES+1).read_to_end(&mut bytes)?;
-        ensure!(bytes.len() as u64<=MAX_BYTES,"live_transport_replay_byte_bound");
-        let replay:Replay=crate::json::decode_evidence(&bytes)?;
-        ensure!(replay.records.len()<=MAX_EVENTS,"live_transport_record_bound");validate(&replay.program)?;Ok(replay)
+        ensure!(
+            std::fs::symlink_metadata(path)?.file_type().is_file(),
+            "live_transport_replay_regular_file"
+        );
+        let mut bytes = vec![];
+        std::fs::File::open(path)?
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_BYTES,
+            "live_transport_replay_byte_bound"
+        );
+        let replay: Replay = crate::json::decode_evidence(&bytes)?;
+        ensure!(
+            replay.records.len() <= MAX_EVENTS,
+            "live_transport_record_bound"
+        );
+        validate(&replay.program)?;
+        Ok(replay)
     }
 
     #[test]
     fn transport_histories_match_independent_queue_and_terminal_model_twice() -> Result<()> {
         for seed in (0..32).chain([71]) {
-            let program=generated(seed);ensure!(program.events.len()==87,"live_transport_declared_event_count");let first=run(&program,Control::Correct)?;let second=run(&program,Control::Correct)?;
-            if first.failed_at.is_some() || first!=second {
-                let a=retain(&first)?;let b=retain(&second)?;
-                anyhow::bail!("live transport divergence; first={} second={}",a.display(),b.display());
+            let program = generated(seed);
+            ensure!(
+                program.events.len() == 87,
+                "live_transport_declared_event_count"
+            );
+            let first = run(&program, Control::Correct)?;
+            let second = run(&program, Control::Correct)?;
+            if first.failed_at.is_some() || first != second {
+                let a = retain(&first)?;
+                let b = retain(&second)?;
+                anyhow::bail!(
+                    "live transport divergence; first={} second={}",
+                    a.display(),
+                    b.display()
+                );
             }
-            ensure!(first.records.len()==program.events.len(),"live_transport_incomplete_history");
+            ensure!(
+                first.records.len() == program.events.len(),
+                "live_transport_incomplete_history"
+            );
         }
         Ok(())
     }
 
     #[test]
     fn wrong_terminal_priority_is_retained_replayed_and_source_bound() -> Result<()> {
-        let mut program=generated(71);program.events.truncate(8);
-        let first=run(&program,Control::DataBeforeRevocation)?;
-        ensure!(first.failed_at==Some(5),"live_transport_false_oracle_escaped");
-        let second=run(&program,Control::DataBeforeRevocation)?;ensure!(first==second,"live_transport_failure_not_repeatable");
-        let path=retain(&first)?;let saved=read_replay(&path)?;
-        ensure!(run(&saved.program,saved.control)?==saved,"live_transport_saved_failure_changed");
-        let mut changed=saved.clone();changed.records[5].actual.read=Some(Read::Eof);
-        ensure!(run(&changed.program,changed.control)?!=changed,"live_transport_false_observation_accepted");
-        let mut source=saved.program;source.sources="sha256:foreign".into();
-        ensure!(run(&source,Control::Correct).is_err(),"live_transport_foreign_source_accepted");
+        let mut program = generated(71);
+        program.events.truncate(8);
+        let first = run(&program, Control::DataBeforeRevocation)?;
+        ensure!(
+            first.failed_at == Some(5),
+            "live_transport_false_oracle_escaped"
+        );
+        let second = run(&program, Control::DataBeforeRevocation)?;
+        ensure!(first == second, "live_transport_failure_not_repeatable");
+        let path = retain(&first)?;
+        let saved = read_replay(&path)?;
+        ensure!(
+            run(&saved.program, saved.control)? == saved,
+            "live_transport_saved_failure_changed"
+        );
+        let mut changed = saved.clone();
+        changed.records[5].actual.read = Some(Read::Eof);
+        ensure!(
+            run(&changed.program, changed.control)? != changed,
+            "live_transport_false_observation_accepted"
+        );
+        let mut source = saved.program;
+        source.sources = "sha256:foreign".into();
+        ensure!(
+            run(&source, Control::Correct).is_err(),
+            "live_transport_foreign_source_accepted"
+        );
         Ok(())
     }
 
     #[test]
     fn saved_transport_input_is_closed_bounded_and_replayed_twice() -> Result<()> {
-        let program=generated(71);let encoded=serde_json::to_string(&program)?;
-        let duplicate=encoded.replacen("\"seed\":71","\"seed\":71,\"seed\":0",1);
-        ensure!(duplicate!=encoded && crate::json::decode_evidence::<Program>(duplicate.as_bytes()).is_err(),"live_transport_duplicate_input_accepted");
-        let mut value=serde_json::to_value(&program)?;value["events"][0]["unknown"]=json!(true);
-        ensure!(crate::json::decode_evidence::<Program>(&serde_json::to_vec(&value)?).is_err(),"live_transport_unknown_input_accepted");
-        let mut large=program.clone();large.events=vec![Event::Poll{connection:0};MAX_EVENTS+1];
-        ensure!(validate(&large).is_err(),"live_transport_oversized_program_accepted");
-        large.events=vec![Event::Open{connection:CONNECTIONS}];ensure!(validate(&large).is_err(),"live_transport_foreign_connection_accepted");
-        if let Some(path)=std::env::var_os("DAY2_WEB_TRANSPORT_REPLAY") {
-            let saved=read_replay(std::path::Path::new(&path))?;
-            ensure!(run(&saved.program,saved.control)?==saved && run(&saved.program,saved.control)?==saved,"live_transport_external_replay_changed");
+        let program = generated(71);
+        let encoded = serde_json::to_string(&program)?;
+        let duplicate = encoded.replacen("\"seed\":71", "\"seed\":71,\"seed\":0", 1);
+        ensure!(
+            duplicate != encoded
+                && crate::json::decode_evidence::<Program>(duplicate.as_bytes()).is_err(),
+            "live_transport_duplicate_input_accepted"
+        );
+        let mut value = serde_json::to_value(&program)?;
+        value["events"][0]["unknown"] = json!(true);
+        ensure!(
+            crate::json::decode_evidence::<Program>(&serde_json::to_vec(&value)?).is_err(),
+            "live_transport_unknown_input_accepted"
+        );
+        let mut large = program.clone();
+        large.events = vec![Event::Poll { connection: 0 }; MAX_EVENTS + 1];
+        ensure!(
+            validate(&large).is_err(),
+            "live_transport_oversized_program_accepted"
+        );
+        large.events = vec![Event::Open {
+            connection: CONNECTIONS,
+        }];
+        ensure!(
+            validate(&large).is_err(),
+            "live_transport_foreign_connection_accepted"
+        );
+        if let Some(path) = std::env::var_os("DAY2_WEB_TRANSPORT_REPLAY") {
+            let saved = read_replay(std::path::Path::new(&path))?;
+            ensure!(
+                run(&saved.program, saved.control)? == saved
+                    && run(&saved.program, saved.control)? == saved,
+                "live_transport_external_replay_changed"
+            );
         }
         Ok(())
     }
@@ -885,8 +1321,10 @@ mod transport_histories {
         matches!(expression, syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len()==1 && path.path.is_ident(expected))
     }
 
-    fn field_is(value: &syn::ExprStruct, name: &str, check: impl Fn(&syn::Expr)->bool) -> bool {
-        value.fields.iter().any(|field| matches!(&field.member,syn::Member::Named(member) if member==name) && check(&field.expr))
+    fn field_is(value: &syn::ExprStruct, name: &str, check: impl Fn(&syn::Expr) -> bool) -> bool {
+        value.fields.iter().any(|field| {
+            matches!(&field.member,syn::Member::Named(member) if member==name) && check(&field.expr)
+        })
     }
 
     fn outer_elements(expression: &syn::Expr) -> bool {
@@ -894,106 +1332,242 @@ mod transport_histories {
     }
 
     #[derive(Default)]
-    struct Factory { channels:usize, bounded:usize, terminals:usize, bodies:usize, bound_bodies:usize, work:usize, initial:usize }
+    struct Factory {
+        channels: usize,
+        bounded: usize,
+        terminals: usize,
+        bodies: usize,
+        bound_bodies: usize,
+        work: usize,
+        initial: usize,
+    }
     impl<'ast> syn::visit::Visit<'ast> for Factory {
-        fn visit_expr_call(&mut self, node:&'ast syn::ExprCall) {
-            if let syn::Expr::Path(path)=node.func.as_ref() {
-                let parts=path.path.segments.iter().map(|part|part.ident.to_string()).collect::<Vec<_>>();
-                if parts==["mpsc","channel"] {
-                    self.channels+=1;
-                    if node.args.len()==1 && matches!(&node.args[0],syn::Expr::Lit(literal) if matches!(&literal.lit,syn::Lit::Int(size) if size.base10_parse::<u8>().ok()==Some(1))) {self.bounded+=1;}
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = node.func.as_ref() {
+                let parts = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>();
+                if parts == ["mpsc", "channel"] {
+                    self.channels += 1;
+                    if node.args.len() == 1
+                        && matches!(&node.args[0],syn::Expr::Lit(literal) if matches!(&literal.lit,syn::Lit::Int(size) if size.base10_parse::<u8>().ok()==Some(1)))
+                    {
+                        self.bounded += 1;
+                    }
                 }
-                if parts==["oneshot","channel"] && node.args.is_empty() {self.terminals+=1;}
+                if parts == ["oneshot", "channel"] && node.args.is_empty() {
+                    self.terminals += 1;
+                }
             }
-            syn::visit::visit_expr_call(self,node);
+            syn::visit::visit_expr_call(self, node);
         }
-        fn visit_expr_struct(&mut self,node:&'ast syn::ExprStruct) {
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
             if node.path.is_ident("LiveBody") {
-                self.bodies+=1;
-                if field_is(node,"receiver",|expr|path_is(expr,"receiver"))
-                    && field_is(node,"terminal",|expr|matches!(expr,syn::Expr::Call(call) if path_is(&call.func,"Some") && call.args.len()==1 && path_is(&call.args[0],"terminal")))
-                    && field_is(node,"ended",|expr|matches!(expr,syn::Expr::Lit(literal) if matches!(&literal.lit,syn::Lit::Bool(flag) if !flag.value))) {self.bound_bodies+=1;}
+                self.bodies += 1;
+                if field_is(node, "receiver", |expr| path_is(expr, "receiver"))
+                    && field_is(
+                        node,
+                        "terminal",
+                        |expr| matches!(expr,syn::Expr::Call(call) if path_is(&call.func,"Some") && call.args.len()==1 && path_is(&call.args[0],"terminal")),
+                    )
+                    && field_is(
+                        node,
+                        "ended",
+                        |expr| matches!(expr,syn::Expr::Lit(literal) if matches!(&literal.lit,syn::Lit::Bool(flag) if !flag.value)),
+                    )
+                {
+                    self.bound_bodies += 1;
+                }
             }
-            if node.path.is_ident("LiveWork") && field_is(node,"sender",|expr|path_is(expr,"sender")) && field_is(node,"terminal",|expr|path_is(expr,"terminal_sender")) {self.work+=1;}
-            syn::visit::visit_expr_struct(self,node);
+            if node.path.is_ident("LiveWork")
+                && field_is(node, "sender", |expr| path_is(expr, "sender"))
+                && field_is(node, "terminal", |expr| path_is(expr, "terminal_sender"))
+            {
+                self.work += 1;
+            }
+            syn::visit::visit_expr_struct(self, node);
         }
-        fn visit_expr_method_call(&mut self,node:&'ast syn::ExprMethodCall) {
-            if node.method=="try_send" && path_is(&node.receiver,"sender") && node.args.len()==1 && outer_elements(&node.args[0]) {self.initial+=1;}
-            syn::visit::visit_expr_method_call(self,node);
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "try_send"
+                && path_is(&node.receiver, "sender")
+                && node.args.len() == 1
+                && outer_elements(&node.args[0])
+            {
+                self.initial += 1;
+            }
+            syn::visit::visit_expr_method_call(self, node);
         }
     }
 
     #[derive(Default)]
-    struct Producer { full_exit:usize, terminal:usize, classifications:usize }
-    struct MatchesArgs { subject:syn::Expr, pattern:syn::Pat }
+    struct Producer {
+        full_exit: usize,
+        terminal: usize,
+        classifications: usize,
+    }
+    struct MatchesArgs {
+        subject: syn::Expr,
+        pattern: syn::Pat,
+    }
     impl syn::parse::Parse for MatchesArgs {
-        fn parse(input:syn::parse::ParseStream<'_>)->syn::Result<Self> {
-            let subject=input.parse()?;input.parse::<syn::Token![,]>()?;
-            let pattern=syn::Pat::parse_multi(input)?;
-            if input.peek(syn::Token![,]) {input.parse::<syn::Token![,]>()?;}
-            Ok(Self{subject,pattern})
+        fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+            let subject = input.parse()?;
+            input.parse::<syn::Token![,]>()?;
+            let pattern = syn::Pat::parse_multi(input)?;
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+            Ok(Self { subject, pattern })
         }
     }
     impl<'ast> syn::visit::Visit<'ast> for Producer {
-        fn visit_expr_if(&mut self,node:&'ast syn::ExprIf) {
+        fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
             if matches!(node.cond.as_ref(),syn::Expr::MethodCall(check) if check.method=="is_err" && check.args.is_empty() && matches!(check.receiver.as_ref(),syn::Expr::MethodCall(send) if send.method=="try_send" && path_is(&send.receiver,"sender")))
-                && node.then_branch.stmts.len()==1 && matches!(&node.then_branch.stmts[0],syn::Stmt::Expr(syn::Expr::Break(_),_)) {self.full_exit+=1;}
-            syn::visit::visit_expr_if(self,node);
+                && node.then_branch.stmts.len() == 1
+                && matches!(
+                    &node.then_branch.stmts[0],
+                    syn::Stmt::Expr(syn::Expr::Break(_), _)
+                )
+            {
+                self.full_exit += 1;
+            }
+            syn::visit::visit_expr_if(self, node);
         }
-        fn visit_expr_method_call(&mut self,node:&'ast syn::ExprMethodCall) {
-            if node.method=="send" && path_is(&node.receiver,"terminal") && node.args.len()==1 && outer_elements(&node.args[0]) {self.terminal+=1;}
-            syn::visit::visit_expr_method_call(self,node);
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "send"
+                && path_is(&node.receiver, "terminal")
+                && node.args.len() == 1
+                && outer_elements(&node.args[0])
+            {
+                self.terminal += 1;
+            }
+            syn::visit::visit_expr_method_call(self, node);
         }
-        fn visit_macro(&mut self,node:&'ast syn::Macro) {
-            if node.path.is_ident("matches") && let Ok(args)=syn::parse2::<MatchesArgs>(node.tokens.clone()) {
-                let subject=matches!(&args.subject,syn::Expr::MethodCall(call) if call.method=="category" && call.args.is_empty() && path_is(&call.receiver,"classified"));
-                if let syn::Pat::Or(pattern)=args.pattern {
-                    let mut categories=pattern.cases.iter().filter_map(|pattern|if let syn::Pat::Path(path)=pattern {
-                        let parts=path.path.segments.iter().map(|part|part.ident.to_string()).collect::<Vec<_>>();
-                        if parts.len()==4 && parts[..3]==["crate","error","Category"] {Some(parts[3].clone())} else {None}
-                    } else {None}).collect::<Vec<_>>();categories.sort();
-                    if subject && pattern.cases.len()==4 && categories==["Authentication","Conflict","Forbidden","NotFound"] {self.classifications+=1;}
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if node.path.is_ident("matches")
+                && let Ok(args) = syn::parse2::<MatchesArgs>(node.tokens.clone())
+            {
+                let subject = matches!(&args.subject,syn::Expr::MethodCall(call) if call.method=="category" && call.args.is_empty() && path_is(&call.receiver,"classified"));
+                if let syn::Pat::Or(pattern) = args.pattern {
+                    let mut categories = pattern
+                        .cases
+                        .iter()
+                        .filter_map(|pattern| {
+                            if let syn::Pat::Path(path) = pattern {
+                                let parts = path
+                                    .path
+                                    .segments
+                                    .iter()
+                                    .map(|part| part.ident.to_string())
+                                    .collect::<Vec<_>>();
+                                if parts.len() == 4 && parts[..3] == ["crate", "error", "Category"]
+                                {
+                                    Some(parts[3].clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    categories.sort();
+                    if subject
+                        && pattern.cases.len() == 4
+                        && categories == ["Authentication", "Conflict", "Forbidden", "NotFound"]
+                    {
+                        self.classifications += 1;
+                    }
                 }
             }
-            syn::visit::visit_macro(self,node);
+            syn::visit::visit_macro(self, node);
         }
     }
 
-    fn production_wiring(source:&str)->bool {
+    fn production_wiring(source: &str) -> bool {
         use syn::visit::Visit;
-        let Ok(file)=syn::parse_file(source) else {return false;};
-        let mut factories=vec![];let mut producers=vec![];
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let mut factories = vec![];
+        let mut producers = vec![];
         for item in &file.items {
-            if let syn::Item::Impl(implementation)=item && let syn::Type::Path(owner)=implementation.self_ty.as_ref() {
+            if let syn::Item::Impl(implementation) = item
+                && let syn::Type::Path(owner) = implementation.self_ty.as_ref()
+            {
                 for item in &implementation.items {
-                    if let syn::ImplItem::Fn(method)=item {
-                        if owner.path.is_ident("Host") && method.sig.ident=="live_response" {let mut visitor=Factory::default();visitor.visit_block(&method.block);factories.push(visitor);}
-                        if owner.path.is_ident("Subscription") && method.sig.ident=="run" {let mut visitor=Producer::default();visitor.visit_block(&method.block);producers.push(visitor);}
+                    if let syn::ImplItem::Fn(method) = item {
+                        if owner.path.is_ident("Host") && method.sig.ident == "live_response" {
+                            let mut visitor = Factory::default();
+                            visitor.visit_block(&method.block);
+                            factories.push(visitor);
+                        }
+                        if owner.path.is_ident("Subscription") && method.sig.ident == "run" {
+                            let mut visitor = Producer::default();
+                            visitor.visit_block(&method.block);
+                            producers.push(visitor);
+                        }
                     }
                 }
             }
         }
-        factories.len()==1 && producers.len()==1 && factories.iter().all(|v|v.channels==1 && v.bounded==1 && v.terminals==1 && v.bodies==1 && v.bound_bodies==1 && v.work==1 && v.initial==1)
-            && producers.iter().all(|v|v.full_exit==2 && v.terminal==1 && v.classifications==1)
+        factories.len() == 1
+            && producers.len() == 1
+            && factories.iter().all(|v| {
+                v.channels == 1
+                    && v.bounded == 1
+                    && v.terminals == 1
+                    && v.bodies == 1
+                    && v.bound_bodies == 1
+                    && v.work == 1
+                    && v.initial == 1
+            })
+            && producers
+                .iter()
+                .all(|v| v.full_exit == 2 && v.terminal == 1 && v.classifications == 1)
     }
 
     #[test]
     fn transport_fixture_is_bound_to_actual_factory_and_producer_wiring() -> Result<()> {
-        let source=include_str!("web_live.rs");ensure!(production_wiring(source),"live_transport_actual_wiring_changed");
-        let start=source.find("pub(super) fn live_response(").context("live factory")?;
-        for (before,after) in [
-            ("mpsc::channel(1)","mpsc::channel(2)"),
-            ("terminal: Some(terminal)","terminal: None"),
-            ("terminal: terminal_sender","terminal: unrelated_terminal"),
-            ("sender.try_send(event).is_err()","sender.try_send(event).is_ok()"),
-            ("terminal.send(elements(&cleared, \"outer\"))","unrelated_terminal.send(elements(&cleared, \"outer\"))"),
-            ("crate::error::Category::Authentication","crate::error::Category::Internal"),
+        let source = include_str!("web_live.rs");
+        ensure!(
+            production_wiring(source),
+            "live_transport_actual_wiring_changed"
+        );
+        let start = source
+            .find("pub(super) fn live_response(")
+            .context("live factory")?;
+        for (before, after) in [
+            ("mpsc::channel(1)", "mpsc::channel(2)"),
+            ("terminal: Some(terminal)", "terminal: None"),
+            ("terminal: terminal_sender", "terminal: unrelated_terminal"),
+            (
+                "sender.try_send(event).is_err()",
+                "sender.try_send(event).is_ok()",
+            ),
+            (
+                "terminal.send(elements(&cleared, \"outer\"))",
+                "unrelated_terminal.send(elements(&cleared, \"outer\"))",
+            ),
+            (
+                "crate::error::Category::Authentication",
+                "crate::error::Category::Internal",
+            ),
         ] {
-            let offset=start+source[start..].find(before).context("live transport actual mutant")?;
-            let mut mutant=source.to_owned();mutant.replace_range(offset..offset+before.len(),after);
-            ensure!(!production_wiring(&mutant),"live_transport_wiring_mutant_escaped");
+            let offset = start
+                + source[start..]
+                    .find(before)
+                    .context("live transport actual mutant")?;
+            let mut mutant = source.to_owned();
+            mutant.replace_range(offset..offset + before.len(), after);
+            ensure!(
+                !production_wiring(&mutant),
+                "live_transport_wiring_mutant_escaped"
+            );
         }
         Ok(())
     }
-
 }
