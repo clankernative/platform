@@ -757,7 +757,7 @@ fn maximum_restore_manifest_and_history_fit_the_unchanged_evidence_decoder() -> 
     let unredacted = decode_contents(&invalid).err().context("missing raw decoder refusal")?;
     assert!(unredacted.to_string().contains(marker));
     let refused = decode(&invalid).err().context("missing closed decoder refusal")?;
-    assert_eq!(refused.to_string(), "secure_restore_replay_refused");
+    assert!(refused.to_string() == "secure_restore_replay_refused", "replay error boundary was not closed");
     assert_eq!(decoded.first, bundle.first);
     assert_eq!(decoded.second, bundle.second);
     let mut trailing = encoded.clone();
