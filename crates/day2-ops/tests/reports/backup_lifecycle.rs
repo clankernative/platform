@@ -43,6 +43,7 @@ type Rows = BTreeMap<u8, (u16, u64)>;
 struct Bundle {
     rows: Rows,
     valid: bool,
+    marker: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +91,7 @@ impl Model {
                 if self.bundles.contains_key(&slot) {
                     return Decision::Refused;
                 }
-                self.bundles.insert(slot, Bundle { rows: self.rows.clone(), valid: true });
+                self.bundles.insert(slot, Bundle { rows: self.rows.clone(), valid: true, marker: true });
                 if lose_reply {
                     self.lost_replies += 1;
                     return Decision::ReplyLost;
@@ -119,6 +120,7 @@ impl Model {
                     return Decision::Refused;
                 };
                 bundle.valid = false;
+                if matches!(event, Event::RemoveMarker { .. }) { bundle.marker = false; }
             }
         }
         Decision::Applied
@@ -277,50 +279,59 @@ impl World {
         expected
     }
 
-    fn observe(&self, model: &Model) -> Result<Value> {
+    fn expected(&self, model: &Model) -> Value {
+        let bundles = model.bundles.iter().map(|(slot,bundle)| (*slot, if bundle.valid {
+            json!({"valid":true,"marker":true,"rows":self.expected_rows(&bundle.rows),"same_authority":true,"sessions":[1,1]})
+        } else { json!({"valid":false,"marker":bundle.marker}) })).collect::<BTreeMap<_,_>>();
+        let restored = model.restored.iter().map(|(slot,rows)| (*slot,json!({
+            "rows":self.expected_rows(rows),"new_unique_epoch":true,"revision_advanced_once":true,
+            "disabled":true,"sessions":[0,0],"desired_fenced":true,"authorization_refused":true
+        }))).collect::<BTreeMap<_,_>>();
+        json!({"rows":self.expected_rows(&model.rows),"same_source_authority":true,"source_enabled":true,"source_sessions":[1,1],"bundles":bundles,"restored":restored})
+    }
+
+    fn observe(&self) -> Result<Value> {
         let source = Connection::open_with_flags(self.runtime.db(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let rows = actual_rows(&source)?;
-        ensure!(rows == self.expected_rows(&model.rows), "backup_source_rows");
         let authority = authority_state::current(&source)?;
-        ensure!(authority.stamp.epoch == self.source_epoch && authority.stamp.revision == self.source_revision && authority.document.enabled, "backup_source_authority");
-        ensure!(sessions(&source)? == [1,1], "backup_source_sessions");
         let mut bundles = BTreeMap::new();
-        for (slot, expected) in &model.bundles {
-            let path = self.path("backup", *slot);
-            let valid = backup::verify(&path).is_ok();
-            ensure!(valid == expected.valid, "backup_bundle_verification");
-            if valid {
+        for slot in 0..4 {
+            let path = self.path("backup", slot);
+            if !path.exists() { continue; }
+            let marker = path.join("backup.json").is_file();
+            let observed = if backup::verify(&path).is_ok() {
                 let database = Connection::open_with_flags(path.join("app.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                ensure!(actual_rows(&database)? == self.expected_rows(&expected.rows), "backup_snapshot_rows");
                 let current = authority_state::current(&database)?;
-                ensure!(current.stamp.epoch == self.source_epoch && current.stamp.revision == self.source_revision, "backup_snapshot_authority");
-                ensure!(sessions(&database)? == [1,1], "backup_snapshot_sessions");
-            }
-            bundles.insert(*slot, valid);
+                json!({"valid":true,"marker":marker,"rows":actual_rows(&database)?,"same_authority":current.stamp.epoch == self.source_epoch && current.stamp.revision == self.source_revision,"sessions":sessions(&database)?})
+            } else { json!({"valid":false,"marker":marker}) };
+            bundles.insert(slot, observed);
         }
         let mut restored = BTreeMap::new();
         let mut epochs = std::collections::BTreeSet::new();
-        for (slot, expected) in &model.restored {
-            let runtime = Runtime::load(&self.path("restored", *slot).join("instance.json"), "app")?;
-            let database = Connection::open_with_flags(runtime.db(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let rows = actual_rows(&database)?;
-            ensure!(rows == self.expected_rows(expected), "backup_restored_rows");
-            let current = authority_state::current(&database)?;
-            ensure!(current.stamp.epoch != self.source_epoch && epochs.insert(current.stamp.epoch) && current.stamp.revision == self.source_revision + 1 && !current.document.enabled, "backup_restore_authority_fence");
-            ensure!(sessions(&database)? == [0,0], "backup_restore_session_fence");
-            let desired = day2::artifact::Instance::load(runtime.instance_path())?;
-            let binding = &desired.apps["app"];
-            ensure!(binding.authority.is_none() && binding.readers.is_empty() && binding.writers.is_empty(), "backup_restore_desired_fence");
-            ensure!(runtime.authorize_audit(development::ACTOR).is_err(), "backup_restore_granted_authority");
-            restored.insert(*slot, rows);
-        }
-        // Refusal must not create an output, including corrupt/missing-marker
-        // bundles. Earlier successful outputs remain completely checked above.
         for slot in 0..4 {
-            ensure!(self.path("restored", slot).exists() == model.restored.contains_key(&slot), "backup_restore_output_presence");
+            let path = self.path("restored", slot);
+            if !path.exists() { continue; }
+            let observed = (|| -> Result<Value> {
+                let runtime = Runtime::load(&path.join("instance.json"), "app")?;
+                let database = Connection::open_with_flags(runtime.db(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                let current = authority_state::current(&database)?;
+                let desired = day2::artifact::Instance::load(runtime.instance_path())?;
+                let binding = &desired.apps["app"];
+                Ok(json!({"rows":actual_rows(&database)?,
+                    "new_unique_epoch":current.stamp.epoch != self.source_epoch && epochs.insert(current.stamp.epoch),
+                    "revision_advanced_once":current.stamp.revision == self.source_revision + 1,
+                    "disabled":!current.document.enabled,"sessions":sessions(&database)?,
+                    "desired_fenced":binding.authority.is_none() && binding.readers.is_empty() && binding.writers.is_empty(),
+                    "authorization_refused":runtime.authorize_audit(development::ACTOR).is_err()}))
+            })();
+            // Preserve unexpected partial-output evidence without formatting any
+            // adapter error. It cannot compare equal to a completed restore.
+            restored.insert(slot, observed.unwrap_or_else(|_| json!({"load_refused":true})));
         }
-        Ok(json!({"rows":rows,"bundles":bundles,"restored":restored,"source_sessions":[1,1],"restored_sessions":[0,0],"restores_fenced":true}))
+        Ok(json!({"rows":actual_rows(&source)?,
+            "same_source_authority":authority.stamp.epoch == self.source_epoch && authority.stamp.revision == self.source_revision,
+            "source_enabled":authority.document.enabled,"source_sessions":sessions(&source)?,"bundles":bundles,"restored":restored}))
     }
+
 }
 
 fn actual_rows(database: &Connection) -> Result<Vec<Value>> {
@@ -338,35 +349,54 @@ fn sessions(database: &Connection) -> Result<[u64;2]> {
 #[serde(deny_unknown_fields)]
 struct Record {
     expected: Model,
-    decision: Decision,
+    expected_decision: Decision,
+    actual_decision: Decision,
+    expected_observation: Value,
     observed: Value,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum OracleControl { Correct, IncludeUncommitted }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Replay {
+    control: OracleControl,
     program: Program,
     records: Vec<Record>,
     failed_at: Option<usize>,
 }
 
 fn run(program: &Program, artifact: &Path) -> Result<Replay> {
+    run_with(program, artifact, OracleControl::Correct)
+}
+
+fn run_with(program: &Program, artifact: &Path, control: OracleControl) -> Result<Replay> {
     let selected = day2::artifact::LoadedArtifact::load(artifact)?;
     validate(program, selected.id())?;
     let mut world = World::new(artifact)?;
     let mut model = Model::default();
-    world.observe(&model)?;
+    ensure!(world.observe()? == world.expected(&model), "backup_initial_state");
     let mut records = Vec::new();
     for (index,event) in program.events.iter().enumerate() {
-        let expected = model.step(event);
-        let actual = world.event(event)?;
-        let observed = world.observe(&model);
-        if actual != expected || observed.is_err() {
-            return Ok(Replay { program: program.clone(), records, failed_at: Some(index) });
+        let expected_decision = model.step(event);
+        if control == OracleControl::IncludeUncommitted {
+            if let Event::Take { slot, .. } = event {
+                if let Some(pending) = &model.pending {
+                    if let Some(bundle) = model.bundles.get_mut(slot) { bundle.rows = pending.clone(); }
+                }
+            }
         }
-        records.push(Record { expected: model.clone(), decision: actual, observed: observed? });
+        let actual_decision = world.event(event).unwrap_or(Decision::Refused);
+        let expected_observation = world.expected(&model);
+        let observed = world.observe().unwrap_or_else(|_| json!({"observation_refused":true}));
+        let failed = actual_decision != expected_decision || observed != expected_observation;
+        records.push(Record { expected: model.clone(), expected_decision, actual_decision, expected_observation, observed });
+        if failed {
+            return Ok(Replay { control, program: program.clone(), records, failed_at: Some(index) });
+        }
     }
-    Ok(Replay { program: program.clone(), records, failed_at: None })
+    Ok(Replay { control, program: program.clone(), records, failed_at: None })
 }
 
 fn read_replay(path: &Path) -> Result<Replay> {
@@ -375,7 +405,9 @@ fn read_replay(path: &Path) -> Result<Replay> {
     fs::File::open(path)?.take(MAX_REPLAY_BYTES + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() as u64 <= MAX_REPLAY_BYTES, "backup_replay_byte_bound");
     // The shared strict decoder rejects duplicate keys, including nested ones.
-    day2::json::decode_evidence(&bytes)
+    let replay: Replay = day2::json::decode_evidence(&bytes)?;
+    ensure!(replay.records.len() <= MAX_EVENTS, "backup_replay_record_bound");
+    Ok(replay)
 }
 
 fn retain(replay: &Replay) -> Result<std::path::PathBuf> {
@@ -386,6 +418,7 @@ fn retain(replay: &Replay) -> Result<std::path::PathBuf> {
     let file = tempfile::Builder::new().prefix("replay-").suffix(".json").tempfile_in(root)?;
     let bytes = serde_json::to_vec(replay)?;
     ensure!(bytes.len() as u64 <= MAX_REPLAY_BYTES, "backup_replay_byte_bound");
+    fs::set_permissions(file.path(), fs::Permissions::from_mode(0o600))?;
     fs::write(file.path(), bytes)?;
     let (_,path) = file.keep()?;
     Ok(path)
@@ -426,8 +459,17 @@ fn saved_backup_history_rejects_false_expectations_and_stale_source_identity() -
     false_expectation.records[2].expected.bundles.get_mut(&0).context("snapshot")?.rows.insert(0,(2,2));
     ensure!(run(&false_expectation.program, &artifact)? != false_expectation, "backup_uncommitted_row_oracle_bypassed");
     let mut false_observation = saved.clone();
-    false_observation.records[5].observed["restores_fenced"] = json!(false);
+    false_observation.records[5].observed["restored"]["0"]["disabled"] = json!(false);
     ensure!(run(&false_observation.program, &artifact)? != false_observation, "backup_restore_fence_oracle_bypassed");
+    let wrong = run_with(&program, &artifact, OracleControl::IncludeUncommitted)?;
+    ensure!(wrong.failed_at == Some(2) && wrong.records.len() == 3, "backup_wrong_oracle_not_detected");
+    ensure!(run_with(&program, &artifact, OracleControl::IncludeUncommitted)? == wrong, "backup_wrong_oracle_not_replayed");
+    let retained = retain(&wrong)?;
+    let saved_failure = read_replay(&retained)?;
+    ensure!(run_with(&saved_failure.program, &artifact, saved_failure.control)? == saved_failure, "backup_failure_retention_changed");
+    let mut wrong_artifact = program.clone();
+    wrong_artifact.artifact = "sha256:wrong-artifact".into();
+    ensure!(run(&wrong_artifact, &artifact).is_err(), "backup_wrong_artifact_accepted");
     program.sources = "sha256:stale-source".into();
     ensure!(run(&program, &artifact).is_err(), "backup_stale_replay_accepted");
     Ok(())
@@ -438,8 +480,25 @@ fn externally_supplied_backup_history_is_strict_and_replayed_twice() -> Result<(
     let Some(path) = std::env::var_os("DAY2_BACKUP_REPLAY") else { return Ok(()); };
     let saved = read_replay(Path::new(&path))?;
     let artifact = super::artifact()?;
-    let first = run(&saved.program, &artifact)?;
-    let second = run(&saved.program, &artifact)?;
+    let first = run_with(&saved.program, &artifact, saved.control)?;
+    let second = run_with(&saved.program, &artifact, saved.control)?;
     ensure!(first == saved && second == saved, "backup_external_replay_changed");
+    Ok(())
+}
+
+#[test]
+fn backup_replay_input_refuses_duplicates_unknown_fields_and_out_of_range_events() -> Result<()> {
+    let program = generated(71, "synthetic-artifact");
+    let encoded = serde_json::to_string(&program)?;
+    let duplicate = encoded.replacen("\"seed\":71", "\"seed\":71,\"seed\":17", 1);
+    ensure!(duplicate != encoded && day2::json::decode_evidence::<Program>(duplicate.as_bytes()).is_err(), "backup_duplicate_input_accepted");
+    let mut unknown = serde_json::to_value(&program)?;
+    unknown["events"][0]["unknown"] = json!(true);
+    ensure!(day2::json::decode_evidence::<Program>(&serde_json::to_vec(&unknown)?).is_err(), "backup_unknown_input_accepted");
+    let mut invalid = program.clone();
+    invalid.events = vec![Event::Take { slot:4, lose_reply:false }];
+    ensure!(validate(&invalid, "synthetic-artifact").is_err(), "backup_out_of_range_slot_accepted");
+    invalid.events = vec![Event::Commit; MAX_EVENTS+1];
+    ensure!(validate(&invalid, "synthetic-artifact").is_err(), "backup_oversized_history_accepted");
     Ok(())
 }
