@@ -54,7 +54,7 @@ impl std::fmt::Display for StopFailure {
     }
 }
 impl std::error::Error for StopFailure {}
-struct Model {
+pub(in crate::security_epoch) struct Model {
     binding: Binding,
     domain: Digest,
     lower: u64,
@@ -94,7 +94,7 @@ impl Model {
             cause: std::sync::Arc::new(()),
         }
     }
-    fn at(&mut self, lower: u64, upper: u64) {
+    pub(in crate::security_epoch) fn at(&mut self, lower: u64, upper: u64) {
         self.lower = lower;
         self.upper = upper;
     }
@@ -508,4 +508,13 @@ fn continuity_data_never_replaces_the_same_fresh_session_or_target() -> Result<(
         assert!(session.source.refused);
     }
     Ok(())
+}
+
+// Controlled model ONLY; no native or production supplier is exposed.
+pub(in crate::security_epoch) fn configured(binding: Binding) -> (Approval, Model) {
+    let mut original = approval(100);
+    original.binding = binding.clone();
+    let mut source = Model::new(vec![]);
+    source.binding = binding;
+    (original, source)
 }
