@@ -520,7 +520,11 @@ impl World {
                 let current = authority_state::current(&database)?;
                 let desired = day2::artifact::Instance::load(runtime.instance_path())?;
                 let binding = &desired.apps["app"];
-                let epoch_stable = self.restored_epochs.entry(slot).or_insert_with(|| current.stamp.epoch.clone()) == &current.stamp.epoch;
+                let epoch_stable = self
+                    .restored_epochs
+                    .entry(slot)
+                    .or_insert_with(|| current.stamp.epoch.clone())
+                    == &current.stamp.epoch;
                 Ok(json!({"rows":actual_rows(&database)?,
                     "new_unique_epoch":current.stamp.epoch != self.source_epoch && epochs.insert(current.stamp.epoch),
                     "epoch_stable":epoch_stable,
@@ -702,7 +706,11 @@ fn composed_backup_histories_replay_commits_reply_loss_and_restore_fences() -> R
         if first.failed_at.is_some() || first != second {
             let first_path = retain(&first)?;
             let second_path = retain(&second)?;
-            anyhow::bail!("backup lifecycle divergence; first={} second={}", first_path.display(), second_path.display());
+            anyhow::bail!(
+                "backup lifecycle divergence; first={} second={}",
+                first_path.display(),
+                second_path.display()
+            );
         }
         ensure!(
             first.records.len() == program.events.len(),
