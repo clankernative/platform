@@ -309,6 +309,7 @@
     "crates/day2/src/operation_contract.rs",
     "crates/day2/src/operation_metadata.rs",
     "crates/day2/src/output_schema.rs",
+    "crates/day2/src/owners.rs",
     "crates/day2/src/packaging.rs",
     "crates/day2/src/packaging_credentials.rs",
     "crates/day2/src/packaging_credentials_tests.rs",

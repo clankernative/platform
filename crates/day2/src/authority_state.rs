@@ -617,7 +617,7 @@ fn require_transaction(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn scope_matches(connection: &Connection, runtime: &Runtime) -> Result<()> {
+pub(crate) fn scope_matches(connection: &Connection, runtime: &Runtime) -> Result<()> {
     let scope: String =
         connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
             row.get(0)
