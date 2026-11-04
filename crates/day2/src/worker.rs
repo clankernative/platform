@@ -1159,3 +1159,981 @@ mod tests {
         assert!(text.contains("first-child-after-drain["));
     }
 }
+
+/// Real supervisor transport with fixed disposable children. No launcher,
+/// sandbox, application ABI or enrolled execution authority is supplied here.
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod exchange_histories {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Weak;
+
+    const MAX_CASES: usize = 8;
+    const MAX_CUTS: usize = 128;
+    const MAX_BYTES: u64 = 512 * 1024;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    enum ChildKind {
+        Echo,
+        Exited,
+        Silent,
+        Missing,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Case {
+        kind: ChildKind,
+        requests: u8,
+        bad_budget: bool,
+        malformed: bool,
+        empty_first: bool,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Program {
+        version: u8,
+        source: String,
+        seed: u64,
+        cases: Vec<Case>,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    enum Control {
+        Correct,
+        TimeoutCompletes,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    enum Step {
+        Start,
+        ZeroBudget,
+        LargeBudget,
+        Request(u8),
+        Malformed,
+        Reuse,
+        Close,
+        CloseAgain,
+        Discard,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    enum Fault {
+        Timeout,
+        Crashed,
+        Missing,
+        Other,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    enum Reply {
+        Started,
+        Refused(Fault),
+        Echo { length: usize, digest: String },
+        Closed,
+        Discarded,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Counters {
+        enqueued: u32,
+        writer_entered: u8,
+        dequeued: u32,
+        flushed: u32,
+        reader_entered: u8,
+        first_byte: u8,
+        frames: u32,
+        write_failed: u8,
+        write_errno: Option<i32>,
+    }
+    impl Counters {
+        fn read(p: &StageProgress) -> Self {
+            // Sample flush before dequeue: one writer publishes dequeue first.
+            // These cumulative fields are not an atomic scheduling trace.
+            let flushed = p.writer_flushed.load(Ordering::Acquire);
+            let dequeued = p.writer_dequeued.load(Ordering::Acquire);
+            Self {
+                enqueued: p.requests_enqueued.load(Ordering::Acquire),
+                writer_entered: p.writer_entered.load(Ordering::Acquire),
+                dequeued,
+                flushed,
+                reader_entered: p.reader_entered.load(Ordering::Acquire),
+                first_byte: p.reader_first_byte.load(Ordering::Acquire),
+                frames: p.reader_frames_completed.load(Ordering::Acquire),
+                write_failed: p.write_failed.load(Ordering::Acquire),
+                write_errno: match p.write_errno.load(Ordering::Acquire) {
+                    NO_ERRNO => None,
+                    n => i32::try_from(n).ok(),
+                },
+            }
+        }
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Observation {
+        present: bool,
+        requests_open: bool,
+        responses_open: bool,
+        same_owner: Option<bool>,
+        terminal: Option<bool>,
+        released: Option<bool>,
+        counters: Option<Counters>,
+    }
+    fn observe(
+        worker: &mut Option<Worker>,
+        weak: &Option<Weak<StageProgress>>,
+        discarded: bool,
+    ) -> Observation {
+        match worker {
+            Some(w) => {
+                let open = w.requests().is_some();
+                let terminal = if !open {
+                    #[cfg(target_os = "macos")]
+                    {
+                        let end = w.owner.final_snapshot().cleanup;
+                        Some(end.terminal == 1 && end.unresolved == 0)
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        Some(w.child.try_wait().ok().flatten().is_some())
+                    }
+                } else {
+                    None
+                };
+                Observation {
+                    present: true,
+                    requests_open: open,
+                    responses_open: w.responses().is_some(),
+                    same_owner: weak
+                        .as_ref()
+                        .map(|old| old.ptr_eq(&Arc::downgrade(&w.progress))),
+                    terminal,
+                    released: None,
+                    counters: Some(Counters::read(&w.progress)),
+                }
+            }
+            None => Observation {
+                present: false,
+                requests_open: false,
+                responses_open: false,
+                same_owner: None,
+                terminal: None,
+                released: if discarded {
+                    weak.as_ref().map(|old| old.upgrade().is_none())
+                } else {
+                    None
+                },
+                counters: None,
+            },
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Expected {
+        present: bool,
+        closed: bool,
+        enqueued: u32,
+        frames: u32,
+        released: Option<bool>,
+    }
+    struct Model {
+        kind: ChildKind,
+        state: Expected,
+    }
+    impl Model {
+        fn new(kind: ChildKind) -> Self {
+            Self {
+                kind,
+                state: Expected {
+                    present: false,
+                    closed: false,
+                    enqueued: 0,
+                    frames: 0,
+                    released: None,
+                },
+            }
+        }
+        fn step(&mut self, step: Step, frame: &[u8]) -> Reply {
+            match step {
+                Step::Start => {
+                    if self.kind == ChildKind::Missing {
+                        Reply::Refused(Fault::Missing)
+                    } else {
+                        self.state.present = true;
+                        Reply::Started
+                    }
+                }
+                Step::ZeroBudget | Step::LargeBudget => Reply::Refused(Fault::Other),
+                Step::Request(_) | Step::Reuse => {
+                    if self.state.closed {
+                        return Reply::Refused(Fault::Other);
+                    }
+                    self.state.enqueued += 1;
+                    match self.kind {
+                        ChildKind::Echo => {
+                            self.state.frames += 1;
+                            Reply::Echo {
+                                length: frame.len(),
+                                digest: crate::digest(frame),
+                            }
+                        }
+                        ChildKind::Exited => {
+                            self.state.closed = true;
+                            Reply::Refused(Fault::Crashed)
+                        }
+                        ChildKind::Silent => {
+                            self.state.closed = true;
+                            Reply::Refused(Fault::Timeout)
+                        }
+                        ChildKind::Missing => unreachable!(),
+                    }
+                }
+                Step::Malformed => {
+                    self.state.closed = true;
+                    Reply::Refused(Fault::Other)
+                }
+                Step::Close | Step::CloseAgain => {
+                    self.state.closed = true;
+                    Reply::Closed
+                }
+                Step::Discard => {
+                    self.state.present = false;
+                    self.state.released = (self.kind != ChildKind::Missing).then_some(true);
+                    Reply::Discarded
+                }
+            }
+        }
+        fn accepts(&self, observed: &Observation) -> bool {
+            let e = &self.state;
+            if observed.present != e.present || observed.released != e.released {
+                return false;
+            }
+            if !e.present {
+                return !observed.requests_open
+                    && !observed.responses_open
+                    && observed.same_owner.is_none()
+                    && observed.terminal.is_none()
+                    && observed.counters.is_none();
+            }
+            let Some(c) = &observed.counters else {
+                return false;
+            };
+            if observed.requests_open == e.closed
+                || observed.responses_open == e.closed
+                || observed.same_owner != Some(true)
+                || observed.terminal != if e.closed { Some(true) } else { None }
+            {
+                return false;
+            }
+            c.enqueued == e.enqueued
+                && c.frames == e.frames
+                && c.writer_entered <= 1
+                && c.reader_entered <= 1
+                && c.flushed <= c.dequeued
+                && c.dequeued <= c.enqueued
+                && c.dequeued.saturating_sub(c.flushed) >= u32::from(c.write_failed)
+                && c.first_byte == u8::from(c.frames > 0)
+                && (c.frames == 0 || c.reader_entered == 1)
+                && (!e.closed
+                    || (c.writer_entered == 1 && c.reader_entered == 1 && c.dequeued == c.enqueued))
+                && c.write_failed <= 1
+                && if c.write_failed == 0 {
+                    c.write_errno.is_none()
+                } else {
+                    e.closed
+                        && matches!(self.kind, ChildKind::Exited | ChildKind::Silent)
+                        && c.enqueued > c.frames
+                        && c.write_errno == Some(32)
+                }
+        }
+    }
+    fn closed_counters_stable(
+        expected: &Expected,
+        observed: &Observation,
+        first: &mut Option<Counters>,
+    ) -> bool {
+        if !expected.present || !expected.closed {
+            return true;
+        }
+        let Some(current) = &observed.counters else {
+            return false;
+        };
+        match first.as_ref() {
+            Some(old) => current == old,
+            None => {
+                *first = Some(current.clone());
+                true
+            }
+        }
+    }
+
+    fn classify(error: &anyhow::Error) -> Fault {
+        match crate::error::classify(error) {
+            crate::error::Failure::WorkerTimeout => Fault::Timeout,
+            crate::error::Failure::WorkerCrashed => Fault::Crashed,
+            _ => {
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+                {
+                    Fault::Missing
+                } else {
+                    Fault::Other
+                }
+            }
+        }
+    }
+    fn actual_reply(result: Result<Vec<u8>>) -> Reply {
+        match result {
+            Ok(bytes) => Reply::Echo {
+                length: bytes.len(),
+                digest: crate::digest(&bytes),
+            },
+            Err(error) => Reply::Refused(classify(&error)),
+        }
+    }
+    fn source() -> String {
+        crate::digest(
+            format!(
+                "worker-exchange-v1:{}:{}:{}:{}:{}",
+                std::env::consts::OS,
+                include_str!("worker.rs"),
+                include_str!("worker/mac_lifetime.rs"),
+                include_str!("worker/child_milestones.rs"),
+                include_str!("error.rs")
+            )
+            .as_bytes(),
+        )
+    }
+    fn validate(program: &Program) -> Result<()> {
+        ensure!(
+            program.version == 1 && program.source == source(),
+            "worker_history_source"
+        );
+        ensure!(
+            !program.cases.is_empty()
+                && program.cases.len() <= MAX_CASES
+                && program.cases.iter().all(|case| case.requests <= 3
+                    && (case.kind != ChildKind::Missing
+                        || (case.requests == 0 && !case.bad_budget && !case.malformed))
+                    && (!case.bad_budget || case.kind == ChildKind::Echo)),
+            "worker_history_bound"
+        );
+        Ok(())
+    }
+    fn frame(program: &Program, case: usize, index: u8, empty: bool) -> Vec<u8> {
+        if empty && index == 0 {
+            vec![]
+        } else {
+            format!("frame-{case}-{index}-{:x}", program.seed).into_bytes()
+        }
+    }
+    fn steps(case: &Case) -> Vec<Step> {
+        let mut steps = vec![Step::Start];
+        if case.kind != ChildKind::Missing {
+            if case.bad_budget {
+                steps.extend([Step::ZeroBudget, Step::LargeBudget])
+            }
+            for n in 0..case.requests {
+                steps.push(Step::Request(n));
+            }
+            if case.malformed {
+                steps.push(Step::Malformed);
+            }
+            steps.extend([Step::Close, Step::CloseAgain, Step::Reuse]);
+        }
+        steps.push(Step::Discard);
+        steps
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Cut {
+        case: usize,
+        step: Step,
+        expected: Reply,
+        actual: Reply,
+        state: Expected,
+        observation: Observation,
+        state_match: bool,
+        matched: bool,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Run {
+        cuts: Vec<Cut>,
+        failed_at: Option<usize>,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Pair {
+        program: Program,
+        control: Control,
+        runs: [Run; 2],
+    }
+
+    fn run(program: &Program, control: Control) -> Result<Run> {
+        validate(program)?;
+        let directory = tempfile::tempdir()?;
+        let mut run = Run {
+            cuts: vec![],
+            failed_at: None,
+        };
+        for (case_index, case) in program.cases.iter().enumerate() {
+            let mut model = Model::new(case.kind);
+            let mut worker: Option<Worker> = None;
+            let mut weak = None;
+            let mut failed = false;
+            let mut closed_counters = None;
+            for step in steps(case) {
+                if failed && step != Step::Discard {
+                    continue;
+                }
+                let payload = frame(
+                    program,
+                    case_index,
+                    match step {
+                        Step::Request(n) => n,
+                        _ => 9,
+                    },
+                    case.empty_first,
+                );
+                let mut expected = model.step(step, &payload);
+                if control == Control::TimeoutCompletes
+                    && expected == Reply::Refused(Fault::Timeout)
+                {
+                    expected = Reply::Echo {
+                        length: payload.len(),
+                        digest: crate::digest(&payload),
+                    };
+                }
+                let actual = match step {
+                    Step::Start => {
+                        let command = match case.kind {
+                            ChildKind::Echo => Command::new("/bin/cat"),
+                            ChildKind::Exited => Command::new("/usr/bin/false"),
+                            ChildKind::Silent => {
+                                let mut c = Command::new("/bin/sleep");
+                                c.arg("60");
+                                c
+                            }
+                            ChildKind::Missing => {
+                                Command::new(directory.path().join("missing-worker"))
+                            }
+                        };
+                        // The real supervisor clears environment and owns all pipes/threads.
+                        match Worker::spawn(command, MAX_FRAME) {
+                            Ok(value) => {
+                                weak = Some(Arc::downgrade(&value.progress));
+                                worker = Some(value);
+                                Reply::Started
+                            }
+                            Err(error) => Reply::Refused(classify(&error)),
+                        }
+                    }
+                    Step::ZeroBudget | Step::LargeBudget => actual_reply(
+                        worker
+                            .as_mut()
+                            .context("fixture worker absent")?
+                            .exchange_bounded(
+                                &payload,
+                                MAX_FRAME,
+                                if step == Step::ZeroBudget {
+                                    Duration::ZERO
+                                } else {
+                                    Duration::from_secs(4)
+                                },
+                            ),
+                    ),
+                    Step::Request(_) | Step::Reuse => {
+                        let value = worker.as_mut().context("fixture worker absent")?;
+                        actual_reply(if case.kind == ChildKind::Silent {
+                            value.exchange_bounded(&payload, MAX_FRAME, Duration::from_millis(2))
+                        } else {
+                            value.exchange(&payload)
+                        })
+                    }
+                    Step::Malformed => actual_reply(
+                        worker
+                            .as_mut()
+                            .context("fixture worker absent")?
+                            .exchange(b"invalid\nframe"),
+                    ),
+                    Step::Close | Step::CloseAgain => {
+                        worker
+                            .as_mut()
+                            .context("fixture worker absent")?
+                            .terminate();
+                        Reply::Closed
+                    }
+                    Step::Discard => {
+                        drop(worker.take());
+                        Reply::Discarded
+                    }
+                };
+                let observation = observe(&mut worker, &weak, step == Step::Discard);
+                let stable =
+                    closed_counters_stable(&model.state, &observation, &mut closed_counters);
+                let state_match = model.accepts(&observation) && stable;
+                let matched = state_match && expected == actual;
+                run.cuts.push(Cut {
+                    case: case_index,
+                    step,
+                    expected,
+                    actual,
+                    state: model.state.clone(),
+                    observation,
+                    state_match,
+                    matched,
+                });
+                ensure!(run.cuts.len() <= MAX_CUTS, "worker_history_cut_bound");
+                if !matched && run.failed_at.is_none() {
+                    run.failed_at = Some(run.cuts.len() - 1);
+                    failed = true;
+                }
+            }
+            if run.failed_at.is_some() {
+                break;
+            }
+        }
+        Ok(run)
+    }
+    // Preserve every raw observation. Compare stable protocol facts and validate
+    // every counter using explicit bounds, rather than inventing an OS schedule.
+    fn same_semantics(a: &Run, b: &Run) -> bool {
+        a.failed_at == b.failed_at
+            && a.cuts.len() == b.cuts.len()
+            && a.cuts.iter().zip(&b.cuts).all(|(a, b)| {
+                a.case == b.case
+                    && a.step == b.step
+                    && a.expected == b.expected
+                    && a.actual == b.actual
+                    && a.state == b.state
+                    && a.state_match == b.state_match
+                    && a.matched == b.matched
+                    && a.observation.present == b.observation.present
+                    && a.observation.requests_open == b.observation.requests_open
+                    && a.observation.responses_open == b.observation.responses_open
+                    && a.observation.same_owner == b.observation.same_owner
+                    && a.observation.terminal == b.observation.terminal
+                    && a.observation.released == b.observation.released
+                    && a.observation
+                        .counters
+                        .as_ref()
+                        .map(|c| (c.enqueued, c.frames, c.first_byte))
+                        == b.observation
+                            .counters
+                            .as_ref()
+                            .map(|c| (c.enqueued, c.frames, c.first_byte))
+            })
+    }
+    fn pair(program: &Program, control: Control) -> Result<Pair> {
+        Ok(Pair {
+            program: program.clone(),
+            control,
+            runs: [run(program, control)?, run(program, control)?],
+        })
+    }
+    fn retain(pair: &Pair) -> Result<std::path::PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Path::new("/tmp/dst-platform-host-loops/worker-exchange");
+        std::fs::create_dir_all(root)?;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        let file = tempfile::Builder::new()
+            .prefix("replay-")
+            .suffix(".json")
+            .tempfile_in(root)?;
+        let bytes = serde_json::to_vec(pair)?;
+        ensure!(bytes.len() <= MAX_BYTES as usize, "worker_history_bytes");
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600))?;
+        std::fs::write(file.path(), bytes)?;
+        Ok(file.keep()?.1)
+    }
+    fn verify(program: &Program) -> Result<Pair> {
+        let value = pair(program, Control::Correct)?;
+        if value.runs.iter().any(|run| run.failed_at.is_some())
+            || !same_semantics(&value.runs[0], &value.runs[1])
+        {
+            let path = retain(&value)?;
+            anyhow::bail!("worker history divergence; replay {}", path.display());
+        }
+        Ok(value)
+    }
+    fn validate_saved(value: &Pair) -> Result<()> {
+        validate(&value.program)?;
+        for run in &value.runs {
+            ensure!(
+                !run.cuts.is_empty() && run.cuts.len() <= MAX_CUTS,
+                "worker_history_saved_cuts"
+            );
+            let mut case_index = 0;
+            let mut step_index = 0;
+            let mut model = Model::new(value.program.cases[0].kind);
+            let mut first_failed = None;
+            let mut closed_counters = None;
+            for (index, cut) in run.cuts.iter().enumerate() {
+                ensure!(
+                    case_index < value.program.cases.len() && cut.case == case_index,
+                    "worker_history_saved_case"
+                );
+                let planned = steps(&value.program.cases[case_index]);
+                let planned_step = if first_failed.is_some() {
+                    Step::Discard
+                } else {
+                    *planned
+                        .get(step_index)
+                        .context("worker history saved step absent")?
+                };
+                ensure!(cut.step == planned_step, "worker_history_saved_order");
+                let payload = frame(
+                    &value.program,
+                    cut.case,
+                    match cut.step {
+                        Step::Request(n) => n,
+                        _ => 9,
+                    },
+                    value.program.cases[cut.case].empty_first,
+                );
+                let mut expected = model.step(cut.step, &payload);
+                if value.control == Control::TimeoutCompletes
+                    && expected == Reply::Refused(Fault::Timeout)
+                {
+                    expected = Reply::Echo {
+                        length: payload.len(),
+                        digest: crate::digest(&payload),
+                    }
+                }
+                let stable =
+                    closed_counters_stable(&model.state, &cut.observation, &mut closed_counters);
+                let state_match = model.accepts(&cut.observation) && stable;
+                let matched = state_match && expected == cut.actual;
+                ensure!(
+                    cut.expected == expected
+                        && cut.state == model.state
+                        && cut.state_match == state_match
+                        && cut.matched == matched,
+                    "worker_history_saved_observation"
+                );
+                if !matched && first_failed.is_none() {
+                    first_failed = Some(index)
+                }
+                if cut.step == Step::Discard {
+                    case_index += 1;
+                    step_index = 0;
+                    closed_counters = None;
+                    if first_failed.is_some() {
+                        ensure!(index + 1 == run.cuts.len(), "worker_history_after_failure");
+                        break;
+                    }
+                    if case_index < value.program.cases.len() {
+                        model = Model::new(value.program.cases[case_index].kind)
+                    }
+                } else {
+                    step_index += 1
+                }
+            }
+            ensure!(
+                first_failed == run.failed_at
+                    && run.cuts.last().is_some_and(|cut| cut.step == Step::Discard)
+                    && (first_failed.is_some() || case_index == value.program.cases.len()),
+                "worker_history_saved_failure"
+            );
+        }
+        Ok(())
+    }
+    fn replay(path: &Path) -> Result<()> {
+        use std::io::Read;
+        ensure!(
+            std::fs::symlink_metadata(path)?.file_type().is_file(),
+            "worker_history_regular"
+        );
+        let mut bytes = vec![];
+        std::fs::File::open(path)?
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= MAX_BYTES as usize, "worker_history_bytes");
+        let input: serde_json::Value = crate::json::decode_evidence(&bytes)
+            .map_err(|_| anyhow::anyhow!("worker_history_decode"))?;
+        let saved: Pair = serde_json::from_value(input.clone())
+            .map_err(|_| anyhow::anyhow!("worker_history_shape"))?;
+        ensure!(
+            input == serde_json::to_value(&saved)?,
+            "worker_history_shape"
+        );
+        validate_saved(&saved)?;
+        let actual = pair(&saved.program, saved.control)?;
+        ensure!(
+            same_semantics(&saved.runs[0], &actual.runs[0])
+                && same_semantics(&saved.runs[1], &actual.runs[1]),
+            "worker_history_replay_changed"
+        );
+        Ok(())
+    }
+    fn generated(seed: u64) -> Program {
+        let mut cases = vec![];
+        for kind in [
+            ChildKind::Echo,
+            ChildKind::Missing,
+            ChildKind::Silent,
+            ChildKind::Exited,
+        ] {
+            cases.push(Case {
+                kind,
+                requests: if kind == ChildKind::Missing { 0 } else { 2 },
+                bad_budget: kind == ChildKind::Echo,
+                malformed: kind == ChildKind::Echo,
+                empty_first: seed.is_multiple_of(2),
+            });
+        }
+        let mut random = seed;
+        for _ in 0..2 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            cases.push(Case {
+                kind: ChildKind::Echo,
+                requests: 1 + (random % 3) as u8,
+                bad_budget: random & 2 != 0,
+                malformed: random & 4 != 0,
+                empty_first: random & 8 != 0,
+            });
+        }
+        Program {
+            version: 1,
+            source: source(),
+            seed,
+            cases,
+        }
+    }
+
+    #[test]
+    fn real_worker_startup_watchdog_and_terminal_lifetimes_match_independent_histories()
+    -> Result<()> {
+        for seed in 0..8 {
+            verify(&generated(seed))?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn timeout_cannot_complete_and_saved_disagreement_replays_twice() -> Result<()> {
+        let mut program = generated(71);
+        program.cases = vec![Case {
+            kind: ChildKind::Silent,
+            requests: 2,
+            bad_budget: false,
+            malformed: false,
+            empty_first: false,
+        }];
+        let value = pair(&program, Control::TimeoutCompletes)?;
+        ensure!(
+            value.runs.iter().all(|run| run.failed_at == Some(1)
+                && run.cuts[1].actual == Reply::Refused(Fault::Timeout)
+                && run.cuts[1]
+                    .observation
+                    .counters
+                    .as_ref()
+                    .is_some_and(|c| c.enqueued == 1 && c.frames == 0)
+                && run.cuts[1].observation.terminal == Some(true)),
+            "worker_timeout_control_not_actual"
+        );
+        let path = retain(&value)?;
+        replay(&path)?;
+        Ok(())
+    }
+    #[test]
+    fn saved_worker_history_requires_source_bounds_full_observations_and_both_runs() -> Result<()> {
+        let mut program = generated(17);
+        program.cases = vec![program.cases[2].clone()];
+        let value = pair(&program, Control::TimeoutCompletes)?;
+        let file = retain(&value)?;
+        replay(&file)?;
+        let bytes = std::fs::read(&file)?;
+        let original: serde_json::Value = crate::json::decode_evidence(&bytes)?;
+        for slot in 0..2 {
+            let mut changed = original.clone();
+            changed["runs"][slot]["cuts"][1]["observation"]["counters"]["enqueued"] =
+                serde_json::json!(2);
+            std::fs::write(&file, serde_json::to_vec(&changed)?)?;
+            ensure!(replay(&file).is_err(), "worker_changed_counter_accepted");
+        }
+        let mut reordered = original.clone();
+        reordered["runs"][0]["cuts"][0]["step"] = serde_json::json!({"Request":255});
+        std::fs::write(&file, serde_json::to_vec(&reordered)?)?;
+        ensure!(
+            replay(&file).is_err(),
+            "worker_saved_operation_order_accepted"
+        );
+        for field in ["source", "unknown"] {
+            let mut changed = original.clone();
+            changed["program"][field] = serde_json::json!("unknown");
+            std::fs::write(&file, serde_json::to_vec(&changed)?)?;
+            ensure!(
+                replay(&file).is_err(),
+                "worker_changed_source_or_shape_accepted"
+            );
+        }
+        std::fs::write(&file, &bytes[..bytes.len() / 2])?;
+        ensure!(replay(&file).is_err(), "worker_truncated_record_accepted");
+        std::fs::write(&file, vec![b' '; MAX_BYTES as usize + 1])?;
+        ensure!(replay(&file).is_err(), "worker_oversize_record_accepted");
+        for raw in [
+            b"PRIVATE_REPLAY_VALUE".as_slice(),
+            br#"{"PRIVATE_REPLAY_VALUE":null}"#,
+        ] {
+            std::fs::write(&file, raw)?;
+            let error = replay(&file)
+                .err()
+                .context("malformed replay must refuse")?;
+            ensure!(
+                !error.to_string().contains("PRIVATE_REPLAY_VALUE")
+                    && error.downcast_ref::<serde_json::Error>().is_none(),
+                "worker_replay_parser_leaked_input"
+            );
+        }
+        std::fs::write(&file, bytes)?;
+        replay(&file)?;
+        Ok(())
+    }
+    #[test]
+    fn joined_terminal_counters_cannot_change_during_closed_reuse_or_replay() -> Result<()> {
+        let mut program = generated(17);
+        program.cases = vec![program.cases[2].clone()];
+        let value = verify(&program)?;
+        let file = retain(&value)?;
+        replay(&file)?;
+        let bytes = std::fs::read(&file)?;
+        let index = value.runs[0]
+            .cuts
+            .iter()
+            .position(|cut| cut.step == Step::Request(1))
+            .context("closed reuse cut absent")?;
+        let mut changed: serde_json::Value = crate::json::decode_evidence(&bytes)?;
+        let counters = changed["runs"][0]["cuts"][index]["observation"]["counters"]
+            .as_object_mut()
+            .unwrap();
+        if counters["write_failed"] == serde_json::json!(1) {
+            counters.insert("write_failed".into(), serde_json::json!(0));
+            counters.insert("write_errno".into(), serde_json::Value::Null);
+        } else {
+            let old = counters["flushed"].as_u64().context("flush count absent")?;
+            counters.insert("flushed".into(), serde_json::json!(1 - old));
+        }
+        let tampered: Pair = serde_json::from_value(changed.clone())?;
+        let model = Model {
+            kind: ChildKind::Silent,
+            state: value.runs[0].cuts[index].state.clone(),
+        };
+        ensure!(
+            model.accepts(&tampered.runs[0].cuts[index].observation),
+            "counter mutation must remain inside ordinary race bounds"
+        );
+        std::fs::write(&file, serde_json::to_vec(&changed)?)?;
+        ensure!(replay(&file).is_err(), "quiescent_terminal_counter_changed");
+        std::fs::write(&file, bytes)?;
+        replay(&file)?;
+        Ok(())
+    }
+    #[test]
+    fn maximum_worker_history_keeps_every_lifetime_and_cleanup() -> Result<()> {
+        let mut program = generated(0);
+        while program.cases.len() < MAX_CASES {
+            program.cases.push(program.cases[0].clone())
+        }
+        let value = verify(&program)?;
+        ensure!(
+            value.runs.iter().all(|run| run
+                .cuts
+                .iter()
+                .filter(|cut| cut.step == Step::Discard)
+                .count()
+                == MAX_CASES),
+            "worker_history_lifetime_truncated"
+        );
+        let path = retain(&value)?;
+        replay(&path)?;
+        Ok(())
+    }
+    fn path_is(expr: &syn::Expr, expected: &[&str]) -> bool {
+        matches!(expr,syn::Expr::Path(value) if value.qself.is_none() && value.path.leading_colon.is_none()
+            && value.path.segments.len()==expected.len() && value.path.segments.iter().zip(expected).all(|(segment,name)|segment.ident==*name && segment.arguments.is_empty()))
+    }
+    fn worker_impl(value: &syn::ItemImpl) -> bool {
+        matches!(&*value.self_ty,syn::Type::Path(value) if value.qself.is_none() && value.path.is_ident("Worker"))
+    }
+    fn default_budget_is_pinned(file: &syn::File) -> bool {
+        let methods: Vec<_> = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(value) if worker_impl(value) => Some(&value.items),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "exchange" => Some(method),
+                _ => None,
+            })
+            .collect();
+        if methods.len() != 1 || methods[0].block.stmts.len() != 1 {
+            return false;
+        }
+        let syn::Stmt::Expr(syn::Expr::MethodCall(call), None) = &methods[0].block.stmts[0] else {
+            return false;
+        };
+        if call.method != "exchange_bounded"
+            || call.args.len() != 3
+            || call.turbofish.is_some()
+            || !path_is(&call.receiver, &["self"])
+            || !path_is(&call.args[0], &["input"])
+            || !path_is(&call.args[1], &["MAX_FRAME"])
+        {
+            return false;
+        }
+        let syn::Expr::Call(timeout) = &call.args[2] else {
+            return false;
+        };
+        path_is(&timeout.func, &["Duration", "from_secs"])
+            && timeout.args.len() == 1
+            && matches!(&timeout.args[0],syn::Expr::Lit(value) if matches!(&value.lit,syn::Lit::Int(value) if value.base10_parse::<u64>().ok()==Some(3)))
+    }
+    #[test]
+    fn actual_default_worker_bound_stays_three_seconds_and_uses_bounded_exchange() -> Result<()> {
+        let source = include_str!("worker.rs");
+        let actual: syn::File = syn::parse_file(source)?;
+        ensure!(
+            default_budget_is_pinned(&actual),
+            "worker_default_bound_changed"
+        );
+        let blocks: [syn::Block; 3] = [
+            syn::parse_quote!({ self.exchange_bounded(input, MAX_FRAME, Duration::from_secs(4)) }),
+            syn::parse_quote!({ self.exchange_frame(input, MAX_FRAME, Duration::from_secs(3)) }),
+            syn::parse_quote!({
+                self.exchange_bounded(input, PROPERTY_MAX_FRAME, Duration::from_secs(3))
+            }),
+        ];
+        for block in blocks {
+            let mut file: syn::File = syn::parse_file(source)?;
+            let mut replaced = 0;
+            for item in &mut file.items {
+                if let syn::Item::Impl(value) = item
+                    && worker_impl(value)
+                {
+                    for item in &mut value.items {
+                        if let syn::ImplItem::Fn(method) = item
+                            && method.sig.ident == "exchange"
+                        {
+                            method.block = block.clone();
+                            replaced += 1;
+                        }
+                    }
+                }
+            }
+            ensure!(
+                replaced == 1 && !default_budget_is_pinned(&file),
+                "worker_default_bound_mutation_escaped"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn external_worker_history_replays_twice_when_supplied() -> Result<()> {
+        let Some(path) = std::env::var_os("DAY2_WORKER_HISTORY_REPLAY") else {
+            return Ok(());
+        };
+        replay(Path::new(&path))
+    }
+}
