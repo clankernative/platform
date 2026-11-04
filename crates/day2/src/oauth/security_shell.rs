@@ -3823,6 +3823,30 @@ mod tests {
             }
         }
 
+        impl crate::managed_credentials::effects::Hooks for CredentialClock {
+            fn domain(&self) -> u64 {
+                effects::Hooks::domain(self.0.as_ref())
+            }
+
+            fn wall_time(&self) -> Result<i64> {
+                effects::Hooks::wall_time(self.0.as_ref())
+            }
+
+            fn monotonic(&self) -> Duration {
+                effects::Hooks::monotonic(self.0.as_ref())
+            }
+
+            fn fill_id(&self, bytes: &mut [u8]) -> Result<()> {
+                getrandom::fill(bytes)?;
+                Ok(())
+            }
+
+            fn fill_secret(&self, bytes: &mut [u8]) -> Result<()> {
+                getrandom::fill(bytes)?;
+                Ok(())
+            }
+        }
+
         let mut world = browser_world(1)?;
         let clock = super::super::simulation::World::new(904);
         clock.advance(u64::try_from(
@@ -3834,7 +3858,7 @@ mod tests {
         world.runtime = world
             .runtime
             .with_host(Arc::new(CredentialClock(clock.clone())), clock.clone());
-        effects::scope(clock.clone(), || {
+        let run = || {
             let identity = iap::Verified {
                 email: "alice@example.com".into(),
                 subject: "accounts.google.com:google-alice".into(),
@@ -3921,7 +3945,12 @@ mod tests {
                 iap::ASSERTION_HEADER,
                 assertions[iap::ASSERTION_HEADER].clone(),
             );
+            let credential_started = crate::managed_credentials::effects::Instant::now();
             clock.advance(1);
+            assert_eq!(
+                credential_started.checked_elapsed(),
+                Some(Duration::from_secs(1))
+            );
             assert_eq!(effects::wall_time()?, world.now + 1);
             assert_eq!(
                 world.runtime.host().now_ms()?.div_euclid(1000),
@@ -4050,6 +4079,7 @@ mod tests {
             );
             let at = world.now + 1;
             assert_eq!(effects::wall_time()?, at);
+            assert_eq!(crate::managed_credentials::effects::wall_time()?, at);
             assert_eq!(
                 world.runtime.host().now_ms()?.div_euclid(1000),
                 effects::wall_time()?
@@ -4172,6 +4202,12 @@ mod tests {
                 assert_eq!(world.keys.0.load(Ordering::SeqCst), keys_before);
             }
             Ok(())
+        };
+        effects::scope(clock.clone(), || {
+            crate::managed_credentials::effects::scope(
+                Arc::new(CredentialClock(clock.clone())),
+                run,
+            )
         })
     }
 

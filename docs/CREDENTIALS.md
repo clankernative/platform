@@ -498,6 +498,26 @@ The current `VerifiedHumanPost` remains an internal input constructed only after
 those checks. Reveal authorization also checks issue, version expiry, grant expiry
 and delivery expiry times.
 
+Delivery-key acquisition first requires the committed permit's frozen namespace
+(including generation), family, recipient, epoch and encryption-key version to
+match the current selection. It exposes no identity getter or new permit factory.
+It snapshots the exact selected binding, management and canonical subject, then releases the
+admission lock before either provider call. After each exact-purpose key load it
+samples the existing host clock again and requires the same selection and
+successful-publication revision, with no rewind or expiry renewal. Every
+successful replacement advances that revision, even an equal replacement or
+removal followed by identical reinstallation; a rejected or exhausted replacement
+changes neither selection nor epoch floors. This is local publication memory,
+not an external epoch witness. Temporary key bytes are zeroized on identity or
+postcheck refusal, second-load failure and unwind. Provider errors retain primary
+precedence while their actual postcheck still runs.
+
+These checks return no key lease after a changed or expired selection. They do
+not change the known-commit reveal cutoff or treat authorization, key acquisition
+or body construction as completed delivery. The genuine native human-purpose
+producer, retained request/SQL owner and actual response transport still require
+their own admission and settlement; this does not enable that native path.
+
 ### Generated rotation and revocation
 
 Fixed client/personal families also expose `rotate(context, { expected })` and

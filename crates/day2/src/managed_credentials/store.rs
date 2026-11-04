@@ -2067,11 +2067,22 @@ pub(crate) struct HumanRevealPermit {
 }
 
 impl HumanRevealPermit {
-    pub(crate) fn encryption_version(&self) -> &str {
-        &self.encryption_version
-    }
-    pub(crate) fn security_epoch(&self) -> u64 {
-        self.identity.security_epoch
+    pub(crate) fn require_selection(
+        &self,
+        binding: &day2_capabilities::credentials::CredentialFamilyBinding,
+        recipient: &str,
+        security_epoch: u64,
+        encryption_version: &str,
+    ) -> Result<()> {
+        ensure!(
+            self.identity.namespace == binding.namespace
+                && self.identity.family == binding.family.as_str()
+                && self.identity.recipient == recipient
+                && self.identity.security_epoch == security_epoch
+                && self.encryption_version == encryption_version,
+            "credential delivery selection does not match committed authorization"
+        );
+        Ok(())
     }
     pub fn into_response_body(self, lease: &KeyLease) -> Result<String> {
         decrypt_for_human(
