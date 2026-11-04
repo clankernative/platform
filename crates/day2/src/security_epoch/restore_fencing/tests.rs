@@ -14,6 +14,10 @@ fn binding() -> Binding {
         incumbent_root: digest("root"),
         incumbent_holder: digest("holder"),
         intent: digest("exact-intent"),
+        operation: digest("one-staging-op"),
+        binding_generation: 3,
+        source_epoch: 7,
+        target_epoch: 8,
         target_incarnation: digest("fresh-target"),
     }
 }
@@ -38,6 +42,7 @@ fn approval(expires: u64) -> Approval {
         expires_at: expires,
         last: None,
         state: Cell::new(Disposition::Fresh),
+        identity: Rc::new(()),
         local: PhantomData,
     }
 }
@@ -463,6 +468,44 @@ fn caught_poll_panics_poison_the_retained_session_at_every_supplier_cut() -> Res
         assert!(session.source.refused);
         assert!(session.require_drained().is_err());
         assert_eq!(session.source.stop_calls, 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn continuity_data_never_replaces_the_same_fresh_session_or_target() -> Result<()> {
+    let mut a = approval(100);
+    let mut source = Model::new(vec![]);
+    let mut first = Session::begin(&mut a, &mut source)?;
+    let id = first.identity();
+    first.require_join(&binding(), &id)?;
+    let copied = id.clone();
+    first.require_join(&binding(), &copied)?;
+    let mut other_a = approval(100);
+    let mut other_source = Model::new(vec![]);
+    let mut second = Session::begin(&mut other_a, &mut other_source)?;
+    assert!(!id.same(&second.identity()));
+    assert!(second.require_join(&binding(), &id).is_err());
+    assert!(second.source.refused);
+    first.source.at(99, 100);
+    assert!(first.require_join(&binding(), &copied).is_err());
+    first.source.at(10, 10);
+    assert!(first.require_join(&binding(), &copied).is_err());
+    for cut in 0..5 {
+        let mut a = approval(100);
+        let mut source = Model::new(vec![]);
+        let mut session = Session::begin(&mut a, &mut source)?;
+        let id = session.identity();
+        let mut expected = binding();
+        match cut {
+            0 => expected.operation = digest("different-operation"),
+            1 => expected.binding_generation += 1,
+            2 => expected.source_epoch += 1,
+            3 => expected.target_epoch += 1,
+            _ => expected.target_incarnation = digest("different-target"),
+        }
+        assert!(session.require_join(&expected, &id).is_err());
+        assert!(session.source.refused);
     }
     Ok(())
 }

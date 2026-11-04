@@ -15,6 +15,10 @@ pub(super) struct Binding {
     pub incumbent_root: Digest,
     pub incumbent_holder: Digest,
     pub intent: Digest,
+    pub operation: Digest,
+    pub binding_generation: u64,
+    pub source_epoch: u64,
+    pub target_epoch: u64,
     pub target_incarnation: Digest,
 }
 
@@ -43,7 +47,18 @@ pub(super) struct Approval {
     expires_at: u64,
     last: Option<(u64, u64)>,
     state: Cell<Disposition>,
+    identity: Rc<()>,
     local: PhantomData<Rc<()>>,
+}
+
+/// Continuity DATA only. This cannot construct approval, exclusion or a writer;
+/// a consuming candidate must still borrow and freshly check the actual Session.
+#[derive(Clone)]
+pub(super) struct ApprovalIdentity(Rc<()>);
+impl ApprovalIdentity {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// Authenticated common-domain interval DATA from the sealed retained supplier.
@@ -211,6 +226,12 @@ impl<'a, S: Source> Session<'a, S> {
             guard.approval.state.get() == Disposition::Fresh,
             "restore_approval_already_used"
         );
+        ensure!(
+            guard.approval.binding.binding_generation > 0
+                && guard.approval.binding.source_epoch > 0
+                && guard.approval.binding.target_epoch > guard.approval.binding.source_epoch,
+            "restore_fence_epoch_binding_invalid"
+        );
         let clock = guard.source.current(guard.approval)?;
         guard.approval.observe(clock)?;
         // Known-May boundary BEFORE the possible stop effect. An unknown reply
@@ -304,11 +325,37 @@ impl<'a, S: Source> Session<'a, S> {
         }
         result
     }
+    /// No clock sample or permission is issued by this continuity projection.
+    pub(super) fn identity(&self) -> ApprovalIdentity {
+        ApprovalIdentity(self.approval.identity.clone())
+    }
+    pub(super) fn require_join(
+        &mut self,
+        binding: &Binding,
+        original: &ApprovalIdentity,
+    ) -> Result<()> {
+        let result = self.require_drained().and_then(|()| {
+            ensure!(
+                &self.approval.binding == binding && self.identity().same(original),
+                "restore_fence_original_or_target_changed"
+            );
+            Ok(())
+        });
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+    /// Terminal disposition only; usable after a failed consuming boundary or
+    /// caught unwind without new IO, clock acquisition or independent authority.
+    pub(super) fn refuse(&mut self) {
+        self.approval.refuse();
+        self.source.refuse();
+    }
 }
 impl<S: Source> Drop for Session<'_, S> {
     fn drop(&mut self) {
-        self.approval.refuse();
-        self.source.refuse();
+        self.refuse();
     }
 }
 
