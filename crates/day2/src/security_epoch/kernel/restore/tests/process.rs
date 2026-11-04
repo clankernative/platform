@@ -459,14 +459,24 @@ fn incomplete_child_failure_records_preserve_closed_stage_and_unresolved_cleanup
     let saved = decode(&bytes)?;
     let marker = "RESTORE_CRASH_PRIVATE_FIELD_CANARY";
     let mut unknown = serde_json::to_value(&failure)?;
-    unknown.as_object_mut().unwrap().insert(marker.into(), serde_json::json!(true));
+    unknown
+        .as_object_mut()
+        .unwrap()
+        .insert(marker.into(), serde_json::json!(true));
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     gzip.write_all(&serde_json::to_vec(&unknown)?)?;
     let invalid = gzip.finish()?;
-    let unredacted = decode_contents(&invalid).err().context("missing raw crash decoder refusal")?;
+    let unredacted = decode_contents(&invalid)
+        .err()
+        .context("missing raw crash decoder refusal")?;
     assert!(unredacted.to_string().contains(marker));
-    let refused = decode(&invalid).err().context("missing closed crash decoder refusal")?;
-    assert!(refused.to_string() == "secure_restore_crash_replay_refused", "crash replay error boundary was not closed");
+    let refused = decode(&invalid)
+        .err()
+        .context("missing closed crash decoder refusal")?;
+    assert!(
+        refused.to_string() == "secure_restore_crash_replay_refused",
+        "crash replay error boundary was not closed"
+    );
     assert_eq!(saved.first, first);
     assert!(saved.second.is_none());
     assert!(!saved.first.attempt.reaped);
