@@ -355,6 +355,35 @@ fn fixture_rollback_classification_never_formats_or_replaces_unknown_errors() {
     }
 }
 
+// Shared immutable fixture inputs only, never a transition or native owner.
+fn consumer_completion_core(selection: &EpochStore, create: &LogicalCore) -> Result<LogicalCore> {
+    let mut counter = Request::CompleteInitialFirstActivation {
+        bootstrap: create.counter.bootstrap().clone(),
+        operation: Digest::new(b"uncomputed"),
+        parent_receipt: create.counter.receipt()?.digest()?,
+        before: Versions {
+            root: version(1),
+            sentinel: version(1),
+        },
+        holder: Holder {
+            principal: Digest::new(b"app-principal"),
+            pod_uid: "11234567-89ab-4cde-8fab-0123456789ab".into(),
+            process_incarnation: Digest::new(b"original-app-process"),
+            ephemeral_key: Digest::new(b"original-app-key"),
+        },
+    };
+    let operation = complete_operation(&counter, &create.seed.digest()?)?;
+    if let Request::CompleteInitialFirstActivation { operation: id, .. } = &mut counter {
+        *id = operation;
+    }
+    LogicalCore::new(
+        selection,
+        create.policy.clone(),
+        create.seed.clone(),
+        &counter,
+    )
+}
+
 impl World {
     fn new(seed: u64, physical: Option<&[u8]>) -> Result<Self> {
         Self::selected(seed, physical, None)
@@ -406,31 +435,7 @@ impl World {
             selection == expected_selection,
             "conditional fixture provider selection changed"
         );
-        let mut counter = Request::CompleteInitialFirstActivation {
-            bootstrap: create.counter.bootstrap().clone(),
-            operation: Digest::new(b"uncomputed"),
-            parent_receipt: create.counter.receipt()?.digest()?,
-            before: Versions {
-                root: version(1),
-                sentinel: version(1),
-            },
-            holder: Holder {
-                principal: Digest::new(b"app-principal"),
-                pod_uid: "11234567-89ab-4cde-8fab-0123456789ab".into(),
-                process_incarnation: Digest::new(b"original-app-process"),
-                ephemeral_key: Digest::new(b"original-app-key"),
-            },
-        };
-        let operation = complete_operation(&counter, &create.seed.digest()?)?;
-        if let Request::CompleteInitialFirstActivation { operation: id, .. } = &mut counter {
-            *id = operation;
-        }
-        let complete = LogicalCore::new(
-            &selection,
-            create.policy.clone(),
-            create.seed.clone(),
-            &counter,
-        )?;
+        let complete = consumer_completion_core(&selection, &create)?;
         let directory = tempfile::tempdir()?;
         let mut port = SharedPort::new();
         port.counter = counter_fixture::open(&directory.path().join("counter.sqlite"));
@@ -1391,6 +1396,212 @@ pub(crate) enum ConsumerHandshakeProgress {
     Refused,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConsumerControllerAction {
+    Reserve,
+    Dispatch,
+    Settle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConsumerStorageFault {
+    None,
+    LostBefore,
+    LostAfter,
+    Rollback,
+    Malformed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "storage", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ConsumerStorageEvent {
+    BeginFirstHolder {
+        death_cut: Option<usize>,
+    },
+    AdvanceFirstHolder {
+        events: u8,
+    },
+    ObserveFirstHolder {
+        work_nanos: u64,
+    },
+    RetainFirstHolder {
+        work_nanos: u64,
+    },
+    BeginBootstrap {
+        activation: bool,
+        action: ConsumerControllerAction,
+        fault: ConsumerStorageFault,
+        death_cut: Option<usize>,
+    },
+    BeginCurrent {
+        death_cut: Option<usize>,
+        rewrite_provider: bool,
+    },
+    AdvanceCompletion {
+        events: u8,
+    },
+    MutateCompletion,
+    PrepareRelease,
+    FinishCompletion,
+    Controller {
+        activation: bool,
+        action: ConsumerControllerAction,
+        fault: ConsumerStorageFault,
+    },
+    LosePacket {
+        sender: usize,
+    },
+}
+
+impl ConsumerControllerAction {
+    fn operation(self) -> Operation {
+        match self {
+            Self::Reserve => Operation::Reserve,
+            Self::Dispatch => Operation::Dispatch,
+            Self::Settle => Operation::Settle,
+        }
+    }
+}
+
+impl ConsumerStorageFault {
+    fn fault(self) -> Fault {
+        match self {
+            Self::None => Fault::None,
+            Self::LostBefore => Fault::LostCounterBefore,
+            Self::LostAfter => Fault::LostCounterAfter,
+            Self::Rollback => Fault::RolledBackCounterWrite,
+            Self::Malformed => Fault::MalformedCounterReply,
+        }
+    }
+}
+
+impl ConsumerStorageEvent {
+    fn events(self) -> Result<Vec<Event>> {
+        let (event, count) = match self {
+            Self::BeginFirstHolder { death_cut } => (Event::StartFirstHolder { death_cut }, 1),
+            Self::AdvanceFirstHolder { events } => (Event::AdvanceFirstHolder, events),
+            Self::ObserveFirstHolder { work_nanos } => {
+                (Event::ObserveFirstHolder { work_nanos }, 1)
+            }
+            Self::RetainFirstHolder { work_nanos } => (Event::RetainFirstHolder { work_nanos }, 1),
+            Self::BeginBootstrap {
+                activation,
+                action,
+                fault,
+                death_cut,
+            } => (
+                Event::StartCompletion {
+                    work: CompletionWork::Bootstrap {
+                        stage: usize::from(activation),
+                        operation: action.operation(),
+                        fault: fault.fault(),
+                    },
+                    death_cut,
+                },
+                1,
+            ),
+            Self::BeginCurrent {
+                death_cut,
+                rewrite_provider,
+            } => (
+                Event::StartCompletion {
+                    work: CompletionWork::Current { rewrite_provider },
+                    death_cut,
+                },
+                1,
+            ),
+            Self::AdvanceCompletion { events } => (Event::AdvanceCompletion, events),
+            Self::MutateCompletion => (Event::MutateCompletion, 1),
+            Self::PrepareRelease => (Event::PrepareCompletionRelease, 1),
+            Self::FinishCompletion => (Event::FinishCompletion, 1),
+            Self::Controller {
+                activation,
+                action,
+                fault,
+            } => (
+                Event::Bootstrap {
+                    stage: usize::from(activation),
+                    operation: action.operation(),
+                    fault: fault.fault(),
+                },
+                1,
+            ),
+            Self::LosePacket { sender } => (Event::LosePacket { sender }, 1),
+        };
+        ensure!((1..=64).contains(&count), ConsumerModelError);
+        Ok(vec![event; usize::from(count)])
+    }
+}
+
+/// Reference-only storage state. Initial cores are controlled immutable DATA;
+/// no actual world, provider, consumer result or SQLite read supplies decisions.
+pub(crate) struct ConsumerStorageReference {
+    model: model::Model,
+}
+
+impl ConsumerStorageReference {
+    pub(crate) fn new(
+        seed: u64,
+        scope: &day2_capabilities::security_epoch::AuthorityScope,
+    ) -> Result<Self> {
+        let mut selection = tests::selection();
+        selection.scope = scope.clone();
+        let (selection, create) = fixture_for_store(selection);
+        let complete = consumer_completion_core(&selection, &create)?;
+        Ok(Self {
+            model: model::Model::new(seed, &[create, complete], None, &None)?,
+        })
+    }
+
+    pub(crate) fn step(&mut self, event: ConsumerEvent) -> Result<bool> {
+        let (events, endpoint) = event.storage_events()?;
+        for event in events {
+            if !self.model.step_peer(event, endpoint)?.0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn current(&self) -> bool {
+        self.model.consumer_current()
+    }
+
+    pub(crate) fn observation(&self) -> Value {
+        json!({"state":self.model.observation(),"handshake":self.model.handshake_snapshot(),"current":self.current()})
+    }
+
+    pub(crate) fn next(&self) -> Result<Option<ConsumerStorageEvent>> {
+        let state: State = serde_json::from_value(self.model.observation())?;
+        if !state.continuation {
+            return Ok(None);
+        }
+        Ok(match state.completion.map(|completion| completion.phase) {
+            Some(
+                CompletionPhase::Wire | CompletionPhase::AfterMutation | CompletionPhase::Releasing,
+            ) => Some(ConsumerStorageEvent::AdvanceCompletion { events: 1 }),
+            Some(CompletionPhase::Mutation) => Some(ConsumerStorageEvent::MutateCompletion),
+            Some(CompletionPhase::Release) => Some(ConsumerStorageEvent::PrepareRelease),
+            Some(CompletionPhase::FinalFile) => Some(ConsumerStorageEvent::FinishCompletion),
+            Some(CompletionPhase::Complete | CompletionPhase::Refused) => None,
+            None => match state.holder_phase {
+                HolderPhase::BeforeOffer | HolderPhase::AfterAppObservation => {
+                    Some(ConsumerStorageEvent::AdvanceFirstHolder { events: 1 })
+                }
+                HolderPhase::AppObservation => {
+                    Some(ConsumerStorageEvent::ObserveFirstHolder { work_nanos: 0 })
+                }
+                HolderPhase::ControllerRetention => {
+                    Some(ConsumerStorageEvent::RetainFirstHolder { work_nanos: 0 })
+                }
+                _ => None,
+            },
+        })
+    }
+}
+
 impl From<LifecycleProgress> for ConsumerHandshakeProgress {
     fn from(progress: LifecycleProgress) -> Self {
         match progress {
@@ -1456,6 +1667,9 @@ impl std::error::Error for ConsumerModelError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ConsumerEvent {
+    Storage {
+        input: ConsumerStorageEvent,
+    },
     FirstHolder {
         death_cut: Option<usize>,
     },
@@ -1486,6 +1700,48 @@ pub(crate) enum ConsumerEvent {
     },
     Reopen,
     RestoreClock,
+}
+
+impl ConsumerEvent {
+    fn storage_events(self) -> Result<(Vec<Event>, usize)> {
+        let endpoint = usize::from(matches!(self, ConsumerEvent::ControllerDeath { .. }));
+        let event = match self {
+            ConsumerEvent::Storage { input } => return Ok((input.events()?, 0)),
+            ConsumerEvent::FirstHolder { death_cut } => Event::FirstHolder { death_cut },
+            ConsumerEvent::Shell { .. }
+            | ConsumerEvent::BeginShell { .. }
+            | ConsumerEvent::AdvanceShell { .. } => return Err(ConsumerModelError.into()),
+            ConsumerEvent::Reserve { activation } => Event::Bootstrap {
+                stage: usize::from(activation),
+                operation: Operation::Reserve,
+                fault: Fault::None,
+            },
+            ConsumerEvent::Dispatch { activation } => Event::Bootstrap {
+                stage: usize::from(activation),
+                operation: Operation::Dispatch,
+                fault: Fault::None,
+            },
+            ConsumerEvent::Settle { activation } => Event::Bootstrap {
+                stage: usize::from(activation),
+                operation: Operation::Settle,
+                fault: Fault::None,
+            },
+            ConsumerEvent::Current {
+                death_cut,
+                rewrite_provider,
+            } => Event::Current {
+                death_cut,
+                rewrite_provider,
+            },
+            ConsumerEvent::ControllerDeath { cut } => Event::Current {
+                death_cut: Some(cut),
+                rewrite_provider: false,
+            },
+            ConsumerEvent::Reopen => Event::Reopen,
+            ConsumerEvent::RestoreClock => Event::RestoreClock,
+        };
+        Ok((vec![event], endpoint))
+    }
 }
 
 impl ConsumerLifecycle {
@@ -1528,7 +1784,7 @@ impl ConsumerLifecycle {
     pub(crate) fn observation(&self) -> Result<Value> {
         Ok(
             json!({"storage":self.world.record(false, counter_fixture::snapshot(&self.world.port.counter))?,
-            "expected":self.model.observation(),"reference":self.model.handshake_snapshot(),"serving":self.shell.snapshot(),
+            "expected":self.model.observation(),"expected_current":self.model.consumer_current(),"reference":self.model.handshake_snapshot(),"serving":self.shell.snapshot(),
             "serving_progress":ConsumerHandshakeProgress::from(self.shell.progress().map_err(|_| ConsumerModelError)?),
             "enrollment":self.enrollment.iter().map(LifecycleHandshake::snapshot).collect::<Vec<_>>()}),
         )
@@ -1621,56 +1877,29 @@ impl ConsumerLifecycle {
             )?;
             return Ok(json!({"actual":record,"serving":self.shell.snapshot()}));
         }
-        let endpoint = usize::from(matches!(event, ConsumerEvent::ControllerDeath { .. }));
-        let event = match event {
-            ConsumerEvent::FirstHolder { death_cut } => Event::FirstHolder { death_cut },
-            ConsumerEvent::Shell { .. }
-            | ConsumerEvent::BeginShell { .. }
-            | ConsumerEvent::AdvanceShell { .. } => unreachable!(),
-            ConsumerEvent::Reserve { activation } => Event::Bootstrap {
-                stage: usize::from(activation),
-                operation: Operation::Reserve,
-                fault: Fault::None,
-            },
-            ConsumerEvent::Dispatch { activation } => Event::Bootstrap {
-                stage: usize::from(activation),
-                operation: Operation::Dispatch,
-                fault: Fault::None,
-            },
-            ConsumerEvent::Settle { activation } => Event::Bootstrap {
-                stage: usize::from(activation),
-                operation: Operation::Settle,
-                fault: Fault::None,
-            },
-            ConsumerEvent::Current {
-                death_cut,
-                rewrite_provider,
-            } => Event::Current {
-                death_cut,
-                rewrite_provider,
-            },
-            ConsumerEvent::ControllerDeath { cut } => Event::Current {
-                death_cut: Some(cut),
-                rewrite_provider: false,
-            },
-            ConsumerEvent::Reopen => Event::Reopen,
-            ConsumerEvent::RestoreClock => Event::RestoreClock,
-        };
-        let actual = self
-            .world
-            .step_peer(event, endpoint)
-            .map_err(|_| ConsumerModelError)?;
-        let (accepted, state) = self
-            .model
-            .step_peer(event, endpoint)
-            .map_err(|_| ConsumerModelError)?;
-        ensure!(
-            (actual.accepted, &actual.state) == (accepted, &state),
-            ConsumerModelError
-        );
-        Ok(
-            json!({"actual":actual,"expected":{"accepted":accepted,"state":state},"serving":self.shell.snapshot()}),
-        )
+        let (events, endpoint) = event.storage_events()?;
+        let mut last = None;
+        for event in events {
+            let actual = self
+                .world
+                .step_peer(event, endpoint)
+                .map_err(|_| ConsumerModelError)?;
+            let (accepted, state) = self
+                .model
+                .step_peer(event, endpoint)
+                .map_err(|_| ConsumerModelError)?;
+            ensure!(
+                (actual.accepted, &actual.state) == (accepted, &state),
+                ConsumerModelError
+            );
+            last = Some(
+                json!({"actual":actual,"expected":{"accepted":accepted,"state":state},"serving":self.shell.snapshot()}),
+            );
+            if !accepted {
+                break;
+            }
+        }
+        last.context(ConsumerModelError)
     }
 }
 
