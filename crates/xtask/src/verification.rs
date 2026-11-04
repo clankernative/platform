@@ -2320,7 +2320,10 @@ mod tests {
             assert!(selector.contains(phase));
             assert!(selector.contains("GH_TOKEN: ${{ github.token }}"));
             let select_at = job.find("      - name: Select authenticated artifacts from successful producer attempts\n").unwrap();
-            let download_at = job.find("uses: actions/download-artifact@").unwrap();
+            let download_at = select_at
+                + job[select_at..]
+                    .find("uses: actions/download-artifact@")
+                    .unwrap();
             let restore = job
                 .find(&format!(
                     "run: tar -xzf /tmp/day2-{archive}.tgz -C \"$GITHUB_WORKSPACE\"\n"
@@ -2339,6 +2342,18 @@ mod tests {
                 .filter(|step| step.contains("uses: actions/download-artifact@"))
             {
                 let inputs = step.split_once("        with:\n").unwrap().1;
+                if step.starts_with(
+                    "name: Download retained compiler actions from the admitted preparation\n",
+                ) || step.starts_with("name: Retry retained compiler action download once\n")
+                {
+                    assert_eq!(name, "verify");
+                    assert!(inputs.contains("repository: clankernative/platform"));
+                    assert!(inputs.contains("github-token: ${{ github.token }}"));
+                    assert!(inputs.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
+                    assert!(inputs.contains("name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+                    assert!(inputs.contains("path: /tmp/day2-bazel-linux-bootstrap-actions"));
+                    continue;
+                }
                 assert!(inputs.contains("repository: clankernative/platform"));
                 assert!(inputs.contains("run-id: ${{ github.run_id }}"));
                 assert!(inputs.contains("github-token: ${{ github.token }}"));
@@ -2391,7 +2406,13 @@ mod tests {
             assert!(!job.contains("path: ../.toolchains"));
             assert!(!job.contains("name: day2-verify-${{ github.run_id }}"));
             assert!(!job.contains("platform/build-out platform/artifacts"));
-            let steps = job.split("      - ").skip(1).collect::<Vec<_>>();
+            let selected = job
+                .split_once(
+                    "      - name: Select authenticated artifacts from successful producer attempts\n",
+                )
+                .unwrap()
+                .1;
+            let steps = selected.split("      - ").skip(1).collect::<Vec<_>>();
             for (index, step) in steps.iter().enumerate() {
                 if !step.contains("uses: actions/download-artifact@")
                     || !step.contains("continue-on-error: true")
@@ -2609,7 +2630,7 @@ mod tests {
                     .contains("Persist newly compiled actions under the captured source key")
             );
         }
-        for consumer in ["verify-prepare", "verify-shards", "verify"] {
+        for consumer in ["verify-prepare", "verify-shards"] {
             let job = ci_job(consumer);
             let prepared = ci_step(
                 &job,
@@ -2620,14 +2641,46 @@ mod tests {
                 "key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
             ));
             assert!(!prepared.contains("restore-keys:") && !prepared.contains("lookup-only:"));
-            if consumer == "verify" {
-                assert!(prepared.contains(
-                    "if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}"
-                ));
-            } else {
-                assert!(!prepared.contains("        if:"));
-            }
+            assert!(!prepared.contains("        if:"));
         }
+        let final_join = ci_job("verify");
+        assert!(final_join.contains("timeout-minutes: 20"));
+        for origin in ["DAY2_CACHE_ORIGIN_RUN:", "DAY2_CACHE_ORIGIN_ATTEMPT:"] {
+            let selected = final_join
+                .lines()
+                .find(|line| line.contains(origin))
+                .unwrap();
+            assert!(selected.contains(admitted));
+            assert!(selected.contains("|| github.run_"));
+        }
+        for name in [
+            "Download retained compiler actions from the admitted preparation",
+            "Retry retained compiler action download once",
+        ] {
+            let download = ci_step(&final_join, name);
+            assert!(download.contains("repository: clankernative/platform"));
+            assert!(download.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
+            assert!(download.contains("name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+            assert!(download.contains("timeout-minutes: 2"));
+            assert!(download.contains("continue-on-error: true"));
+        }
+        let first = ci_step(
+            &final_join,
+            "Download retained compiler actions from the admitted preparation",
+        );
+        let retry = ci_step(&final_join, "Retry retained compiler action download once");
+        assert!(retry.contains(
+            "if: ${{ !cancelled() && steps.bootstrap_actions_download.outcome == 'failure' }}"
+        ));
+        assert_eq!(
+            first.split_once("        with:\n").unwrap().1.trim(),
+            retry.split_once("        with:\n").unwrap().1.trim()
+        );
+        let extract = "Restore retained compiler action data before admission bootstrap";
+        let bootstrap = "Bootstrap the current source artifact admission guard";
+        assert!(final_join.find(extract).unwrap() < final_join.find(bootstrap).unwrap());
+        assert!(ci_step(&final_join, extract).contains("-C \"$HOME/.cache/bazel-disk\""));
+        assert!(!ci_step(&final_join, bootstrap).contains("        if:"));
         assert!(
             !ci_job("verify-queue-receipt")
                 .contains("Restore compiled actions from this run preparation only")
