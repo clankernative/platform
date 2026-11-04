@@ -2555,6 +2555,8 @@ mod tests {
         assert!(upload.contains("steps.mac_actions_archive.outcome == 'success'"));
 
         let publisher = ci_job("publish-mac-actions");
+        assert!(job.contains("runs-on: macos-15"));
+        assert!(publisher.contains("runs-on: ubuntu-24.04"));
         assert!(
             publisher.contains("needs: [verify, verify-queue-receipt, verify-mac-compatibility, retry-mac-compatibility]")
         );
@@ -2579,10 +2581,14 @@ mod tests {
             assert!(download.contains("name: day2-bazel-mac-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
             assert!(download.contains("timeout-minutes: 2"));
         }
+        let compression = ci_step(&publisher, "Require Mac-compatible cache compression");
+        assert!(compression.contains("zstd --quiet --version"));
+        let directory = ci_step(&publisher, "Create the compiler cache directory");
+        assert!(directory.contains("steps.actions_compression.outcome == 'success'"));
         let publish = ci_step(&publisher, "Publish compiler actions in this branch scope");
         assert!(publish.contains("steps.actions_extract.outcome == 'success'"));
         assert!(publish.contains("path: ~/.cache/bazel-disk"));
-        assert!(publish.contains("key: day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"));
+        assert!(publish.contains("key: day2-bazel-mac-actions-v2-macOS-ARM64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"));
         assert!(publisher.contains("contents: read") && publisher.contains("actions: read"));
         assert!(!publisher.contains("contents: write") && !publisher.contains("actions: write"));
         let main = ci_job("verify-queue-receipt");

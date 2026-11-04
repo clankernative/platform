@@ -579,7 +579,9 @@ jobs:
     # guard may supply actions. Other events use their own completed full gate.
     needs: [verify, verify-queue-receipt, verify-mac-compatibility, retry-mac-compatibility]
     if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.verify-mac-compatibility.result == 'success' || needs.retry-mac-compatibility.result == 'success' || (needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' && needs.verify-queue-receipt.outputs.cache_run != '' && needs.verify-queue-receipt.outputs.cache_attempt != '')) }}
-    runs-on: macos-15
+    # Copy completed Mac compiler data without acquiring another Mac runner.
+    # Keep the literal cache path and zstd transport compatible with Mac restores.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -611,8 +613,13 @@ jobs:
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
           name: day2-bazel-mac-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}
           path: /tmp/day2-bazel-mac-actions
-      - name: Create the compiler cache directory
+      - name: Require Mac-compatible cache compression
+        id: actions_compression
         if: ${{ steps.actions_download.outcome == 'success' || steps.actions_retry.outcome == 'success' }}
+        continue-on-error: true
+        run: zstd --quiet --version
+      - name: Create the compiler cache directory
+        if: ${{ steps.actions_compression.outcome == 'success' }}
         continue-on-error: true
         id: actions_directory
         run: mkdir -p "$HOME/.cache/bazel-disk"
@@ -629,7 +636,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: day2-bazel-mac-actions-v2-macOS-ARM64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
