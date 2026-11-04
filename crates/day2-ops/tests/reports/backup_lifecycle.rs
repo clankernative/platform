@@ -540,9 +540,11 @@ impl World {
                 observed.unwrap_or_else(|_| json!({"load_refused":true})),
             );
         }
-        Ok(json!({"rows":actual_rows(&source)?,"writer_rows":actual_rows(&self.writer)?,"transaction_open":!self.writer.is_autocommit(),
+        Ok(
+            json!({"rows":actual_rows(&source)?,"writer_rows":actual_rows(&self.writer)?,"transaction_open":!self.writer.is_autocommit(),
             "same_source_authority":authority.stamp.epoch == self.source_epoch && authority.stamp.revision == self.source_revision,
-            "source_enabled":authority.document.enabled,"source_sessions":sessions(&source)?,"bundles":bundles,"restored":restored}))
+            "source_enabled":authority.document.enabled,"source_sessions":sessions(&source)?,"bundles":bundles,"restored":restored}),
+        )
     }
 }
 
