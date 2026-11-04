@@ -287,6 +287,9 @@ fn install_schema_in(db: &Connection) -> Result<()> {
     validate_credential_peers(db, &peers)
 }
 
+/// The historical GoLinks unit is frozen independently of the current layout.
+const VERSION_1_UNIT: &str = include_str!("../../fixtures/credential-schema-v1.sql");
+
 /// Tables every version-1 installer created together. Version 1 later gained
 /// `day2_credential_revocations` and the three peer tables in place, so a
 /// version-1 unit may lack them.
@@ -373,10 +376,11 @@ fn replace_empty_version_1_unit_in(db: &Connection) -> Result<()> {
     if versions != [1] {
         return Ok(());
     }
-    // Version 2 changed only the marker and added guard triggers: its tables,
-    // indexes and peers are exactly those of the last version-1 installer, so
-    // the current installers define every object version 1 could hold.
+    // Compare the original tables with the frozen GoLinks installer. The
+    // current IF NOT EXISTS batches add only the later optional tables and
+    // peers; they must not redefine the historical versions table.
     let expected = Connection::open_in_memory()?;
+    expected.execute_batch(VERSION_1_UNIT)?;
     expected.execute_batch(CREDENTIAL_DDL)?;
     super::issuance::install(&expected)?;
     for (kind, name, table) in &owned {
@@ -2663,10 +2667,6 @@ mod tests {
         }
         Ok(())
     }
-
-    /// The version-1 unit exactly as the GoLinks build installs it; the fixture
-    /// documents its provenance.
-    const VERSION_1_UNIT: &str = include_str!("../../fixtures/credential-schema-v1.sql");
 
     /// Tables later version-1 builds added in place, copied verbatim from the
     /// parent of c4aa7a2 (store.rs and ingress.rs install). A store opened by
