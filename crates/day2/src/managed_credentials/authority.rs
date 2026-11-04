@@ -863,7 +863,8 @@ mod tests {
     }
 
     #[test]
-    fn fixture_source_does_not_rewind_to_an_older_request_minimum_after_a_fresh_read() -> Result<()> {
+    fn fixture_source_does_not_rewind_to_an_older_request_minimum_after_a_fresh_read() -> Result<()>
+    {
         for elapsed_key_work in [false, true] {
             let f = Fixture::new()?;
             let fixture = SelectedAuthority::fixture(vec![f.selected.clone()], f.keys.clone())?;
@@ -875,16 +876,52 @@ mod tests {
                     }));
                     fixture.verification_keys(&f.selected.binding, &f.selected.management, 1100)?;
                 } else {
-                    assert_eq!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1101)?, Some(7));
+                    assert_eq!(
+                        fixture.verification_epoch(
+                            &f.selected.binding,
+                            &f.selected.management,
+                            "verify-v1",
+                            1101
+                        )?,
+                        Some(7)
+                    );
                 }
                 // This is an older captured request's lower bound, not a
                 // command to rewind the source's actual observation clock.
-                assert_eq!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1100)?, Some(7));
-                assert_eq!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1199)?, Some(7));
-                assert!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1200).is_err());
+                assert_eq!(
+                    fixture.verification_epoch(
+                        &f.selected.binding,
+                        &f.selected.management,
+                        "verify-v1",
+                        1100
+                    )?,
+                    Some(7)
+                );
+                assert_eq!(
+                    fixture.verification_epoch(
+                        &f.selected.binding,
+                        &f.selected.management,
+                        "verify-v1",
+                        1199
+                    )?,
+                    Some(7)
+                );
+                assert!(
+                    fixture
+                        .verification_epoch(
+                            &f.selected.binding,
+                            &f.selected.management,
+                            "verify-v1",
+                            1200
+                        )
+                        .is_err()
+                );
                 Ok(())
             })?;
-            assert_eq!(f.keys.calls.lock().unwrap().len(), usize::from(elapsed_key_work));
+            assert_eq!(
+                f.keys.calls.lock().unwrap().len(),
+                usize::from(elapsed_key_work)
+            );
         }
         let f = Fixture::new()?;
         let fixture = SelectedAuthority::fixture(vec![f.selected.clone()], f.keys.clone())?;
@@ -893,10 +930,23 @@ mod tests {
             clock.0.lock().unwrap().2 += Duration::from_secs(100);
         }));
         super::super::effects::scope(f.clock.clone(), || {
-            assert!(fixture.verification_keys(&f.selected.binding, &f.selected.management, 1100).is_err());
+            assert!(
+                fixture
+                    .verification_keys(&f.selected.binding, &f.selected.management, 1100)
+                    .is_err()
+            );
             // Expiry at the post-read is permanent in the source clock;
             // an older capture cannot select the once-ready snapshot again.
-            assert!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1100).is_err());
+            assert!(
+                fixture
+                    .verification_epoch(
+                        &f.selected.binding,
+                        &f.selected.management,
+                        "verify-v1",
+                        1100
+                    )
+                    .is_err()
+            );
         });
         Ok(())
     }
