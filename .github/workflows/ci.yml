@@ -347,8 +347,8 @@ jobs:
       - name: Plan only this lane's admitted compiler outputs
         run: build-out/bin/xtask verify-transport-plan ${{ matrix.part }}
       - name: Archive fixture and check preparation
-        if: ${{ matrix.part == 'inputs' }}
-        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/inputs.list0
+        if: ${{ matrix.part != 'tests' }}
+        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/${{ matrix.part }}.list0
       - name: Archive test compilation and documentation preparation
         if: ${{ matrix.part == 'tests' }}
         run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/tests.list0
