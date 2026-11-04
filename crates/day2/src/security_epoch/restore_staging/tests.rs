@@ -391,7 +391,6 @@ fn expected(point: Point) -> Observation {
             Copied | Synced => ImageState::Revoked,
         },
         complete: false,
-        writer_attempted: false,
         refused: true,
         creator: matches!(point, FirstWrite | Copied | Synced),
         sql_held: matches!(point, BeforeCommit | AfterCommit),
