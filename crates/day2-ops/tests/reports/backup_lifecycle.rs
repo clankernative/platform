@@ -16,8 +16,8 @@ const MAX_REPLAY_BYTES: u64 = 2 << 20;
 enum Event {
     Write { row: u8, value: u16 },
     Begin { row: u8, value: u16 },
-    Commit,
-    Rollback,
+    Commit {},
+    Rollback {},
     Take { slot: u8, lose_reply: bool },
     Verify { slot: u8 },
     Restore { slot: u8, output: u8, lose_reply: bool },
@@ -79,11 +79,11 @@ impl Model {
                     self.rows = next;
                 }
             }
-            Event::Commit | Event::Rollback => {
+            Event::Commit {} | Event::Rollback {} => {
                 let Some(pending) = self.pending.take() else {
                     return Decision::Refused;
                 };
-                if matches!(event, Event::Commit) {
+                if matches!(event, Event::Commit {}) {
                     self.rows = pending;
                 }
             }
@@ -144,7 +144,7 @@ fn validate(program: &Program, artifact: &str) -> Result<()> {
             Event::Restore { slot, output, .. } => ensure!(slot < 4 && output < 4, "backup_replay_slot"),
             Event::Take { slot, .. } | Event::Verify { slot } | Event::RemoveMarker { slot }
             | Event::DamageDatabase { slot } | Event::DamageArtifact { slot } => ensure!(slot < 4, "backup_replay_slot"),
-            Event::Commit | Event::Rollback => {}
+            Event::Commit {} | Event::Rollback {} => {}
         }
     }
     Ok(())
@@ -157,14 +157,14 @@ fn generated(seed: u64, artifact: &str) -> Program {
         Event::Write { row: 0, value: 1 },
         Event::Begin { row: 0, value: 2 },
         Event::Take { slot: 0, lose_reply: true },
-        Event::Rollback,
+        Event::Rollback {},
         Event::Write { row: 0, value: 3 },
         Event::Restore { slot: 0, output: 0, lose_reply: true },
         Event::Restore { slot: 0, output: 0, lose_reply: false },
         Event::Take { slot: 0, lose_reply: false },
         Event::Begin { row: 1, value: 4 },
         Event::Take { slot: 1, lose_reply: false },
-        Event::Commit,
+        Event::Commit {},
         Event::Restore { slot: 1, output: 1, lose_reply: false },
         Event::Take { slot: 2, lose_reply: false },
         Event::DamageDatabase { slot: 2 },
@@ -181,8 +181,8 @@ fn generated(seed: u64, artifact: &str) -> Program {
         events.push(match random % 7 {
             0 => Event::Write { row: slot, value: index + 10 },
             1 => Event::Begin { row: slot, value: index + 10 },
-            2 => Event::Commit,
-            3 => Event::Rollback,
+            2 => Event::Commit {},
+            3 => Event::Rollback {},
             4 => Event::Verify { slot },
             5 => Event::Take { slot, lose_reply: false },
             _ => Event::Restore { slot, output: slot, lose_reply: false },
@@ -239,9 +239,9 @@ impl World {
                 }
                 self.write(row, value)
             }
-            Event::Commit | Event::Rollback => {
+            Event::Commit {} | Event::Rollback {} => {
                 if !self.pending { return Ok(Decision::Refused); }
-                self.writer.execute_batch(if matches!(event, Event::Commit) { "COMMIT" } else { "ROLLBACK" })?;
+                self.writer.execute_batch(if matches!(event, Event::Commit {}) { "COMMIT" } else { "ROLLBACK" })?;
                 self.pending = false;
                 Ok(())
             }
@@ -495,10 +495,12 @@ fn backup_replay_input_refuses_duplicates_unknown_fields_and_out_of_range_events
     let mut unknown = serde_json::to_value(&program)?;
     unknown["events"][0]["unknown"] = json!(true);
     ensure!(day2::json::decode_evidence::<Program>(&serde_json::to_vec(&unknown)?).is_err(), "backup_unknown_input_accepted");
+    let extra_unit = br#"{"kind":"Commit","unknown":true}"#;
+    ensure!(day2::json::decode_evidence::<Event>(extra_unit).is_err(), "backup_unknown_unit_field_accepted");
     let mut invalid = program.clone();
     invalid.events = vec![Event::Take { slot:4, lose_reply:false }];
     ensure!(validate(&invalid, "synthetic-artifact").is_err(), "backup_out_of_range_slot_accepted");
-    invalid.events = vec![Event::Commit; MAX_EVENTS+1];
+    invalid.events = vec![Event::Commit {}; MAX_EVENTS+1];
     ensure!(validate(&invalid, "synthetic-artifact").is_err(), "backup_oversized_history_accepted");
     Ok(())
 }

@@ -1077,6 +1077,14 @@ jobs:
           path: artifacts/storage-lifecycle-simulation/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
+      - name: Retain failed ordinary backup lifecycle histories
+        if: ${{ failure() && matrix.shard == 'workspace-other' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-backup-lifecycle-replays-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/simulations/backup-lifecycle/replay-*.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Retain failed native OAuth consumer histories
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
