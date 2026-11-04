@@ -2259,7 +2259,10 @@ mod tests {
             })
             .collect();
         let keys = Arc::new(BrowserKeys(AtomicUsize::new(0)));
-        let authority = Arc::new(SelectedAuthority::new(selections.clone(), keys.clone())?);
+        let authority = Arc::new(SelectedAuthority::fixture(
+            selections.clone(),
+            keys.clone(),
+        )?);
         let runtime = runtime.with_credential_authority(authority.clone());
         Ok(BrowserWorld {
             _directory: directory,
@@ -4724,7 +4727,7 @@ mod tests {
                 delay: AtomicBool::new(false),
                 clock,
             });
-            let authority = Arc::new(SelectedAuthority::new(selections, keys.clone())?);
+            let authority = Arc::new(SelectedAuthority::fixture(selections, keys.clone())?);
             let runtime = runtime.with_credential_authority(authority.clone());
             let registry = Arc::new(credentials::Registry::new(
                 &instance,

@@ -2717,7 +2717,7 @@ mod owned_google {
         // while preserving the later ambient serving OAuth track.
         let registry = if with_registry {
             let authority = Arc::new(
-                crate::managed_credentials::authority::SelectedAuthority::new(
+                crate::managed_credentials::authority::SelectedAuthority::fixture(
                     Vec::new(),
                     Arc::new(fixtures::TestApprovalKeys(0.into())),
                 )?,

@@ -1056,6 +1056,7 @@ jobs:
           path: |
             artifacts/oauth-simulation/*.json
             artifacts/credential-simulation/failure-*.json
+            artifacts/credential-verifier-adapter/failure-*.json
             artifacts/epoch-advance-failures/*.json
             artifacts/control-slot-replays/*/replay.json.gz
             artifacts/native-handshake-simulation/*.json
