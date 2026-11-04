@@ -611,7 +611,7 @@ mod transport_histories {
         fn poll(&mut self, control: Control) -> Read {
             if !self.receiver { return Read::Absent; }
             if self.ended { return Read::Eof; }
-            if self.terminal_value && !(control == Control::DataBeforeRevocation && !self.queue.is_empty()) {
+            if self.terminal_value && (control != Control::DataBeforeRevocation || self.queue.is_empty()) {
                 self.terminal_value=false; self.queue.clear(); self.receiver_closed=true; self.ended=true;
                 self.delivered.push(Frame::Clear);
                 return Read::Frame(Frame::Clear);
@@ -839,7 +839,7 @@ mod transport_histories {
     #[test]
     fn transport_histories_match_independent_queue_and_terminal_model_twice() -> Result<()> {
         for seed in (0..32).chain([71]) {
-            let program=generated(seed);let first=run(&program,Control::Correct)?;let second=run(&program,Control::Correct)?;
+            let program=generated(seed);ensure!(program.events.len()==87,"live_transport_declared_event_count");let first=run(&program,Control::Correct)?;let second=run(&program,Control::Correct)?;
             if first.failed_at.is_some() || first!=second {
                 let a=retain(&first)?;let b=retain(&second)?;
                 anyhow::bail!("live transport divergence; first={} second={}",a.display(),b.display());
