@@ -247,6 +247,15 @@ checks, not current schema/key/epoch admission: backup verification remains
 historical inspection, and restoring private security state still needs genuine
 outside-backup fencing and its own qualified workflow.
 
+Private SQLite tests retain consistent copies before and after rotation,
+revocation and delivery acknowledgement, including a copy while a rotation is
+uncommitted. The old copy can still accept a then-valid bearer under its old
+epoch; current readiness must come from outside that copy. Acknowledgement
+closes delivery without revoking the bearer. Both old and new copies must refuse
+ordinary restore without mutation. These tests use SQLite `VACUUM INTO` copies,
+not the ops backup bundle, native maintenance authority or a secure-restore
+workflow; those qualification requirements remain separate.
+
 Canonical requests exclude derived after-record hashes. A domain-separated
 request digest determines both records; the immutable receipt then commits the
 request and those derived records. This avoids a recursive hash definition.
