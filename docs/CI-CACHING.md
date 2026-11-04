@@ -33,6 +33,18 @@ A missing archive, including on a
 failed-jobs-only rerun with an earlier producer attempt, merely loses this optional
 acceleration. It cannot supply a receipt or skip the current verification gate.
 
+The final verification join also restores that retained compiler-action archive
+before compiling its current admission guard. It uses its own preparation run and
+attempt, or the exact queue origin already admitted by the reuse guard. This
+keeps a cache entry evicted during a long runtime campaign from forcing a cold
+verifier rebuild inside the join's unchanged twenty-minute budget. Artifact
+transport has the same two-minute deadline and one retry; failures leave the
+ordinary compilation path in place. The archive contains only content-addressed
+compiler data, never a verifier to install directly or a reusable test outcome.
+Bazel still builds the current source verifier, and native-output selection,
+source/byte/mode admission and complete receipt composition still follow it.
+The other Linux consumers retain their existing same-run cache restore.
+
 Both platforms retain their OS/architecture partition and source/run/attempt keys.
 The publisher runs in the caller's GitHub cache scope: PRs still cannot write
 main's cache. The trusted main push is what makes its snapshot available to
