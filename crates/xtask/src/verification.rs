@@ -2144,10 +2144,11 @@ mod tests {
         let context = ci_step(&shards, "Retain current native Linux shard context");
         assert!(context.contains("always() && steps.linux_context.outcome == 'success'"));
         assert!(
-            context.contains("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
+            context.contains("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9")
         );
         assert!(context.contains("name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}"));
         assert!(context.contains("path: /tmp/day2-ci-linux-context.json"));
+        assert!(context.contains("archive: true"));
         assert!(
             context.contains("if-no-files-found: error") && context.contains("retention-days: 14")
         );
