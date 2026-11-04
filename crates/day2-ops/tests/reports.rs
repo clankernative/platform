@@ -4,6 +4,9 @@ use day2_ops::{backup, projection};
 use serde_json::Value;
 use std::{fs, path::PathBuf};
 
+#[path = "reports/backup_lifecycle.rs"]
+mod backup_lifecycle;
+
 fn artifact() -> Result<PathBuf> {
     std::env::var_os("DAY2_TEST_REPORTS_ARTIFACT")
         .map(PathBuf::from)
