@@ -73,7 +73,15 @@ pub(super) fn api(root: &Path, endpoint: &str) -> Result<Value> {
     run_with_budget(
         root,
         Command::new("gh")
-            .args(["api", "--hostname", "github.com", "--method", "GET"])
+            .args([
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "GET",
+                "--header",
+                "Cache-Control: no-cache",
+            ])
             .arg(format!("repos/{REPOSITORY}/{endpoint}"))
             .env_remove("GH_DEBUG")
             .stdout(Stdio::from(file.reopen()?))

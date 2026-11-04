@@ -592,18 +592,21 @@ jobs:
     # GitHub can cancel an unacquired hosted job after fifteen minutes. A fresh
     # allocation may retry that infrastructure failure, never an executed test.
     needs: [verify-mac-compatibility]
-    if: ${{ !cancelled() && needs.verify-mac-compatibility.result == 'cancelled' }}
+    # Scheduler needs.result can disagree with an unacquired job's API state.
+    # Preserve workflow cancellation, then decide from the exact job record.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
     outputs:
-      admitted: ${{ steps.admit.outcome }}
+      admitted: ${{ steps.admit.outputs.admitted }}
     steps:
-      - name: Require one current cancelled Mac job with no assigned runner or steps
+      - name: Admit only one current unacquired Mac allocation
         id: admit
         run: >-
           gh api --hostname github.com --method GET
+          --header 'Cache-Control: no-cache'
           'repos/clankernative/platform/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs?per_page=100'
           --jq '
           if (.jobs | type) == "array" and .total_count == (.jobs | length) and .total_count <= 100
@@ -611,19 +614,25 @@ jobs:
           if length == 1 then .[0] |
           if .run_id == ${{ github.run_id }} and .run_attempt == ${{ github.run_attempt }}
           and .head_sha == "${{ github.event.pull_request.head.sha || github.sha }}"
-          and .status == "completed" and .conclusion == "cancelled"
-          and .runner_id == 0 and .runner_name == "" and .labels == ["macos-15"]
+          and .status == "completed" and .labels == ["macos-15"]
+          then if .conclusion == "cancelled"
+          and .runner_id == 0 and .runner_name == ""
           and (.steps | type) == "array" and (.steps | length) == 0
-          then "Retrying one unacquired Mac job; no verification ran"
-          else error("Mac acquisition retry refused: current unacquired job required") end
+          then "admitted=true"
+          elif .conclusion == "success" or .conclusion == "failure"
+          or .conclusion == "skipped" or .conclusion == "cancelled"
+          then "admitted=false"
+          else error("Mac acquisition retry refused: terminal outcome required") end
+          else error("Mac acquisition retry refused: current completed job required") end
           else error("Mac acquisition retry refused: unique original job required") end
           else error("Mac acquisition retry refused: complete job inventory required") end'
+          >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
 
   retry-mac-compatibility:
     needs: [admit-mac-acquisition-retry]
-    if: ${{ !cancelled() && needs.admit-mac-acquisition-retry.result == 'success' && needs.admit-mac-acquisition-retry.outputs.admitted == 'success' }}
+    if: ${{ !cancelled() && needs.admit-mac-acquisition-retry.result == 'success' && needs.admit-mac-acquisition-retry.outputs.admitted == 'true' }}
     runs-on: macos-15
     timeout-minutes: 360
     env: *mac_verification_environment

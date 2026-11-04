@@ -144,7 +144,14 @@ count and its entries disagree or the count changes between pages, the selector
 discards that entire snapshot and restarts from page one, at most three times.
 It never truncates extra entries or combines pages from different snapshots.
 Malformed identities, duplicates and budget overruns refuse immediately;
-persistent inconsistency also refuses. Diagnostics identify only the closed
+persistent inconsistency also refuses. The complete jobs index binds producer
+identity and uniqueness. Each selected producer's exact numeric job endpoint
+refreshes its current outcome without changing the indexed run, attempt, SHA,
+job ID, name or URL. A known terminal failure cannot be overwritten by a
+conflicting success; a fresh failed producer still refuses older artifacts.
+Metadata requests require revalidation, and producer refusal diagnostics name
+only the fixed field, never API values or private output. Diagnostics identify
+only the closed
 inventory endpoint and numeric run/attempt, without process arguments or
 environment values.
 
@@ -161,7 +168,12 @@ GitHub can cancel a `macos-15` allocation before any runner starts, independentl
 of the job's six-hour execution timeout. Platform CI requests one new allocation
 only after a read-only API guard authenticates the unique original job in the
 same run, attempt and head, cancelled with runner ID zero, an empty runner name,
-and no steps. Partial job inventories, missing or duplicated jobs, wrong heads
+and no steps. The cheap guard reads the actual API state after the original job
+instead of requiring the scheduler's `needs.result` to report `cancelled`.
+A completed ordinary success or executed failure emits `admitted=false` and
+cannot allocate a retry; only the exact unacquired shape emits `admitted=true`.
+The normal workflow-cancellation conditions still apply to both guard and retry.
+Partial job inventories, missing or duplicated jobs, wrong heads
 and executed failures refuse the retry. Cancelling the entire workflow also
 prevents it. The retry uses the identical steps, runner, verification recipe,
 cache policy, and source/run/attempt-bound Mac receipt as the original job.
