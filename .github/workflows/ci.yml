@@ -1142,7 +1142,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-credential-crash-coverage-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/credential-crash-reopen/campaign-*/receipt.json
+          path: |
+            artifacts/credential-crash-reopen/campaign-*/receipt.json
+            artifacts/credential-verifier-maintenance/campaign-*/receipt.json
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted credential process-loss cases
@@ -1150,7 +1152,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-credential-crash-replays-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/credential-crash-reopen/failure-*/failure.json
+          path: |
+            artifacts/credential-crash-reopen/failure-*/failure.json
+            artifacts/credential-verifier-maintenance/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Publish actual Notifications campaign coverage

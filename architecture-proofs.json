@@ -249,6 +249,38 @@
       ]
     },
     {
+      "source": "crates/day2/src/managed_credentials/rewrap.rs",
+      "type_name": "VerifierPending",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn stage_verifier (tx : & Transaction < '_ > , authority : & dyn VerifierAuthority , prepared : VerifierPrepared) -> Result < VerifierPending >"
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/managed_credentials/rewrap.rs",
+      "type_name": "VerifierPrepared",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn prepare_verifier (db : & Connection , authority : & dyn VerifierAuthority , provider : & dyn ApprovalKeyProvider , request : Request < '_ > , presented_token : & str) -> Result < VerifierPrepared >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn stage_verifier (tx : & Transaction < '_ > , authority : & dyn VerifierAuthority , prepared : VerifierPrepared) -> Result < VerifierPending >"
+        }
+      ]
+    },
+    {
       "source": "crates/day2/src/managed_credentials/store.rs",
       "type_name": "HumanRevealPermit",
       "kind": "secret_permit",

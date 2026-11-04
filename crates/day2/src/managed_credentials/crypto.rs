@@ -344,6 +344,35 @@ pub(crate) fn verify_managed(
     Ok(hmac::verify(&lease.key, &message, expected_verifier).is_ok())
 }
 
+/// Rehash only the SAME presented token after constant-time verification under
+/// its accepted old exact key. This has no encryption/decryption capability,
+/// plaintext result, new bearer identity, entropy or authority of its own.
+pub(super) fn prepare_verifier_replacement(
+    previous: &VerifierLease,
+    replacement: &VerifierLease,
+    identity: &MaterialIdentity,
+    expected_selector: &str,
+    expected_verifier: &[u8],
+    token: &str,
+) -> Result<[u8; 32]> {
+    ensure!(
+        previous.verifier_version != replacement.verifier_version && expected_verifier.len() == 32,
+        "credential verifier replacement selection changed"
+    );
+    let (selector, secret) = parse_token(token)?;
+    ensure!(
+        selector == expected_selector,
+        "credential verifier replacement token refused"
+    );
+    let message = Zeroizing::new(verifier_message(identity, &selector, &secret)?);
+    hmac::verify(&previous.key, &message, expected_verifier)
+        .map_err(|_| anyhow::anyhow!("credential verifier replacement token refused"))?;
+    let tag = hmac::sign(&replacement.key, &message);
+    let mut verifier = [0; 32];
+    verifier.copy_from_slice(tag.as_ref());
+    Ok(verifier)
+}
+
 /// Only a role-specific, consuming sink should call this after a known-commit
 /// reveal authorization. The envelope's identity is compared with an independent
 /// state selection before decryption.

@@ -56,7 +56,8 @@ const CREDENTIAL_DDL: &str = "
             expires_at INTEGER NOT NULL CHECK(expires_at > issued_at),
             security_epoch INTEGER NOT NULL CHECK(security_epoch > 0),
             grant_digest TEXT NOT NULL,
-            state TEXT NOT NULL CHECK(state IN ('active', 'superseded', 'revoked'))
+            state TEXT NOT NULL CHECK(state IN ('active', 'superseded', 'revoked')),
+            verifier_revision INTEGER NOT NULL CHECK(verifier_revision > 0)
         ) STRICT;
         CREATE TABLE IF NOT EXISTS day2_credential_material (
             version TEXT PRIMARY KEY REFERENCES day2_credential_versions(id),
@@ -286,6 +287,9 @@ fn install_schema_in(db: &Connection) -> Result<()> {
     validate_credential_peers(db, &peers)
 }
 
+/// The historical GoLinks unit is frozen independently of the current layout.
+const VERSION_1_UNIT: &str = include_str!("../../fixtures/credential-schema-v1.sql");
+
 /// Tables every version-1 installer created together. Version 1 later gained
 /// `day2_credential_revocations` and the three peer tables in place, so a
 /// version-1 unit may lack them.
@@ -372,10 +376,11 @@ fn replace_empty_version_1_unit_in(db: &Connection) -> Result<()> {
     if versions != [1] {
         return Ok(());
     }
-    // Version 2 changed only the marker and added guard triggers: its tables,
-    // indexes and peers are exactly those of the last version-1 installer, so
-    // the current installers define every object version 1 could hold.
+    // Compare the original tables with the frozen GoLinks installer. The
+    // current IF NOT EXISTS batches add only the later optional tables and
+    // peers; they must not redefine the historical versions table.
     let expected = Connection::open_in_memory()?;
+    expected.execute_batch(VERSION_1_UNIT)?;
     expected.execute_batch(CREDENTIAL_DDL)?;
     super::issuance::install(&expected)?;
     for (kind, name, table) in &owned {
@@ -654,7 +659,7 @@ fn credential_predicates() -> Vec<(&'static str, String)> {
         (
             "day2_credential_versions",
             format!(
-                "{} AND {} AND (predecessor IS NULL OR ({} AND predecessor != id)) AND {} AND length(selector)=22 AND selector NOT GLOB '*[^a-zA-Z0-9_-]*' AND substr(selector,22,1) IN ('A','Q','g','w') AND {} AND {} AND length(verifier)=32 AND expires_at > issued_at AND security_epoch > 0 AND state IN ('active','superseded','revoked')",
+                "{} AND {} AND (predecessor IS NULL OR ({} AND predecessor != id)) AND {} AND length(selector)=22 AND selector NOT GLOB '*[^a-zA-Z0-9_-]*' AND substr(selector,22,1) IN ('A','Q','g','w') AND {} AND {} AND length(verifier)=32 AND verifier_revision > 0 AND expires_at > issued_at AND security_epoch > 0 AND state IN ('active','superseded','revoked')",
                 id("id"),
                 id("lineage"),
                 id("predecessor"),
@@ -1345,8 +1350,8 @@ fn insert_version(tx: &Transaction<'_>, write: VersionWrite<'_>) -> Result<()> {
     tx.execute(
         "INSERT INTO day2_credential_versions
          (id, lineage, predecessor, selector, verifier, verifier_key_version, issued_at,
-          expires_at, security_epoch, grant_digest, state)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active')",
+          expires_at, security_epoch, grant_digest, state, verifier_revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', 1)",
         params![
             version,
             lineage,
@@ -2894,10 +2899,6 @@ mod tests {
         }
         Ok(())
     }
-
-    /// The version-1 unit exactly as the GoLinks build installs it; the fixture
-    /// documents its provenance.
-    const VERSION_1_UNIT: &str = include_str!("../../fixtures/credential-schema-v1.sql");
 
     /// Tables later version-1 builds added in place, copied verbatim from the
     /// parent of c4aa7a2 (store.rs and ingress.rs install). A store opened by
