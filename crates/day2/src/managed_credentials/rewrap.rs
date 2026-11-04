@@ -1244,6 +1244,7 @@ mod tests {
             let token = verifier_token(&db, &control)?;
             let before = verifier_image(&db)?;
             for fault in 0..3 {
+                control.allowed.store(true, Ordering::SeqCst);
                 let (source, _) = maintenance_source(&db, &control)?;
                 let authority = maintenance_authority::CurrentAuthority::new(&source);
                 let prepared = prepare_verifier(
