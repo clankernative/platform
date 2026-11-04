@@ -91,7 +91,7 @@ pub(super) struct Stopped {
 }
 
 mod sealed {
-    pub(super) trait Source {}
+    pub trait Source {}
 }
 /// Only a future retained native source may implement this in production.
 /// No default, blanket or production implementation is supplied in this slice.
