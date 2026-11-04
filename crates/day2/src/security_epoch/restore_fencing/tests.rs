@@ -11,18 +11,18 @@ fn approval(expires:u64)->Approval {
     Approval {origin:ApprovalOrigin::UnqualifiedModel,binding:binding(),domain:digest("qualified-clock"),issued_at:10,expires_at:expires,last:None,state:Cell::new(Disposition::Fresh),local:PhantomData}
 }
 #[derive(Debug)]
-struct StopFailure(Rc<()>);
+struct StopFailure(std::sync::Arc<()>);
 impl std::fmt::Display for StopFailure {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("controlled_stop_unknown")}}
 impl std::error::Error for StopFailure {}
 struct Model {
     binding:Binding,domain:Digest,lower:u64,upper:u64,identity:Rc<()>,leases:Vec<Outstanding>,
     gate_closed:bool,refused:bool,complete:bool,stop_calls:usize,samples:usize,
-    unknown:bool,post_error:bool,cause:Rc<()>,
+    unknown:bool,post_error:bool,cause:std::sync::Arc<()>,
 }
 impl Model {
     fn new(mut leases:Vec<Outstanding>)->Self {
         leases.sort_by(|a,b|a.identity.cmp(&b.identity));
-        Self {binding:binding(),domain:digest("qualified-clock"),lower:10,upper:10,identity:Rc::new(()),leases,gate_closed:false,refused:false,complete:true,stop_calls:0,samples:0,unknown:false,post_error:false,cause:Rc::new(())}
+        Self {binding:binding(),domain:digest("qualified-clock"),lower:10,upper:10,identity:Rc::new(()),leases,gate_closed:false,refused:false,complete:true,stop_calls:0,samples:0,unknown:false,post_error:false,cause:std::sync::Arc::new(())}
     }
     fn at(&mut self,lower:u64,upper:u64) {self.lower=lower;self.upper=upper;}
 }
@@ -86,7 +86,7 @@ fn unknown_stop_keeps_primary_cause_runs_postcheck_and_never_reissues() {
     let mut a=approval(100);let mut source=Model::new(vec![]);source.unknown=true;source.post_error=true;
     let cause=source.cause.clone();
     let error=match Session::begin(&mut a,&mut source) {Ok(_)=>panic!("unknown stop admitted"),Err(error)=>error};
-    assert!(Rc::ptr_eq(&error.downcast_ref::<StopFailure>().unwrap().0,&cause));
+    assert!(std::sync::Arc::ptr_eq(&error.downcast_ref::<StopFailure>().unwrap().0,&cause));
     assert_eq!(source.samples,2);assert!(source.refused&&source.gate_closed);
     assert!(Session::begin(&mut a,&mut source).is_err());assert_eq!(source.stop_calls,1);
 }

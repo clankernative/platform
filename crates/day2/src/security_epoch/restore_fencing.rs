@@ -24,7 +24,7 @@ enum ApprovalOrigin {
     #[cfg(test)]
     UnqualifiedModel,
 }
-#[derive(Clone,Copy,PartialEq,Eq)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum Disposition {Fresh,Stopping,Waiting,Drained,Refused}
 
 /// No configuration/scalar/record/default constructor, clone, serialization,
