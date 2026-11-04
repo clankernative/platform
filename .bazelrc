@@ -30,6 +30,8 @@ build:ci-linux --local_resources=cpu=2
 build:ci-mac --jobs=3
 build:ci-mac --define=DAY2_PLATFORM_JOBS=3
 build:ci-mac --local_resources=cpu=3
+# Schedule library dependents from metadata without omitting any code generation.
+build:ci-mac --@rules_rust//rust/settings:pipelined_compilation=true
 
 # Distribution builds preserve the former release panic/profile policy.
 build:release --compilation_mode=opt
