@@ -78,6 +78,15 @@ test changes from invalidating otherwise identical compiled actions on either
 host. The complete target catalog, compiler flags, byte admission and fresh
 runtime campaigns remain mandatory.
 
+Successful captured builds emit `BAZEL_BUILD_METRICS_V1` with eight optional
+numeric timing/cache fields from the existing Bazel events. Missing, invalid or
+default-omitted counters stay unknown; no event text, labels, arguments or
+environment values are exported. Action requests include spawn-cache hits and
+exclude local action-cache hits; they are not native codegen counts. Counters
+and analysis/execution timing envelopes can overlap and must not be summed.
+These diagnostics never supply build completion or replace process, capture,
+compiler/output admission or fresh verification checks.
+
 Development workspace crates use optimization level 1; dependencies and build
 tools use level 2, with assertions and overflow checks enabled and debug info
 disabled. Native non-incremental builds leave codegen partitioning at the
