@@ -10,7 +10,7 @@ on:
       verification:
         description: Complete Linux and focused Mac verification, or independent diagnostics
         type: choice
-        options: [sharded, diagnostics]
+        options: [sharded, diagnostics, mac-measurement]
         default: sharded
       compilation_cache:
         description: Reuse admitted compiled outputs, or measure complete verification with empty compiled-output caches
@@ -174,7 +174,7 @@ jobs:
   verify-prepare-parts:
     # Reject known security failures before allocating compilation runners.
     needs: [secrets, dependencies, verify-queue-receipt]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' && inputs.verification != 'mac-measurement' }}
     runs-on: ubuntu-24.04
     container:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
@@ -633,7 +633,7 @@ jobs:
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' && inputs.verification != 'mac-measurement' }}
     runs-on: ubuntu-24.04
     container:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
@@ -1170,7 +1170,7 @@ jobs:
 
   verify:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards, verify-mac-compatibility, retry-mac-compatibility]
-    if: ${{ always() && inputs.verification != 'diagnostics' }}
+    if: ${{ always() && inputs.verification != 'diagnostics' && inputs.verification != 'mac-measurement' }}
     # A rejected source only needs the failure guard, not a macOS queue slot.
     runs-on: ubuntu-24.04
     container:
