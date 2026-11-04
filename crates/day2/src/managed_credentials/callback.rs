@@ -1161,7 +1161,7 @@ mod tests {
             .read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 2 * 1024 * 1024, "callback_evidence_bound");
         let saved: Saved =
-            crate::json::decode(&bytes).map_err(|_| anyhow::anyhow!("callback_replay_decode"))?;
+            crate::json::decode_evidence(&bytes).map_err(|_| anyhow::anyhow!("callback_replay_decode"))?;
         ensure!(
             saved.format == 1 && saved.source == implementation()?,
             "callback_replay_source"
@@ -1285,6 +1285,35 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn maximum_history_and_late_second_run_disagreement_preserve_both_complete_runs() -> Result<()> {
+        for late_disagreement in [false, true] {
+            let mut steps = vec![Step::Prepare { id: 1, input: 1 }, Step::Apply { cut: Cut::Known }];
+            while steps.len() < 63 {
+                steps.push(Step::Clock { at: 1100 });
+            }
+            steps.push(if late_disagreement { Step::Prepare { id: 2, input: 1 } } else { Step::Clock { at: 1100 } });
+            let flags = [false, late_disagreement];
+            let runs = [history(&steps, flags[0])?, history(&steps, flags[1])?];
+            ensure!(runs.iter().all(|run| run.observations.len() == 64) && runs[0].agrees && runs[1].agrees != late_disagreement, "callback_maximum_history_incomplete");
+            let path = retain(&steps, flags, runs.clone())?;
+            let bytes = std::fs::read(&path)?;
+            ensure!(bytes.len() > 1_048_576 && bytes.len() <= 2 * 1_048_576, "callback_maximum_history_envelope");
+            ensure!(crate::json::decode::<Saved>(&bytes).is_err(), "callback_transport_budget_changed");
+            let saved: Saved = crate::json::decode_evidence(&bytes)?;
+            ensure!(saved.runs == runs && saved.steps.len() == 64 && saved.wrong_reference == flags, "callback_maximum_history_changed");
+            replay(&path)?;
+            let mut altered: serde_json::Value = crate::json::decode_evidence(&bytes)?;
+            altered["runs"][1]["observations"][63]["returned"] = serde_json::json!("Recovered");
+            let counterfeit = tempfile::NamedTempFile::new()?;
+            std::fs::write(counterfeit.path(), serde_json::to_vec(&altered)?)?;
+            ensure!(replay(counterfeit.path()).is_err(), "callback_late_record_tampering_accepted");
+            std::fs::write(counterfeit.path(), vec![b' '; 2 * 1_048_576 + 1])?;
+            ensure!(replay(counterfeit.path()).is_err(), "callback_local_evidence_budget_changed");
+        }
+        Ok(())
+    }
+
     #[test]
     fn saved_callback_reservation_replay() -> Result<()> {
         let Some(path) = std::env::var_os("DAY2_CALLBACK_LEDGER_REPLAY") else {
@@ -1655,7 +1684,7 @@ mod tests {
             bytes.len() <= 2 * 1024 * 1024,
             "callback_crash_evidence_bound"
         );
-        let archive: CrashArchive = crate::json::decode(&bytes)
+        let archive: CrashArchive = crate::json::decode_evidence(&bytes)
             .map_err(|_| anyhow::anyhow!("callback_crash_replay_decode"))?;
         ensure!(
             archive.format == 1

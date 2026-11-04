@@ -68,6 +68,10 @@ synthetic records under `artifacts/credential-simulation/failure-callback-*`.
 History replay checks both runs with a 64-event/two-MiB limit. Unknown fields,
 changed source and altered observations refuse. Records contain no token,
 verifier, ciphertext, provider payload or downstream error messages.
+Both replay decoders use the bounded evidence codec after that local byte cap,
+with the same duplicate-key and depth rules. The maximum-history control exceeds
+the ordinary transport budget and replays a last-step, second-run disagreement
+without losing either full run; larger local records still refuse.
 
 ```console
 bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib managed_credentials::callback::tests:: --test-threads=1
