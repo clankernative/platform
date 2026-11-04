@@ -11,8 +11,8 @@ transaction completion, verification and restore attempts.
 
 The independent model derives complete Reports rows, revisions and immutable
 snapshot expectations from events. It never reads an adapter receipt or a
-database to choose expected rows. Every cut compares all Reports columns,
-source/snapshot authority continuity, browser session/secret counts, bundle
+database to choose expected rows. Every cut compares all committed and in-transaction Reports columns, transaction state,
+source/snapshot authority continuity, stable restored epochs, browser session/secret counts, bundle
 verification and every restored output. Restores must have distinct new epochs,
 one revision advance, disabled authority, cleared desired readers/writers and
 browser secrets, and refusal of ordinary authorization. Normalized observations
