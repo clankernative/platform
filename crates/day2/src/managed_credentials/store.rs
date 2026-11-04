@@ -19,6 +19,9 @@ use day2_capabilities::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+#[path = "restore.rs"]
+pub(crate) mod restore;
+
 #[path = "rewrap.rs"]
 pub(crate) mod rewrap;
 
@@ -2347,7 +2350,7 @@ pub(super) fn validate_id(value: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use day2_capabilities::{
         BindingRef, Name,
@@ -2375,12 +2378,12 @@ mod tests {
     type TableRows = (String, Vec<Vec<rusqlite::types::Value>>);
 
     #[derive(Debug, PartialEq)]
-    struct DatabaseSnapshot {
+    pub(super) struct DatabaseSnapshot {
         objects: Vec<SchemaObject>,
         tables: Vec<TableRows>,
     }
 
-    fn database_snapshot(db: &Connection) -> Result<DatabaseSnapshot> {
+    pub(super) fn database_snapshot(db: &Connection) -> Result<DatabaseSnapshot> {
         let objects = db
             .prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")?
             .query_map([], |row| {
@@ -3639,7 +3642,7 @@ mod tests {
         Ok(())
     }
 
-    fn restored_peer_database() -> Result<Connection> {
+    pub(super) fn restored_peer_database() -> Result<Connection> {
         let db = current_database()?;
         db.execute_batch(
             "CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, operation TEXT, actor TEXT)",
@@ -4175,7 +4178,7 @@ mod tests {
         .unwrap()
     }
 
-    pub(super) fn namespace() -> Namespace {
+    pub(crate) fn namespace() -> Namespace {
         Namespace {
             installation: name("wonderly"),
             environment: name("dev"),
@@ -4257,14 +4260,14 @@ mod tests {
         }
     }
 
-    pub(super) fn database() -> Result<(TempDir, Connection)> {
+    pub(crate) fn database() -> Result<(TempDir, Connection)> {
         let dir = tempfile::tempdir()?;
         let db = Connection::open(dir.path().join("app.sqlite"))?;
         install_schema(&db)?;
         Ok((dir, db))
     }
 
-    pub(super) fn committed_issue(db: &mut Connection) -> Result<PublicReceipt> {
+    pub(crate) fn committed_issue(db: &mut Connection) -> Result<PublicReceipt> {
         let prepared = prepare_issue(&lease(), &family(), issue("invocation-1"))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let receipt = stage_issue(&tx, prepared)?.public_identity().clone();
