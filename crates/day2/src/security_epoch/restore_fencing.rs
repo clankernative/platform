@@ -241,42 +241,24 @@ impl<'a, S: Source> Session<'a, S> {
             ceiling,
         })
     }
-    pub(super) fn poll(&mut self) -> Result<WaitStatus> {
-        let result = (|| {
-            ensure!(
-                matches!(
-                    self.approval.state.get(),
-                    Disposition::Waiting | Disposition::Drained
-                ),
-                "restore_fence_session_refused"
-            );
-            let clock = self.source.current(self.approval)?;
-            self.approval.observe(clock)?;
-            let checked = self.source.check_stopped(self.approval, &self.cut);
-            let post = self
-                .source
-                .current(self.approval)
-                .and_then(|c| self.approval.observe(c));
-            checked?;
-            post?;
-            ensure!(
-                self.cut.ceiling(self.approval)? == self.ceiling,
-                "restore_stop_inventory_changed"
-            );
-            let lower = self.approval.last.context("restore_stop_clock_missing")?.0;
-            if lower < self.ceiling {
-                Ok(WaitStatus::Pending {
-                    not_before: self.ceiling,
-                })
-            } else {
-                self.approval.state.set(Disposition::Drained);
-                Ok(WaitStatus::Drained)
-            }
+    pub(super) fn poll(&mut self)->Result<WaitStatus> {
+        let cut=&self.cut;let ceiling=self.ceiling;
+        // A caught panic must poison the SAME still-borrowed session. Session
+        // Drop alone is insufficient when the caller retains it after unwind.
+        let mut guard=Attempt {approval:&mut *self.approval,source:&mut *self.source,disarmed:false};
+        let result=(|| {
+            ensure!(matches!(guard.approval.state.get(),Disposition::Waiting|Disposition::Drained),"restore_fence_session_refused");
+            let clock=guard.source.current(guard.approval)?;guard.approval.observe(clock)?;
+            let checked=guard.source.check_stopped(guard.approval,cut);
+            let post=guard.source.current(guard.approval).and_then(|c|guard.approval.observe(c));
+            checked?;post?;
+            ensure!(cut.ceiling(guard.approval)?==ceiling,"restore_stop_inventory_changed");
+            let lower=guard.approval.last.context("restore_stop_clock_missing")?.0;
+            if lower<ceiling {Ok(WaitStatus::Pending{not_before:ceiling})}
+            else {guard.approval.state.set(Disposition::Drained);Ok(WaitStatus::Drained)}
         })();
-        if result.is_err() {
-            self.approval.refuse();
-            self.source.refuse();
-        }
+        if result.is_ok() {guard.disarmed=true;}
+        drop(guard);
         result
     }
     /// Call again at the next concrete consuming boundary. A previous Drained
