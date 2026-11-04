@@ -223,7 +223,7 @@ pub(super) fn admit_cli(root: &Path) -> Result<()> {
 
 pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) -> Result<()> {
     let part = match phase {
-        "inputs" | "tests" => phase,
+        "inputs" | "fixtures" | "tests" => phase,
         "runtime" => "all",
         _ => anyhow::bail!("unknown preparation transport phase"),
     };
@@ -243,6 +243,7 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
             BINARIES,
             BUILD_CACHE,
             "artifacts/ci-preparation-inputs.json",
+            "artifacts/ci-preparation-fixtures.json",
             "artifacts/ci-preparation-tests.json",
             "build-out/bin/day2-workflows",
             "build-out/bin/day2-workflows.json",
@@ -270,12 +271,14 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
     } else {
         let mut files = Files::default();
         files.add(root, Path::new(super::preparation_path(part)?), 0)?;
-        if phase == "inputs" {
+        if ["inputs", "fixtures"].contains(&phase) {
             add_fixtures(root, &mut files, &prepared)?;
-            add_cli(root, &mut files)?;
-            staging_roots(root, &mut files)?;
-            files.add(root, Path::new("build-out/bin/day2-workflows"), 0)?;
-            files.add(root, Path::new("build-out/bin/day2-workflows.json"), 0)?;
+            if phase == "inputs" {
+                add_cli(root, &mut files)?;
+                staging_roots(root, &mut files)?;
+                files.add(root, Path::new("build-out/bin/day2-workflows"), 0)?;
+                files.add(root, Path::new("build-out/bin/day2-workflows.json"), 0)?;
+            }
         } else {
             for path in [BINARIES, BUILD_CACHE] {
                 files.add(root, Path::new(path), 0)?;

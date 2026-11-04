@@ -94,7 +94,7 @@ pub(super) fn read_json(path: &Path) -> Result<Value> {
 
 pub(super) fn output(name: &str, value: &str) -> Result<()> {
     ensure!(
-        ["run", "artifact", "attempt", "reused", "inputs", "tests", "common", "binaries", "results", "mac", "reuse_artifact"].contains(&name)
+        ["run", "artifact", "attempt", "reused", "inputs", "fixtures", "tests", "common", "binaries", "results", "mac", "reuse_artifact"].contains(&name)
             && (value == "true"
                 || value == "false"
                 || value.split(',').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))),
@@ -326,11 +326,12 @@ fn admit_full(
     mac_snapshot: &str,
 ) -> Result<()> {
     ensure!(
-        files.len() == 7
+        files.len() == 8
             && [
                 "verification.json",
                 "ci-prepared.json",
                 "ci-preparation-inputs.json",
+                "ci-preparation-fixtures.json",
                 "ci-preparation-tests.json",
                 "ci-verification.json",
                 "ci-test-build-cache.json",
@@ -342,6 +343,7 @@ fn admit_full(
     );
     let prepared: Prepared = serde_json::from_value(files["ci-prepared.json"].clone())?;
     let inputs: Prepared = serde_json::from_value(files["ci-preparation-inputs.json"].clone())?;
+    let fixtures: Prepared = serde_json::from_value(files["ci-preparation-fixtures.json"].clone())?;
     let tests: Prepared = serde_json::from_value(files["ci-preparation-tests.json"].clone())?;
     let joined: Joined = serde_json::from_value(files["ci-verification.json"].clone())?;
     let cache: BuildCache = serde_json::from_value(files["ci-test-build-cache.json"].clone())?;
@@ -369,11 +371,21 @@ fn admit_full(
         prepared.identity == common
             && joined.identity == common
             && serde_json::to_value(super::combine_origins(
-                inputs,
-                tests,
+                [inputs, fixtures, tests],
                 &common,
-                &super::artifacts::origin(&expected, selection, super::artifacts::Role::Inputs)?,
-                &super::artifacts::origin(&expected, selection, super::artifacts::Role::Tests)?
+                [
+                    &super::artifacts::origin(
+                        &expected,
+                        selection,
+                        super::artifacts::Role::Inputs
+                    )?,
+                    &super::artifacts::origin(
+                        &expected,
+                        selection,
+                        super::artifacts::Role::Fixtures
+                    )?,
+                    &super::artifacts::origin(&expected, selection, super::artifacts::Role::Tests)?,
+                ]
             )?)? == serde_json::to_value(&prepared)?,
         "complete current-source queue preparation required"
     );
@@ -462,6 +474,7 @@ pub(in super::super) fn admit(root: &Path, snapshot: &str) -> Result<Value> {
         "verification.json",
         "ci-prepared.json",
         "ci-preparation-inputs.json",
+        "ci-preparation-fixtures.json",
         "ci-preparation-tests.json",
         "ci-verification.json",
         "ci-test-build-cache.json",
@@ -629,6 +642,11 @@ mod tests {
             *id = format!("sha256:{}", "a".repeat(64));
         }
         inputs.identity = serde_json::from_value(serde_json::to_value(&current)?)?;
+        let mut fixtures = sample_part("fixtures")?;
+        for id in fixtures.fixtures.values_mut() {
+            *id = format!("sha256:{}", "a".repeat(64));
+        }
+        fixtures.identity = current.clone();
         let mut tests = sample_part("tests")?;
         tests.identity = serde_json::from_value(serde_json::to_value(&current)?)?;
         for (_, target, kind) in super::super::auxiliary_targets("linux") {
@@ -685,8 +703,11 @@ mod tests {
             binary.digest = format!("sha256:{}", "b".repeat(64));
         }
         let prepared = combine_parts(
-            serde_json::from_value(serde_json::to_value(&inputs)?)?,
-            serde_json::from_value(serde_json::to_value(&tests)?)?,
+            [
+                serde_json::from_value(serde_json::to_value(&inputs)?)?,
+                serde_json::from_value(serde_json::to_value(&fixtures)?)?,
+                serde_json::from_value(serde_json::to_value(&tests)?)?,
+            ],
             &current,
         )?;
         let compiler = BuildIdentity {
@@ -727,6 +748,7 @@ mod tests {
             ("verification.json",json!({"status":"passed","scope":"all","workflow":current.workflow,
                 "input_snapshot":current.snapshot,"host":current.host,"architecture":current.architecture,"timings_ms":{"steps":timings}})),
             ("ci-prepared.json",serde_json::to_value(&prepared)?),("ci-preparation-inputs.json",serde_json::to_value(inputs)?),
+            ("ci-preparation-fixtures.json",serde_json::to_value(fixtures)?),
             ("ci-preparation-tests.json",serde_json::to_value(tests)?),("ci-verification.json",joined),
             ("ci-test-build-cache.json",serde_json::to_value(cache)?),
             ("ci-artifact-selection.json",serde_json::to_value(super::super::artifacts::sample(&current))?),
@@ -847,6 +869,7 @@ mod tests {
                 json!("2"),
             ),
             ("ci-preparation-tests.json", "/programs", json!([])),
+            ("ci-preparation-fixtures.json", "/fixtures", json!({})),
             ("ci-verification.json", "/shards/0/binaries", json!([])),
             (
                 "ci-verification.json",
