@@ -3858,7 +3858,10 @@ mod tests {
                 .resolve(attempt, &identity, world.now)?
                 .context("actual pending")?;
             let intent = credentials::fresh_intent(&runtime, &pending, &identity)?;
-            assert!(matches!(intent.purpose(), FreshPurpose::CredentialIssueIntent));
+            assert!(matches!(
+                intent.purpose(),
+                FreshPurpose::CredentialIssueIntent
+            ));
             let google_started_at = world.now;
             let google_started = effects::Instant::now();
             let (authenticator, assertions, callback) = shell_oidc::fixture_login(

@@ -60,7 +60,9 @@ impl FreshPurpose {
     pub(in crate::oauth) fn is_credential_intent(self) -> bool {
         matches!(
             self,
-            Self::CredentialIssueIntent | Self::CredentialRotateIntent | Self::CredentialRevokeIntent
+            Self::CredentialIssueIntent
+                | Self::CredentialRotateIntent
+                | Self::CredentialRevokeIntent
         )
     }
 }
@@ -291,7 +293,10 @@ impl FreshIntent {
         pending: &Pending,
         identity: &iap::Verified,
     ) -> Result<Self> {
-        ensure!(pending.actor == identity.email, "fixture credential owner changed");
+        ensure!(
+            pending.actor == identity.email,
+            "fixture credential owner changed"
+        );
         let mut intent = Self::fixture_oauth(
             identity,
             &pending.attempt,
@@ -559,8 +564,17 @@ mod purpose_tests {
             expires_at: 305,
         };
         let mut credential_commitments = std::collections::BTreeSet::new();
-        for action in [CredentialIntentAction::Issue, CredentialIntentAction::Rotate, CredentialIntentAction::Revoke] {
-            let Context::Credential { action: selected, .. } = &mut intent.context else { unreachable!() };
+        for action in [
+            CredentialIntentAction::Issue,
+            CredentialIntentAction::Rotate,
+            CredentialIntentAction::Revoke,
+        ] {
+            let Context::Credential {
+                action: selected, ..
+            } = &mut intent.context
+            else {
+                unreachable!()
+            };
             *selected = action;
             assert!(intent.purpose().is_credential_intent());
             assert!(intent.require_oauth_management().is_err());

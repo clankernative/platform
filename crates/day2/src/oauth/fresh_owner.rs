@@ -602,56 +602,139 @@ mod tests {
     use rusqlite::TransactionBehavior;
 
     fn credential_intent(index: u8) -> Result<FreshIntent> {
-        use crate::managed_credentials::{browser::Pending, lifecycle::{Intent, IssueGrant, RotateGrant}};
+        use crate::managed_credentials::{
+            browser::Pending,
+            lifecycle::{Intent, IssueGrant, RotateGrant},
+        };
         let pending = Pending {
-            attempt: "credential-same-attempt".into(), invocation: "same-invocation".into(),
-            operation: "fixture".into(), actor: "alice@example.com".into(),
-            input: serde_json::json!({"label":"Fixture"}), family: "fixture-family".into(),
+            attempt: "credential-same-attempt".into(),
+            invocation: "same-invocation".into(),
+            operation: "fixture".into(),
+            actor: "alice@example.com".into(),
+            input: serde_json::json!({"label":"Fixture"}),
+            family: "fixture-family".into(),
             intent: match index {
-                0 => Intent::Issue { label: "Fixture".into(), grant: IssueGrant::Fixed {} },
-                1 => Intent::Rotate { lineage: "lineage".into(), head: "head".into(), revision: 1, grant: RotateGrant::Fixed },
-                2 => Intent::Revoke { lineage: "lineage".into() },
+                0 => Intent::Issue {
+                    label: "Fixture".into(),
+                    grant: IssueGrant::Fixed {},
+                },
+                1 => Intent::Rotate {
+                    lineage: "lineage".into(),
+                    head: "head".into(),
+                    revision: 1,
+                    grant: RotateGrant::Fixed,
+                },
+                2 => Intent::Revoke {
+                    lineage: "lineage".into(),
+                },
                 _ => anyhow::bail!("unsupported fixture intent"),
             },
-            rotation: None, artifact: Digest::new(b"synthetic artifact DATA").as_str().into(),
-            authority: crate::authority_state::AuthorityStamp { epoch: Digest::new(b"fixture epoch").as_str().into(), revision: 1 },
-            binding: Digest::new(b"fixture binding"), created_at: 0, expires_at: 300, product_return: None,
+            rotation: None,
+            artifact: Digest::new(b"synthetic artifact DATA").as_str().into(),
+            authority: crate::authority_state::AuthorityStamp {
+                epoch: Digest::new(b"fixture epoch").as_str().into(),
+                revision: 1,
+            },
+            binding: Digest::new(b"fixture binding"),
+            created_at: 0,
+            expires_at: 300,
+            product_return: None,
         };
-        FreshIntent::fixture_credential(&pending, &iap::Verified { email: pending.actor.clone(), subject: "google:alice".into() })
+        FreshIntent::fixture_credential(
+            &pending,
+            &iap::Verified {
+                email: pending.actor.clone(),
+                subject: "google:alice".into(),
+            },
+        )
     }
 
     const PURPOSES: [PurposeData; 6] = [
-        PurposeData::OAuthApproval, PurposeData::OAuthConnect, PurposeData::OAuthDisconnect,
-        PurposeData::CredentialIssueIntent, PurposeData::CredentialRotateIntent, PurposeData::CredentialRevokeIntent,
+        PurposeData::OAuthApproval,
+        PurposeData::OAuthConnect,
+        PurposeData::OAuthDisconnect,
+        PurposeData::CredentialIssueIntent,
+        PurposeData::CredentialRotateIntent,
+        PurposeData::CredentialRevokeIntent,
     ];
 
     #[test]
     fn fresh_purposes_have_one_canonical_closed_wire_and_no_delivery_variant() -> Result<()> {
-        let names = ["o_auth_approval", "o_auth_connect", "o_auth_disconnect", "credential_issue_intent", "credential_rotate_intent", "credential_revoke_intent"];
+        let names = [
+            "o_auth_approval",
+            "o_auth_connect",
+            "o_auth_disconnect",
+            "credential_issue_intent",
+            "credential_rotate_intent",
+            "credential_revoke_intent",
+        ];
         for (purpose, name) in PURPOSES.into_iter().zip(names) {
             let bytes = serde_json::to_vec(&purpose)?;
-            ensure!(bytes == serde_json::to_vec(name)?, "noncanonical fresh purpose");
-            ensure!(crate::json::decode::<PurposeData>(&bytes)? == purpose, "purpose roundtrip changed");
-            ensure!(serde_json::from_value::<PurposeData>(serde_json::json!(name))? == purpose, "Value purpose roundtrip changed");
-            for wrong in [serde_json::Value::Object(serde_json::Map::from_iter([(name.to_owned(), serde_json::Value::Null)])), serde_json::json!([name]), serde_json::Value::Null, serde_json::json!(17)] {
-                ensure!(crate::json::decode::<PurposeData>(&serde_json::to_vec(&wrong)?).is_err()
-                    && serde_json::from_value::<PurposeData>(wrong).is_err(), "alternate purpose encoding accepted");
+            ensure!(
+                bytes == serde_json::to_vec(name)?,
+                "noncanonical fresh purpose"
+            );
+            ensure!(
+                crate::json::decode::<PurposeData>(&bytes)? == purpose,
+                "purpose roundtrip changed"
+            );
+            ensure!(
+                serde_json::from_value::<PurposeData>(serde_json::json!(name))? == purpose,
+                "Value purpose roundtrip changed"
+            );
+            for wrong in [
+                serde_json::Value::Object(serde_json::Map::from_iter([(
+                    name.to_owned(),
+                    serde_json::Value::Null,
+                )])),
+                serde_json::json!([name]),
+                serde_json::Value::Null,
+                serde_json::json!(17),
+            ] {
+                ensure!(
+                    crate::json::decode::<PurposeData>(&serde_json::to_vec(&wrong)?).is_err()
+                        && serde_json::from_value::<PurposeData>(wrong).is_err(),
+                    "alternate purpose encoding accepted"
+                );
             }
         }
-        for wrong in ["credential_intent", "CredentialIntent", "credential_reveal", "credential_ack", "credential_acknowledge", "approval", "issue", "", "credential_issue_intent "] {
-            ensure!(crate::json::decode::<PurposeData>(&serde_json::to_vec(wrong)?).is_err(), "unknown or delivery purpose accepted");
+        for wrong in [
+            "credential_intent",
+            "CredentialIntent",
+            "credential_reveal",
+            "credential_ack",
+            "credential_acknowledge",
+            "approval",
+            "issue",
+            "",
+            "credential_issue_intent ",
+        ] {
+            ensure!(
+                crate::json::decode::<PurposeData>(&serde_json::to_vec(wrong)?).is_err(),
+                "unknown or delivery purpose accepted"
+            );
         }
         Ok(())
     }
 
     #[test]
     fn credential_calls_bind_the_actual_intent_before_any_sql_change() -> Result<()> {
-        let expected = [PurposeData::CredentialIssueIntent, PurposeData::CredentialRotateIntent, PurposeData::CredentialRevokeIntent];
+        let expected = [
+            PurposeData::CredentialIssueIntent,
+            PurposeData::CredentialRotateIntent,
+            PurposeData::CredentialRevokeIntent,
+        ];
         let mut originals = std::collections::BTreeSet::new();
         for (index, purpose) in expected.into_iter().enumerate() {
             let intent = credential_intent(index.try_into()?)?;
-            ensure!(intent.require_oauth_management().is_err(), "credential DATA entered OAuth producer");
-            ensure!(originals.insert(intent.commitment()?), "credential actions shared an original");
+            ensure!(
+                intent.require_oauth_management().is_err(),
+                "credential DATA entered OAuth producer"
+            );
+            ensure!(
+                originals.insert(intent.commitment()?),
+                "credential actions shared an original"
+            );
             let owner = Digest::new(b"one original bundle owner DATA");
             let call = CallData::claim(&intent, owner.clone())?;
             ensure!(call.purpose == purpose, "actual Pending action changed");
@@ -660,42 +743,103 @@ mod tests {
             decoded.require_intent(&intent)?;
             let mut db = Connection::open_in_memory()?;
             install(&db)?;
-            for wrong in PURPOSES.into_iter().filter(|candidate| *candidate != purpose) {
+            for wrong in PURPOSES
+                .into_iter()
+                .filter(|candidate| *candidate != purpose)
+            {
                 let mut forged = call.clone();
                 forged.purpose = wrong;
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                ensure!(apply_in_current_app_transaction(&tx, &intent, &forged, 1).is_err(), "foreign action selected current Pending");
+                ensure!(
+                    apply_in_current_app_transaction(&tx, &intent, &forged, 1).is_err(),
+                    "foreign action selected current Pending"
+                );
                 tx.commit()?;
-                ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners", [], |r|r.get::<_, i64>(0))? == 0, "foreign action mutated allocation");
+                ensure!(
+                    db.query_row("SELECT count(*) FROM native_fresh_owners", [], |r| r
+                        .get::<_, i64>(0))?
+                        == 0,
+                    "foreign action mutated allocation"
+                );
             }
             for other in 0..3 {
                 if usize::from(other) != index {
-                    ensure!(decoded.require_intent(&credential_intent(other)?).is_err(), "another Pending action adopted call");
+                    ensure!(
+                        decoded.require_intent(&credential_intent(other)?).is_err(),
+                        "another Pending action adopted call"
+                    );
                 }
             }
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let reply = apply_in_current_app_transaction(&tx, &intent, &decoded, 1)?;
             reply.require_call(&decoded, &intent)?;
-            ensure!(matches!(reply.outcome, OutcomeData::Allocation { state: AllocationData::Allocated }), "first claim was not allocated");
+            ensure!(
+                matches!(
+                    reply.outcome,
+                    OutcomeData::Allocation {
+                        state: AllocationData::Allocated
+                    }
+                ),
+                "first claim was not allocated"
+            );
             tx.commit()?;
             // Independent expected state: exactly one immutable allocated row.
-            let expected_purpose = ["CredentialIssueIntent", "CredentialRotateIntent", "CredentialRevokeIntent"][index];
+            let expected_purpose = [
+                "CredentialIssueIntent",
+                "CredentialRotateIntent",
+                "CredentialRevokeIntent",
+            ][index];
             ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners WHERE purpose=?1 AND stage='allocated'", [expected_purpose], |r|r.get::<_, i64>(0))? == 1, "allocation did not bind intent purpose");
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let repeated = apply_in_current_app_transaction(&tx, &intent, &decoded, 2)?;
-            ensure!(matches!(repeated.outcome, OutcomeData::Allocation { state: AllocationData::ExistingOwner }), "duplicate claim granted another allocation");
-            let publication = CallData::publication(&intent, owner, serde_json::to_string(&GoogleBundleData::from_native_parts(intent.commitment()?, Digest::new(b"profile"), Digest::new(b"bundle")))?)?;
+            ensure!(
+                matches!(
+                    repeated.outcome,
+                    OutcomeData::Allocation {
+                        state: AllocationData::ExistingOwner
+                    }
+                ),
+                "duplicate claim granted another allocation"
+            );
+            let publication = CallData::publication(
+                &intent,
+                owner,
+                serde_json::to_string(&GoogleBundleData::from_native_parts(
+                    intent.commitment()?,
+                    Digest::new(b"profile"),
+                    Digest::new(b"bundle"),
+                ))?,
+            )?;
             let mut changed = publication.clone();
             changed.purpose = PurposeData::OAuthConnect;
-            ensure!(apply_in_current_app_transaction(&tx, &intent, &changed, 2).is_err(), "publication action changed");
+            ensure!(
+                apply_in_current_app_transaction(&tx, &intent, &changed, 2).is_err(),
+                "publication action changed"
+            );
             let published = apply_in_current_app_transaction(&tx, &intent, &publication, 2)?;
             published.require_call(&publication, &intent)?;
-            ensure!(reply.require_call(&publication, &intent).is_err(), "claim reply became publication");
-            ensure!(published.require_call(&decoded, &intent).is_err(), "publication reply became claim");
+            ensure!(
+                reply.require_call(&publication, &intent).is_err(),
+                "claim reply became publication"
+            );
+            ensure!(
+                published.require_call(&decoded, &intent).is_err(),
+                "publication reply became claim"
+            );
             tx.commit()?;
-            ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners WHERE purpose=?1 AND stage='offered'", [expected_purpose], |r|r.get::<_, i64>(0))? == 1, "publication did not retain the one bound allocation");
+            ensure!(
+                db.query_row(
+                    "SELECT count(*) FROM native_fresh_owners WHERE purpose=?1 AND stage='offered'",
+                    [expected_purpose],
+                    |r| r.get::<_, i64>(0)
+                )? == 1,
+                "publication did not retain the one bound allocation"
+            );
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            ensure!(apply_in_current_app_transaction(&tx, &intent, &decoded, 300).is_err(), "deadline equality renewed an allocation");
+            ensure!(
+                apply_in_current_app_transaction(&tx, &intent, &decoded, 300).is_err(),
+                "deadline equality renewed an allocation"
+            );
             tx.commit()?;
         }
         Ok(())
@@ -710,13 +854,27 @@ mod tests {
                 let intent = credential_intent(selected)?;
                 let owner = Digest::new(b"one original owner");
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                ensure!(matches!(claim(&tx, &intent, &owner, 1)?, AllocationData::Allocated), "initial credential original missing");
+                ensure!(
+                    matches!(claim(&tx, &intent, &owner, 1)?, AllocationData::Allocated),
+                    "initial credential original missing"
+                );
                 if stage == 1 || stage == 2 {
-                    let bytes = serde_json::to_vec(&GoogleBundleData::from_native_parts(intent.commitment()?, Digest::new(b"profile"), Digest::new(b"bundle")))?;
+                    let bytes = serde_json::to_vec(&GoogleBundleData::from_native_parts(
+                        intent.commitment()?,
+                        Digest::new(b"profile"),
+                        Digest::new(b"bundle"),
+                    ))?;
                     let request = publish(&tx, &intent, &owner, &bytes, 2)?;
                     if stage == 2 {
                         // Controlled DATA transition only, not native authentication.
-                        consume_in_current_app_transaction(&tx, &intent, &owner, &request, &Digest::new(b"result DATA"), 3)?;
+                        consume_in_current_app_transaction(
+                            &tx,
+                            &intent,
+                            &owner,
+                            &request,
+                            &Digest::new(b"result DATA"),
+                            3,
+                        )?;
                     }
                 } else if stage == 3 {
                     tx.execute("UPDATE native_fresh_owners SET stage='refused'", [])?;
@@ -724,13 +882,24 @@ mod tests {
                 tx.commit()?;
                 let before = crate::oauth::simulation::snapshot(&db)?;
                 for other in 0..3 {
-                    if other == selected { continue; }
+                    if other == selected {
+                        continue;
+                    }
                     let replacement = credential_intent(other)?;
-                    let call = CallData::claim(&replacement, Digest::new(b"replacement owner cannot adopt history"))?;
+                    let call = CallData::claim(
+                        &replacement,
+                        Digest::new(b"replacement owner cannot adopt history"),
+                    )?;
                     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                    ensure!(apply_in_current_app_transaction(&tx, &replacement, &call, 4).is_err(), "another credential action forked one attempt");
+                    ensure!(
+                        apply_in_current_app_transaction(&tx, &replacement, &call, 4).is_err(),
+                        "another credential action forked one attempt"
+                    );
                     tx.commit()?;
-                    ensure!(crate::oauth::simulation::snapshot(&db)? == before, "foreign action changed retained history");
+                    ensure!(
+                        crate::oauth::simulation::snapshot(&db)? == before,
+                        "foreign action changed retained history"
+                    );
                 }
             }
         }
@@ -738,8 +907,14 @@ mod tests {
         install(&db)?;
         db.execute("DROP INDEX native_fresh_credential_attempt", [])?;
         let before = schema_rows(&db)?;
-        ensure!(install(&db).is_err(), "missing cross-action fence was silently repaired");
-        ensure!(schema_rows(&db)? == before, "refused fence removal changed schema");
+        ensure!(
+            install(&db).is_err(),
+            "missing cross-action fence was silently repaired"
+        );
+        ensure!(
+            schema_rows(&db)? == before,
+            "refused fence removal changed schema"
+        );
         Ok(())
     }
 
@@ -747,22 +922,47 @@ mod tests {
     fn sqlite_rejects_mismatched_credential_action_even_without_the_rpc_decoder() -> Result<()> {
         for index in 0..3 {
             let intent = credential_intent(index)?;
-            let expected = ["CredentialIssueIntent", "CredentialRotateIntent", "CredentialRevokeIntent"][usize::from(index)];
-            for purpose in ["CredentialIntent", "CredentialIssueIntent", "CredentialRotateIntent", "CredentialRevokeIntent", "OAuthConnect", "CredentialReveal", "CredentialAck"] {
-                if purpose == expected { continue; }
+            let expected = [
+                "CredentialIssueIntent",
+                "CredentialRotateIntent",
+                "CredentialRevokeIntent",
+            ][usize::from(index)];
+            for purpose in [
+                "CredentialIntent",
+                "CredentialIssueIntent",
+                "CredentialRotateIntent",
+                "CredentialRevokeIntent",
+                "OAuthConnect",
+                "CredentialReveal",
+                "CredentialAck",
+            ] {
+                if purpose == expected {
+                    continue;
+                }
                 let db = Connection::open_in_memory()?;
                 install(&db)?;
                 ensure!(db.execute("INSERT INTO native_fresh_owners(original,attempt,purpose,human,subject,context,owner,created_at,expires_at,stage) VALUES(?1,?2,?3,?4,?5,?6,?7,0,300,'allocated')",
                     params![intent.commitment()?.as_str(), intent.attempt(), purpose, intent.human(), intent.subject(), serde_json::to_string(&intent)?, Digest::new(b"owner").as_str()]).is_err(), "SQLite accepted a foreign intent purpose");
-                ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners", [], |r|r.get::<_, i64>(0))? == 0, "refused purpose left a row");
+                ensure!(
+                    db.query_row("SELECT count(*) FROM native_fresh_owners", [], |r| r
+                        .get::<_, i64>(0))?
+                        == 0,
+                    "refused purpose left a row"
+                );
             }
         }
         let db = Connection::open_in_memory()?;
         db.execute_batch(&SCHEMA.replacen("CredentialIssueIntent", "CredentialIntent", 1))?;
         db.execute("INSERT INTO native_fresh_schema_version VALUES(1)", [])?;
         let before = schema_rows(&db)?;
-        ensure!(install(&db).is_err(), "unknown generic-purpose unit was upgraded");
-        ensure!(schema_rows(&db)? == before, "refused purpose unit was altered");
+        ensure!(
+            install(&db).is_err(),
+            "unknown generic-purpose unit was upgraded"
+        );
+        ensure!(
+            schema_rows(&db)? == before,
+            "refused purpose unit was altered"
+        );
         Ok(())
     }
 
