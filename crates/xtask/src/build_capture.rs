@@ -9,6 +9,83 @@ use std::{collections::BTreeSet, fs, io::Read, path::Path, process::Command, tim
 
 const MAX_CAPTURE: usize = 16 * 1024 * 1024;
 
+/// Advisory counters from the pinned Bazel BEP schema. Missing/default-omitted
+/// fields stay unknown. Action requests include spawn-cache hits but exclude
+/// local action-cache hits; they are not codegen counts. The counters overlap
+/// and must not be added together.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct BuildMetrics {
+    wall_time_ms: Option<u64>,
+    analysis_time_ms: Option<u64>,
+    execution_time_ms: Option<u64>,
+    action_requests_including_cache: Option<u64>,
+    rustc_requests_including_cache: Option<u64>,
+    disk_cache_hit_spawns: Option<u64>,
+    local_action_cache_hits: Option<u64>,
+    local_action_cache_misses: Option<u64>,
+}
+
+fn metric_number(value: Option<&Value>) -> Option<u64> {
+    match value? {
+        Value::String(value)
+            if !value.is_empty()
+                && value.len() <= 20
+                && value.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            value.parse().ok()
+        }
+        value => value.as_u64(),
+    }
+}
+
+fn build_metrics(bytes: &[u8]) -> Option<BuildMetrics> {
+    if bytes.len() > MAX_CAPTURE {
+        return None;
+    }
+    let mut metrics = None;
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let value: Value = day2::json::decode(line).ok()?;
+        if value.pointer("/id/buildMetrics").is_none() {
+            continue;
+        }
+        if metrics.is_some() {
+            return None;
+        }
+        let data = value.get("buildMetrics")?.as_object()?;
+        let action = data.get("actionSummary");
+        let timing = data.get("timingMetrics");
+        let number = |value: Option<&Value>, path: &str| {
+            metric_number(value.and_then(|value| value.pointer(path)))
+        };
+        let named = |array: &str, field: &str, name: &str, count: &str| {
+            let mut matches = action?
+                .get(array)?
+                .as_array()?
+                .iter()
+                .filter(|entry| entry.get(field).and_then(Value::as_str) == Some(name));
+            let entry = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            metric_number(entry.get(count))
+        };
+        metrics = Some(BuildMetrics {
+            wall_time_ms: number(timing, "/wallTimeInMs"),
+            analysis_time_ms: number(timing, "/analysisPhaseTimeInMs"),
+            execution_time_ms: number(timing, "/executionPhaseTimeInMs"),
+            action_requests_including_cache: number(action, "/actionsExecuted"),
+            rustc_requests_including_cache: named("actionData", "mnemonic", "Rustc", "actionsExecuted"),
+            disk_cache_hit_spawns: named("runnerCount", "name", "disk cache hit", "count"),
+            local_action_cache_hits: number(action, "/actionCacheStatistics/hits"),
+            local_action_cache_misses: number(action, "/actionCacheStatistics/misses"),
+        });
+    }
+    metrics
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Outcome {
     category: &'static str,
@@ -421,10 +498,12 @@ fn capture(root: &Path, command: &mut Command, budget: Duration, events: &Path) 
     let process = Outcome::observe(command_status_with_budget(root, command, budget));
     let output = read_bounded(stdout.path());
     let errors = read_bounded(stderr.path());
+    let events = read_bounded(events);
+    let metrics = events.as_deref().ok().and_then(build_metrics);
     let result = report(
         root,
         process,
-        read_bounded(events),
+        events,
         errors.as_deref().unwrap_or_default(),
         memory_before,
     );
@@ -432,6 +511,14 @@ fn capture(root: &Path, command: &mut Command, budget: Duration, events: &Path) 
     // public error exports only the actual numeric outcome and fixed classes.
     if result.is_ok() {
         ensure!(output.is_ok() && errors.is_ok(), "Bazel log capture failed");
+        // Fixed numeric fields only, never the event object, labels, argv or
+        // environment. Advisory metrics cannot admit a failed build or replace
+        // its existing completion/capture checks. Keep CLI path stdout intact.
+        if let Some(metrics) = metrics
+            && let Ok(summary) = serde_json::to_string(&metrics)
+        {
+            eprintln!("BAZEL_BUILD_METRICS_V1 {summary}");
+        }
     }
     result
 }
@@ -448,6 +535,82 @@ pub(crate) fn run(root: &Path, command: &mut Command, budget: Duration) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_metrics_never_export_private_event_fields() -> Result<()> {
+        let bytes = serde_json::to_vec(&json!({
+            "id":{"buildMetrics":{}},
+            "buildMetrics":{
+                "timingMetrics":{"wallTimeInMs":"1200","analysisPhaseTimeInMs":200,"executionPhaseTimeInMs":"900"},
+                "actionSummary":{
+                    "actionsExecuted":"12",
+                    "actionData":[{"mnemonic":"Rustc","actionsExecuted":"7","commandLine":"PRIVATE-ARGS"}],
+                    "runnerCount":[{"name":"disk cache hit","count":5},{"name":"PRIVATE-RUNNER","count":91}],
+                    "actionCacheStatistics":{"hits":3,"misses":2},
+                    "environment":"PRIVATE-ENV"
+                },
+                "privatePath":"PRIVATE-PATH"
+            }
+        }))?;
+        let metrics = build_metrics(&bytes).context("fixed numeric metrics")?;
+        assert_eq!(metrics.wall_time_ms, Some(1200));
+        assert_eq!(metrics.analysis_time_ms, Some(200));
+        assert_eq!(metrics.execution_time_ms, Some(900));
+        assert_eq!(metrics.action_requests_including_cache, Some(12));
+        assert_eq!(metrics.rustc_requests_including_cache, Some(7));
+        assert_eq!(metrics.disk_cache_hit_spawns, Some(5));
+        assert_eq!(metrics.local_action_cache_hits, Some(3));
+        assert_eq!(metrics.local_action_cache_misses, Some(2));
+        let public = serde_json::to_value(&metrics)?;
+        assert_eq!(public.as_object().context("numeric object")?.len(), 8);
+        assert!(public.as_object().unwrap().values().all(Value::is_u64));
+        assert!(!public.to_string().contains("PRIVATE"));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_invalid_and_duplicate_metric_counters_remain_unknown() -> Result<()> {
+        let bytes = serde_json::to_vec(&json!({
+            "id":{"buildMetrics":{}},
+            "buildMetrics":{
+                "timingMetrics":{"wallTimeInMs":"18446744073709551616","analysisPhaseTimeInMs":-1,"executionPhaseTimeInMs":1.5},
+                "actionSummary":{
+                    "actionsExecuted":"PRIVATE",
+                    "actionData":[{"mnemonic":"Rustc","actionsExecuted":"7"},{"mnemonic":"Rustc","actionsExecuted":"3"}],
+                    "runnerCount":[{"name":"disk cache hit","count":5},{"name":"disk cache hit","count":2}]
+                }
+            }
+        }))?;
+        let public = serde_json::to_value(build_metrics(&bytes).context("unknown metrics")?)?;
+        assert!(public.as_object().unwrap().values().all(Value::is_null));
+        let empty = br#"{"id":{"buildMetrics":{}},"buildMetrics":{}}"#;
+        let public = serde_json::to_value(build_metrics(empty).context("omitted metrics")?)?;
+        assert!(public.as_object().unwrap().values().all(Value::is_null));
+        assert!(build_metrics(&vec![b' '; MAX_CAPTURE + 1]).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn metrics_neither_supply_completion_nor_replace_a_valid_process_outcome() {
+        let event = br#"{"id":{"buildMetrics":{}},"buildMetrics":{"timingMetrics":{"wallTimeInMs":"12"}}}"#;
+        assert!(build_metrics(event).is_some());
+        assert!(finished(event).is_err());
+        let mut duplicate = event.to_vec();
+        duplicate.push(b'\n');
+        duplicate.extend_from_slice(event);
+        assert!(build_metrics(&duplicate).is_none());
+        let mut complete = success_events();
+        complete.extend_from_slice(b"\n");
+        complete.extend_from_slice(br#"{"id":{"buildMetrics":{}},"buildMetrics":false}"#);
+        assert!(build_metrics(&complete).is_none());
+        assert!(finished(&complete).is_ok());
+        let mut failed = event.to_vec();
+        failed.extend_from_slice(br#"
+{"id":{"buildFinished":{}},"finished":{"exitCode":{"name":"BUILD_FAILURE","code":1}}}"#);
+        assert!(build_metrics(&failed).is_some());
+        assert!(finished(&failed).is_err());
+        assert!(build_metrics(&success_events()).is_none());
+    }
 
     #[test]
     fn public_diagnostics_export_only_fixed_markers_and_bounded_numeric_children() -> Result<()> {
