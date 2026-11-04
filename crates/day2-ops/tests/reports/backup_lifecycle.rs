@@ -700,8 +700,9 @@ fn composed_backup_histories_replay_commits_reply_loss_and_restore_fences() -> R
         let first = run(&program, &artifact)?;
         let second = run(&program, &artifact)?;
         if first.failed_at.is_some() || first != second {
-            let path = retain(&first)?;
-            anyhow::bail!("backup lifecycle divergence; replay={}", path.display());
+            let first_path = retain(&first)?;
+            let second_path = retain(&second)?;
+            anyhow::bail!("backup lifecycle divergence; first={} second={}", first_path.display(), second_path.display());
         }
         ensure!(
             first.records.len() == program.events.len(),
