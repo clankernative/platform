@@ -23,8 +23,9 @@ Before any allocation/publication write, the existing transaction adapter checks
 the call's exact action, attempt and complete original against that resolved
 intent. Replies bind the complete call, original interval and operation. SQLite
 also binds each credential purpose to its context action, so bypassing the RPC
-decoder does not admit an issue row with rotate/revoke context. Original fields
-remain immutable and terminal rows remain terminal. Duplicate replies describe
+decoder does not admit an issue row with rotate/revoke context. A shared credential-attempt uniqueness constraint prevents the three actions
+from forking one attempt into multiple originals, including after terminal
+history. Original fields remain immutable and terminal rows remain terminal. Duplicate replies describe
 the same allocation; they do not grant another original or a fresh human proof.
 
 This private schema and its callers change in place. Unknown prior layouts

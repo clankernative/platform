@@ -317,6 +317,9 @@ const SCHEMA: &str = r#"
                       OR (request IS NOT NULL AND request_digest IS NOT NULL)))),
             UNIQUE(attempt,purpose)
         ) STRICT;
+        CREATE UNIQUE INDEX IF NOT EXISTS native_fresh_credential_attempt
+        ON native_fresh_owners(attempt)
+        WHERE purpose IN ('CredentialIssueIntent','CredentialRotateIntent','CredentialRevokeIntent');
         CREATE TRIGGER IF NOT EXISTS native_fresh_owner_original_immutable
         BEFORE UPDATE OF original,attempt,purpose,human,subject,context,owner,created_at,expires_at ON native_fresh_owners
         BEGIN SELECT RAISE(ABORT,'native fresh original immutable'); END;
@@ -695,6 +698,48 @@ mod tests {
             ensure!(apply_in_current_app_transaction(&tx, &intent, &decoded, 300).is_err(), "deadline equality renewed an allocation");
             tx.commit()?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn one_credential_attempt_cannot_fork_into_another_action_or_terminal_original() -> Result<()> {
+        for selected in 0..3 {
+            for stage in 0..4 {
+                let mut db = Connection::open_in_memory()?;
+                install(&db)?;
+                let intent = credential_intent(selected)?;
+                let owner = Digest::new(b"one original owner");
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                ensure!(matches!(claim(&tx, &intent, &owner, 1)?, AllocationData::Allocated), "initial credential original missing");
+                if stage == 1 || stage == 2 {
+                    let bytes = serde_json::to_vec(&GoogleBundleData::from_native_parts(intent.commitment()?, Digest::new(b"profile"), Digest::new(b"bundle")))?;
+                    let request = publish(&tx, &intent, &owner, &bytes, 2)?;
+                    if stage == 2 {
+                        // Controlled DATA transition only, not native authentication.
+                        consume_in_current_app_transaction(&tx, &intent, &owner, &request, &Digest::new(b"result DATA"), 3)?;
+                    }
+                } else if stage == 3 {
+                    tx.execute("UPDATE native_fresh_owners SET stage='refused'", [])?;
+                }
+                tx.commit()?;
+                let before = crate::oauth::simulation::snapshot(&db)?;
+                for other in 0..3 {
+                    if other == selected { continue; }
+                    let replacement = credential_intent(other)?;
+                    let call = CallData::claim(&replacement, Digest::new(b"replacement owner cannot adopt history"))?;
+                    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    ensure!(apply_in_current_app_transaction(&tx, &replacement, &call, 4).is_err(), "another credential action forked one attempt");
+                    tx.commit()?;
+                    ensure!(crate::oauth::simulation::snapshot(&db)? == before, "foreign action changed retained history");
+                }
+            }
+        }
+        let db = Connection::open_in_memory()?;
+        install(&db)?;
+        db.execute("DROP INDEX native_fresh_credential_attempt", [])?;
+        let before = schema_rows(&db)?;
+        ensure!(install(&db).is_err(), "missing cross-action fence was silently repaired");
+        ensure!(schema_rows(&db)? == before, "refused fence removal changed schema");
         Ok(())
     }
 
