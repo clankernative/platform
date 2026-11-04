@@ -1048,7 +1048,7 @@ impl SecurityShell {
                 .context("OAuth management unavailable")?
                 .reauthenticated(proof, headers, identity, at);
         }
-        if proof.purpose() == FreshPurpose::CredentialIntent {
+        if proof.purpose().is_credential_intent() {
             let registry = self
                 .credentials
                 .as_ref()
@@ -3858,6 +3858,10 @@ mod tests {
                 .resolve(attempt, &identity, world.now)?
                 .context("actual pending")?;
             let intent = credentials::fresh_intent(&runtime, &pending, &identity)?;
+            assert!(matches!(
+                intent.purpose(),
+                FreshPurpose::CredentialIssueIntent
+            ));
             let google_started_at = world.now;
             let google_started = effects::Instant::now();
             let (authenticator, assertions, callback) = shell_oidc::fixture_login(
@@ -4024,7 +4028,7 @@ mod tests {
                 .read_session(&headers, world.now + 1)?
                 .context("explicit isolated credential session")?;
             session.proof.require_intent(&intent, &identity)?;
-            assert!(session.proof.purpose() == FreshPurpose::CredentialIntent);
+            assert!(session.proof.purpose().is_credential_intent());
             assert!(session.proof.require_intent(&opposite, &identity).is_err());
             for (changed, owner) in &substitutions {
                 assert!(session.proof.require_intent(changed, owner).is_err());

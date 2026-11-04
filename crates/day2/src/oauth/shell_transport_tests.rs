@@ -1,4 +1,5 @@
 use super::*;
+
 use crate::oauth::{
     approval_registry::{
         ApprovalAuthority, ApprovalKeyMaterial, ApprovalKeyProvider, ApprovalKeyPurpose,
@@ -23,6 +24,47 @@ use std::{
     },
     thread,
 };
+
+#[test]
+fn fresh_attempt_routing_uses_the_same_closed_intent_set_at_both_ends() -> Result<()> {
+    use crate::oauth::fresh_owner::PurposeData;
+    let route = route_prefix("installation", "development", "app")?;
+    let oauth = format!("{route}{}", "a".repeat(43));
+    for purpose in [
+        PurposeData::CredentialIssueIntent,
+        PurposeData::CredentialRotateIntent,
+        PurposeData::CredentialRevokeIntent,
+    ] {
+        fresh_attempt(purpose, "credential-attempt", &route)?;
+        for wrong in [
+            oauth.as_str(),
+            "credential-../hidden",
+            "",
+            &"credential-a".repeat(13),
+        ] {
+            ensure!(
+                fresh_attempt(purpose, wrong, &route).is_err(),
+                "foreign credential attempt accepted"
+            );
+        }
+    }
+    for purpose in [
+        PurposeData::OAuthApproval,
+        PurposeData::OAuthConnect,
+        PurposeData::OAuthDisconnect,
+    ] {
+        fresh_attempt(purpose, &oauth, &route)?;
+        ensure!(
+            fresh_attempt(purpose, "credential-attempt", &route).is_err(),
+            "credential attempt entered OAuth route"
+        );
+        ensure!(
+            fresh_attempt(purpose, &oauth, "foreign_").is_err(),
+            "foreign app route accepted"
+        );
+    }
+    Ok(())
+}
 
 // The owned Google campaign below exercises this same private receiver and
 // SQLite writer. It emulates the IAP edge and Google/Secret Manager inputs; it
@@ -315,28 +357,34 @@ fn authenticated_credential_fresh_route_refuses_before_instance_or_sql_open() ->
     .with_management(Arc::new(crate::oauth::management::app::Manager::new(
         runtime, authority,
     )))?;
-    let request = RequestBody::FreshOwner {
-        version: VERSION,
-        human_assertion: assertions.assertion(SHELL_AUDIENCE, HUMAN, SUBJECT),
-        call: Box::new(crate::json::decode(&serde_json::to_vec(&json!({
-            "purpose":"credential_intent", "attempt":"credential-unsupported",
-            "original":Digest::of(&"unsupported-original")?,
-            "owner":Digest::of(&"unsupported-owner")?, "operation":{"operation":"claim"}
-        }))?)?),
-    };
-    let error = receiver
-        .dispatch(
-            &Method::POST,
-            PATH,
-            None,
-            &assertions.headers(),
-            &serde_json::to_vec(&request)?,
-            6,
-        )
-        .err()
-        .context("unsupported credential purpose unexpectedly succeeded")?;
-    assert_eq!(error.to_string(), "OAuth management fresh purpose refused");
-    assert!(!database.exists() && !instance.exists());
+    for purpose in [
+        "credential_issue_intent",
+        "credential_rotate_intent",
+        "credential_revoke_intent",
+    ] {
+        let request = RequestBody::FreshOwner {
+            version: VERSION,
+            human_assertion: assertions.assertion(SHELL_AUDIENCE, HUMAN, SUBJECT),
+            call: Box::new(crate::json::decode(&serde_json::to_vec(&json!({
+                "purpose":purpose, "attempt":"credential-unsupported",
+                "original":Digest::of(&"unsupported-original")?,
+                "owner":Digest::of(&"unsupported-owner")?, "operation":{"operation":"claim"}
+            }))?)?),
+        };
+        let error = receiver
+            .dispatch(
+                &Method::POST,
+                PATH,
+                None,
+                &assertions.headers(),
+                &serde_json::to_vec(&request)?,
+                6,
+            )
+            .err()
+            .context("unsupported credential purpose unexpectedly succeeded")?;
+        assert_eq!(error.to_string(), "OAuth management fresh purpose refused");
+        assert!(!database.exists() && !instance.exists());
+    }
     std::fs::rename(&saved_database, &database)?;
     std::fs::rename(&saved_instance, &instance)?;
     assert_eq!(

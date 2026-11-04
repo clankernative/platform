@@ -495,20 +495,7 @@ impl AppApprovalReceiver {
                 use super::fresh_owner::PurposeData;
                 ensure!(version == VERSION, "unsupported OAuth private version");
                 let identity = self.human.verify(&human_assertion, at)?;
-                match call.purpose {
-                    PurposeData::OAuthApproval
-                    | PurposeData::OAuthConnect
-                    | PurposeData::OAuthDisconnect => {
-                        routed_attempt(&call.attempt, &self.route)?;
-                    }
-                    PurposeData::CredentialIntent => {
-                        ensure!(
-                            call.attempt.starts_with("credential-") && call.attempt.len() <= 128,
-                            "invalid credential fresh attempt"
-                        );
-                        attempt(&call.attempt)?;
-                    }
-                }
+                fresh_attempt(call.purpose, &call.attempt, &self.route)?;
                 let reply = if call.purpose == PurposeData::OAuthApproval {
                     self.backend.fresh_owner(&call, &identity, at)?
                 } else {
@@ -649,9 +636,7 @@ impl RemoteApprovals {
             .context("native fresh app receiver missing")?;
         intent.require_shell_origin(&self.shell_origin)?;
         call.require_intent(intent)?;
-        if call.purpose != super::fresh_owner::PurposeData::CredentialIntent {
-            routed_attempt(&call.attempt, &target.route)?;
-        }
+        fresh_attempt(call.purpose, &call.attempt, &target.route)?;
         let request = RequestBody::FreshOwner {
             version: VERSION,
             human_assertion: one_assertion(headers)?.into(),
@@ -1025,6 +1010,26 @@ pub(super) fn routed_attempt(id: &str, route: &str) -> Result<()> {
         "invalid OAuth routed attempt"
     );
     Ok(())
+}
+
+/// Routing DATA only. Both ends check the same closed purpose before selecting
+/// an App Pending; none of these values creates an original or authorizes use.
+fn fresh_attempt(purpose: super::fresh_owner::PurposeData, id: &str, route: &str) -> Result<()> {
+    use super::fresh_owner::PurposeData;
+    match purpose {
+        PurposeData::CredentialIssueIntent
+        | PurposeData::CredentialRotateIntent
+        | PurposeData::CredentialRevokeIntent => {
+            ensure!(
+                id.starts_with("credential-") && id.len() <= 128,
+                "invalid credential fresh attempt"
+            );
+            attempt(id)
+        }
+        PurposeData::OAuthApproval | PurposeData::OAuthConnect | PurposeData::OAuthDisconnect => {
+            routed_attempt(id, route)
+        }
+    }
 }
 
 fn one_assertion(headers: &HeaderMap) -> Result<&str> {
