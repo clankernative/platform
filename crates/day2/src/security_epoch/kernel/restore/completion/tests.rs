@@ -1239,15 +1239,36 @@ fn replay_parser_closes_unknown_fields_and_requires_both_complete_run_records() 
     let bytes = archive(92, &events, false, &runs)?;
     let mut raw = Vec::new();
     flate2::read::GzDecoder::new(bytes.as_slice()).read_to_end(&mut raw)?;
-    let mut lines = raw.split(|b| *b == b'\n').filter(|l| !l.is_empty()).map(Vec::from).collect::<Vec<_>>();
+    let mut lines = raw
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(Vec::from)
+        .collect::<Vec<_>>();
     let mut input: Value = crate::json::decode_evidence(&lines[0])?;
-    input.as_object_mut().unwrap().insert("RESTORE_SETTLEMENT_PRIVATE_FIELD_CANARY".into(),json!(true));
+    input.as_object_mut().unwrap().insert(
+        "RESTORE_SETTLEMENT_PRIVATE_FIELD_CANARY".into(),
+        json!(true),
+    );
     lines[0] = serde_json::to_vec(&input)?;
-    for mutated in [lines, vec![raw.split(|b| *b == b'\n').next().unwrap().to_vec(),b"{\"part\":\"end\"}".to_vec()]] {
-        let mut encoder=flate2::write::GzEncoder::new(Vec::new(),flate2::Compression::default());
-        for line in mutated {encoder.write_all(&line)?;encoder.write_all(b"\n")?;}
-        let refused=decode(&encoder.finish()?).err().ok_or_else(||anyhow::anyhow!("expected_closed_parser_refusal"))?;
-        assert!(refused.to_string()=="restore_settlement_replay_refused","replay parser error escaped its closed boundary");
+    for mutated in [
+        lines,
+        vec![
+            raw.split(|b| *b == b'\n').next().unwrap().to_vec(),
+            b"{\"part\":\"end\"}".to_vec(),
+        ],
+    ] {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        for line in mutated {
+            encoder.write_all(&line)?;
+            encoder.write_all(b"\n")?;
+        }
+        let refused = decode(&encoder.finish()?)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected_closed_parser_refusal"))?;
+        assert!(
+            refused.to_string() == "restore_settlement_replay_refused",
+            "replay parser error escaped its closed boundary"
+        );
     }
     Ok(())
 }
