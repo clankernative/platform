@@ -236,12 +236,23 @@ fn refresh_producers_with(
     mut read: impl FnMut(u64) -> Result<Value>,
 ) -> Result<()> {
     for job in jobs {
-        if !job["name"].as_str().is_some_and(|name| names.contains(name)) {
+        if !job["name"]
+            .as_str()
+            .is_some_and(|name| names.contains(name))
+        {
             continue;
         }
         let fresh = read(number(job, "id")?)?;
         number(&fresh, "id")?;
-        for field in ["id", "name", "run_id", "run_attempt", "head_sha", "html_url"] {
+        for field in [
+            "id",
+            "name",
+            "run_id",
+            "run_attempt",
+            "head_sha",
+            "html_url",
+            "labels",
+        ] {
             ensure!(
                 fresh[field] == job[field],
                 "producer detail disagrees with its indexed identity: field={field}"
@@ -256,16 +267,21 @@ fn refresh_producers_with(
                 "conflicting terminal producer outcome; refusing stale success"
             );
         }
+        let unacquired = |value: &Value| {
+            value["runner_id"] == 0
+                && value["runner_name"] == ""
+                && value["steps"].as_array().is_some_and(Vec::is_empty)
+        };
+        ensure!(
+            unacquired(job) || !unacquired(&fresh),
+            "producer detail cannot erase runner assignment or execution evidence"
+        );
         *job = fresh;
     }
     Ok(())
 }
 
-fn producer_jobs(
-    root: &Path,
-    inventory: Inventory,
-    names: &BTreeSet<&str>,
-) -> Result<Vec<Value>> {
+fn producer_jobs(root: &Path, inventory: Inventory, names: &BTreeSet<&str>) -> Result<Vec<Value>> {
     let mut jobs = pages(root, inventory)?;
     refresh_producers_with(&mut jobs, names, |id| {
         reuse::api(root, &format!("actions/jobs/{id}"))
@@ -441,7 +457,10 @@ fn resolve(root: &Path, expected: &Identity, phase: &str) -> Result<Selection> {
     let artifacts = pages(root, Inventory::Artifacts { run: run_id })?;
     let attempt = number(&run, "run_attempt")?;
     let required = roles(phase)?;
-    let mut names = required.iter().map(|role| role.job()).collect::<BTreeSet<_>>();
+    let mut names = required
+        .iter()
+        .map(|role| role.job())
+        .collect::<BTreeSet<_>>();
     if required.contains(&Role::Mac) {
         names.insert("retry-mac-compatibility");
     }
@@ -851,8 +870,7 @@ mod tests {
             let mut fresh = job.clone();
             fresh[field] = value;
             assert!(
-                refresh_producers_with(&mut [job.clone()], &names, |_| Ok(fresh.clone()))
-                    .is_err(),
+                refresh_producers_with(&mut [job.clone()], &names, |_| Ok(fresh.clone())).is_err(),
                 "{field}"
             );
         }
@@ -919,6 +937,34 @@ mod tests {
         let error = successful_job(&[failed], Role::Common, &run, 2).unwrap_err();
         assert!(error.to_string().contains("field=conclusion"));
         assert!(!error.to_string().contains("private-field-canary"));
+        Ok(())
+    }
+
+    #[test]
+    fn producer_refresh_cannot_invent_an_unacquired_mac_job() -> Result<()> {
+        let (_, jobs, _, _) = mac_facts(1);
+        let unacquired = jobs[0].clone();
+        let names = BTreeSet::from([Role::Mac.job()]);
+        for (field, value) in [
+            ("runner_id", json!(42)),
+            ("runner_name", json!("assigned Mac")),
+            ("steps", json!([{"number":1,"conclusion":"failure"}])),
+            ("steps", Value::Null),
+            ("labels", json!(["ubuntu-24.04"])),
+        ] {
+            let mut indexed = unacquired.clone();
+            indexed[field] = value;
+            assert!(
+                refresh_producers_with(&mut [indexed], &names, |_| Ok(unacquired.clone())).is_err(),
+                "{field}"
+            );
+        }
+        let mut acquired = unacquired.clone();
+        acquired["runner_id"] = json!(42);
+        acquired["steps"] = json!([{"number":1,"conclusion":"failure"}]);
+        let mut indexed = vec![unacquired];
+        refresh_producers_with(&mut indexed, &names, |_| Ok(acquired.clone()))?;
+        assert_eq!(indexed, vec![acquired]);
         Ok(())
     }
 

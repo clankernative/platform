@@ -147,7 +147,8 @@ Malformed identities, duplicates and budget overruns refuse immediately;
 persistent inconsistency also refuses. The complete jobs index binds producer
 identity and uniqueness. Each selected producer's exact numeric job endpoint
 refreshes its current outcome without changing the indexed run, attempt, SHA,
-job ID, name or URL. A known terminal failure cannot be overwritten by a
+job ID, name, URL or runner labels. Refresh also refuses to erase observed
+runner assignment or execution evidence. A known terminal failure cannot be overwritten by a
 conflicting success; a fresh failed producer still refuses older artifacts.
 Metadata requests require revalidation, and producer refusal diagnostics name
 only the fixed field, never API values or private output. Diagnostics identify
