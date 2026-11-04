@@ -823,6 +823,14 @@ mod tests {
                 let receipt = super::super::stage_issue(&tx, material)?.public_identity().clone();tx.commit()?;
                 let (authority, keys) = verifier_ports(receipt.version.as_deref().context("issued version")?, family);
                 let token = verifier_token(&db, &authority)?;
+                let ingress = |db: &Connection, lease: &crypto::VerifierLease, epoch| {
+                    super::super::verify_ingress(db, lease, super::super::IngressVerification {
+                        namespace: &authority.binding.namespace, family: authority.family.id.as_str(),
+                        family_contract: &authority.family.contract, security_epoch: epoch, now: 1000,
+                        operation: &authority.family.roots["SubmitTranscription"],
+                    }, &token)
+                };
+                let before_ingress = ingress(&db, fixture::lease().as_ref(), 7)?.context("original ingress refused")?;
                 let before = verifier_image(&db)?;
                 let ready = verifier_prepared(&db, &authority, &keys, &token)?;
                 let identity = ready.target.identity.clone();let selector = ready.original.selector.clone();
@@ -833,6 +841,12 @@ mod tests {
                 ensure!(key == "verify-v2" && revision == 2 && verifier_token(&db, &authority)? == token, "verifier identity changed");
                 ensure!(crypto::verify_managed(&crypto::VerifierLease::new(&[9;32], key.clone())?, &identity, &selector, &hash, &key, &token)?, "new exact verifier refused same token");
                 ensure!(crypto::verify_managed(&fixture::lease(), &identity, &selector, &hash, &key, &token).is_err(), "old exact key accepted replacement");
+                let next = crypto::VerifierLease::new(&[9;32],key)?;
+                let after_ingress = ingress(&db,&next,7)?.context("maintained ingress refused")?;
+                ensure!(before_ingress.principal==after_ingress.principal && before_ingress.lineage==after_ingress.lineage
+                    && before_ingress.version==after_ingress.version && before_ingress.ceiling==after_ingress.ceiling,
+                    "verifier maintenance changed ingress authority");
+                ensure!(ingress(&db,&next,8)?.is_none(),"verifier maintenance bypassed current epoch");
                 super::super::install_schema(&db)?;
             }
             Ok(())
@@ -1014,6 +1028,267 @@ mod tests {
             let after:String=old_db.query_row("SELECT group_concat(sql,';') FROM (SELECT sql FROM sqlite_schema ORDER BY name)",[],|r|r.get(0))?;
             ensure!(schema==after,"refused old layout was mutated");Ok(())
         })
+    }
+
+    #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[serde(tag="step",rename_all="snake_case",deny_unknown_fields)]
+    enum VerifyStep {
+        Select { previous:u8,replacement:u8 }, Prepare { slot:u8 }, Stage { slot:u8,commit:bool },
+        Permission { allowed:bool }, Rotate, Revoke, Rewrap,
+    }
+
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct VerifyProgram { seed:u64,steps:Vec<VerifyStep> }
+
+    #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all="snake_case")]
+    enum VerifyState { Active, Superseded, Revoked }
+
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct VerifyProjection {
+        versions:u64,lineage_revision:u64,verifier_revision:u64,key:u8,envelope_revision:u64,
+        state:VerifyState,available:u64,
+    }
+
+    #[derive(Clone,Copy)]
+    struct ModelPreparation { revision:u64,key:u8,envelope:u64,selection:(u8,u8) }
+
+    // This state machine consumes only controlled inputs. It does not call a
+    // production transition, inspect SQLite, or accept an implementation result.
+    struct VerifierModel {
+        projection:VerifyProjection,selection:(u8,u8),allowed:bool,
+        pending:[Option<ModelPreparation>;3],
+    }
+
+    impl VerifierModel {
+        fn new()->Self { Self { projection:VerifyProjection { versions:1,lineage_revision:1,
+            verifier_revision:1,key:1,envelope_revision:1,state:VerifyState::Active,available:1 },
+            selection:(1,2),allowed:true,pending:[None;3] } }
+        fn apply(&mut self,event:VerifyStep)->bool {
+            match event {
+                VerifyStep::Select{previous,replacement}=>{ self.selection=(previous,replacement);true },
+                VerifyStep::Permission{allowed}=>{self.allowed=allowed;true},
+                VerifyStep::Prepare{slot}=>{
+                    let accepted=self.allowed && self.projection.state==VerifyState::Active
+                        && self.selection.0==self.projection.key && self.selection.0!=self.selection.1;
+                    self.pending[usize::from(slot)]=accepted.then_some(ModelPreparation{
+                        revision:self.projection.verifier_revision,key:self.projection.key,
+                        envelope:self.projection.envelope_revision,selection:self.selection});accepted
+                },
+                VerifyStep::Stage{slot,commit}=>{
+                    let prepared=self.pending[usize::from(slot)].take();
+                    let accepted=prepared.is_some_and(|p|self.allowed && self.projection.state==VerifyState::Active
+                        && p.revision==self.projection.verifier_revision && p.key==self.projection.key
+                        && p.envelope==self.projection.envelope_revision && p.selection==self.selection);
+                    if accepted && commit { self.projection.verifier_revision+=1;self.projection.key=self.selection.1; }
+                    accepted
+                },
+                VerifyStep::Rotate=>{
+                    let accepted=self.projection.state==VerifyState::Active;
+                    if accepted {self.projection.versions=2;self.projection.lineage_revision+=1;self.projection.state=VerifyState::Superseded;}
+                    accepted
+                },
+                VerifyStep::Revoke=>{
+                    let accepted=self.projection.state!=VerifyState::Revoked;
+                    if accepted {self.projection.lineage_revision+=1;self.projection.state=VerifyState::Revoked;self.projection.available=0;}
+                    accepted
+                },
+                VerifyStep::Rewrap=>{
+                    let accepted=self.projection.state==VerifyState::Active && self.projection.envelope_revision==1;
+                    if accepted {self.projection.envelope_revision+=1;}accepted
+                },
+            }
+        }
+    }
+
+    fn verify_key_name(key:u8)->Result<&'static str> {
+        Ok(match key {1=>"verify-v1",2=>"verify-v2",3=>"verify-v3",_=>anyhow::bail!("unknown verifier fixture key")})
+    }
+
+    fn verifier_projection(db:&Connection,version:&str)->Result<VerifyProjection> {
+        let (revision,key,envelope,state):(i64,String,i64,String)=db.query_row(
+            "SELECT v.verifier_revision,v.verifier_key_version,m.envelope_revision,v.state
+             FROM day2_credential_versions v JOIN day2_credential_material m ON m.version=v.id WHERE v.id=?1",
+            [version],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        let key=match key.as_str(){"verify-v1"=>1,"verify-v2"=>2,"verify-v3"=>3,_=>anyhow::bail!("unknown stored verifier key")};
+        let state=match state.as_str(){"active"=>VerifyState::Active,"superseded"=>VerifyState::Superseded,"revoked"=>VerifyState::Revoked,_=>anyhow::bail!("unknown stored verifier state")};
+        Ok(VerifyProjection { versions:db.query_row("SELECT count(*) FROM day2_credential_versions",[],|r|r.get(0))?,
+            lineage_revision:db.query_row("SELECT revision FROM day2_credential_lineages",[],|r|r.get(0))?,
+            verifier_revision:revision.try_into()?,key,envelope_revision:envelope.try_into()?,state,
+            available:db.query_row("SELECT count(*) FROM day2_credential_deliveries WHERE state='available'",[],|r|r.get(0))? })
+    }
+
+    #[derive(Clone,Copy,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+    #[serde(rename_all="snake_case")]
+    enum VerifyControl { None, WrongRevision }
+
+    #[derive(PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+    #[serde(rename_all="snake_case")]
+    enum VerifyFailure { Acceptance, State, Execution }
+
+    #[derive(PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct VerifyRecord { accepted:bool,expected:bool,actual:VerifyProjection,reference:VerifyProjection }
+
+    #[derive(PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct VerifyRun { records:Vec<VerifyRecord>,failure:Option<VerifyFailure> }
+
+    fn verifier_run(program:&VerifyProgram,control:VerifyControl)->Result<VerifyRun> {
+        ensure!(!program.steps.is_empty() && program.steps.len()<=64 && program.steps.iter().all(|step|match step {
+            VerifyStep::Select{previous,replacement}=>(1..=3).contains(previous) && (1..=3).contains(replacement),
+            VerifyStep::Prepare{slot}|VerifyStep::Stage{slot,..}=>*slot<3,_=>true }),"verifier history input bound");
+        let mut records=vec![];
+        let result=effects::scope(World::new(program.seed),||->Result<Option<VerifyFailure>>{
+            let (_dir,mut db)=fixture::database()?;let receipt=fixture::committed_issue(&mut db)?;
+            let (authority,keys)=verifier_ports(receipt.version.as_deref().context("issued version")?,fixture::family());
+            let token=verifier_token(&db,&authority)?;let mut pending:[Option<VerifierPrepared>;3]=[None,None,None];
+            let mut reference=VerifierModel::new();let mut corrupted=false;
+            for &step in &program.steps {
+                let expected=reference.apply(step);let before=verifier_image(&db)?;
+                let accepted=match step {
+                    VerifyStep::Select{previous,replacement}=>{
+                        authority.selection.borrow_mut().previous.version=verify_key_name(previous)?.into();
+                        authority.selection.borrow_mut().replacement.version=verify_key_name(replacement)?.into();true
+                    },
+                    VerifyStep::Permission{allowed}=>{authority.allowed.store(allowed,Ordering::SeqCst);true},
+                    VerifyStep::Prepare{slot}=>{
+                        pending[usize::from(slot)]=verifier_prepared(&db,&authority,&keys,&token).ok();
+                        pending[usize::from(slot)].is_some()
+                    },
+                    VerifyStep::Stage{slot,commit}=>{
+                        if let Some(ready)=pending[usize::from(slot)].take(){
+                            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                            let accepted=stage_verifier(&tx,&authority,ready).is_ok();
+                            if accepted && commit {tx.commit()?;}else{tx.rollback()?;}accepted
+                        }else{false}
+                    },
+                    VerifyStep::Rotate=>{
+                        let grant=fixture::issue("model-grant").ceiling;
+                        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        let accepted=matches!(super::super::stage_rotation(&tx,&fixture::lease(),&fixture::snapshot(&receipt),super::super::RotationIntent{
+                            grant:&grant,invocation:"model-rotation",instruction_slot:0,recipient:"issuer/human-1",session:"session-1",issued_at:1000,expires_at:2000,reveal_until:1300}),Ok(super::super::RotationResult::Rotated(_)));
+                        if accepted {tx.commit()?;}else{tx.rollback()?;}accepted
+                    },
+                    VerifyStep::Revoke=>{
+                        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        let accepted=super::super::stage_revoke(&tx,&fixture::namespace(),&receipt.lineage)?;
+                        if accepted {tx.commit()?;}else{tx.rollback()?;}accepted
+                    },
+                    VerifyStep::Rewrap=>{
+                        let (authority,keys)=ports(&authority.version);
+                        if let Ok(ready)=prepared(&db,&authority,&keys) {
+                            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                            let accepted=stage(&tx,&authority,ready).is_ok();
+                            if accepted {tx.commit()?;}else{tx.rollback()?;}accepted
+                        }else{false}
+                    },
+                };
+                if !corrupted && control==VerifyControl::WrongRevision
+                    && matches!(step,VerifyStep::Stage{commit:true,..}) && expected {
+                    // Deliberately wrong reference only; never fed to SQLite,
+                    // authority, key provider or the actual maintenance core.
+                    reference.projection.verifier_revision+=1;corrupted=true;
+                }
+                let after=verifier_image(&db)?;
+                if !accepted || matches!(step,VerifyStep::Prepare{..}|VerifyStep::Select{..}|VerifyStep::Permission{..}|VerifyStep::Stage{commit:false,..}) {
+                    ensure!(after==before,"noncommitting maintenance changed durable state");
+                }else if matches!(step,VerifyStep::Stage{commit:true,..}){only_verifier_changed(&before,&after)?;}
+                super::super::install_schema(&db)?;
+                let actual=verifier_projection(&db,&authority.version)?;
+                let failure=if accepted!=expected{Some(VerifyFailure::Acceptance)}else if actual!=reference.projection{Some(VerifyFailure::State)}else{None};
+                records.push(VerifyRecord{accepted,expected,actual,reference:reference.projection.clone()});
+                if failure.is_some(){return Ok(failure);}
+            }
+            Ok(None)
+        });
+        Ok(VerifyRun{records,failure:result.unwrap_or(Some(VerifyFailure::Execution))})
+    }
+
+    fn verifier_source()->Digest { Digest::of(&("credential-verifier-maintenance-v1",include_str!("rewrap.rs"),include_str!("crypto.rs"),include_str!("store.rs"),include_str!("simulation.rs"),include_str!("../../../../toolchain.json"))).unwrap() }
+
+    #[derive(serde::Serialize,serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct VerifyReplay { format:u32,source:Digest,fixture:Digest,program:VerifyProgram,control:VerifyControl,observed:VerifyRun }
+
+    fn verifier_retain(root:&std::path::Path,program:&VerifyProgram,control:VerifyControl,observed:VerifyRun)->Result<std::path::PathBuf>{
+        std::fs::create_dir_all(root)?;
+        let directory=tempfile::Builder::new().prefix("failure-").tempdir_in(root)?.keep();let path=directory.join("failure.json");
+        std::fs::write(&path,serde_json::to_vec(&VerifyReplay{format:1,source:verifier_source(),fixture:Digest::of(&fixture::family())?,program:program.clone(),control,observed})?)?;Ok(path)
+    }
+
+    fn verifier_replay(bytes:&[u8])->Result<()> {
+        ensure!(bytes.len()<=65536,"verifier replay byte bound");let replay:VerifyReplay=crate::json::decode(bytes)?;
+        ensure!(replay.format==1 && replay.source==verifier_source() && replay.fixture==Digest::of(&fixture::family())?
+            && replay.observed.failure.is_some(),"verifier replay source/fixture or failure identity differs");
+        let first=verifier_run(&replay.program,replay.control)?;let second=verifier_run(&replay.program,replay.control)?;
+        ensure!(first==replay.observed && second==first,"verifier saved failure did not replay exactly");Ok(())
+    }
+
+    fn verifier_generated(seed:u64)->VerifyProgram {
+        let mut steps=vec![VerifyStep::Prepare{slot:0},VerifyStep::Prepare{slot:1},VerifyStep::Stage{slot:0,commit:false},
+            VerifyStep::Prepare{slot:0},VerifyStep::Stage{slot:1,commit:true},VerifyStep::Stage{slot:0,commit:true}];
+        let mut stream=seed;
+        for index in 0..32 {
+            stream=stream.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            steps.push(match (stream>>32)%9 {
+                0|1=>VerifyStep::Select{previous:((stream>>12)%3+1)as u8,replacement:((stream>>20)%3+1)as u8},
+                2|3=>VerifyStep::Prepare{slot:(stream%3)as u8},
+                4|5=>VerifyStep::Stage{slot:(stream%3)as u8,commit:stream&1==0},
+                6=>VerifyStep::Permission{allowed:stream&1==0},
+                7 if index>12=>VerifyStep::Rotate,
+                8 if index>20=>VerifyStep::Revoke,
+                _=>VerifyStep::Rewrap,
+            });
+        }
+        steps.extend([VerifyStep::Rotate,VerifyStep::Revoke,VerifyStep::Permission{allowed:true},VerifyStep::Prepare{slot:2},VerifyStep::Stage{slot:2,commit:true}]);
+        VerifyProgram{seed,steps}
+    }
+
+    #[test]
+    fn verifier_seeded_histories_match_independent_model_and_replay() -> Result<()> {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/credential-verifier-maintenance");
+        let mut observations=vec![];
+        for seed in 0..32 {
+            let program=verifier_generated(seed);let first=verifier_run(&program,VerifyControl::None)?;
+            let second=verifier_run(&program,VerifyControl::None)?;
+            if first.failure.is_some() || first!=second || first.records.len()!=program.steps.len() {
+                verifier_retain(&root,&program,VerifyControl::None,first)?;
+                anyhow::bail!("verifier model disagreement; redacted source-bound case retained");
+            }
+            observations.push(serde_json::json!({"seed":seed,"steps":program.steps,"records":first.records}));
+        }
+        std::fs::create_dir_all(&root)?;let directory=tempfile::Builder::new().prefix("campaign-").tempdir_in(&root)?.keep();
+        std::fs::write(directory.join("receipt.json"),serde_json::to_vec(&serde_json::json!({"format":1,"status":"passed",
+            "scope":"controlled_sqlite_verifier_core_not_native_operator_execution","source":verifier_source(),
+            "fixture":Digest::of(&fixture::family())?,"each_history_replayed":true,"observations":observations}))?)?;Ok(())
+    }
+
+    #[test]
+    fn verifier_false_model_is_retained_replayed_and_source_bound() -> Result<()> {
+        let program=verifier_generated(71);let observed=verifier_run(&program,VerifyControl::WrongRevision)?;
+        ensure!(observed.failure==Some(VerifyFailure::State),"false verifier oracle escaped");
+        let root=tempfile::tempdir()?;let path=verifier_retain(root.path(),&program,VerifyControl::WrongRevision,observed)?;
+        let bytes=std::fs::read(&path)?;verifier_replay(&bytes)?;
+        let original:serde_json::Value=crate::json::decode(&bytes)?;
+        for field in ["source","fixture","unknown"] {
+            let mut wrong=original.clone();wrong[field]=serde_json::json!(Digest::new(b"foreign"));
+            ensure!(verifier_replay(&serde_json::to_vec(&wrong)?).is_err(),"foreign verifier replay accepted");
+        }
+        for (field,value) in [("slot",serde_json::json!(3)),("step",serde_json::json!("unknown"))] {
+            let mut wrong=original.clone();wrong["program"]["steps"][0][field]=value;
+            ensure!(verifier_replay(&serde_json::to_vec(&wrong)?).is_err(),"unknown verifier schedule accepted");
+        }
+        ensure!(verifier_replay(&vec![b' ';65537]).is_err(),"oversized verifier replay accepted");Ok(())
+    }
+
+    #[test]
+    fn verifier_replay_saved_failure()->Result<()> {
+        let Some(path)=std::env::var_os("DAY2_CREDENTIAL_VERIFIER_REPLAY")else{return Ok(())};
+        use std::io::Read as _;let mut bytes=vec![];
+        std::fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;verifier_replay(&bytes)
     }
 
     #[test]
