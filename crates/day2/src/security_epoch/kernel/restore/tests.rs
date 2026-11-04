@@ -572,7 +572,7 @@ fn fresh_authority_exact_keys_fence_and_clock_are_required_without_renewing_the_
     let current = current(&selected, &intent, &before);
     let request = Request::new(&selected, intent, &current, 1000, &before)?;
     let plan = request.prepare(&selected, &current, 1000, &before, None)?;
-    for field in 0..11 {
+    for field in 0..16 {
         let mut changed = current.clone();
         let mut at = 1001;
         match field {
@@ -591,6 +591,11 @@ fn fresh_authority_exact_keys_fence_and_clock_are_required_without_renewing_the_
                 at = 1099;
             }
             10 => changed.grant.expires_at = 1200,
+            11 => changed.grant.issuer = Digest::new(b"foreign-maintenance-issuer"),
+            12 => changed.grant.policy = Digest::new(b"foreign-maintenance-policy"),
+            13 => changed.grant.intent = Digest::new(b"another-restore-intent"),
+            14 => changed.grant.fence.receipt = Digest::new(b"replacement-fence-statement"),
+            15 => changed.available_keys[0].purpose = KeyPurpose::CustodyVerifier,
             _ => unreachable!(),
         }
         assert!(
@@ -662,6 +667,22 @@ fn different_backup_target_schema_key_manifest_and_selected_store_cannot_share_a
         }
     }
     let request = Request::new(&selected, original, &current, 1000, &before)?;
+    for epoch in [0, 2, u64::MAX] {
+        let mut unsupported = request.intent.clone();
+        unsupported.archive.security_epoch = epoch;
+        assert!(unsupported.commitment(&selected).is_err());
+    }
+    for operation in [
+        before.root.as_ref().unwrap().value.bootstrap.create_operation.clone(),
+        before.activate.as_ref().unwrap().value.request.operation().clone(),
+    ] {
+        let mut reused = request.intent.clone();
+        reused.operation = operation;
+        // Rebind the controlled authorization to the changed intent, so the
+        // operation-reuse check itself must refuse, not an earlier hash mismatch.
+        let rebound = self::current(&selected, &reused, &before);
+        assert!(Request::new(&selected, reused, &rebound, 1000, &before).is_err());
+    }
     let mut other_store = selected.clone();
     other_store.max_lease_seconds += 1;
     assert!(
@@ -806,10 +827,13 @@ fn closed_restore_codec_rejects_extras_duplicates_and_unpinned_keys() -> Result<
     );
     assert_ne!(duplicate, encoded);
     assert!(crate::json::decode_evidence::<Request>(duplicate.as_bytes()).is_err());
+    for version in ["latest".to_owned(), "LATEST".to_owned(), "current".to_owned(),
+        "Current".to_owned(), "latest/alias".to_owned(), String::new(), "x".repeat(129)] {
+        let mut malformed = request.intent.clone();
+        malformed.archive.required_keys[0].version = version;
+        assert!(malformed.commitment(&selected).is_err());
+    }
     let mut malformed = request.intent.clone();
-    malformed.archive.required_keys[0].version = "latest/alias".into();
-    assert!(malformed.commitment(&selected).is_err());
-    malformed = request.intent.clone();
     malformed
         .archive
         .required_keys
