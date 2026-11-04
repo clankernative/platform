@@ -681,7 +681,10 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     recipe == format!("verify-prepare-part-{part}"),
                     "preparation receipt must match the selected part"
                 );
-                ensure!(part != "fixtures" || fixture_ui_ready, "fixture UI admission required");
+                ensure!(
+                    part != "fixtures" || fixture_ui_ready,
+                    "fixture UI admission required"
+                );
                 ensure_stable(root, recipe, &snapshot)?;
                 shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, part)?;
                 return Ok(json!({}));
@@ -739,7 +742,10 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 "cli".into()
             }
             "verify-build" => {
-                ensure!(recipe != "verify-prepare-part-fixtures" || fixture_ui_ready, "fixture UI admission required");
+                ensure!(
+                    recipe != "verify-prepare-part-fixtures" || fixture_ui_ready,
+                    "fixture UI admission required"
+                );
                 let fixture = value("fixture")?;
                 ensure!(!fixtures.contains_key(fixture), "duplicate fixture");
                 let build = fixture_build(root, fixture, &fixtures)?;

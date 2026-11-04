@@ -374,8 +374,16 @@ fn admit_full(
                 [inputs, fixtures, tests],
                 &common,
                 [
-                    &super::artifacts::origin(&expected, selection, super::artifacts::Role::Inputs)?,
-                    &super::artifacts::origin(&expected, selection, super::artifacts::Role::Fixtures)?,
+                    &super::artifacts::origin(
+                        &expected,
+                        selection,
+                        super::artifacts::Role::Inputs
+                    )?,
+                    &super::artifacts::origin(
+                        &expected,
+                        selection,
+                        super::artifacts::Role::Fixtures
+                    )?,
                     &super::artifacts::origin(&expected, selection, super::artifacts::Role::Tests)?,
                 ]
             )?)? == serde_json::to_value(&prepared)?,

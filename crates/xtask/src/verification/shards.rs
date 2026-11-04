@@ -985,7 +985,10 @@ fn combine_origins(
         validate_preparation(part, name)?;
         ensure!(
             part.passed.iter().all(|step| passed.insert(step.clone()))
-                && part.fixtures.keys().all(|name| fixtures.insert(name.clone())),
+                && part
+                    .fixtures
+                    .keys()
+                    .all(|name| fixtures.insert(name.clone())),
             "preparation effects and fixtures must be disjoint"
         );
     }
@@ -1490,7 +1493,11 @@ mod tests {
     }
 
     pub(super) fn sample_parts() -> Result<[Prepared; 3]> {
-        Ok([sample_part("inputs")?, sample_part("fixtures")?, sample_part("tests")?])
+        Ok([
+            sample_part("inputs")?,
+            sample_part("fixtures")?,
+            sample_part("tests")?,
+        ])
     }
 
     #[test]
@@ -1505,7 +1512,15 @@ mod tests {
         consumer.attempt = "4".into();
         let mixed = combine_origins(parts, &consumer, [&origins[0], &origins[1], &origins[2]])?;
         assert_eq!(mixed.identity, consumer);
-        for field in ["run", "checkout", "tree", "source_identity", "workflow", "snapshot", "attempt"] {
+        for field in [
+            "run",
+            "checkout",
+            "tree",
+            "source_identity",
+            "workflow",
+            "snapshot",
+            "attempt",
+        ] {
             for index in 0..3 {
                 let mut parts = sample_parts()?;
                 for (part, origin) in parts.iter_mut().zip(&origins) {
@@ -1514,9 +1529,11 @@ mod tests {
                 let mut forged = serde_json::to_value(&parts[index])?;
                 forged["identity"][field] = json!("foreign");
                 parts[index] = serde_json::from_value(forged)?;
-                assert!(combine_origins(
-                    parts, &consumer, [&origins[0], &origins[1], &origins[2]]
-                ).is_err(), "{field} / {index}");
+                assert!(
+                    combine_origins(parts, &consumer, [&origins[0], &origins[1], &origins[2]])
+                        .is_err(),
+                    "{field} / {index}"
+                );
             }
         }
         Ok(())
@@ -1529,27 +1546,47 @@ mod tests {
         assert_eq!(complete.fixtures.len(), 26);
         for fixture in complete.fixtures.keys() {
             let mut parts = sample_parts()?;
-            let removed: usize = parts.iter_mut()
+            let removed: usize = parts
+                .iter_mut()
                 .map(|part| usize::from(part.fixtures.remove(fixture).is_some()))
                 .sum();
             assert_eq!(removed, 1, "{fixture}");
-            assert!(combine_parts(parts, &sample_identity()).is_err(), "{fixture}");
+            assert!(
+                combine_parts(parts, &sample_identity()).is_err(),
+                "{fixture}"
+            );
         }
         for field in [
-            "checkout", "tree", "source_identity", "workspace", "run", "attempt",
-            "host", "architecture", "workflow", "snapshot",
+            "checkout",
+            "tree",
+            "source_identity",
+            "workspace",
+            "run",
+            "attempt",
+            "host",
+            "architecture",
+            "workflow",
+            "snapshot",
         ] {
             for index in 0..3 {
                 let mut parts = sample_parts()?;
                 let mut invalid = serde_json::to_value(&parts[index])?;
                 invalid["identity"][field] = json!("foreign");
                 parts[index] = serde_json::from_value(invalid)?;
-                assert!(combine_parts(parts, &sample_identity()).is_err(), "{field} / {index}");
+                assert!(
+                    combine_parts(parts, &sample_identity()).is_err(),
+                    "{field} / {index}"
+                );
             }
         }
         for (index, field) in [
-            (0, "fixtures"), (0, "passed"), (1, "fixtures"), (1, "passed"),
-            (1, "timings_ms"), (2, "binaries"), (2, "timings_ms"),
+            (0, "fixtures"),
+            (0, "passed"),
+            (1, "fixtures"),
+            (1, "passed"),
+            (1, "timings_ms"),
+            (2, "binaries"),
+            (2, "timings_ms"),
         ] {
             let mut parts = sample_parts()?;
             let mut invalid = serde_json::to_value(&parts[index])?;
@@ -1559,7 +1596,10 @@ mod tests {
                 json!([])
             };
             parts[index] = serde_json::from_value(invalid)?;
-            assert!(combine_parts(parts, &sample_identity()).is_err(), "{field} / {index}");
+            assert!(
+                combine_parts(parts, &sample_identity()).is_err(),
+                "{field} / {index}"
+            );
         }
         for pair in [(0, 1), (1, 2), (0, 2)] {
             let mut parts = sample_parts()?;
@@ -1584,7 +1624,10 @@ mod tests {
             ["build-stock-ledger", "build-request-desk"],
             ["build-app-ownership", "build-notifications"],
         ] {
-            assert!(pair.into_iter().all(|step| part_steps("inputs").unwrap().contains(step)));
+            assert!(
+                pair.into_iter()
+                    .all(|step| part_steps("inputs").unwrap().contains(step))
+            );
         }
         assert_eq!(part_steps("fixtures")?.len(), 18);
         Ok(())
@@ -1994,7 +2037,14 @@ mod tests {
             });
             Ok(tests)
         };
-        let complete = combine_parts([sample_part("inputs")?, sample_part("fixtures")?, make_tests()?], &sample_identity())?;
+        let complete = combine_parts(
+            [
+                sample_part("inputs")?,
+                sample_part("fixtures")?,
+                make_tests()?,
+            ],
+            &sample_identity(),
+        )?;
         assert_eq!(complete.programs.len(), 1);
         assert!(!expected_binaries(&complete, "workspace-day2").contains(&program_output("day2")));
         for field in ["programs", "executable", "target", "kind", "directory"] {
@@ -2009,7 +2059,13 @@ mod tests {
                 };
             }
             let invalid = serde_json::from_value(value)?;
-            assert!(combine_parts([sample_part("inputs")?, sample_part("fixtures")?, invalid], &sample_identity()).is_err());
+            assert!(
+                combine_parts(
+                    [sample_part("inputs")?, sample_part("fixtures")?, invalid],
+                    &sample_identity()
+                )
+                .is_err()
+            );
         }
         Ok(())
     }
