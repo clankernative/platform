@@ -8,11 +8,11 @@ mod history;
 #[cfg(unix)]
 mod process;
 
-fn version(n: u64) -> super::super::UpdateTime {
+pub(super) fn version(n: u64) -> super::super::UpdateTime {
     format!("2026-11-04T00:00:00.{n:06}Z").try_into().unwrap()
 }
 
-fn initial() -> (EpochStore, Snapshot) {
+pub(super) fn initial() -> (EpochStore, Snapshot) {
     let selection = crate::security_epoch::tests::selection();
     let create = crate::security_epoch::tests::create();
     let activate = InitialRequest::CompleteInitialFirstActivation {
@@ -54,7 +54,7 @@ fn initial() -> (EpochStore, Snapshot) {
     )
 }
 
-fn intent(selected: &EpochStore, seed: u64) -> Intent {
+pub(super) fn intent(selected: &EpochStore, seed: u64) -> Intent {
     Intent {
         operation: Digest::of(&("restore-fixture-operation", seed)).unwrap(),
         archive: Backup {
@@ -83,7 +83,7 @@ fn intent(selected: &EpochStore, seed: u64) -> Intent {
     }
 }
 
-fn current(selected: &EpochStore, intent: &Intent, before: &Snapshot) -> Current {
+pub(super) fn current(selected: &EpochStore, intent: &Intent, before: &Snapshot) -> Current {
     let root = &before.root.as_ref().unwrap().value;
     let Phase::ActiveFirstHolder { completion } = &root.phase else {
         panic!("fixture root");
