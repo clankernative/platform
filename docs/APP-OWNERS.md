@@ -79,7 +79,8 @@ cannot be activated by an owner mutation. Normal authority revision fencing
 applies to unfinished work, live subscriptions and historical outcomes.
 
 New owners must be individual principals, not group, domain, app or service
-selectors. Google service-account identities are refused. In an IAP installation,
+selectors. Managed-client (`client/`) principals and Google service-account
+identities are refused, including in local development. In an IAP installation,
 new owners must be exact people at its verified hosted domain. Local development
 can use its explicit development actor names. The list is bounded to 512 owners.
 Adding an existing owner, removing an absent owner, mutating a disabled app and

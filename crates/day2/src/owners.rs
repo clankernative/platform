@@ -164,7 +164,9 @@ fn changed_document(
 ) -> Result<authority_state::AuthorityDocument> {
     crate::authority::valid_actor(owner)?;
     ensure!(
-        !owner.contains(':') && !owner.ends_with(".gserviceaccount.com"),
+        !owner.contains(':')
+            && !owner.starts_with("client/")
+            && !owner.ends_with(".gserviceaccount.com"),
         "owner_must_be_an_individual"
     );
     ensure!(original.enabled, "owner_management_app_disabled");

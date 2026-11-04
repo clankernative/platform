@@ -182,6 +182,70 @@ fn owner_changes_preserve_active_policy_and_are_cas_idempotent() -> Result<()> {
 }
 
 #[test]
+fn owner_changes_reject_managed_clients_without_mutating_authority() -> Result<()> {
+    use day2::{
+        authority_state::{self, LocalOperator},
+        owners::{self, Change, Operation},
+    };
+    let world = World::new()?;
+    let mut instance = Instance::load(world.runtime.instance_path())?;
+    instance.control = Some(serde_json::from_value(json!({
+        "version":1,"state_directory":world.directory.path().join("control"),
+        "operators":["operator"],"sources":{},"apps":{}
+    }))?);
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&instance)?,
+    )?;
+    let operator = LocalOperator::assert_local("operator")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let before = authority_state::current(&db)?;
+    let counts = || -> Result<(i64, i64)> {
+        Ok((
+            db.query_row("SELECT count(*) FROM day2_authority_history", [], |row| {
+                row.get(0)
+            })?,
+            db.query_row("SELECT count(*) FROM day2_authority_requests", [], |row| {
+                row.get(0)
+            })?,
+        ))
+    };
+    let before_counts = counts()?;
+    for (index, owner) in [
+        format!("client/client_keys/{}", "a".repeat(64)),
+        "client/".into(),
+        "client/client_keys/not-a-stable-id".into(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = owners::change(
+            &world.runtime,
+            &operator,
+            Operation::Add,
+            &Change {
+                owner: owner.clone(),
+                expected: before.stamp.clone(),
+                request_id: format!("reject-client-{index}"),
+            },
+        )
+        .expect_err("managed clients cannot become individual owners");
+        assert!(error.to_string().contains("owner_must_be_an_individual"));
+        assert_eq!(authority_state::current(&db)?, before);
+        assert_eq!(counts()?, before_counts);
+        for permission in owners::PERMISSIONS {
+            assert!(!owners::check(
+                &world.runtime,
+                &operator,
+                &owner,
+                permission
+            )?);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn owner_permission_reads_use_live_authority_and_restores_do_not_grant_access() -> Result<()> {
     use day2::{
         authority_state::{self, LocalOperator},
