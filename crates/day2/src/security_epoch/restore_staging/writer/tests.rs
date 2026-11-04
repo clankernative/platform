@@ -258,3 +258,28 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
     assert!(!closed(&(source.to_owned() + "\nimpl Source<UntrustedClock> for UntrustedData {}")));
     assert!(!closed(&source.replacen("    fn check(&mut self)", "    pub fn check(&mut self)", 1)));
 }
+
+#[test]
+fn candidate_and_admission_are_not_copyable_serialized_transferable_permissions() {
+    type Borrowed = Candidate<'static, 'static, super::super::tests::Fixture, drain::Model, Model>;
+    macro_rules! opaque {
+        ($ty:ty, $bound:path) => {{
+            trait Ambiguous<A> { fn check() {} }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$ty as Ambiguous<_>>::check;
+        }};
+    }
+    opaque!(Borrowed, Clone);
+    opaque!(Borrowed, Default);
+    opaque!(Borrowed, serde::Serialize);
+    opaque!(Borrowed, serde::Deserialize<'static>);
+    opaque!(Borrowed, Send);
+    opaque!(Borrowed, Sync);
+    opaque!(Admission, Clone);
+    opaque!(Admission, Default);
+    opaque!(Admission, serde::Serialize);
+    opaque!(Admission, serde::Deserialize<'static>);
+    opaque!(Admission, Send);
+    opaque!(Admission, Sync);
+}
