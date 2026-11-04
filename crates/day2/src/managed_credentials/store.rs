@@ -56,7 +56,8 @@ const CREDENTIAL_DDL: &str = "
             expires_at INTEGER NOT NULL CHECK(expires_at > issued_at),
             security_epoch INTEGER NOT NULL CHECK(security_epoch > 0),
             grant_digest TEXT NOT NULL,
-            state TEXT NOT NULL CHECK(state IN ('active', 'superseded', 'revoked'))
+            state TEXT NOT NULL CHECK(state IN ('active', 'superseded', 'revoked')),
+            verifier_revision INTEGER NOT NULL CHECK(verifier_revision > 0)
         ) STRICT;
         CREATE TABLE IF NOT EXISTS day2_credential_material (
             version TEXT PRIMARY KEY REFERENCES day2_credential_versions(id),
@@ -654,7 +655,7 @@ fn credential_predicates() -> Vec<(&'static str, String)> {
         (
             "day2_credential_versions",
             format!(
-                "{} AND {} AND (predecessor IS NULL OR ({} AND predecessor != id)) AND {} AND length(selector)=22 AND selector NOT GLOB '*[^a-zA-Z0-9_-]*' AND substr(selector,22,1) IN ('A','Q','g','w') AND {} AND {} AND length(verifier)=32 AND expires_at > issued_at AND security_epoch > 0 AND state IN ('active','superseded','revoked')",
+                "{} AND {} AND (predecessor IS NULL OR ({} AND predecessor != id)) AND {} AND length(selector)=22 AND selector NOT GLOB '*[^a-zA-Z0-9_-]*' AND substr(selector,22,1) IN ('A','Q','g','w') AND {} AND {} AND length(verifier)=32 AND verifier_revision > 0 AND expires_at > issued_at AND security_epoch > 0 AND state IN ('active','superseded','revoked')",
                 id("id"),
                 id("lineage"),
                 id("predecessor"),
@@ -1345,8 +1346,8 @@ fn insert_version(tx: &Transaction<'_>, write: VersionWrite<'_>) -> Result<()> {
     tx.execute(
         "INSERT INTO day2_credential_versions
          (id, lineage, predecessor, selector, verifier, verifier_key_version, issued_at,
-          expires_at, security_epoch, grant_digest, state)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active')",
+          expires_at, security_epoch, grant_digest, state, verifier_revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', 1)",
         params![
             version,
             lineage,

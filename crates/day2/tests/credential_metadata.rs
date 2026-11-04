@@ -543,7 +543,7 @@ impl World {
         tx.execute("INSERT INTO day2_credential_lineages VALUES(?1,?2,?3,?4,?5,?10,?6,'Test key','PRIVATE_RECIPIENT','PRIVATE_SESSION',?7,?8,4000,1,'active',?9,1)",
             params![id, namespace.as_str(), serde_json::to_string(&binding.namespace)?, family, manifest.contract.as_str(), creator, serde_json::to_string(&ceiling)?, ceiling.digest.as_str(), version, ceiling.subject])
             .context("seed credential metadata lineage")?;
-        tx.execute("INSERT INTO day2_credential_versions VALUES(?1,?2,NULL,?3,?4,'PRIVATE_VERIFIER_KEY',100,3700,1,?5,'active')",
+        tx.execute("INSERT INTO day2_credential_versions VALUES(?1,?2,NULL,?3,?4,'PRIVATE_VERIFIER_KEY',100,3700,1,?5,'active',1)",
             params![version, id, metadata_selector(id), [8u8;32].as_slice(), ceiling.digest.as_str()])
             .context("seed credential metadata version")?;
         tx.execute(
