@@ -474,6 +474,12 @@ fn encode(bundle: &Bundle) -> Result<Vec<u8>> {
 }
 
 fn decode(bytes: &[u8]) -> Result<Bundle> {
+    // Untrusted field names/values must not escape through serde's Display.
+    // Use the same bounded parser, with one closed admission error boundary.
+    decode_contents(bytes).map_err(|_| anyhow::anyhow!("secure_restore_replay_refused"))
+}
+
+fn decode_contents(bytes: &[u8]) -> Result<Bundle> {
     ensure!(bytes.len() <= MAX_BYTES, "restore_history_encoded_bound");
     let mut reader = flate2::bufread::GzDecoder::new(bytes);
     let mut raw = Vec::new();
@@ -740,6 +746,18 @@ fn maximum_restore_manifest_and_history_fit_the_unchanged_evidence_decoder() -> 
     };
     let encoded = encode(&bundle)?;
     let decoded = decode(&encoded)?;
+    let marker = "RESTORE_REPLAY_PRIVATE_FIELD_CANARY";
+    let mut unknown = serde_json::to_value(Part::Header { format: 1, input: decoded.input.clone() })?;
+    unknown.as_object_mut().unwrap().insert(marker.into(), serde_json::json!(true));
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gzip.write_all(&serde_json::to_vec(&unknown)?)?;
+    let invalid = gzip.finish()?;
+    // The same parser's original error really contains the synthetic field;
+    // the actual reader boundary must replace it, not merely omit saved text.
+    let unredacted = decode_contents(&invalid).err().context("missing raw decoder refusal")?;
+    assert!(unredacted.to_string().contains(marker));
+    let refused = decode(&invalid).err().context("missing closed decoder refusal")?;
+    assert_eq!(refused.to_string(), "secure_restore_replay_refused");
     assert_eq!(decoded.first, bundle.first);
     assert_eq!(decoded.second, bundle.second);
     let mut trailing = encoded.clone();

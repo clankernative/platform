@@ -368,6 +368,12 @@ fn retain(failure: &Failure) -> Result<std::path::PathBuf> {
 }
 
 fn decode(bytes: &[u8]) -> Result<Failure> {
+    // Untrusted field names/values must not escape through serde's Display.
+    // Use the same bounded parser, with one closed admission error boundary.
+    decode_contents(bytes).map_err(|_| anyhow::anyhow!("secure_restore_crash_replay_refused"))
+}
+
+fn decode_contents(bytes: &[u8]) -> Result<Failure> {
     ensure!(bytes.len() <= 1024 * 1024, "restore_crash_encoded_bound");
     let mut gzip = flate2::bufread::GzDecoder::new(bytes);
     let mut raw = Vec::new();
@@ -451,6 +457,16 @@ fn incomplete_child_failure_records_preserve_closed_stage_and_unresolved_cleanup
     let path = retain(&failure)?;
     let bytes = std::fs::read(&path)?;
     let saved = decode(&bytes)?;
+    let marker = "RESTORE_CRASH_PRIVATE_FIELD_CANARY";
+    let mut unknown = serde_json::to_value(&failure)?;
+    unknown.as_object_mut().unwrap().insert(marker.into(), serde_json::json!(true));
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gzip.write_all(&serde_json::to_vec(&unknown)?)?;
+    let invalid = gzip.finish()?;
+    let unredacted = decode_contents(&invalid).err().context("missing raw crash decoder refusal")?;
+    assert!(unredacted.to_string().contains(marker));
+    let refused = decode(&invalid).err().context("missing closed crash decoder refusal")?;
+    assert_eq!(refused.to_string(), "secure_restore_crash_replay_refused");
     assert_eq!(saved.first, first);
     assert!(saved.second.is_none());
     assert!(!saved.first.attempt.reaped);
