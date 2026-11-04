@@ -317,21 +317,17 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
                         return false;
                     }
                     for member in item.items {
-                        if let syn::ImplItem::Fn(f) = member {
-                            if !matches!(f.vis, syn::Visibility::Inherited) {
-                                return false;
-                            }
+                        if let syn::ImplItem::Fn(f) = member
+                            && !matches!(f.vis, syn::Visibility::Inherited)
+                        {
+                            return false;
                         }
                     }
                 }
-                syn::Item::Trait(item) => {
-                    if item
-                        .items
-                        .iter()
-                        .any(|i| matches!(i, syn::TraitItem::Fn(f) if f.default.is_some()))
-                    {
-                        return false;
-                    }
+                syn::Item::Trait(item)
+                    if item.items.iter().any(|i| matches!(i, syn::TraitItem::Fn(f) if f.default.is_some())) =>
+                {
+                    return false;
                 }
                 _ => {}
             }
