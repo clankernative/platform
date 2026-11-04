@@ -1852,7 +1852,7 @@ mod tests {
                 let mut pending: [Option<VerifierPrepared>; 3] = [None, None, None];
                 let mut reference = VerifierModel::new();
                 let mut corrupted = false;
-                for &step in &program.steps {
+                for (index, &step) in program.steps.iter().enumerate() {
                     let expected = reference.apply(step);
                     let before = verifier_image(&db)?;
                     let accepted = match step {
@@ -1892,6 +1892,9 @@ mod tests {
                         }
                         VerifyStep::Rotate => {
                             let grant = fixture::issue("model-grant").ceiling;
+                        // A new scheduled rotation is a fresh intent. Reusing
+                        // one invocation would exercise receipt recovery instead.
+                        let invocation = format!("model-rotation-{index}");
                             let tx =
                                 db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                             let accepted = matches!(
@@ -1901,7 +1904,7 @@ mod tests {
                                     &fixture::snapshot(&receipt),
                                     super::super::RotationIntent {
                                         grant: &grant,
-                                        invocation: "model-rotation",
+                                        invocation: &invocation,
                                         instruction_slot: 0,
                                         recipient: "issuer/human-1",
                                         session: "session-1",
