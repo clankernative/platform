@@ -1,8 +1,8 @@
 //! Settlement of a reserved restore's DATA observation. Neither disposition
 //! admits a target, changes the fenced epoch, nor permits copy, key or writer use.
 use super::{Current, EpochStore, Phase, Snapshot, Versioned, advance};
-use anyhow::{Result, ensure};
 use crate::security_epoch::kernel::restore::Policy;
+use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use serde::{Deserialize, Serialize};
 
