@@ -2366,7 +2366,13 @@ mod tests {
             assert!(!job.contains("path: ../.toolchains"));
             assert!(!job.contains("name: day2-verify-${{ github.run_id }}"));
             assert!(!job.contains("platform/build-out platform/artifacts"));
-            let steps = job.split("      - ").skip(1).collect::<Vec<_>>();
+            let selected = job
+                .split_once(
+                    "      - name: Select authenticated artifacts from successful producer attempts\n",
+                )
+                .unwrap()
+                .1;
+            let steps = selected.split("      - ").skip(1).collect::<Vec<_>>();
             for (index, step) in steps.iter().enumerate() {
                 if !step.contains("uses: actions/download-artifact@")
                     || !step.contains("continue-on-error: true")
@@ -2612,6 +2618,18 @@ mod tests {
             assert!(download.contains("timeout-minutes: 2"));
             assert!(download.contains("continue-on-error: true"));
         }
+        let first = ci_step(
+            &final_join,
+            "Download retained compiler actions from the admitted preparation",
+        );
+        let retry = ci_step(&final_join, "Retry retained compiler action download once");
+        assert!(retry.contains(
+            "if: ${{ !cancelled() && steps.bootstrap_actions_download.outcome == 'failure' }}"
+        ));
+        assert_eq!(
+            first.split_once("        with:\n").unwrap().1.trim(),
+            retry.split_once("        with:\n").unwrap().1.trim()
+        );
         let extract = "Restore retained compiler action data before admission bootstrap";
         let bootstrap = "Bootstrap the current source artifact admission guard";
         assert!(final_join.find(extract).unwrap() < final_join.find(bootstrap).unwrap());
