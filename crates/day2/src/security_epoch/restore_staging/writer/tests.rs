@@ -105,12 +105,12 @@ fn same_creator_reset_image_and_actual_session_remain_borrowed_and_drop_refuses_
 fn same_inode_same_length_overwrite_cannot_reuse_a_previous_positive_check() -> Result<()> {
     let mut world = super::super::tests::world()?;
     let binding = binding(&mut world.owner);
-    let mut external = world.owner.state().creator.as_ref().unwrap().try_clone()?;
-    external.seek(SeekFrom::Start(120))?;
-    let mut saved = [0u8; 1]; external.read_exact(&mut saved)?;
     let (mut a, mut stop) = drain::configured(binding.clone());
     let mut session = Session::begin(&mut a, &mut stop)?;
     stage(&mut world.owner, &mut session, &binding)?;
+    let mut external = world.owner.state().creator.as_ref().unwrap().try_clone()?;
+    external.seek(SeekFrom::Start(120))?;
+    let mut saved = [0u8; 1]; external.read_exact(&mut saved)?;
     let mut source = Model::new(); let root = source.root.clone();
     let mut candidate = Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root)?;
     candidate.check()?;
@@ -128,11 +128,11 @@ fn same_inode_same_length_overwrite_cannot_reuse_a_previous_positive_check() -> 
 fn replacing_creator_with_byte_equal_named_file_cannot_replace_first_creator_identity() -> Result<()> {
     let mut world = super::super::tests::world()?;
     let binding = binding(&mut world.owner);
-    let path = world.owner.state().target_path()?;
-    let bytes = std::fs::read(&path)?;
     let (mut a, mut stop) = drain::configured(binding.clone());
     let mut session = Session::begin(&mut a, &mut stop)?;
     stage(&mut world.owner, &mut session, &binding)?;
+    let path = world.owner.state().target_path()?;
+    let bytes = std::fs::read(&path)?;
     let mut source = Model::new(); let root = source.root.clone();
     let mut candidate = Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root)?;
     std::fs::rename(&path, path.with_extension("old"))?;
