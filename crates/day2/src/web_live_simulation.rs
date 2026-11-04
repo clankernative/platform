@@ -485,6 +485,7 @@ fn shared_refresh_rejects_revocation_and_expiry_during_render_before_publishing(
 /// histories poll the actual production body and use real bounded channels.
 mod transport_histories {
     use super::*;
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
@@ -520,7 +521,7 @@ mod transport_histories {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    enum Decision { Applied, Full, Closed, Unavailable, Fault }
+    enum Decision { Applied, Full, Closed, Unavailable }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
     enum Read { Pending, Frame(Frame), Interrupted, Eof, Absent, InvalidFrame }
