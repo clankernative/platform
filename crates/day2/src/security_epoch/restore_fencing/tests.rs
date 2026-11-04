@@ -99,7 +99,9 @@ impl Model {
     pub(in crate::security_epoch) fn at(&mut self, lower: u64, upper: u64) {
         self.lower = lower;
         self.upper = upper;
-        if let Some(clock) = &self.external_clock { clock.set((lower, upper)); }
+        if let Some(clock) = &self.external_clock {
+            clock.set((lower, upper));
+        }
     }
 }
 impl sealed::Source for Model {}
@@ -115,7 +117,10 @@ impl Source for Model {
             !(self.post_error && self.stop_calls > 0),
             "controlled_postcheck_failure"
         );
-        let (lower, upper) = self.external_clock.as_ref().map_or((self.lower, self.upper), |clock| clock.get());
+        let (lower, upper) = self
+            .external_clock
+            .as_ref()
+            .map_or((self.lower, self.upper), |clock| clock.get());
         Ok(Clock {
             binding: self.binding.clone(),
             domain: self.domain.clone(),
@@ -528,7 +533,9 @@ pub(in crate::security_epoch) fn at(session: &mut Session<'_, Model>, lower: u64
     session.source.at(lower, upper);
 }
 
-pub(in crate::security_epoch) fn clock_handle(session: &mut Session<'_, Model>) -> Rc<Cell<(u64, u64)>> {
+pub(in crate::security_epoch) fn clock_handle(
+    session: &mut Session<'_, Model>,
+) -> Rc<Cell<(u64, u64)>> {
     let clock = Rc::new(Cell::new((session.source.lower, session.source.upper)));
     session.source.external_clock = Some(clock.clone());
     clock

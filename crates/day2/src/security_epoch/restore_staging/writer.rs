@@ -73,7 +73,11 @@ fn stage<A: Checks, F: fence::Source>(
             }
         }
     }
-    let mut guard = Birth { owner, session, done: false };
+    let mut guard = Birth {
+        owner,
+        session,
+        done: false,
+    };
     let original = guard.session.identity();
     guard.session.require_join(binding, &original)?;
     ensure!(
@@ -131,7 +135,10 @@ impl Target {
             "restore_writer_staged_target_changed"
         );
         ensure!(
-            state.birth_original.as_ref().is_some_and(|birth| birth.same(&self.original)),
+            state
+                .birth_original
+                .as_ref()
+                .is_some_and(|birth| birth.same(&self.original)),
             "restore_writer_creator_original_changed"
         );
         let file = state.creator.as_ref().context("restore_creator_missing")?;
@@ -165,7 +172,8 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Guard<'_, '_, A, F, W> 
 }
 impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
     fn retained(&mut self, target: &Target) -> Result<()> {
-        self.session.require_join(&target.binding, &target.original)?;
+        self.session
+            .require_join(&target.binding, &target.original)?;
         let checked = self.owner.current().and_then(|()| {
             self.owner.state().join()?;
             target.join(self.owner.state())
@@ -179,8 +187,16 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
     fn current(&mut self, target: &Target, admission: Option<&Admission>) -> Result<()> {
         self.retained(target)?;
         if let Some(admission) = admission {
-            ensure!(admission.target.same(target), "restore_writer_admission_changed");
-            let creator = self.owner.state().creator.as_ref().context("restore_creator_missing")?;
+            ensure!(
+                admission.target.same(target),
+                "restore_writer_admission_changed"
+            );
+            let creator = self
+                .owner
+                .state()
+                .creator
+                .as_ref()
+                .context("restore_creator_missing")?;
             let checked = self.source.check(self.session, admission, creator);
             let post = self.retained(target);
             checked?;
@@ -195,7 +211,13 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
         operation: impl FnOnce(&mut File) -> Result<T>,
     ) -> Result<T> {
         self.current(target, admission)?;
-        let result = operation(self.owner.state().creator.as_mut().context("restore_creator_missing")?);
+        let result = operation(
+            self.owner
+                .state()
+                .creator
+                .as_mut()
+                .context("restore_creator_missing")?,
+        );
         // Run mandatory postchecks on primary IO failure, preserving that cause.
         let post = self.current(target, admission);
         let value = result?;
@@ -213,7 +235,9 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
         loop {
             let limit = usize::try_from(MAX_BYTES.saturating_sub(count).saturating_add(1))?
                 .min(buffer.len());
-            let n = self.io(target, admission, |file| Ok(file.read(&mut buffer[..limit])?))?;
+            let n = self.io(target, admission, |file| {
+                Ok(file.read(&mut buffer[..limit])?)
+            })?;
             count = count.checked_add(n as u64).context("restore_byte_count")?;
             ensure!(count <= MAX_BYTES, "restore_writer_image_bound");
             if n == 0 {
@@ -221,7 +245,10 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
             }
             hash.update(&buffer[..n]);
         }
-        ensure!((sum(hash)?, count) == target.image, "restore_writer_image_changed");
+        ensure!(
+            (sum(hash)?, count) == target.image,
+            "restore_writer_image_changed"
+        );
         Ok(())
     }
 }
@@ -243,20 +270,47 @@ impl<'a, 'original, A: Checks, F: fence::Source, W: Source<F>> Candidate<'a, 'or
         binding: Binding,
         settled_root: Digest,
     ) -> Result<Self> {
-        let mut guard = Guard { owner: &mut *owner, session: &mut *session, source: &mut *source, done: false };
-        ensure!(!guard.owner.state().writer_attempted, "restore_writer_attempt_spent");
+        let mut guard = Guard {
+            owner: &mut *owner,
+            session: &mut *session,
+            source: &mut *source,
+            done: false,
+        };
+        ensure!(
+            !guard.owner.state().writer_attempted,
+            "restore_writer_attempt_spent"
+        );
         // Known-May BEFORE any possible P3/writer admission send. Unknown
         // completion cannot retry or adopt the same path under another original.
         guard.owner.state().writer_attempted = true;
         let target = Target {
             binding,
-            original: guard.owner.state().birth_original.clone().context("restore_creator_original_missing")?,
+            original: guard
+                .owner
+                .state()
+                .birth_original
+                .clone()
+                .context("restore_creator_original_missing")?,
             settled_root,
-            image: guard.owner.state().frozen_image.clone().context("restore_reset_image_missing")?,
-            creator: guard.owner.state().creator_identity.context("restore_creator_identity_missing")?,
+            image: guard
+                .owner
+                .state()
+                .frozen_image
+                .clone()
+                .context("restore_reset_image_missing")?,
+            creator: guard
+                .owner
+                .state()
+                .creator_identity
+                .context("restore_creator_identity_missing")?,
         };
         guard.readback(&target, None)?;
-        let creator = guard.owner.state().creator.as_ref().context("restore_creator_missing")?;
+        let creator = guard
+            .owner
+            .state()
+            .creator
+            .as_ref()
+            .context("restore_creator_missing")?;
         let admitted = guard.source.admit(guard.session, &target, creator);
         let post = guard.retained(&target);
         let admission = admitted?;
@@ -266,7 +320,13 @@ impl<'a, 'original, A: Checks, F: fence::Source, W: Source<F>> Candidate<'a, 'or
         guard.readback(&target, Some(&admission))?;
         guard.done = true;
         drop(guard);
-        Ok(Self { owner, session, source, target, admission })
+        Ok(Self {
+            owner,
+            session,
+            source,
+            target,
+            admission,
+        })
     }
     fn check(&mut self) -> Result<()> {
         let mut guard = Guard {

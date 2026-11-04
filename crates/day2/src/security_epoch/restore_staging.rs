@@ -508,7 +508,11 @@ fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
                 | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::from_raw_mode(0o600),
         )?));
-        let created = s.creator.as_ref().context("restore_creator_missing")?.metadata()?;
+        let created = s
+            .creator
+            .as_ref()
+            .context("restore_creator_missing")?
+            .metadata()?;
         s.creator_identity = Some((created.dev(), created.ino()));
         #[cfg(test)]
         tests::after_create(s)?;

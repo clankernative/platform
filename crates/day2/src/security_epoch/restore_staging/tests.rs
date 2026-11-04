@@ -93,7 +93,9 @@ impl Checks for Fixture {
     }
     fn current(&mut self) -> Result<()> {
         self.calls += 1;
-        if let Some(clock) = self.expire_current.take() { clock.set((99, 100)); }
+        if let Some(clock) = self.expire_current.take() {
+            clock.set((99, 100));
+        }
         ensure!(!self.refused, "fixture_refused");
         ensure!(
             !(self.fail_after_directory && self.state.directory_may_exist),
@@ -139,7 +141,11 @@ pub(super) fn world() -> Result<World> {
         source_digest,
     })
 }
-pub(super) fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Result<Fixture> {
+pub(super) fn fixture_owner(
+    source: PathBuf,
+    root_path: PathBuf,
+    database: Digest,
+) -> Result<Fixture> {
     // The fixture supplies the private-root precondition explicitly, independent
     // of the process umask. Production admission must still refuse public roots.
     std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700))?;
