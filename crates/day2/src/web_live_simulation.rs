@@ -880,4 +880,120 @@ mod transport_histories {
         }
         Ok(())
     }
+
+    fn path_is(expression: &syn::Expr, expected: &str) -> bool {
+        matches!(expression, syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len()==1 && path.path.is_ident(expected))
+    }
+
+    fn field_is(value: &syn::ExprStruct, name: &str, check: impl Fn(&syn::Expr)->bool) -> bool {
+        value.fields.iter().any(|field| matches!(&field.member,syn::Member::Named(member) if member==name) && check(&field.expr))
+    }
+
+    fn outer_elements(expression: &syn::Expr) -> bool {
+        matches!(expression,syn::Expr::Call(call) if path_is(&call.func,"elements") && call.args.len()==2 && matches!(&call.args[1],syn::Expr::Lit(literal) if matches!(&literal.lit,syn::Lit::Str(text) if text.value()=="outer")))
+    }
+
+    #[derive(Default)]
+    struct Factory { channels:usize, bounded:usize, terminals:usize, bodies:usize, bound_bodies:usize, work:usize, initial:usize }
+    impl<'ast> syn::visit::Visit<'ast> for Factory {
+        fn visit_expr_call(&mut self, node:&'ast syn::ExprCall) {
+            if let syn::Expr::Path(path)=node.func.as_ref() {
+                let parts=path.path.segments.iter().map(|part|part.ident.to_string()).collect::<Vec<_>>();
+                if parts==["mpsc","channel"] {
+                    self.channels+=1;
+                    if node.args.len()==1 && matches!(&node.args[0],syn::Expr::Lit(literal) if matches!(&literal.lit,syn::Lit::Int(size) if size.base10_parse::<u8>().ok()==Some(1))) {self.bounded+=1;}
+                }
+                if parts==["oneshot","channel"] && node.args.is_empty() {self.terminals+=1;}
+            }
+            syn::visit::visit_expr_call(self,node);
+        }
+        fn visit_expr_struct(&mut self,node:&'ast syn::ExprStruct) {
+            if node.path.is_ident("LiveBody") {
+                self.bodies+=1;
+                if field_is(node,"receiver",|expr|path_is(expr,"receiver"))
+                    && field_is(node,"terminal",|expr|matches!(expr,syn::Expr::Call(call) if path_is(&call.func,"Some") && call.args.len()==1 && path_is(&call.args[0],"terminal")))
+                    && field_is(node,"ended",|expr|matches!(expr,syn::Expr::Lit(literal) if matches!(&literal.lit,syn::Lit::Bool(flag) if !flag.value))) {self.bound_bodies+=1;}
+            }
+            if node.path.is_ident("LiveWork") && field_is(node,"sender",|expr|path_is(expr,"sender")) && field_is(node,"terminal",|expr|path_is(expr,"terminal_sender")) {self.work+=1;}
+            syn::visit::visit_expr_struct(self,node);
+        }
+        fn visit_expr_method_call(&mut self,node:&'ast syn::ExprMethodCall) {
+            if node.method=="try_send" && path_is(&node.receiver,"sender") && node.args.len()==1 && outer_elements(&node.args[0]) {self.initial+=1;}
+            syn::visit::visit_expr_method_call(self,node);
+        }
+    }
+
+    #[derive(Default)]
+    struct Producer { full_exit:usize, terminal:usize, classifications:usize }
+    struct MatchesArgs { subject:syn::Expr, pattern:syn::Pat }
+    impl syn::parse::Parse for MatchesArgs {
+        fn parse(input:syn::parse::ParseStream<'_>)->syn::Result<Self> {
+            let subject=input.parse()?;input.parse::<syn::Token![,]>()?;
+            let pattern=syn::Pat::parse_multi(input)?;
+            if input.peek(syn::Token![,]) {input.parse::<syn::Token![,]>()?;}
+            Ok(Self{subject,pattern})
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Producer {
+        fn visit_expr_if(&mut self,node:&'ast syn::ExprIf) {
+            if matches!(node.cond.as_ref(),syn::Expr::MethodCall(check) if check.method=="is_err" && check.args.is_empty() && matches!(check.receiver.as_ref(),syn::Expr::MethodCall(send) if send.method=="try_send" && path_is(&send.receiver,"sender")))
+                && node.then_branch.stmts.len()==1 && matches!(&node.then_branch.stmts[0],syn::Stmt::Expr(syn::Expr::Break(_),_)) {self.full_exit+=1;}
+            syn::visit::visit_expr_if(self,node);
+        }
+        fn visit_expr_method_call(&mut self,node:&'ast syn::ExprMethodCall) {
+            if node.method=="send" && path_is(&node.receiver,"terminal") && node.args.len()==1 && outer_elements(&node.args[0]) {self.terminal+=1;}
+            syn::visit::visit_expr_method_call(self,node);
+        }
+        fn visit_macro(&mut self,node:&'ast syn::Macro) {
+            if node.path.is_ident("matches") && let Ok(args)=syn::parse2::<MatchesArgs>(node.tokens.clone()) {
+                let subject=matches!(&args.subject,syn::Expr::MethodCall(call) if call.method=="category" && call.args.is_empty() && path_is(&call.receiver,"classified"));
+                if let syn::Pat::Or(pattern)=args.pattern {
+                    let mut categories=pattern.cases.iter().filter_map(|pattern|if let syn::Pat::Path(path)=pattern {
+                        let parts=path.path.segments.iter().map(|part|part.ident.to_string()).collect::<Vec<_>>();
+                        if parts.len()==4 && parts[..3]==["crate","error","Category"] {Some(parts[3].clone())} else {None}
+                    } else {None}).collect::<Vec<_>>();categories.sort();
+                    if subject && pattern.cases.len()==4 && categories==["Authentication","Conflict","Forbidden","NotFound"] {self.classifications+=1;}
+                }
+            }
+            syn::visit::visit_macro(self,node);
+        }
+    }
+
+    fn production_wiring(source:&str)->bool {
+        use syn::visit::Visit;
+        let Ok(file)=syn::parse_file(source) else {return false;};
+        let mut factories=vec![];let mut producers=vec![];
+        for item in &file.items {
+            if let syn::Item::Impl(implementation)=item && let syn::Type::Path(owner)=implementation.self_ty.as_ref() {
+                for item in &implementation.items {
+                    if let syn::ImplItem::Fn(method)=item {
+                        if owner.path.is_ident("Host") && method.sig.ident=="live_response" {let mut visitor=Factory::default();visitor.visit_block(&method.block);factories.push(visitor);}
+                        if owner.path.is_ident("Subscription") && method.sig.ident=="run" {let mut visitor=Producer::default();visitor.visit_block(&method.block);producers.push(visitor);}
+                    }
+                }
+            }
+        }
+        factories.len()==1 && producers.len()==1 && factories.iter().all(|v|v.channels==1 && v.bounded==1 && v.terminals==1 && v.bodies==1 && v.bound_bodies==1 && v.work==1 && v.initial==1)
+            && producers.iter().all(|v|v.full_exit==2 && v.terminal==1 && v.classifications==1)
+    }
+
+    #[test]
+    fn transport_fixture_is_bound_to_actual_factory_and_producer_wiring() -> Result<()> {
+        let source=include_str!("web_live.rs");ensure!(production_wiring(source),"live_transport_actual_wiring_changed");
+        let start=source.find("pub(super) fn live_response(").context("live factory")?;
+        for (before,after) in [
+            ("mpsc::channel(1)","mpsc::channel(2)"),
+            ("terminal: Some(terminal)","terminal: None"),
+            ("terminal: terminal_sender","terminal: unrelated_terminal"),
+            ("sender.try_send(event).is_err()","sender.try_send(event).is_ok()"),
+            ("terminal.send(elements(&cleared, \"outer\"))","unrelated_terminal.send(elements(&cleared, \"outer\"))"),
+            ("crate::error::Category::Authentication","crate::error::Category::Internal"),
+        ] {
+            let offset=start+source[start..].find(before).context("live transport actual mutant")?;
+            let mut mutant=source.to_owned();mutant.replace_range(offset..offset+before.len(),after);
+            ensure!(!production_wiring(&mutant),"live_transport_wiring_mutant_escaped");
+        }
+        Ok(())
+    }
+
 }
