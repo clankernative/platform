@@ -2233,6 +2233,7 @@ mod tests {
                 || first.records.len() != program.steps.len()
             {
                 verifier_retain(&root, &program, VerifyControl::None, first)?;
+                verifier_retain(&root, &program, VerifyControl::None, second)?;
                 anyhow::bail!("verifier model disagreement; redacted source-bound case retained");
             }
             observations.push(
