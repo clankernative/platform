@@ -36,6 +36,9 @@ transition helpers or reads actual results to predict expectations. Every event
 compares the complete callback and intent rows, pending plan, clock and source,
 plus the exact adapter phases reached. Both complete runs are retained on a
 disagreement, including a disagreement occurring only on the second run.
+Initial cuts vary across commit and rollback. Generated steps run before the
+irreversible epoch advance as well as after restore; initially rolled-back
+histories must witness an actual later transaction, not only refusals.
 
 The ordinary SQLite fixture conditionally changes the callback row and inserts
 an acceptance-INTENT row in one transaction. These are fixture records, not

@@ -1177,19 +1177,32 @@ mod tests {
     fn seeded_histories_compare_complete_reservations_and_external_epoch_fences() -> Result<()> {
         for seed in 0u64..24 {
             let mut random = seed + 1;
+            let initial_cut = [Cut::Known, Cut::BeforeWrite, Cut::AfterRecord, Cut::AfterIntent, Cut::AfterCommit][seed as usize % 5];
             let mut steps = vec![
                 Step::Prepare { id: 1, input: 1 },
-                Step::Apply {
-                    cut: Cut::AfterCommit,
-                },
+                Step::Apply { cut: initial_cut },
                 Step::Reopen,
-                Step::Prepare { id: 1, input: 1 },
-                Step::Prepare { id: 2, input: 1 },
-                Step::Source { fault: 2 },
-                Step::RestoreBefore,
-                Step::Prepare { id: 1, input: 1 },
             ];
-            for _ in 0..40 {
+            let generated_start = steps.len();
+            let mut generated_end = generated_start;
+            for round in 0..40 {
+                if round == 20 {
+                    // Before irreversible fencing, ensure an initially rolled-back
+                    // reservation actually enters a generated transaction. Clearing
+                    // transient faults cannot lower the independent epoch.
+                    steps.extend([
+                        Step::Source { fault: 0 },
+                        Step::Clock { at: 1100 },
+                        Step::Prepare { id: 1, input: 1 },
+                        Step::Apply { cut: Cut::AfterRecord },
+                    ]);
+                    generated_end = steps.len();
+                    steps.extend([
+                        Step::Source { fault: 2 },
+                        Step::RestoreBefore,
+                        Step::Prepare { id: 1, input: 1 },
+                    ]);
+                }
                 random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
                 steps.push(match random % 7 {
                     0 => Step::Prepare {
@@ -1205,8 +1218,9 @@ mod tests {
                             Cut::AfterCommit,
                         ][(random >> 32) as usize % 5],
                     },
-                    2 => Step::Source {
-                        fault: ((random >> 32) % 6) as u8,
+                    2 => {
+                        let fault = ((random >> 32) % 6) as u8;
+                        Step::Source { fault: if round < 20 && matches!(fault, 2 | 3) { 0 } else { fault } }
                     },
                     3 => Step::Clock {
                         at: [999, 1099, 1100, 1150, 1299, 1300][(random >> 32) as usize % 6],
@@ -1217,7 +1231,9 @@ mod tests {
                 });
             }
             let runs = [history(&steps, false)?, history(&steps, false)?];
-            if !runs[0].agrees || !runs[1].agrees || runs[0] != runs[1] {
+            let needs_progress = matches!(initial_cut, Cut::BeforeWrite | Cut::AfterRecord | Cut::AfterIntent);
+            let generated_progress = runs[0].observations.get(generated_start..generated_end).is_some_and(|window| window.iter().any(|o| o.phases.contains(&Cut::BeforeWrite)));
+            if !runs[0].agrees || !runs[1].agrees || runs[0] != runs[1] || (needs_progress && !generated_progress) {
                 let path = retain(&steps, [false, false], runs)?;
                 anyhow::bail!("callback_history_divergence {}", path.display());
             }
