@@ -44,15 +44,15 @@ pub(super) fn cut(point: Point) -> Result<()> {
         if let Some((selected, marker)) = &*c.borrow()
             && *selected == point
         {
-                let pending = marker.with_extension("pending");
-                std::fs::write(&pending, b"staging-cut-ready")?;
-                std::fs::rename(&pending, marker)?;
-                // Parent retains the child's stdin and kills the same Child
-                // object after reading the closed marker. This is process loss,
-                // not a power-loss or hostile-kernel claim.
-                let mut byte = [0u8; 1];
-                std::io::stdin().read_exact(&mut byte)?;
-                anyhow::bail!("staging_crash_continuation_forbidden");
+            let pending = marker.with_extension("pending");
+            std::fs::write(&pending, b"staging-cut-ready")?;
+            std::fs::rename(&pending, marker)?;
+            // Parent retains the child's stdin and kills the same Child
+            // object after reading the closed marker. This is process loss,
+            // not a power-loss or hostile-kernel claim.
+            let mut byte = [0u8; 1];
+            std::io::stdin().read_exact(&mut byte)?;
+            anyhow::bail!("staging_crash_continuation_forbidden");
         }
         Ok(())
     })
@@ -717,16 +717,16 @@ fn actual_sql_constructor_cannot_reopen_either_path_or_deserialize_different_byt
             if let syn::Expr::Path(path) = &*call.func
                 && path.path.segments.iter().any(|s| s.ident == "Connection")
             {
-                    if path
-                        .path
-                        .segments
-                        .last()
-                        .is_some_and(|s| s.ident == "open_in_memory")
-                    {
-                        self.fresh += 1;
-                    } else {
-                        self.foreign += 1;
-                    }
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.ident == "open_in_memory")
+                {
+                    self.fresh += 1;
+                } else {
+                    self.foreign += 1;
+                }
             }
             visit::visit_expr_call(self, call)
         }
