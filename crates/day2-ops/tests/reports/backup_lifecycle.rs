@@ -253,7 +253,7 @@ fn generated(seed: u64, artifact: &str) -> Program {
             slot: 3,
             lose_reply: false,
         },
-        if seed % 2 == 0 {
+        if seed.is_multiple_of(2) {
             Event::RemoveMarker { slot: 3 }
         } else {
             Event::DamageArtifact { slot: 3 }
@@ -311,6 +311,7 @@ struct World {
     ids: Vec<Vec<u8>>,
     source_epoch: String,
     source_revision: u64,
+    restored_epochs: BTreeMap<u8, String>,
 }
 
 impl World {
@@ -345,6 +346,7 @@ impl World {
             ids,
             source_epoch: current.stamp.epoch,
             source_revision: current.stamp.revision,
+            restored_epochs: BTreeMap::new(),
         })
     }
 
@@ -475,13 +477,13 @@ impl World {
             json!({"valid":true,"marker":true,"rows":self.expected_rows(&bundle.rows),"same_authority":true,"sessions":[1,1]})
         } else { json!({"valid":false,"marker":bundle.marker}) })).collect::<BTreeMap<_,_>>();
         let restored = model.restored.iter().map(|(slot,rows)| (*slot,json!({
-            "rows":self.expected_rows(rows),"new_unique_epoch":true,"revision_advanced_once":true,
+            "rows":self.expected_rows(rows),"new_unique_epoch":true,"epoch_stable":true,"revision_advanced_once":true,
             "disabled":true,"sessions":[0,0],"desired_fenced":true,"authorization_refused":true
         }))).collect::<BTreeMap<_,_>>();
         json!({"rows":self.expected_rows(&model.rows),"same_source_authority":true,"source_enabled":true,"source_sessions":[1,1],"bundles":bundles,"restored":restored})
     }
 
-    fn observe(&self) -> Result<Value> {
+    fn observe(&mut self) -> Result<Value> {
         let source =
             Connection::open_with_flags(self.runtime.db(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let authority = authority_state::current(&source)?;
@@ -518,8 +520,10 @@ impl World {
                 let current = authority_state::current(&database)?;
                 let desired = day2::artifact::Instance::load(runtime.instance_path())?;
                 let binding = &desired.apps["app"];
+                let epoch_stable = self.restored_epochs.entry(slot).or_insert_with(|| current.stamp.epoch.clone()) == &current.stamp.epoch;
                 Ok(json!({"rows":actual_rows(&database)?,
                     "new_unique_epoch":current.stamp.epoch != self.source_epoch && epochs.insert(current.stamp.epoch),
+                    "epoch_stable":epoch_stable,
                     "revision_advanced_once":current.stamp.revision == self.source_revision + 1,
                     "disabled":!current.document.enabled,"sessions":sessions(&database)?,
                     "desired_fenced":binding.authority.is_none() && binding.readers.is_empty() && binding.writers.is_empty(),
@@ -544,8 +548,8 @@ fn actual_rows(database: &Connection) -> Result<Vec<Value>> {
         .query_map([], |row| {
             Ok(json!([
                 row.get::<_, String>(0)?,
-                row.get::<_, u64>(1)?,
-                row.get::<_, u64>(2)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
@@ -558,7 +562,7 @@ fn actual_rows(database: &Connection) -> Result<Vec<Value>> {
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn sessions(database: &Connection) -> Result<[u64; 2]> {
+fn sessions(database: &Connection) -> Result<[i64; 2]> {
     Ok([
         database.query_row("SELECT COUNT(*) FROM day2_web_sessions", [], |row| {
             row.get(0)
@@ -608,14 +612,12 @@ fn run_with(program: &Program, artifact: &Path, control: OracleControl) -> Resul
     let mut records = Vec::new();
     for (index, event) in program.events.iter().enumerate() {
         let expected_decision = model.step(event);
-        if control == OracleControl::IncludeUncommitted {
-            if let Event::Take { slot, .. } = event {
-                if let Some(pending) = &model.pending {
-                    if let Some(bundle) = model.bundles.get_mut(slot) {
-                        bundle.rows = pending.clone();
-                    }
-                }
-            }
+        if control == OracleControl::IncludeUncommitted
+            && let Event::Take { slot, .. } = event
+            && let Some(pending) = &model.pending
+            && let Some(bundle) = model.bundles.get_mut(slot)
+        {
+            bundle.rows = pending.clone();
         }
         let actual_decision = world.event(event).unwrap_or(Decision::Refused);
         let expected_observation = world.expected(&model);
