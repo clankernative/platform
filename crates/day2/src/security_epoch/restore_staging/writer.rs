@@ -4,6 +4,7 @@
 //! cloned continuity ID onto separately acquired native authority.
 use super::*;
 use crate::security_epoch::restore_fencing::{self as fence, ApprovalIdentity, Binding, Session};
+use std::fs::File;
 
 mod sealed {
     pub trait Source {}
