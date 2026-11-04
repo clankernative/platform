@@ -92,6 +92,12 @@ fn same_creator_reset_image_and_actual_session_remain_borrowed_and_drop_refuses_
     let mut source2 = Model::new();
     assert!(Candidate::admit(&mut world.owner, &mut session2, &mut source2, binding, root).is_err());
     assert_eq!(source2.calls, 0);
+    let state = world.owner.state();
+    let mut reopened = super::super::tests::fixture_owner(
+        state.input.source.clone(), state.root_path.clone(), state.input.database.clone(),
+    )?;
+    assert!(execute(&mut reopened).is_err());
+    assert!(reopened.state().refused);
     Ok(())
 }
 
@@ -216,23 +222,39 @@ fn caught_check_unwind_and_expiry_poison_actual_owners_not_only_candidate() -> R
 
 #[test]
 fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api() {
-    let source = include_str!("../writer.rs");
-    let file = syn::parse_file(source).unwrap();
-    let origin = file.items.iter().find_map(|item| match item {
-        syn::Item::Enum(item) if item.ident == "AdmissionOrigin" => Some(item), _ => None,
-    }).unwrap();
-    assert!(origin.variants.iter().all(|v| v.attrs.iter().any(|a| matches!(&a.meta,
-        syn::Meta::List(m) if m.path.is_ident("cfg") && m.tokens.to_string() == "test"))));
-    for item in file.items {
-        if let syn::Item::Impl(item) = item {
-            assert!(item.trait_.as_ref().is_none_or(|(_, p, _)| !p.is_ident("Source")));
-            for member in item.items {
-                if let syn::ImplItem::Fn(f) = member {
-                    assert!(matches!(f.vis, syn::Visibility::Inherited));
+    fn closed(source: &str) -> bool {
+        let file = syn::parse_file(source).unwrap();
+        let mut origins = 0;
+        for item in file.items {
+            match item {
+                syn::Item::Enum(item) if item.ident == "AdmissionOrigin" => {
+                    origins += 1;
+                    if !item.variants.iter().all(|v| v.attrs.iter().any(|a| matches!(&a.meta,
+                        syn::Meta::List(m) if m.path.is_ident("cfg") && m.tokens.to_string() == "test"))) {
+                        return false;
+                    }
                 }
+                syn::Item::Impl(item) => {
+                    if item.trait_.as_ref().is_some_and(|(_, p, _)| p.segments.last().is_some_and(|s| s.ident == "Source")) {
+                        return false;
+                    }
+                    for member in item.items {
+                        if let syn::ImplItem::Fn(f) = member {
+                            if !matches!(f.vis, syn::Visibility::Inherited) { return false; }
+                        }
+                    }
+                }
+                syn::Item::Trait(item) => {
+                    if item.items.iter().any(|i| matches!(i, syn::TraitItem::Fn(f) if f.default.is_some())) { return false; }
+                }
+                _ => {}
             }
         }
+        origins == 1
     }
-    // No genuine owner or filesystem object can be recovered from Candidate.
-
+    let source = include_str!("../writer.rs");
+    assert!(closed(source));
+    assert!(!closed(&source.replacen("enum AdmissionOrigin {", "enum AdmissionOrigin { UntrustedReceipt,", 1)));
+    assert!(!closed(&(source.to_owned() + "\nimpl Source<UntrustedClock> for UntrustedData {}")));
+    assert!(!closed(&source.replacen("    fn check(&mut self)", "    pub fn check(&mut self)", 1)));
 }

@@ -137,7 +137,7 @@ pub(super) fn world() -> Result<World> {
         source_digest,
     })
 }
-fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Result<Fixture> {
+pub(super) fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Result<Fixture> {
     let root = File::open(&root_path)?;
     let scope = Rc::new(());
     let state = State {
