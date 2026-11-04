@@ -77,7 +77,12 @@ fn build_metrics(bytes: &[u8]) -> Option<BuildMetrics> {
             analysis_time_ms: number(timing, "/analysisPhaseTimeInMs"),
             execution_time_ms: number(timing, "/executionPhaseTimeInMs"),
             action_requests_including_cache: number(action, "/actionsExecuted"),
-            rustc_requests_including_cache: named("actionData", "mnemonic", "Rustc", "actionsExecuted"),
+            rustc_requests_including_cache: named(
+                "actionData",
+                "mnemonic",
+                "Rustc",
+                "actionsExecuted",
+            ),
             disk_cache_hit_spawns: named("runnerCount", "name", "disk cache hit", "count"),
             local_action_cache_hits: number(action, "/actionCacheStatistics/hits"),
             local_action_cache_misses: number(action, "/actionCacheStatistics/misses"),
@@ -592,7 +597,8 @@ mod tests {
 
     #[test]
     fn metrics_neither_supply_completion_nor_replace_a_valid_process_outcome() {
-        let event = br#"{"id":{"buildMetrics":{}},"buildMetrics":{"timingMetrics":{"wallTimeInMs":"12"}}}"#;
+        let event =
+            br#"{"id":{"buildMetrics":{}},"buildMetrics":{"timingMetrics":{"wallTimeInMs":"12"}}}"#;
         assert!(build_metrics(event).is_some());
         assert!(finished(event).is_err());
         let mut duplicate = event.to_vec();
@@ -605,8 +611,10 @@ mod tests {
         assert!(build_metrics(&complete).is_none());
         assert!(finished(&complete).is_ok());
         let mut failed = event.to_vec();
-        failed.extend_from_slice(br#"
-{"id":{"buildFinished":{}},"finished":{"exitCode":{"name":"BUILD_FAILURE","code":1}}}"#);
+        failed.extend_from_slice(
+            br#"
+{"id":{"buildFinished":{}},"finished":{"exitCode":{"name":"BUILD_FAILURE","code":1}}}"#,
+        );
         assert!(build_metrics(&failed).is_some());
         assert!(finished(&failed).is_err());
         assert!(build_metrics(&success_events()).is_none());
@@ -859,6 +867,27 @@ mod tests {
         assert_eq!(failure.capture, Some("events"));
         assert!(failure.retained);
         assert!(!error.to_string().contains("PRIVATE"));
+
+        // Even valid success events and useful metrics cannot override the
+        // genuine nonzero child. Exercise the same capture/report wiring.
+        let events = root.path().join("metric-events");
+        let mut bytes = success_events();
+        bytes.extend_from_slice(
+            br#"
+{"id":{"buildMetrics":{}},"buildMetrics":{"timingMetrics":{"wallTimeInMs":"12"}}}"#,
+        );
+        private_write(&events, &bytes)?;
+        let error = capture(
+            root.path(),
+            &mut fixture_command("failure")?,
+            Duration::from_secs(3),
+            &events,
+        )
+        .unwrap_err();
+        let failure = error.downcast_ref::<Failure>().context("real child outcome")?;
+        assert_eq!(failure.process.category, "exit");
+        assert_eq!(failure.process.code, Some(7));
+        assert_eq!(failure.capture, None);
         Ok(())
     }
 
