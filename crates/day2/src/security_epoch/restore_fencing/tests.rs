@@ -518,3 +518,8 @@ pub(in crate::security_epoch) fn configured(binding: Binding) -> (Approval, Mode
     source.binding = binding;
     (original, source)
 }
+
+// Test-only clock cut on the actual controlled retained Session.
+pub(in crate::security_epoch) fn at(session: &mut Session<'_, Model>, lower: u64, upper: u64) {
+    session.source.at(lower, upper);
+}

@@ -58,11 +58,14 @@ struct State {
     directory_may_exist: bool,
     directory: Option<File>,
     creator: Option<File>,
+    creator_identity: Option<(u64, u64)>,
+    frozen_image: Option<(Digest, u64)>,
     source: Option<File>,
     sql: Option<Connection>,
     consumed: u64,
     written: u64,
     complete: bool,
+    writer_attempted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +128,7 @@ impl State {
                 named.is_file()
                     && named.dev() == held.dev()
                     && named.ino() == held.ino()
+                    && self.creator_identity == Some((held.dev(), held.ino()))
                     && named.mode() & 0o777 == 0o600,
                 "restore_staging_creator_changed"
             );
@@ -463,6 +467,9 @@ fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
     tests::cut(tests::Point::Closed)?;
     let expected = Digest::new(&image);
     let length = u64::try_from(image.len())?;
+    // Freeze the reset image BEFORE any creation. A later projection or current
+    // pathname cannot supply this commitment to new-writer admission.
+    owner.state().frozen_image = Some((expected.clone(), length));
     // Reset precedes creation. A crash never leaves a complete active source
     // image at the target; any partial or uncertain write stays unpublished.
     boundary(owner, |s| {
@@ -500,6 +507,8 @@ fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
                 | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::from_raw_mode(0o600),
         )?));
+        let created = s.creator.as_ref().context("restore_creator_missing")?.metadata()?;
+        s.creator_identity = Some((created.dev(), created.ino()));
         #[cfg(test)]
         tests::after_create(s)?;
         Ok(())
@@ -568,4 +577,6 @@ fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
+
+mod writer;

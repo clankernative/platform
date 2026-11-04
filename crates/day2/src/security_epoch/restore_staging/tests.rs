@@ -78,7 +78,7 @@ use rusqlite::OpenFlags;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use syn::visit::{self, Visit};
 
-struct Fixture {
+pub(super) struct Fixture {
     state: State,
     refused: bool,
     calls: usize,
@@ -113,13 +113,13 @@ impl Checks for Fixture {
     }
 }
 
-struct World {
+pub(super) struct World {
     source: tempfile::TempDir,
     target: tempfile::TempDir,
-    owner: Fixture,
+    pub(super) owner: Fixture,
     source_digest: Digest,
 }
-fn world() -> Result<World> {
+pub(super) fn world() -> Result<World> {
     let (source, mut db) = fixture::database()?;
     fixture::committed_issue(&mut db)?;
     db.execute_batch("CREATE TABLE fixture_business(value TEXT) STRICT; INSERT INTO fixture_business VALUES('keep-data'); CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
@@ -158,11 +158,14 @@ fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Resul
         directory_may_exist: false,
         directory: None,
         creator: None,
+        creator_identity: None,
+        frozen_image: None,
         source: None,
         sql: None,
         consumed: 0,
         written: 0,
         complete: false,
+        writer_attempted: false,
     };
     Ok(Fixture {
         state,
@@ -388,6 +391,7 @@ fn expected(point: Point) -> Observation {
             Copied | Synced => ImageState::Revoked,
         },
         complete: false,
+        writer_attempted: false,
         refused: true,
         creator: matches!(point, FirstWrite | Copied | Synced),
         sql_held: matches!(point, BeforeCommit | AfterCommit),
