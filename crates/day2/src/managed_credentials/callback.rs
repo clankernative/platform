@@ -619,21 +619,40 @@ mod tests {
         Ok(serde_json::to_value(plan(1, 1, &initial())?)?)
     }
 
-
     #[test]
-    fn competing_prepared_invocations_cannot_reserve_the_same_callback_twice()->Result<()> {
-        for winner in [1,2] {
-            let dir=tempfile::tempdir()?;let path=dir.path().join("race.sqlite");
-            let mut first=Provider::create(&path)?;let mut second=Provider::open(&path)?;
-            let a=plan(winner,1,&first.rows()?.callback)?;
-            let b=plan(3-winner,2,&second.rows()?.callback)?;
-            first.apply(&a,&source(),1100,Cut::Known)?;
-            let committed=second.rows()?;
-            assert!(second.apply(&b,&source(),1100,Cut::Known).is_err());
-            assert_eq!(second.rows()?,committed);
-            assert_eq!(committed.intents.len(),1);
-            assert!(matches!(decide(&binding(),&invocation(winner,1),&source(),1110,&committed.callback)?,Decision::Existing(_)));
-            assert!(decide(&binding(),&invocation(3-winner,2),&source(),1110,&committed.callback).is_err());
+    fn competing_prepared_invocations_cannot_reserve_the_same_callback_twice() -> Result<()> {
+        for winner in [1, 2] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("race.sqlite");
+            let mut first = Provider::create(&path)?;
+            let mut second = Provider::open(&path)?;
+            let a = plan(winner, 1, &first.rows()?.callback)?;
+            let b = plan(3 - winner, 2, &second.rows()?.callback)?;
+            first.apply(&a, &source(), 1100, Cut::Known)?;
+            let committed = second.rows()?;
+            assert!(second.apply(&b, &source(), 1100, Cut::Known).is_err());
+            assert_eq!(second.rows()?, committed);
+            assert_eq!(committed.intents.len(), 1);
+            assert!(matches!(
+                decide(
+                    &binding(),
+                    &invocation(winner, 1),
+                    &source(),
+                    1110,
+                    &committed.callback
+                )?,
+                Decision::Existing(_)
+            ));
+            assert!(
+                decide(
+                    &binding(),
+                    &invocation(3 - winner, 2),
+                    &source(),
+                    1110,
+                    &committed.callback
+                )
+                .is_err()
+            );
         }
         Ok(())
     }
@@ -1606,8 +1625,10 @@ mod tests {
         );
         for run in &archive.runs {
             ensure!(
-                run.trace.progress.len() <= 6 && run.trace.cleanup_closed != Some(false)
-                    && (!run.trace.progress.contains(&CrashStage::Spawned) || run.observation.is_some()
+                run.trace.progress.len() <= 6
+                    && run.trace.cleanup_closed != Some(false)
+                    && (!run.trace.progress.contains(&CrashStage::Spawned)
+                        || run.observation.is_some()
                         || run.trace.cleanup_closed == Some(true)),
                 "callback_crash_unresolved_cleanup"
             );
