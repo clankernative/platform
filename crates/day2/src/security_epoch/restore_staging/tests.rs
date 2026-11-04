@@ -19,12 +19,12 @@ enum Action {
 }
 thread_local! {static CUT:Cell<Option<(Point,Action)>>=const{Cell::new(None)};}
 pub(super) fn cut(point: Point) -> Result<()> {
-    if let Some((selected, action)) = CUT.with(Cell::get) {
-        if selected == point {
-            match action {
-                Action::Refuse => anyhow::bail!("staging_fixture_cut"),
-                Action::Panic => panic!("staging_fixture_unwind"),
-            }
+    if let Some((selected, action)) = CUT.with(Cell::get)
+        && selected == point
+    {
+        match action {
+            Action::Refuse => anyhow::bail!("staging_fixture_cut"),
+            Action::Panic => panic!("staging_fixture_unwind"),
         }
     }
     SOURCE_SWAP.with(|swap| -> Result<()> {
@@ -41,8 +41,9 @@ pub(super) fn cut(point: Point) -> Result<()> {
         Ok(())
     })?;
     CRASH.with(|c| -> Result<()> {
-        if let Some((selected, marker)) = &*c.borrow() {
-            if *selected == point {
+        if let Some((selected, marker)) = &*c.borrow()
+            && *selected == point
+        {
                 let pending = marker.with_extension("pending");
                 std::fs::write(&pending, b"staging-cut-ready")?;
                 std::fs::rename(&pending, marker)?;
@@ -52,7 +53,6 @@ pub(super) fn cut(point: Point) -> Result<()> {
                 let mut byte = [0u8; 1];
                 std::io::stdin().read_exact(&mut byte)?;
                 anyhow::bail!("staging_crash_continuation_forbidden");
-            }
         }
         Ok(())
     })
@@ -714,8 +714,9 @@ fn actual_sql_constructor_cannot_reopen_either_path_or_deserialize_different_byt
     }
     impl<'ast> Visit<'ast> for Opens {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if let syn::Expr::Path(path) = &*call.func {
-                if path.path.segments.iter().any(|s| s.ident == "Connection") {
+            if let syn::Expr::Path(path) = &*call.func
+                && path.path.segments.iter().any(|s| s.ident == "Connection")
+            {
                     if path
                         .path
                         .segments
@@ -726,7 +727,6 @@ fn actual_sql_constructor_cannot_reopen_either_path_or_deserialize_different_byt
                     } else {
                         self.foreign += 1;
                     }
-                }
             }
             visit::visit_expr_call(self, call)
         }
