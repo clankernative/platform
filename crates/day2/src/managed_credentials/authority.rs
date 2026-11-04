@@ -863,6 +863,45 @@ mod tests {
     }
 
     #[test]
+    fn fixture_source_does_not_rewind_to_an_older_request_minimum_after_a_fresh_read() -> Result<()> {
+        for elapsed_key_work in [false, true] {
+            let f = Fixture::new()?;
+            let fixture = SelectedAuthority::fixture(vec![f.selected.clone()], f.keys.clone())?;
+            super::super::effects::scope(f.clock.clone(), || -> Result<()> {
+                if elapsed_key_work {
+                    let clock = f.clock.clone();
+                    *f.keys.cut.lock().unwrap() = Some(Box::new(move || {
+                        clock.0.lock().unwrap().2 += Duration::from_secs(2);
+                    }));
+                    fixture.verification_keys(&f.selected.binding, &f.selected.management, 1100)?;
+                } else {
+                    assert_eq!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1101)?, Some(7));
+                }
+                // This is an older captured request's lower bound, not a
+                // command to rewind the source's actual observation clock.
+                assert_eq!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1100)?, Some(7));
+                assert_eq!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1199)?, Some(7));
+                assert!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1200).is_err());
+                Ok(())
+            })?;
+            assert_eq!(f.keys.calls.lock().unwrap().len(), usize::from(elapsed_key_work));
+        }
+        let f = Fixture::new()?;
+        let fixture = SelectedAuthority::fixture(vec![f.selected.clone()], f.keys.clone())?;
+        let clock = f.clock.clone();
+        *f.keys.cut.lock().unwrap() = Some(Box::new(move || {
+            clock.0.lock().unwrap().2 += Duration::from_secs(100);
+        }));
+        super::super::effects::scope(f.clock.clone(), || {
+            assert!(fixture.verification_keys(&f.selected.binding, &f.selected.management, 1100).is_err());
+            // Expiry at the post-read is permanent in the source clock;
+            // an older capture cannot select the once-ready snapshot again.
+            assert!(fixture.verification_epoch(&f.selected.binding, &f.selected.management, "verify-v1", 1100).is_err());
+        });
+        Ok(())
+    }
+
+    #[test]
     fn exact_verifier_and_local_epoch_never_borrow_encryption_or_load_in_sql() -> Result<()> {
         let f = Fixture::new()?;
         assert_eq!(f.acquire()?.verifier_version, "verify-v1");
