@@ -21,6 +21,9 @@ cut compares actual decisions and polls, queue length, producer/receiver state,
 terminal wiring, permanent termination and delivered frames for every connection.
 When a pending poll must become ready, the actual waker must be notified. Extra
 notifications are allowed and recorded; their count is not an authority proof.
+"Delivered" in a record means yielded by `LiveBody::poll_next` to the controlled
+consumer. It is not socket completion, browser receipt or an exposure
+acknowledgement.
 
 Production `elements` encodes the fixture frames. An independent strict SSE
 parser checks one event, the exact mode/data fields and the reconstructed public
