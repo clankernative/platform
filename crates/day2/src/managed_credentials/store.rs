@@ -2606,7 +2606,7 @@ mod tests {
                     // Fresh controlled readiness is supplied independently of both
                     // database copies, not recovered from either backup's epoch.
                     let selected = epoch_selection(8);
-                    let authority = SelectedAuthority::new(
+                    let authority = SelectedAuthority::fixture(
                         vec![selected.clone()],
                         std::sync::Arc::new(EpochKeys),
                     )?;
@@ -4341,8 +4341,45 @@ mod tests {
         use super::super::{authority::SelectedAuthority, issuance::Authority};
         super::super::effects::scope(super::super::simulation::World::new(712), || {
             let initial = epoch_selection(7);
-            let authority =
-                SelectedAuthority::new(vec![initial.clone()], std::sync::Arc::new(EpochKeys))?;
+            // Independent controlled epoch source; it does not read the
+            // SelectedAuthority snapshot or consult the credential database.
+            struct Source {
+                scope: super::super::authority::Selection,
+                epoch: std::sync::Mutex<(u64, u64)>,
+            }
+            impl super::super::authority::VerificationSource for Source {
+                fn current(
+                    &self,
+                    _: &day2_capabilities::credentials::CredentialFamilyBinding,
+                    _: &ManagementPolicy,
+                    minimum_time: i64,
+                ) -> Result<super::super::authority::VerificationObservation> {
+                    let (security_epoch, revision) = *self.epoch.lock().unwrap();
+                    Ok(super::super::authority::VerificationObservation {
+                        namespace: self.scope.binding.namespace.clone(),
+                        family: self.scope.binding.family.clone(),
+                        epoch_store: self.scope.binding.epoch_store.clone(),
+                        binding: Digest::of(&self.scope.binding)?,
+                        management: Digest::of(&self.scope.management)?,
+                        verifier: self.scope.verifier.clone(),
+                        security_epoch,
+                        revision,
+                        enabled: true,
+                        observed_at: 1000,
+                        ready_until: 1200,
+                        read_at: minimum_time,
+                    })
+                }
+            }
+            let source = std::sync::Arc::new(Source {
+                scope: initial.clone(),
+                epoch: std::sync::Mutex::new((7, 1)),
+            });
+            let authority = SelectedAuthority::new(
+                vec![initial.clone()],
+                std::sync::Arc::new(EpochKeys),
+                source.clone(),
+            )?;
             let (dir, mut db) = database()?;
             let receipt = committed_issue(&mut db)?;
             let token = authorize_reveal(
@@ -4378,6 +4415,9 @@ mod tests {
                 .is_some())
             };
             assert!(check(&db)?);
+            *source.epoch.lock().unwrap() = (8, 2);
+            // A genuinely newer epoch refuses the stale local selection too.
+            assert!(check(&db).is_err());
             authority.replace(vec![epoch_selection(8)])?;
             assert!(!check(&db)?);
             assert!(
@@ -4423,7 +4463,7 @@ mod tests {
         use super::super::{authority::SelectedAuthority, issuance::Authority};
         let initial = epoch_selection(8);
         let authority =
-            SelectedAuthority::new(vec![initial.clone()], std::sync::Arc::new(EpochKeys))?;
+            SelectedAuthority::fixture(vec![initial.clone()], std::sync::Arc::new(EpochKeys))?;
         authority.replace(Vec::new())?;
         assert!(authority.replace(vec![epoch_selection(7)]).is_err());
         assert!(
@@ -4510,7 +4550,7 @@ mod tests {
     fn selected_epoch_history_budget_refuses_without_eviction_or_partial_publication() -> Result<()>
     {
         use super::super::{authority::SelectedAuthority, issuance::Authority};
-        let authority = SelectedAuthority::new(Vec::new(), std::sync::Arc::new(EpochKeys))?;
+        let authority = SelectedAuthority::fixture(Vec::new(), std::sync::Arc::new(EpochKeys))?;
         for generation in 1..=128 {
             let mut selection = epoch_selection(8);
             selection.binding.namespace.binding_generation = generation;
@@ -4547,7 +4587,7 @@ mod tests {
     #[test]
     fn selected_epoch_concurrent_advances_cannot_publish_the_losing_lower_epoch() -> Result<()> {
         use super::super::{authority::SelectedAuthority, issuance::Authority};
-        let authority = std::sync::Arc::new(SelectedAuthority::new(
+        let authority = std::sync::Arc::new(SelectedAuthority::fixture(
             vec![epoch_selection(7)],
             std::sync::Arc::new(EpochKeys),
         )?);
@@ -4586,7 +4626,7 @@ mod tests {
         #[test]
         fn selected_epoch_histories_preserve_the_maximum_after_removal(events in prop::collection::vec(0_u64..16, 1..64)) {
             use super::super::{authority::SelectedAuthority, issuance::Authority};
-            let authority = SelectedAuthority::new(Vec::new(), std::sync::Arc::new(EpochKeys)).unwrap();
+            let authority = SelectedAuthority::fixture(Vec::new(), std::sync::Arc::new(EpochKeys)).unwrap();
             let mut maximum = 0;
             let mut available = None;
             let binding = epoch_selection(1);

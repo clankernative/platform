@@ -111,13 +111,11 @@ pub(crate) fn wall_time() -> Result<i64> {
     )?)
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(crate) struct Instant {
     inner: InstantSource,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy)]
 enum InstantSource {
     Live(std::time::Instant),
@@ -128,7 +126,6 @@ enum InstantSource {
     },
 }
 
-#[cfg(test)]
 impl Instant {
     pub(crate) fn now() -> Self {
         #[cfg(test)]
