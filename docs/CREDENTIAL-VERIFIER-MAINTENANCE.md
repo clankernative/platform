@@ -36,6 +36,39 @@ maintenance. This core supplies no native maintenance purpose, operator route,
 background executor, accepted-key retirement policy or key-retirement action.
 Ingress still requires current lifecycle, epoch, grant and caller policy.
 
+## Exact current authority adapter
+
+`maintenance_authority::CurrentAuthority` connects that core to an explicit
+trusted local maintenance source. Construction grants no permission. The source
+must independently check its maintenance policy on every observation, including
+inside staging SQL, without provider I/O or waits. The adapter compares the full
+family binding and declaration, exact version and actual joined-row fingerprint,
+current epoch, accepted previous verifier key and distinct replacement key.
+Possessing the token, being its creator or reading a stored key-version string
+does not authorize maintenance.
+
+The observation is current at the caller's checked time. The first successful
+grant fixes its policy revision, target, key selection and original readiness
+window for this attempt. Later observations must select that same grant; they
+cannot extend its expiry. Missing permission, a stale or foreign observation,
+source error, changed grant, clock rewind or expiry permanently refuses the
+adapter. Source panics poison it. An observed refusal cannot be cleared by
+restoring the original source record. This is process-local refusal memory,
+not an external epoch witness or a substitute for the actual request owner.
+
+The existing core still reselects SQL state and authority around both key loads
+and at staging. Exact key-purpose checks, token authentication, one-row CAS and
+real commit settlement are unchanged. The adapter does not load keys, open SQL,
+sample a new clock or create an original. A future production source must retain
+the genuine maintenance original, enforce its unchanged deadline and refuse
+the owning request on all failures; a copied grant is not such a source.
+Provider or outer SQL failures are still owned by that caller. No production
+source, operator command, native execution or key retirement is enabled here.
+
+Real SQLite tests compare explicit independent fault histories with actual
+preparation and staging, including wrong-world grants, denial after key I/O,
+changed staging policy/epoch, durable state preservation and permanent refusal.
+
 The current private layout requires the verifier revision. Older layouts refuse
 without alteration and disposable installations must be redeployed. No schema
 upgrade, dual reader or compatibility path is added; the existing GoLinks

@@ -18,6 +18,9 @@ use day2_capabilities::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use zeroize::Zeroize;
 
+#[path = "maintenance_authority.rs"]
+pub(crate) mod maintenance_authority;
+
 /// Requested DATA, never a permit. The current row and authorizer select what
 /// may actually be prepared; creator/reveal permission is not consulted.
 pub(crate) struct Request<'a> {
@@ -391,7 +394,8 @@ pub(crate) struct VerifierSelection {
 
 /// Local current evidence only, including exact binding/family/target, epoch,
 /// accepted old verifier key and replacement. No provider I/O under caller TX.
-/// No production adapter, maintenance purpose or operator execution is enabled.
+/// The explicit local-source adapter supplies no native maintenance purpose or
+/// operator execution.
 pub(crate) trait VerifierAuthority {
     fn authorize(&self, target: &Target, now: i64) -> Result<VerifierSelection>;
 }
@@ -402,6 +406,15 @@ fn authorize_verifier(
     now: i64,
 ) -> Result<VerifierSelection> {
     let selected = authority.authorize(target, now)?;
+    validate_verifier_selection(&selected, target, now)?;
+    Ok(selected)
+}
+
+fn validate_verifier_selection(
+    selected: &VerifierSelection,
+    target: &Target,
+    now: i64,
+) -> Result<()> {
     ensure!(
         selected.security_epoch == target.identity.security_epoch
             && selected.previous.binding == target.binding.verifier
@@ -417,7 +430,7 @@ fn authorize_verifier(
                 .is_some_and(|n| n <= 300),
         "credential verifier maintenance selection unavailable or changed"
     );
-    Ok(selected)
+    Ok(())
 }
 
 fn verifier_key(
@@ -876,6 +889,396 @@ mod tests {
             },
             token,
         )
+    }
+
+    struct MaintenanceSource {
+        grant: RefCell<maintenance_authority::Grant>,
+        allowed: Arc<AtomicBool>,
+        checked_at: std::cell::Cell<Option<i64>>,
+        failure: std::cell::Cell<u8>,
+        calls: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct MaintenanceSourceFailure;
+
+    impl std::fmt::Display for MaintenanceSourceFailure {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("controlled maintenance source unavailable")
+        }
+    }
+
+    impl std::error::Error for MaintenanceSourceFailure {}
+
+    impl maintenance_authority::Source for MaintenanceSource {
+        fn observe(&self, _: &Target, now: i64) -> Result<maintenance_authority::Observation> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.failure.get() {
+                1 => return Err(MaintenanceSourceFailure.into()),
+                2 => panic!("controlled maintenance source panic"),
+                _ => {}
+            }
+            Ok(maintenance_authority::Observation {
+                checked_at: self.checked_at.get().unwrap_or(now),
+                grant: self
+                    .allowed
+                    .load(Ordering::SeqCst)
+                    .then(|| self.grant.borrow().clone()),
+            })
+        }
+    }
+
+    fn maintenance_source(
+        db: &Connection,
+        authority: &VerifyAuthority,
+    ) -> Result<(MaintenanceSource, Target)> {
+        let (target, _) = current(
+            db,
+            &Request {
+                binding: &authority.binding,
+                family: &authority.family,
+                version: &authority.version,
+            },
+            1000,
+        )?;
+        let source = MaintenanceSource {
+            grant: RefCell::new(maintenance_authority::Grant {
+                binding: authority.binding.clone(),
+                family: authority.family.clone(),
+                version: authority.version.clone(),
+                target: target.fingerprint.clone(),
+                selection: authority.selection.borrow().clone(),
+            }),
+            allowed: authority.allowed.clone(),
+            checked_at: std::cell::Cell::new(None),
+            failure: std::cell::Cell::new(0),
+            calls: AtomicUsize::new(0),
+        };
+        Ok((source, target))
+    }
+
+    #[test]
+    fn maintenance_current_source_rechecks_both_key_gaps_and_actual_staging() -> Result<()> {
+        effects::scope(World::new(731), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let version = receipt.version.as_deref().context("issued version")?;
+            let (control, keys) = verifier_ports(version, fixture::family());
+            let token = verifier_token(&db, &control)?;
+            let (source, _) = maintenance_source(&db, &control)?;
+            let authority = maintenance_authority::CurrentAuthority::new(&source);
+            ensure!(
+                source.calls.load(Ordering::SeqCst) == 0,
+                "constructor granted work"
+            );
+            let before = verifier_image(&db)?;
+            let prepared = prepare_verifier(
+                &db,
+                &authority,
+                &keys,
+                Request {
+                    binding: &control.binding,
+                    family: &control.family,
+                    version,
+                },
+                &token,
+            )?;
+            ensure!(keys.calls.load(Ordering::SeqCst) == 2, "exact key count");
+            ensure!(
+                source.calls.load(Ordering::SeqCst) == 4,
+                "key gap lost current source"
+            );
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let _pending = stage_verifier(&tx, &authority, prepared)?;
+            ensure!(
+                source.calls.load(Ordering::SeqCst) == 5,
+                "stage lost current source"
+            );
+            tx.commit()?;
+            only_verifier_changed(&before, &verifier_image(&db)?)?;
+            ensure!(
+                verifier_token(&db, &control)? == token,
+                "token identity changed"
+            );
+            super::super::install_schema(&db)?;
+            Ok(())
+        })
+    }
+
+    fn change_maintenance_grant(grant: &mut maintenance_authority::Grant, fault: u8) {
+        match fault {
+            0 => grant.binding.namespace.binding_generation += 1,
+            1 => grant.binding.management = pin("foreign-management"),
+            2 => grant.binding.epoch_store = pin("foreign-epoch-store"),
+            3 => grant.family.contract = Digest::new(b"foreign-family"),
+            4 => grant.version = "foreign-version".into(),
+            5 => grant.target = Digest::new(b"foreign-row"),
+            6 => grant.selection.security_epoch = 8,
+            7 => grant.selection.previous.binding = pin("foreign-verifier"),
+            8 => grant.selection.previous.version = "verify-v3".into(),
+            9 => grant.selection.replacement.binding = pin("foreign-verifier"),
+            10 => grant.selection.replacement.version = grant.selection.previous.version.clone(),
+            11 => grant.selection.observed_at = 1001,
+            12 => grant.selection.ready_until = 1000,
+            13 => grant.selection.observed_at = -1,
+            14 => grant.selection.ready_until = 1300,
+            _ => panic!("unknown closed maintenance fault"),
+        }
+    }
+
+    #[test]
+    fn maintenance_current_source_rejects_wrong_world_before_key_access() -> Result<()> {
+        effects::scope(World::new(732), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let version = receipt.version.as_deref().context("issued version")?;
+            let (control, keys) = verifier_ports(version, fixture::family());
+            let token = verifier_token(&db, &control)?;
+            let before = verifier_image(&db)?;
+            for fault in 0..15 {
+                let (source, _) = maintenance_source(&db, &control)?;
+                change_maintenance_grant(&mut source.grant.borrow_mut(), fault);
+                let authority = maintenance_authority::CurrentAuthority::new(&source);
+                ensure!(
+                    prepare_verifier(
+                        &db,
+                        &authority,
+                        &keys,
+                        Request {
+                            binding: &control.binding,
+                            family: &control.family,
+                            version
+                        },
+                        &token,
+                    )
+                    .is_err(),
+                    "foreign maintenance grant accepted: {fault}"
+                );
+                ensure!(
+                    keys.calls.load(Ordering::SeqCst) == 0,
+                    "denial loaded keys: {fault}"
+                );
+                ensure!(
+                    before == verifier_image(&db)?,
+                    "denial changed durable state: {fault}"
+                );
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn maintenance_current_source_refusal_is_permanent_under_independent_fault_histories()
+    -> Result<()> {
+        effects::scope(World::new(733), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let (control, _) = verifier_ports(
+                receipt.version.as_deref().context("issued version")?,
+                fixture::family(),
+            );
+            let before = verifier_image(&db)?;
+            // Independent expectations: a fresh attempt succeeds; each listed
+            // fault refuses; restoring its exact original source never revives it.
+            for fault in 0..10 {
+                let (source, target) = maintenance_source(&db, &control)?;
+                let original = source.grant.borrow().clone();
+                let authority = maintenance_authority::CurrentAuthority::new(&source);
+                ensure!(
+                    authority.authorize(&target, 1000).is_ok(),
+                    "initial grant refused"
+                );
+                let now = match fault {
+                    0 => {
+                        source.allowed.store(false, Ordering::SeqCst);
+                        1001
+                    }
+                    1 => {
+                        source.failure.set(1);
+                        1001
+                    }
+                    2 => {
+                        source.checked_at.set(Some(1000));
+                        1001
+                    }
+                    3 => {
+                        source.checked_at.set(Some(1002));
+                        1001
+                    }
+                    4 => 999,
+                    5 => 1200,
+                    6 => {
+                        source.grant.borrow_mut().selection.authority_revision =
+                            Digest::new(b"changed-policy");
+                        1001
+                    }
+                    7 => {
+                        source.grant.borrow_mut().selection.ready_until = 1201;
+                        source.grant.borrow_mut().selection.observed_at = 901;
+                        1001
+                    }
+                    8 => {
+                        source.grant.borrow_mut().selection.replacement.version =
+                            "verify-v3".into();
+                        1001
+                    }
+                    9 => {
+                        source.grant.borrow_mut().target = Digest::new(b"changed-row");
+                        1001
+                    }
+                    _ => unreachable!(),
+                };
+                let result = authority.authorize(&target, now);
+                ensure!(result.is_err(), "fault history admitted: {fault}");
+                if fault == 1 {
+                    ensure!(
+                        result
+                            .err()
+                            .context("source error absent")?
+                            .downcast_ref::<MaintenanceSourceFailure>()
+                            .is_some(),
+                        "primary source error lost"
+                    );
+                }
+                let calls = source.calls.load(Ordering::SeqCst);
+                source.allowed.store(true, Ordering::SeqCst);
+                source.failure.set(0);
+                source.checked_at.set(None);
+                *source.grant.borrow_mut() = original;
+                ensure!(
+                    authority.authorize(&target, 1001).is_err(),
+                    "refused attempt revived: {fault}"
+                );
+                ensure!(
+                    source.calls.load(Ordering::SeqCst) == calls,
+                    "refused attempt called source: {fault}"
+                );
+            }
+            ensure!(
+                before == verifier_image(&db)?,
+                "authority histories changed private state"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn maintenance_current_source_panic_poison_cannot_restore_the_attempt() -> Result<()> {
+        effects::scope(World::new(734), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let (control, _) = verifier_ports(
+                receipt.version.as_deref().context("issued version")?,
+                fixture::family(),
+            );
+            let (source, target) = maintenance_source(&db, &control)?;
+            let authority = maintenance_authority::CurrentAuthority::new(&source);
+            source.failure.set(2);
+            ensure!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || authority.authorize(&target, 1000)
+                ))
+                .is_err(),
+                "source panic not reached"
+            );
+            source.failure.set(0);
+            ensure!(
+                authority.authorize(&target, 1000).is_err(),
+                "panic revived maintenance"
+            );
+            ensure!(
+                source.calls.load(Ordering::SeqCst) == 1,
+                "poisoned source reused"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn maintenance_current_source_revocation_after_key_io_refuses_without_retry() -> Result<()> {
+        effects::scope(World::new(735), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let version = receipt.version.as_deref().context("issued version")?;
+            let (control, mut keys) = verifier_ports(version, fixture::family());
+            let token = verifier_token(&db, &control)?;
+            let (source, _) = maintenance_source(&db, &control)?;
+            let authority = maintenance_authority::CurrentAuthority::new(&source);
+            keys.revoke = Some(source.allowed.clone());
+            let before = verifier_image(&db)?;
+            let attempt = || {
+                prepare_verifier(
+                    &db,
+                    &authority,
+                    &keys,
+                    Request {
+                        binding: &control.binding,
+                        family: &control.family,
+                        version,
+                    },
+                    &token,
+                )
+            };
+            ensure!(attempt().is_err(), "post-key revocation admitted");
+            ensure!(
+                keys.calls.load(Ordering::SeqCst) == 1,
+                "denied replacement key loaded"
+            );
+            source.allowed.store(true, Ordering::SeqCst);
+            ensure!(attempt().is_err(), "post-key denied attempt retried");
+            ensure!(
+                keys.calls.load(Ordering::SeqCst) == 1 && before == verifier_image(&db)?,
+                "denied retry performed work"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn maintenance_current_source_staging_requires_same_original_policy_and_grant() -> Result<()> {
+        effects::scope(World::new(736), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let version = receipt.version.as_deref().context("issued version")?;
+            let (control, keys) = verifier_ports(version, fixture::family());
+            let token = verifier_token(&db, &control)?;
+            let before = verifier_image(&db)?;
+            for fault in 0..3 {
+                let (source, _) = maintenance_source(&db, &control)?;
+                let authority = maintenance_authority::CurrentAuthority::new(&source);
+                let prepared = prepare_verifier(
+                    &db,
+                    &authority,
+                    &keys,
+                    Request {
+                        binding: &control.binding,
+                        family: &control.family,
+                        version,
+                    },
+                    &token,
+                )?;
+                match fault {
+                    0 => source.allowed.store(false, Ordering::SeqCst),
+                    1 => {
+                        source.grant.borrow_mut().selection.authority_revision =
+                            Digest::new(b"revoked-maintenance-policy")
+                    }
+                    2 => source.grant.borrow_mut().selection.security_epoch = 8,
+                    _ => unreachable!(),
+                }
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                ensure!(
+                    stage_verifier(&tx, &authority, prepared).is_err(),
+                    "stale source staged: {fault}"
+                );
+                tx.rollback()?;
+                ensure!(
+                    before == verifier_image(&db)?,
+                    "stale source committed: {fault}"
+                );
+            }
+            Ok(())
+        })
     }
 
     // Private rows and tokens deliberately have no Debug or serialization.
@@ -2953,6 +3356,7 @@ mod tests {
         opaque!(Pending);
         opaque!(VerifierPrepared);
         opaque!(VerifierPending);
+        opaque!(maintenance_authority::CurrentAuthority<'static>);
     }
 
     #[test]
