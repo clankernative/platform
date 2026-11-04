@@ -479,6 +479,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         None
     };
     let mut fixture_ui_ready = false;
+    let mut fixture_tools_ready = false;
     let mut prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
         // A runtime shard admits exactly the programs it will execute. The
         // producer and final join still independently admit every output.
@@ -584,6 +585,18 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         };
         let started = Instant::now();
         let key = match request.action.as_str() {
+            "verify-fixture-tools" => {
+                ensure!(
+                    recipe == "verify-prepare-part-fixtures"
+                        && parameters.is_empty()
+                        && fixture_ui_ready
+                        && !fixture_tools_ready,
+                    "fixture launchers require the selected recipe and admitted UI dependency"
+                );
+                crate::bazel::programs(root, &["day2-sandbox"])?;
+                fixture_tools_ready = true;
+                return Ok(json!({}));
+            }
             "verify-bazel-controls" => {
                 ensure!(
                     parameters.is_empty(),
@@ -682,8 +695,8 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     "preparation receipt must match the selected part"
                 );
                 ensure!(
-                    part != "fixtures" || fixture_ui_ready,
-                    "fixture UI admission required"
+                    part != "fixtures" || (fixture_ui_ready && fixture_tools_ready),
+                    "fixture UI and launcher preparation required"
                 );
                 ensure_stable(root, recipe, &snapshot)?;
                 shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, part)?;
@@ -743,8 +756,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             }
             "verify-build" => {
                 ensure!(
-                    recipe != "verify-prepare-part-fixtures" || fixture_ui_ready,
-                    "fixture UI admission required"
+                    recipe != "verify-prepare-part-fixtures"
+                        || (fixture_ui_ready && fixture_tools_ready),
+                    "fixture UI and launcher preparation required"
                 );
                 let fixture = value("fixture")?;
                 ensure!(!fixtures.contains_key(fixture), "duplicate fixture");

@@ -146,6 +146,7 @@ Verify :: [].{
 			}
 			"fixtures" => {
 				_ = UiDependency.install!(host!)?
+				_ = Capability.call!("verify-fixture-tools", "{}", host!)?
 				remaining_fixtures!(host!)
 			}
 			"tests" => {
