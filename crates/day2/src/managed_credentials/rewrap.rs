@@ -445,10 +445,15 @@ pub(crate) fn prepare_verifier(
         .context("credential verifier revision exhausted")?;
     let selected = authorize_verifier(authority, &target, started)?;
     let previous = verifier_key(provider, &selected.previous)?;
+    let after_previous = effects::wall_time()?;
+    let (intermediate, observed) = current(db, &request, after_previous)?;
+    ensure!(after_previous >= started && observed == original
+        && authorize_verifier(authority, &intermediate, after_previous)? == selected,
+        "credential verifier preparation became stale after previous key");
     let replacement = verifier_key(provider, &selected.replacement)?;
     let now = effects::wall_time()?;
     let (target, observed) = current(db, &request, now)?;
-    ensure!(now >= started && observed == original
+    ensure!(now >= after_previous && observed == original
         && authorize_verifier(authority, &target, now)? == selected,
         "credential verifier preparation became stale");
     let replacement_verifier = crypto::prepare_verifier_replacement(
@@ -757,15 +762,21 @@ mod tests {
     fn verifier_image(db: &Connection) -> Result<VerifyImage> {
         let mut names = db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'day2_credential_*' ORDER BY name")?;
         let tables = names.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        ensure!(tables.len() == super::super::CREDENTIAL_TABLES.len(), "verifier fixture table inventory changed");
+        ensure!(tables.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>()
+            == super::super::CREDENTIAL_TABLES.iter().copied().collect(), "verifier fixture table inventory changed");
         let mut image = std::collections::BTreeMap::new();
         for table in tables {
             let count: i64 = db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
             ensure!((0..=4).contains(&count), "verifier fixture row bound");
             let mut query = db.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
             let columns = query.column_count();
+            ensure!(columns <= 32, "verifier fixture column bound");
             let rows = query.query_map([], |r| (0..columns).map(|i| r.get(i)).collect::<rusqlite::Result<Vec<Value>>>())?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            for row in &rows { for value in row {
+                ensure!(match value { Value::Text(text) => text.len() <= 65536,
+                    Value::Blob(bytes) => bytes.len() <= 8192, _ => true }, "verifier fixture cell bound");
+            } }
             image.insert(table, rows);
         }
         Ok(VerifyImage(image))
@@ -925,6 +936,83 @@ mod tests {
             let before=verifier_image(&db)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             ensure!(stage(&tx,&enc_authority,stale).is_err(),"encryption preparation overwrote newer verifier state");tx.rollback()?;
             ensure!(verifier_image(&db)?==before,"stale encryption changed verifier state");Ok(())
+        })
+    }
+
+    #[test]
+    fn verifier_checks_permission_before_keys_after_each_provider_and_at_stage() -> Result<()> {
+        effects::scope(World::new(727), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;let receipt = fixture::committed_issue(&mut db)?;
+            let (authority, mut keys) = verifier_ports(receipt.version.as_deref().context("issued version")?, fixture::family());
+            let token = verifier_token(&db,&authority)?;let before=verifier_image(&db)?;
+            authority.allowed.store(false,Ordering::SeqCst);
+            ensure!(verifier_prepared(&db,&authority,&keys,&token).is_err() && keys.calls.load(Ordering::SeqCst)==0,"denied maintenance loaded keys");
+            authority.allowed.store(true,Ordering::SeqCst);
+            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure!(verifier_prepared(&tx,&authority,&keys,&token).is_err() && keys.calls.load(Ordering::SeqCst)==0,"key work ran under transaction");tx.rollback()?;
+            keys.revoke=Some(authority.allowed.clone());
+            ensure!(verifier_prepared(&db,&authority,&keys,&token).is_err() && keys.calls.load(Ordering::SeqCst)==1,"revoked key read reached replacement key");
+            keys.revoke=None;authority.allowed.store(true,Ordering::SeqCst);
+            let ready=verifier_prepared(&db,&authority,&keys,&token)?;
+            authority.selection.borrow_mut().authority_revision=Digest::new(b"new-maintenance-policy");
+            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure!(stage_verifier(&tx,&authority,ready).is_err(),"stale maintenance policy published");tx.rollback()?;
+            ensure!(verifier_image(&db)?==before,"authority refusal changed private rows");Ok(())
+        })
+    }
+
+    #[test]
+    fn verifier_keeps_latest_clock_and_checks_final_cas_expiry_and_rewind() -> Result<()> {
+        struct ClockCut<'a> { authority: &'a VerifyAuthority, world: Arc<World>, next: i64 }
+        impl VerifierAuthority for ClockCut<'_> {
+            fn authorize(&self,target:&Target,now:i64)->Result<VerifierSelection>{
+                let selected=self.authority.authorize(target,now)?;self.world.set_wall(self.next);Ok(selected)
+            }
+        }
+        let world=World::new(728);
+        effects::scope(world.clone(),||->Result<()>{
+            let (_dir,mut db)=fixture::database()?;let receipt=fixture::committed_issue(&mut db)?;
+            let (authority,mut keys)=verifier_ports(receipt.version.as_deref().context("issued version")?,fixture::family());
+            let token=verifier_token(&db,&authority)?;let before=verifier_image(&db)?;
+            for now in [999,1200] {
+                world.set_wall(1000);keys.advance=Some((world.clone(),now));
+                ensure!(verifier_prepared(&db,&authority,&keys,&token).is_err(),"provider renewed or rewound original window");
+            }
+            keys.advance=Some((world.clone(),1001));world.set_wall(1000);
+            let ready=verifier_prepared(&db,&authority,&keys,&token)?;world.set_wall(1000);
+            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure!(stage_verifier(&tx,&authority,ready).is_err(),"latest provider clock was forgotten");tx.rollback()?;
+            keys.advance=None;
+            for now in [999,1200] {
+                world.set_wall(1000);let ready=verifier_prepared(&db,&authority,&keys,&token)?;
+                let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                ensure!(stage_verifier(&tx,&ClockCut{authority:&authority,world:world.clone(),next:now},ready).is_err(),"final CAS crossed expiry or rewind");tx.rollback()?;
+            }
+            world.set_wall(1000);let ready=verifier_prepared(&db,&authority,&keys,&token)?;
+            // Equality with the last observation is valid; equality with expiry is not.
+            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;let _pending=stage_verifier(&tx,&authority,ready)?;tx.rollback()?;
+            ensure!(verifier_image(&db)?==before,"clock control changed durable state");Ok(())
+        })
+    }
+
+    #[test]
+    fn verifier_revision_exhaustion_and_old_schema_refuse_without_upgrade() -> Result<()> {
+        effects::scope(World::new(729),||->Result<()>{
+            let (_dir,mut db)=fixture::database()?;let receipt=fixture::committed_issue(&mut db)?;
+            let (authority,keys)=verifier_ports(receipt.version.as_deref().context("issued version")?,fixture::family());
+            let token=verifier_token(&db,&authority)?;
+            db.execute("UPDATE day2_credential_versions SET verifier_revision=?1",[i64::MAX])?;
+            let before=verifier_image(&db)?;
+            ensure!(verifier_prepared(&db,&authority,&keys,&token).is_err() && keys.calls.load(Ordering::SeqCst)==0,"exhausted verifier revision wrapped or fetched keys");
+            ensure!(verifier_image(&db)?==before,"exhausted verifier revision changed rows");
+            let old=super::super::CREDENTIAL_DDL.replace(",\n            verifier_revision INTEGER NOT NULL CHECK(verifier_revision > 0)","");
+            ensure!(old!=super::super::CREDENTIAL_DDL,"old schema control did not remove revision");
+            let old_db=Connection::open_in_memory()?;old_db.execute_batch(&old)?;
+            old_db.execute("INSERT INTO day2_credential_schema_version VALUES(2)",[])?;
+            let schema:String=old_db.query_row("SELECT group_concat(sql,';') FROM (SELECT sql FROM sqlite_schema ORDER BY name)",[],|r|r.get(0))?;
+            ensure!(super::super::install_schema(&old_db).is_err(),"old verifier layout silently upgraded");
+            let after:String=old_db.query_row("SELECT group_concat(sql,';') FROM (SELECT sql FROM sqlite_schema ORDER BY name)",[],|r|r.get(0))?;
+            ensure!(schema==after,"refused old layout was mutated");Ok(())
         })
     }
 
