@@ -63,8 +63,8 @@ struct Model {
     samples: usize,
     unknown: bool,
     post_error: bool,
-    panic_sample:Option<usize>,
-    panic_stopped:bool,
+    panic_sample: Option<usize>,
+    panic_stopped: bool,
     cause: std::sync::Arc<()>,
 }
 impl Model {
@@ -84,8 +84,8 @@ impl Model {
             samples: 0,
             unknown: false,
             post_error: false,
-            panic_sample:None,
-            panic_stopped:false,
+            panic_sample: None,
+            panic_stopped: false,
             cause: std::sync::Arc::new(()),
         }
     }
@@ -98,7 +98,10 @@ impl sealed::Source for Model {}
 impl Source for Model {
     fn current(&mut self, _: &Approval) -> Result<Clock> {
         self.samples += 1;
-        assert!(self.panic_sample!=Some(self.samples),"controlled_current_panic");
+        assert!(
+            self.panic_sample != Some(self.samples),
+            "controlled_current_panic"
+        );
         ensure!(!self.refused, "controlled_source_refused");
         ensure!(
             !(self.post_error && self.stop_calls > 0),
@@ -132,7 +135,7 @@ impl Source for Model {
         })
     }
     fn check_stopped(&mut self, _: &Approval, cut: &Stopped) -> Result<()> {
-        assert!(!self.panic_stopped,"controlled_stop_check_panic");
+        assert!(!self.panic_stopped, "controlled_stop_check_panic");
         ensure!(
             !self.refused
                 && self.gate_closed
@@ -441,18 +444,25 @@ fn production_approval_stop_proofs_and_sources_have_no_construction_or_default_p
 }
 
 #[test]
-fn caught_poll_panics_poison_the_retained_session_at_every_supplier_cut()->Result<()> {
+fn caught_poll_panics_poison_the_retained_session_at_every_supplier_cut() -> Result<()> {
     for site in 0..3 {
-        let mut a=approval(100);let mut source=Model::new(vec![lease(Kind::FinalPermit,"held",20)]);
-        let mut session=Session::begin(&mut a,&mut source)?;
-        match site {0=>session.source.panic_sample=Some(session.source.samples+1),1=>session.source.panic_stopped=true,_=>session.source.panic_sample=Some(session.source.samples+2)}
-        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||session.poll()));
+        let mut a = approval(100);
+        let mut source = Model::new(vec![lease(Kind::FinalPermit, "held", 20)]);
+        let mut session = Session::begin(&mut a, &mut source)?;
+        match site {
+            0 => session.source.panic_sample = Some(session.source.samples + 1),
+            1 => session.source.panic_stopped = true,
+            _ => session.source.panic_sample = Some(session.source.samples + 2),
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.poll()));
         assert!(result.is_err());
-        session.source.panic_sample=None;session.source.panic_stopped=false;session.source.at(20,20);
-        assert_eq!(session.approval.state.get(),Disposition::Refused);
+        session.source.panic_sample = None;
+        session.source.panic_stopped = false;
+        session.source.at(20, 20);
+        assert_eq!(session.approval.state.get(), Disposition::Refused);
         assert!(session.source.refused);
         assert!(session.require_drained().is_err());
-        assert_eq!(session.source.stop_calls,1);
+        assert_eq!(session.source.stop_calls, 1);
     }
     Ok(())
 }
