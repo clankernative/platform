@@ -1,7 +1,7 @@
 use super::super::{Holder, Request as InitialRequest, Versions};
 use super::*;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
 mod history;
