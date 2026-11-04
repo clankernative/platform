@@ -1,6 +1,7 @@
 //! Host-only managed credential primitives. App code cannot import this module.
 pub(crate) mod authority;
 pub(crate) mod browser;
+pub(crate) mod callback;
 pub(crate) mod crypto;
 pub(crate) mod effects;
 pub(crate) mod ingress;

@@ -98,6 +98,7 @@ COMPILE_INPUTS = [
     "//crates/day2:src/json.rs",
     "//crates/day2:src/managed_credentials/authority.rs",
     "//crates/day2:src/managed_credentials/browser.rs",
+    "//crates/day2:src/managed_credentials/callback.rs",
     "//crates/day2:src/managed_credentials/crypto.rs",
     "//crates/day2:src/managed_credentials/effects.rs",
     "//crates/day2:src/managed_credentials/ingress.rs",

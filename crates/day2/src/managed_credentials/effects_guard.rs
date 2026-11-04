@@ -184,6 +184,7 @@ impl<'ast> Visit<'ast> for Guard {
 const REVIEWED_SOURCES: &[&str] = &[
     "authority.rs",
     "browser.rs",
+    "callback.rs",
     "crash_reopen_tests.rs",
     "crypto.rs",
     "effects.rs",
@@ -236,6 +237,7 @@ fn managed_credential_ambient_effects_are_confined_to_the_reviewed_adapter() {
         ("mod", include_str!("mod.rs")),
         ("authority", include_str!("authority.rs")),
         ("browser", include_str!("browser.rs")),
+        ("callback", include_str!("callback.rs")),
         ("crypto", include_str!("crypto.rs")),
         ("ingress", include_str!("ingress.rs")),
         ("issuance", include_str!("issuance.rs")),
