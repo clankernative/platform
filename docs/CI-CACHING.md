@@ -148,13 +148,18 @@ persistent inconsistency also refuses. The complete jobs index binds producer
 identity and uniqueness. Each selected producer's exact numeric job endpoint
 refreshes its current outcome without changing the indexed run, attempt, SHA,
 job ID, name, URL or runner labels. Refresh also refuses to erase observed
-runner assignment or execution evidence. A known terminal failure cannot be overwritten by a
-conflicting success; a fresh failed producer still refuses older artifacts.
-Metadata requests require revalidation, and producer refusal diagnostics name
-only the fixed field, never API values or private output. Diagnostics identify
-only the closed
-inventory endpoint and numeric run/attempt, without process arguments or
-environment values.
+runner assignment or execution evidence. A known terminal failure cannot be
+overwritten by a conflicting success; a fresh failed producer still refuses
+older artifacts.
+
+Read-only metadata GETs request revalidation. Only a genuinely closed child with
+numeric exit code 1 can retry, at most three requests sharing the original
+120-second monotonic budget. Each attempt uses a fresh response file. Spawn,
+wait, timeout, other or nonnumeric exit, and malformed or oversized successful
+JSON errors refuse without retry. A successful response reporting a failed
+producer is not a transport failure and still refuses admission. Diagnostics
+identify only the fixed refused field or closed endpoint and numeric exit, never
+process arguments, environments, API values or private output.
 
 `ci-artifact-selection.json` in the final verification receipt records the current
 consumer and each original producer attempt, job, check, artifact ID and digest.
