@@ -5,7 +5,9 @@ use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use crate::{
     oauth::native_management,
     protocol::{Instruction, Request},
-    security_epoch::{ConsumerEvent, ConsumerLifecycle},
+    security_epoch::{
+        ConsumerEvent, ConsumerHandshakeProgress, ConsumerLifecycle, ConsumerShellReference,
+    },
 };
 use day2_capabilities::security_epoch::{AuthorityScope, bootstrap::NativeRole};
 use serde_json::Value;
@@ -62,6 +64,8 @@ enum Step {
     Restart,
     Restore,
     ResetMonotonic,
+    BeginShell { death_cut: Option<usize> },
+    AdvanceShell { events: u8 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -575,6 +579,10 @@ impl World {
             Step::ResetMonotonic => {
                 self.port.ticks.store(100_000, SeqCst);
             }
+            Step::BeginShell { death_cut } => {
+                native_event(ConsumerEvent::BeginShell { death_cut })?
+            }
+            Step::AdvanceShell { events } => native_event(ConsumerEvent::AdvanceShell { events })?,
         }
         Ok(true)
     }
@@ -612,15 +620,18 @@ impl World {
             json!({"accepted":accepted,"oracle":model,"owners":native_management::fixtures::observation()?,"projection":{"slot":slot,
             "exchanges":self.fixture.port.posts.load(SeqCst),"refreshes":self.port.refreshes.load(SeqCst),
             "reads":self.port.reads.load(SeqCst),"revokes":self.fixture.port.revokes.load(SeqCst),"journal":*self.port.journal.lock().unwrap(),"refresh_rows":refresh_rows,"tokens":tokens},"sql":crate::oauth::simulation::snapshot(&db)?,
-            "native":NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?}),
+            "native":NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?,
+            "shell_reference":model.shell_reference.observation(),"shell_progress":model.shell_reference.progress()?}),
         )
     }
 }
 
 // The oracle consumes only the schedule, never World results, SQL or production
 // transition functions. OAuth slots and provider effects have independent rules.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Serialize)]
 struct Oracle {
+    #[serde(skip)]
+    shell_reference: ConsumerShellReference,
     stage: u8,
     disconnect: bool,
     pending: bool,
@@ -642,8 +653,14 @@ struct Oracle {
 }
 
 impl Oracle {
-    fn new() -> Self {
-        Self {
+    fn new(seed: u64) -> Result<Self> {
+        let mut shell_reference = ConsumerShellReference::new(seed)?;
+        ensure!(
+            shell_reference.exchange(None)?,
+            "reference Shell setup refused"
+        );
+        Ok(Self {
+            shell_reference,
             stage: 0,
             disconnect: false,
             pending: false,
@@ -662,7 +679,7 @@ impl Oracle {
             reads: 0,
             cached: None,
             journal: vec![],
-        }
+        })
     }
     fn resolve_read(&mut self, fault: Option<RefreshFault>) -> bool {
         if !self.app || !self.controller || self.stage != 3 {
@@ -736,10 +753,10 @@ impl Oracle {
         true
     }
 
-    fn step(&mut self, step: Step) -> bool {
+    fn step(&mut self, step: Step) -> Result<bool> {
         let app = self.app && self.controller;
         let original = app && self.pending && self.now < self.created + 300;
-        match step {
+        Ok(match step {
             Step::Capture { disconnect } => {
                 let accepted = app
                     && if disconnect {
@@ -760,6 +777,15 @@ impl Oracle {
                 accepted
             }
             Step::Approve => {
+                // The actual reserve_shell reaches the selected fixture role
+                // before signing. Failure there permanently refuses that owner;
+                // completing DATA later never renews its original or role.
+                if self.pending
+                    && self.shell
+                    && self.shell_reference.progress()? != ConsumerHandshakeProgress::Completed
+                {
+                    self.shell = false;
+                }
                 let available = self.shell
                     && self.controller
                     && self.pending
@@ -826,13 +852,16 @@ impl Oracle {
                 }
                 accepted
             }
-            Step::Fail { owner, .. } => {
+            Step::Fail { owner, cut } => {
                 match owner {
                     Failure::App => {
                         self.app = false;
                         self.controller = false;
                     }
-                    Failure::Shell => self.shell = false,
+                    Failure::Shell => {
+                        self.shell_reference.exchange(Some(cut))?;
+                        self.shell = false;
+                    }
                     Failure::Controller | Failure::Epoch => self.controller = false,
                 };
                 true
@@ -847,7 +876,15 @@ impl Oracle {
                 self.shell = false;
                 true
             }
-        }
+            Step::BeginShell { death_cut } => {
+                self.shell_reference.begin(death_cut)?;
+                true
+            }
+            Step::AdvanceShell { events } => {
+                self.shell_reference.advance(events)?;
+                true
+            }
+        })
     }
     fn slot(&self) -> Option<(String, i64, i64, i64)> {
         match self.stage {
@@ -931,6 +968,7 @@ fn original_invariants(
 enum OracleControl {
     None,
     OvercountFirstRead,
+    PendingShellCompletes,
 }
 
 fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
@@ -943,7 +981,7 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
         "consumer clock input bound");
     let mut world = World::new(program.seed)?;
     let hooks = world.port.clone();
-    let mut model = Oracle::new();
+    let mut model = Oracle::new(program.seed)?;
     effects::scope(hooks.clone(), || -> Result<()> {
         let scope = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().scope.clone());
         native_management::fixtures::select_app_scope(&scope)?;
@@ -961,7 +999,18 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
     let mut originals = std::collections::BTreeMap::new();
     let mut corrupted = false;
     for (index, &step) in program.steps.iter().enumerate() {
-        let expected = model.step(step);
+        let mut expected = model.step(step).map_err(|_| Divergence {
+            category: "native_model",
+            index,
+            records: records.clone(),
+        })?;
+        if control == OracleControl::PendingShellCompletes
+            && step == Step::Approve
+            && model.shell_reference.progress()? == ConsumerHandshakeProgress::Pending
+        {
+            // Negative expectation only, never supplied to the real consumer.
+            expected = true;
+        }
         if !corrupted
             && control == OracleControl::OvercountFirstRead
             && step == Step::Read
@@ -1006,7 +1055,7 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
         };
         let category = if panicked {
             Some("adapter_panic")
-        } else if native_divergence {
+        } else if native_divergence || !shell_reference_matches(&record) {
             Some("native_model")
         } else if actual != expected {
             Some("acceptance")
@@ -1028,6 +1077,26 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
         }
     }
     Ok(records)
+}
+
+fn shell_reference_matches(record: &Value) -> bool {
+    let actual = &record["native"]["serving"];
+    let reference = &record["shell_reference"];
+    actual["actual"].is_object()
+        && actual["oracle"].is_object()
+        && reference["world"].is_object()
+        && actual["schedule"].is_object()
+        && reference["schedule"].is_object()
+        && actual["failed"] == false
+        && reference["failed"] == false
+        && actual["oracle"] == reference["world"]
+        && actual["schedule"] == reference["schedule"]
+        && actual["failed"] == reference["failed"]
+        && matches!(
+            record["shell_progress"].as_str(),
+            Some("pending" | "completed" | "refused")
+        )
+        && record["native"]["serving_progress"] == record["shell_progress"]
 }
 
 fn source() -> Digest {
@@ -1863,6 +1932,340 @@ fn happy() -> Vec<Step> {
         Step::ReplayCallback,
         Step::CachedRead,
     ]
+}
+
+fn shell_schedule(seed: u64, death_cut: Option<usize>) -> Result<usize> {
+    let mut reference = ConsumerShellReference::new(seed)?;
+    ensure!(reference.exchange(None)?, "Shell reference setup");
+    reference.begin(death_cut)?;
+    Ok(reference.observation()["schedule"]["pending"]
+        .as_array()
+        .context("reference schedule missing")?
+        .len())
+}
+
+fn advance_shell(steps: &mut Vec<Step>, events: usize) {
+    let mut remaining = events;
+    while remaining > 0 {
+        let events = remaining.min(64) as u8;
+        steps.push(Step::AdvanceShell { events });
+        remaining -= usize::from(events);
+    }
+}
+
+#[test]
+fn shell_progress_drives_selected_oauth_decisions_without_reviving_a_refused_owner() -> Result<()> {
+    let mut covered = BTreeSet::new();
+    for seed in 0..4 {
+        let count = shell_schedule(seed, None)?;
+        for pause in [0, 1, count / 2, count - 1, count] {
+            for attempt in [false, true] {
+                let mut steps = happy()[..5].to_vec(); // Real connect and callback.
+                steps.extend([
+                    Step::Capture { disconnect: true },
+                    Step::Advance { seconds: 2 },
+                    Step::BeginShell { death_cut: None },
+                ]);
+                advance_shell(&mut steps, pause);
+                let at = steps.len();
+                if attempt {
+                    steps.push(Step::Approve);
+                }
+                steps.push(Step::Read); // App does not borrow the Shell owner.
+                advance_shell(&mut steps, count - pause);
+                let final_approval = steps.len();
+                steps.extend([
+                    Step::Reopen,
+                    Step::Restore,
+                    Step::Approve,
+                    Step::Read,
+                    Step::Refresh,
+                ]);
+                let records = verify(&Program {
+                    version: 1,
+                    seed,
+                    steps,
+                })?;
+                let expected_approval = !attempt || pause == count;
+                ensure!(
+                    records[final_approval + 2]["accepted"] == expected_approval,
+                    "completion restored a refused Shell owner or denied completed serving"
+                );
+                ensure!(
+                    records[final_approval + 3]["accepted"] == true
+                        && records[final_approval + 4]["accepted"] == true,
+                    "Shell progress leaked into independent App reads"
+                );
+                if attempt && pause < count {
+                    ensure!(
+                        records[at]["accepted"] == false
+                            && records[at]["shell_progress"] == "pending",
+                        "pending transcript reused a prior completion"
+                    );
+                }
+                ensure!(
+                    records.last().unwrap()["shell_progress"] == "completed",
+                    "resume did not complete the same transcript"
+                );
+                covered.insert((seed, pause, attempt));
+            }
+        }
+    }
+    ensure!(covered.len() == 40, "Shell pause coverage incomplete");
+    Ok(())
+}
+
+#[test]
+fn shell_peer_death_and_reopen_do_not_reclassify_app_or_restore_shell() -> Result<()> {
+    for seed in 0..8 {
+        let death_cut = Some(seed as usize * 17);
+        let count = shell_schedule(seed, death_cut)?;
+        let mut steps = happy()[..5].to_vec();
+        steps.push(Step::BeginShell { death_cut });
+        advance_shell(&mut steps, count);
+        let at = steps.len();
+        steps.extend([
+            Step::Read,
+            Step::Capture { disconnect: true },
+            Step::Advance { seconds: 2 },
+            Step::Approve,
+            Step::Reopen,
+            Step::Restore,
+            Step::Approve,
+            Step::Read,
+            Step::Restart,
+            Step::Approve,
+            Step::Read,
+        ]);
+        let records = verify(&Program {
+            version: 1,
+            seed,
+            steps,
+        })?;
+        ensure!(
+            records[at]["accepted"] == true && records[at]["shell_progress"] == "refused",
+            "peer death did not select Shell"
+        );
+        for index in [at + 3, at + 6, at + 9, at + 10] {
+            ensure!(records[index]["accepted"] == false, "dead owner revived");
+        }
+        ensure!(
+            records[at + 7]["accepted"] == true,
+            "Shell death denied App"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn pending_shell_oracle_mutation_is_retained_and_replayed_as_a_real_consumer_disagreement()
+-> Result<()> {
+    let program = Program {
+        version: 1,
+        seed: 71,
+        steps: vec![
+            Step::Capture { disconnect: false },
+            Step::Advance { seconds: 2 },
+            Step::BeginShell { death_cut: None },
+            Step::Approve,
+        ],
+    };
+    let pair = replay_pair(&program, OracleControl::PendingShellCompletes);
+    ensure!(
+        pair.failure() == Some(FailureKind::Acceptance),
+        "false completion expectation escaped"
+    );
+    ensure!(
+        pair.first
+            .records()
+            .last()
+            .context("missing failed consumer record")?["shell_progress"]
+            == "pending",
+        "failure lost pending progress"
+    );
+    let root = tempfile::tempdir()?;
+    let path = retain_at(
+        root.path(),
+        &program,
+        pair,
+        OracleControl::PendingShellCompletes,
+    )?;
+    replay_file(&path)?;
+    Ok(())
+}
+
+#[test]
+fn pending_shell_hook_checks_exact_role_scope_and_model_errors() -> Result<()> {
+    let mut world = World::new(71)?;
+    let hooks = world.port.clone();
+    effects::scope(hooks.clone(), || -> Result<()> {
+        world.boot()?;
+        native_event(ConsumerEvent::BeginShell { death_cut: None })?;
+        let scope = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().scope.clone());
+        let mut before =
+            NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
+        ensure!(
+            effects::Hooks::native_check(hooks.as_ref(), NativeRole::AppHost, Some(&scope)).is_ok(),
+            "pending Shell blocked App"
+        );
+        ensure!(
+            effects::Hooks::native_check(hooks.as_ref(), NativeRole::SecurityShell, Some(&scope))
+                .is_err(),
+            "pending Shell accepted"
+        );
+        ensure!(
+            effects::Hooks::native_check(hooks.as_ref(), NativeRole::EpochController, Some(&scope))
+                .is_err(),
+            "unsupported role accepted"
+        );
+        ensure!(
+            effects::Hooks::native_check(hooks.as_ref(), NativeRole::AppHost, None).is_err(),
+            "missing scope accepted"
+        );
+        let mut foreign = scope.clone();
+        foreign.app = "foreign".to_owned().try_into()?;
+        ensure!(
+            effects::Hooks::native_check(hooks.as_ref(), NativeRole::AppHost, Some(&foreign))
+                .is_err(),
+            "foreign scope accepted"
+        );
+        let mut after =
+            NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
+        // Both selected roles still perform their real read-only counter
+        // observation. Preserve that complete journal; compare all remaining
+        // state without mistaking these mandatory reads for writes.
+        let before_calls = before["storage"]["provider"]["counter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("calls")
+            .unwrap();
+        let after_calls = after["storage"]["provider"]["counter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("calls")
+            .unwrap();
+        let before_calls = before_calls.as_array().unwrap();
+        let after_calls = after_calls.as_array().unwrap();
+        ensure!(
+            after_calls.starts_with(before_calls) && after_calls.len() > before_calls.len(),
+            "selected roles skipped fresh reads"
+        );
+        ensure!(
+            before == after && hooks.journal.lock().unwrap().is_empty(),
+            "hook changed state or called a provider"
+        );
+        NATIVE.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .unwrap()
+                .lifecycle
+                .corrupt_shell_reference_for_control()
+        });
+        let error =
+            effects::Hooks::native_check(hooks.as_ref(), NativeRole::SecurityShell, Some(&scope))
+                .expect_err("pending denial hid model error");
+        ensure!(
+            error.is::<crate::security_epoch::ConsumerModelError>(),
+            "model error collapsed into denial"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn consumer_progress_requires_complete_known_reference_observations() -> Result<()> {
+    let records = verify(&Program {
+        version: 1,
+        seed: 4,
+        steps: vec![Step::BeginShell { death_cut: None }],
+    })?;
+    let original = &records[0];
+    ensure!(
+        shell_reference_matches(original),
+        "complete pending observation refused"
+    );
+    for (side, field) in [
+        ("shell_reference", "world"),
+        ("shell_reference", "schedule"),
+        ("shell_reference", "failed"),
+    ] {
+        let mut changed = original.clone();
+        changed[side].as_object_mut().unwrap().remove(field);
+        ensure!(
+            !shell_reference_matches(&changed),
+            "absent reference field accepted"
+        );
+    }
+    for value in [Value::Null, json!("unknown"), json!(true)] {
+        let mut changed = original.clone();
+        changed["shell_progress"] = value.clone();
+        changed["native"]["serving_progress"] = value;
+        ensure!(
+            !shell_reference_matches(&changed),
+            "unknown progress accepted"
+        );
+    }
+    let mut changed = original.clone();
+    changed["shell_reference"]["world"] = Value::Null;
+    changed["native"]["serving"]["oracle"] = Value::Null;
+    ensure!(
+        !shell_reference_matches(&changed),
+        "two absent worlds compared equal"
+    );
+    let mut changed = original.clone();
+    changed["shell_reference"]["failed"] = json!(true);
+    changed["native"]["serving"]["failed"] = json!(true);
+    ensure!(
+        !shell_reference_matches(&changed),
+        "two failed worlds compared equal"
+    );
+    Ok(())
+}
+
+#[test]
+fn shell_batch_bounds_and_overlapping_begin_preserve_the_pending_original() -> Result<()> {
+    let mut actual = ConsumerLifecycle::new(
+        71,
+        &AuthorityScope {
+            installation: "company".to_owned().try_into()?,
+            environment: "production".to_owned().try_into()?,
+            app: "workspace".to_owned().try_into()?,
+        },
+    )?;
+    let mut reference = ConsumerShellReference::new(71)?;
+    actual.step(ConsumerEvent::BeginShell { death_cut: None })?;
+    reference.begin(None)?;
+    let before = actual.observation()?;
+    let expected = reference.observation();
+    for events in [0, 65, u8::MAX] {
+        ensure!(
+            actual.step(ConsumerEvent::AdvanceShell { events }).is_err(),
+            "invalid batch admitted"
+        );
+        ensure!(
+            reference.advance(events).is_err(),
+            "invalid reference batch admitted"
+        );
+        ensure!(
+            actual.observation()? == before && reference.observation() == expected,
+            "invalid batch changed original"
+        );
+    }
+    ensure!(
+        actual
+            .step(ConsumerEvent::BeginShell { death_cut: None })
+            .is_err(),
+        "overlap replaced original"
+    );
+    ensure!(
+        reference.begin(None).is_err(),
+        "reference overlap replaced original"
+    );
+    ensure!(
+        actual.observation()? == before && reference.observation() == expected,
+        "overlap changed original"
+    );
+    Ok(())
 }
 
 #[test]
