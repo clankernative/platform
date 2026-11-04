@@ -708,6 +708,19 @@ fn completion_request(
     Ok(complete)
 }
 
+/// Portable composition DATA only; this calls the same pure production
+/// selector and creates no first-holder, file, role or dispatch owner.
+#[cfg(test)]
+pub(super) fn completion_request_fixture(
+    selection: &EpochStore,
+    create: &Request,
+    seed: &super::seed_core::OriginalSeedCore,
+    pending: &Snapshot,
+    holder: super::kernel::Holder,
+) -> Result<Request> {
+    completion_request(selection, create, seed, pending, holder)
+}
+
 pub(super) enum ControllerActivationOutcome {
     Active(Box<ActiveControllerStorageContinuity>),
     Refused {

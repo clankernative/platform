@@ -415,7 +415,9 @@ pub(super) enum CompletionKind {
 }
 
 impl Body {
-    #[cfg(target_os = "linux")]
+    // Portable conformance executes this same DATA mapping; production keeps
+    // the unchanged Linux-only native caller boundary.
+    #[cfg(any(test, target_os = "linux"))]
     pub(super) fn frame(&self) -> super::handshake::Frame {
         use super::handshake::{Frame, Protocol, Step};
         let (protocol, step, sequence) = match self {
