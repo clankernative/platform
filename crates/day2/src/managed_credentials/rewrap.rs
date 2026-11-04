@@ -1374,30 +1374,57 @@ mod tests {
 
     #[test]
     fn verifier_current_selection_refuses_foreign_epoch_binding_keys_and_time() -> Result<()> {
-        effects::scope(World::new(730),||->Result<()>{
-            let (_dir,mut db)=fixture::database()?;let receipt=fixture::committed_issue(&mut db)?;
-            let (authority,keys)=verifier_ports(receipt.version.as_deref().context("issued version")?,fixture::family());
-            let token=verifier_token(&db,&authority)?;let before=verifier_image(&db)?;
-            let selected=authority.selection.borrow().clone();
+        effects::scope(World::new(730), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let (authority, keys) = verifier_ports(
+                receipt.version.as_deref().context("issued version")?,
+                fixture::family(),
+            );
+            let token = verifier_token(&db, &authority)?;
+            let before = verifier_image(&db)?;
+            let selected = authority.selection.borrow().clone();
             for cut in 0..8 {
-                let mut wrong=selected.clone();
+                let mut wrong = selected.clone();
                 match cut {
-                    0=>wrong.security_epoch+=1,
-                    1=>wrong.previous.binding.revision=Digest::new(b"foreign-old-binding"),
-                    2=>wrong.replacement.binding.revision=Digest::new(b"foreign-next-binding"),
-                    3=>wrong.previous.version="verify-v3".into(),
-                    4=>wrong.replacement.version=wrong.previous.version.clone(),
-                    5=>wrong.observed_at=1001,
-                    6=>wrong.ready_until=1000,
-                    _=>wrong.ready_until=1201,
+                    0 => wrong.security_epoch += 1,
+                    1 => wrong.previous.binding.revision = Digest::new(b"foreign-old-binding"),
+                    2 => wrong.replacement.binding.revision = Digest::new(b"foreign-next-binding"),
+                    3 => wrong.previous.version = "verify-v3".into(),
+                    4 => wrong.replacement.version = wrong.previous.version.clone(),
+                    5 => wrong.observed_at = 1001,
+                    6 => wrong.ready_until = 1000,
+                    _ => wrong.ready_until = 1201,
                 }
-                *authority.selection.borrow_mut()=wrong;
-                ensure!(verifier_prepared(&db,&authority,&keys,&token).is_err(),"foreign current verifier selection accepted");
+                *authority.selection.borrow_mut() = wrong;
+                ensure!(
+                    verifier_prepared(&db, &authority, &keys, &token).is_err(),
+                    "foreign current verifier selection accepted"
+                );
             }
-            *authority.selection.borrow_mut()=selected;
-            let mut foreign=authority.binding.clone();foreign.namespace.binding_generation+=1;
-            ensure!(prepare_verifier(&db,&authority,&keys,Request{binding:&foreign,family:&authority.family,version:&authority.version},&token).is_err(),"foreign namespace selected verifier material");
-            ensure!(keys.calls.load(Ordering::SeqCst)==0 && verifier_image(&db)?==before,"refused selection fetched keys or changed state");Ok(())
+            *authority.selection.borrow_mut() = selected;
+            let mut foreign = authority.binding.clone();
+            foreign.namespace.binding_generation += 1;
+            ensure!(
+                prepare_verifier(
+                    &db,
+                    &authority,
+                    &keys,
+                    Request {
+                        binding: &foreign,
+                        family: &authority.family,
+                        version: &authority.version
+                    },
+                    &token
+                )
+                .is_err(),
+                "foreign namespace selected verifier material"
+            );
+            ensure!(
+                keys.calls.load(Ordering::SeqCst) == 0 && verifier_image(&db)? == before,
+                "refused selection fetched keys or changed state"
+            );
+            Ok(())
         })
     }
 
@@ -1405,20 +1432,37 @@ mod tests {
     fn verifier_preparation_needs_no_new_secret_or_id_entropy() -> Result<()> {
         struct NoEntropy(Arc<World>);
         impl effects::Hooks for NoEntropy {
-            fn domain(&self)->u64{effects::Hooks::domain(self.0.as_ref())}
-            fn wall_time(&self)->Result<i64>{effects::Hooks::wall_time(self.0.as_ref())}
-            fn monotonic(&self)->std::time::Duration{effects::Hooks::monotonic(self.0.as_ref())}
-            fn fill_id(&self,_:&mut[u8])->Result<()>{anyhow::bail!("verifier maintenance requested identity entropy")}
-            fn fill_secret(&self,_:&mut[u8])->Result<()>{anyhow::bail!("verifier maintenance requested secret entropy")}
+            fn domain(&self) -> u64 {
+                effects::Hooks::domain(self.0.as_ref())
+            }
+            fn wall_time(&self) -> Result<i64> {
+                effects::Hooks::wall_time(self.0.as_ref())
+            }
+            fn monotonic(&self) -> std::time::Duration {
+                effects::Hooks::monotonic(self.0.as_ref())
+            }
+            fn fill_id(&self, _: &mut [u8]) -> Result<()> {
+                anyhow::bail!("verifier maintenance requested identity entropy")
+            }
+            fn fill_secret(&self, _: &mut [u8]) -> Result<()> {
+                anyhow::bail!("verifier maintenance requested secret entropy")
+            }
         }
-        let world=World::new(731);
-        effects::scope(world.clone(),||->Result<()>{
-            let (_dir,mut db)=fixture::database()?;let receipt=fixture::committed_issue(&mut db)?;
-            let (authority,keys)=verifier_ports(receipt.version.as_deref().context("issued version")?,fixture::family());
-            let token=verifier_token(&db,&authority)?;
-            effects::scope(Arc::new(NoEntropy(world)),||->Result<()>{
-                let ready=verifier_prepared(&db,&authority,&keys,&token)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let _pending=stage_verifier(&tx,&authority,ready)?;tx.commit()?;Ok(())
+        let world = World::new(731);
+        effects::scope(world.clone(), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let receipt = fixture::committed_issue(&mut db)?;
+            let (authority, keys) = verifier_ports(
+                receipt.version.as_deref().context("issued version")?,
+                fixture::family(),
+            );
+            let token = verifier_token(&db, &authority)?;
+            effects::scope(Arc::new(NoEntropy(world)), || -> Result<()> {
+                let ready = verifier_prepared(&db, &authority, &keys, &token)?;
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let _pending = stage_verifier(&tx, &authority, ready)?;
+                tx.commit()?;
+                Ok(())
             })
         })
     }
@@ -1725,23 +1769,27 @@ mod tests {
             _ => anyhow::bail!("unknown stored verifier state"),
         };
         Ok(VerifyProjection {
-            versions: db.query_row("SELECT count(*) FROM day2_credential_versions", [], |r| {
-                r.get::<_,i64>(0)
-            })?.try_into()?,
-            lineage_revision: db.query_row(
-                "SELECT revision FROM day2_credential_lineages",
-                [],
-                |r| r.get::<_,i64>(0),
-            )?.try_into()?,
+            versions: db
+                .query_row("SELECT count(*) FROM day2_credential_versions", [], |r| {
+                    r.get::<_, i64>(0)
+                })?
+                .try_into()?,
+            lineage_revision: db
+                .query_row("SELECT revision FROM day2_credential_lineages", [], |r| {
+                    r.get::<_, i64>(0)
+                })?
+                .try_into()?,
             verifier_revision: revision.try_into()?,
             key,
             envelope_revision: envelope.try_into()?,
             state,
-            available: db.query_row(
-                "SELECT count(*) FROM day2_credential_deliveries WHERE state='available'",
-                [],
-                |r| r.get::<_,i64>(0),
-            )?.try_into()?,
+            available: db
+                .query_row(
+                    "SELECT count(*) FROM day2_credential_deliveries WHERE state='available'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?
+                .try_into()?,
         })
     }
 
