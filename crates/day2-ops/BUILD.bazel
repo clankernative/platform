@@ -132,7 +132,7 @@ platform_rust_test(
     crate_name = "reports",
     crate_root = "tests/reports.rs",
     srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
-    compile_data = COMPILE_INPUTS,
+    compile_data = COMPILE_INPUTS + ["//crates/day2:src/authority_state.rs"],
     internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
     own_library = ":lib",
     program_data = ["//crates/day2-ops:day2-backup", "//crates/day2-ops:day2-host", "//crates/day2-ops:day2-provision-credentials"],
