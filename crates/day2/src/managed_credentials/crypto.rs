@@ -355,10 +355,15 @@ pub(super) fn prepare_verifier_replacement(
     expected_verifier: &[u8],
     token: &str,
 ) -> Result<[u8; 32]> {
-    ensure!(previous.verifier_version != replacement.verifier_version
-        && expected_verifier.len() == 32, "credential verifier replacement selection changed");
+    ensure!(
+        previous.verifier_version != replacement.verifier_version && expected_verifier.len() == 32,
+        "credential verifier replacement selection changed"
+    );
     let (selector, secret) = parse_token(token)?;
-    ensure!(selector == expected_selector, "credential verifier replacement token refused");
+    ensure!(
+        selector == expected_selector,
+        "credential verifier replacement token refused"
+    );
     let message = Zeroizing::new(verifier_message(identity, &selector, &secret)?);
     hmac::verify(&previous.key, &message, expected_verifier)
         .map_err(|_| anyhow::anyhow!("credential verifier replacement token refused"))?;
