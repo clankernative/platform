@@ -360,4 +360,4 @@ impl<S: Source> Drop for Session<'_, S> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
