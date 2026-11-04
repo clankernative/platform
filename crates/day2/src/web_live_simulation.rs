@@ -1424,22 +1424,49 @@ mod transport_histories {
         }
     }
     fn terminal_call(node: &syn::ExprMethodCall) -> bool {
-        node.method == "send" && path_is(&node.receiver, "terminal") && node.args.len() == 1 && outer_elements(&node.args[0])
+        node.method == "send"
+            && path_is(&node.receiver, "terminal")
+            && node.args.len() == 1
+            && outer_elements(&node.args[0])
     }
 
     fn terminal_predicate(expression: &syn::Expr) -> bool {
-        let syn::Expr::Macro(expression) = expression else { return false; };
-        if !expression.mac.path.is_ident("matches") { return false; }
-        let Ok(args) = syn::parse2::<MatchesArgs>(expression.mac.tokens.clone()) else { return false; };
-        if !matches!(&args.subject,syn::Expr::MethodCall(call) if call.method=="category" && call.args.is_empty() && path_is(&call.receiver,"classified")) { return false; }
-        let syn::Pat::Or(pattern) = args.pattern else { return false; };
-        let mut categories = pattern.cases.iter().filter_map(|pattern| {
-            let syn::Pat::Path(path) = pattern else { return None; };
-            let parts = path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>();
-            (parts.len()==4 && parts[..3]==["crate","error","Category"]).then(|| parts[3].clone())
-        }).collect::<Vec<_>>();
+        let syn::Expr::Macro(expression) = expression else {
+            return false;
+        };
+        if !expression.mac.path.is_ident("matches") {
+            return false;
+        }
+        let Ok(args) = syn::parse2::<MatchesArgs>(expression.mac.tokens.clone()) else {
+            return false;
+        };
+        if !matches!(&args.subject,syn::Expr::MethodCall(call) if call.method=="category" && call.args.is_empty() && path_is(&call.receiver,"classified"))
+        {
+            return false;
+        }
+        let syn::Pat::Or(pattern) = args.pattern else {
+            return false;
+        };
+        let mut categories = pattern
+            .cases
+            .iter()
+            .filter_map(|pattern| {
+                let syn::Pat::Path(path) = pattern else {
+                    return None;
+                };
+                let parts = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>();
+                (parts.len() == 4 && parts[..3] == ["crate", "error", "Category"])
+                    .then(|| parts[3].clone())
+            })
+            .collect::<Vec<_>>();
         categories.sort();
-        pattern.cases.len()==4 && categories==["Authentication","Conflict","Forbidden","NotFound"]
+        pattern.cases.len() == 4
+            && categories == ["Authentication", "Conflict", "Forbidden", "NotFound"]
     }
 
     impl<'ast> syn::visit::Visit<'ast> for Producer {
@@ -1469,7 +1496,6 @@ mod transport_histories {
             }
             syn::visit::visit_expr_method_call(self, node);
         }
-
     }
 
     fn production_wiring(source: &str) -> bool {
@@ -1528,7 +1554,10 @@ mod transport_histories {
         for (before, after) in [
             ("mpsc::channel(1)", "mpsc::channel(2)"),
             ("if matches!(", "if !matches!("),
-            ("let _ = terminal.send(elements(&cleared, \"outer\"));", "let _ = || terminal.send(elements(&cleared, \"outer\"));"),
+            (
+                "let _ = terminal.send(elements(&cleared, \"outer\"));",
+                "let _ = || terminal.send(elements(&cleared, \"outer\"));",
+            ),
             ("terminal: Some(terminal)", "terminal: None"),
             ("terminal: terminal_sender", "terminal: unrelated_terminal"),
             (
