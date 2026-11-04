@@ -71,10 +71,10 @@ fn binding(owner: &mut impl Checks) -> Binding {
 #[test]
 fn same_creator_reset_image_and_actual_session_remain_borrowed_and_drop_refuses_all() -> Result<()> {
     let mut world = super::super::tests::world()?;
-    execute(&mut world.owner)?;
     let binding = binding(&mut world.owner);
     let (mut a, mut stop) = drain::configured(binding.clone());
     let mut session = Session::begin(&mut a, &mut stop)?;
+    stage(&mut world.owner, &mut session, &binding)?;
     let mut source = Model::new();
     let root = source.root.clone();
     {
@@ -104,13 +104,13 @@ fn same_creator_reset_image_and_actual_session_remain_borrowed_and_drop_refuses_
 #[test]
 fn same_inode_same_length_overwrite_cannot_reuse_a_previous_positive_check() -> Result<()> {
     let mut world = super::super::tests::world()?;
-    execute(&mut world.owner)?;
     let binding = binding(&mut world.owner);
     let mut external = world.owner.state().creator.as_ref().unwrap().try_clone()?;
     external.seek(SeekFrom::Start(120))?;
     let mut saved = [0u8; 1]; external.read_exact(&mut saved)?;
     let (mut a, mut stop) = drain::configured(binding.clone());
     let mut session = Session::begin(&mut a, &mut stop)?;
+    stage(&mut world.owner, &mut session, &binding)?;
     let mut source = Model::new(); let root = source.root.clone();
     let mut candidate = Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root)?;
     candidate.check()?;
@@ -127,12 +127,12 @@ fn same_inode_same_length_overwrite_cannot_reuse_a_previous_positive_check() -> 
 #[test]
 fn replacing_creator_with_byte_equal_named_file_cannot_replace_first_creator_identity() -> Result<()> {
     let mut world = super::super::tests::world()?;
-    execute(&mut world.owner)?;
     let binding = binding(&mut world.owner);
     let path = world.owner.state().target_path()?;
     let bytes = std::fs::read(&path)?;
     let (mut a, mut stop) = drain::configured(binding.clone());
     let mut session = Session::begin(&mut a, &mut stop)?;
+    stage(&mut world.owner, &mut session, &binding)?;
     let mut source = Model::new(); let root = source.root.clone();
     let mut candidate = Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root)?;
     std::fs::rename(&path, path.with_extension("old"))?;
@@ -149,10 +149,10 @@ fn replacing_creator_with_byte_equal_named_file_cannot_replace_first_creator_ide
 fn identical_binding_under_another_original_or_foreign_root_never_joins() -> Result<()> {
     for change in 0..5 {
         let mut world = super::super::tests::world()?;
-        execute(&mut world.owner)?;
-        let binding = binding(&mut world.owner);
+            let binding = binding(&mut world.owner);
         let (mut a, mut stop) = drain::configured(binding.clone());
         let mut session = Session::begin(&mut a, &mut stop)?;
+    stage(&mut world.owner, &mut session, &binding)?;
         let (mut a2, mut stop2) = drain::configured(binding.clone());
         let other = Session::begin(&mut a2, &mut stop2)?;
         let state = world.owner.state();
@@ -178,10 +178,10 @@ fn identical_binding_under_another_original_or_foreign_root_never_joins() -> Res
 #[test]
 fn unknown_admission_keeps_primary_and_postchecks_the_same_original_before_refusing() -> Result<()> {
     let mut world = super::super::tests::world()?;
-    execute(&mut world.owner)?;
     let binding = binding(&mut world.owner);
     let (mut a, mut stop) = drain::configured(binding.clone());
     let mut session = Session::begin(&mut a, &mut stop)?;
+    stage(&mut world.owner, &mut session, &binding)?;
     let mut source = Model::new(); source.unknown = true; source.expire = true;
     let root = source.root.clone(); let cause = source.cause.clone();
     let error = match Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root) {
@@ -198,10 +198,10 @@ fn unknown_admission_keeps_primary_and_postchecks_the_same_original_before_refus
 fn caught_check_unwind_and_expiry_poison_actual_owners_not_only_candidate() -> Result<()> {
     for panic in [false, true] {
         let mut world = super::super::tests::world()?;
-        execute(&mut world.owner)?;
-        let binding = binding(&mut world.owner);
+            let binding = binding(&mut world.owner);
         let (mut a, mut stop) = drain::configured(binding.clone());
         let mut session = Session::begin(&mut a, &mut stop)?;
+    stage(&mut world.owner, &mut session, &binding)?;
         let mut source = Model::new(); let root = source.root.clone();
         let mut candidate = Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root)?;
         if panic {
@@ -282,4 +282,64 @@ fn candidate_and_admission_are_not_copyable_serialized_transferable_permissions(
     opaque!(Admission, serde::Deserialize<'static>);
     opaque!(Admission, Send);
     opaque!(Admission, Sync);
+}
+
+#[test]
+fn creator_born_under_original_a_cannot_join_identical_original_b() -> Result<()> {
+    let mut world = super::super::tests::world()?;
+    let binding = binding(&mut world.owner);
+    let (mut a, mut stop) = drain::configured(binding.clone());
+    let mut first = Session::begin(&mut a, &mut stop)?;
+    let first_id = first.identity();
+    stage(&mut world.owner, &mut first, &binding)?;
+    assert!(world.owner.state().birth_original.as_ref().unwrap().same(&first_id));
+    let (mut b, mut other_stop) = drain::configured(binding.clone());
+    let mut other = Session::begin(&mut b, &mut other_stop)?;
+    assert!(!first_id.same(&other.identity()));
+    let mut source = Model::new(); let root = source.root.clone();
+    assert!(Candidate::admit(&mut world.owner, &mut other, &mut source, binding, root).is_err());
+    assert_eq!(source.calls, 0);
+    assert!(world.owner.state().birth_original.as_ref().unwrap().same(&first_id));
+    assert!(world.owner.state().refused && source.refused);
+    assert!(other.require_drained().is_err());
+    Ok(())
+}
+
+#[test]
+fn raw_mechanical_staging_cannot_be_stamped_later_or_create_a_candidate() -> Result<()> {
+    for later_stage in [false, true] {
+        let mut world = super::super::tests::world()?;
+        execute(&mut world.owner)?;
+        assert!(world.owner.state().birth_original.is_none());
+        let binding = binding(&mut world.owner);
+        let (mut a, mut stop) = drain::configured(binding.clone());
+        let mut session = Session::begin(&mut a, &mut stop)?;
+        let mut source = Model::new(); let root = source.root.clone();
+        if later_stage { assert!(stage(&mut world.owner, &mut session, &binding).is_err()); }
+        assert!(Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root).is_err());
+        assert!(world.owner.state().birth_original.is_none());
+        assert_eq!(source.calls, 0);
+        assert!(world.owner.state().refused && source.refused);
+    }
+    Ok(())
+}
+
+#[test]
+fn expiry_during_owner_metadata_work_prevents_the_next_creator_io_and_admission() -> Result<()> {
+    let mut world = super::super::tests::world()?;
+    let binding = binding(&mut world.owner);
+    let (mut a, mut stop) = drain::configured(binding.clone());
+    let mut session = Session::begin(&mut a, &mut stop)?;
+    stage(&mut world.owner, &mut session, &binding)?;
+    let mut observed = world.owner.state().creator.as_ref().unwrap().try_clone()?;
+    observed.seek(SeekFrom::Start(37))?;
+    world.owner.expire_current = Some(drain::clock_handle(&mut session));
+    let mut source = Model::new(); let root = source.root.clone();
+    assert!(Candidate::admit(&mut world.owner, &mut session, &mut source, binding, root).is_err());
+    assert_eq!(observed.stream_position()?, 37); // even first seek was forbidden
+    assert_eq!(source.calls, 0);
+    assert!(world.owner.state().refused && source.refused);
+    drain::at(&mut session, 10, 10);
+    assert!(session.require_drained().is_err());
+    Ok(())
 }

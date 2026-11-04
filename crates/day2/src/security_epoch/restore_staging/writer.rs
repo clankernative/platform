@@ -51,6 +51,60 @@ trait Source<F: fence::Source>: sealed::Source {
     fn refuse(&mut self);
 }
 
+/// Sole joined staging entry for a future creator handoff. The opaque original
+/// is captured from the ACTUAL borrowed Session before reset or first creation;
+/// staging without this entry can never acquire a later admission candidate.
+fn stage<A: Checks, F: fence::Source>(
+    owner: &mut A,
+    session: &mut Session<'_, F>,
+    binding: &Binding,
+) -> Result<Projection> {
+    struct Birth<'a, 'original, A: Checks, F: fence::Source> {
+        owner: &'a mut A,
+        session: &'a mut Session<'original, F>,
+        done: bool,
+    }
+    impl<A: Checks, F: fence::Source> Drop for Birth<'_, '_, A, F> {
+        fn drop(&mut self) {
+            if !self.done {
+                self.owner.state().refused = true;
+                self.owner.refuse();
+                self.session.refuse();
+            }
+        }
+    }
+    let mut guard = Birth { owner, session, done: false };
+    let original = guard.session.identity();
+    guard.session.require_join(binding, &original)?;
+    ensure!(
+        !guard.owner.state().attempted && guard.owner.state().birth_original.is_none(),
+        "restore_creator_original_already_bound"
+    );
+    require_input(binding, guard.owner.state())?;
+    guard.owner.state().birth_original = Some(original.clone());
+    let result = execute(guard.owner);
+    let post = guard.session.require_join(binding, &original);
+    let value = result?;
+    post?;
+    guard.done = true;
+    Ok(value)
+}
+
+fn require_input(binding: &Binding, state: &State) -> Result<()> {
+    let ns = &state.input.namespace;
+    ensure!(
+        ns.installation == binding.scope.installation
+            && ns.environment == binding.scope.environment
+            && ns.app == binding.scope.app
+            && ns.binding_generation == binding.binding_generation
+            && state.input.operation == binding.operation
+            && state.input.source_epoch == binding.source_epoch
+            && state.input.target_incarnation == binding.target_incarnation,
+        "restore_creator_input_changed"
+    );
+    Ok(())
+}
+
 impl Target {
     fn same(&self, other: &Self) -> bool {
         self.binding == other.binding
@@ -75,6 +129,10 @@ impl Target {
                 && state.frozen_image.as_ref() == Some(&self.image)
                 && state.creator_identity == Some(self.creator),
             "restore_writer_staged_target_changed"
+        );
+        ensure!(
+            state.birth_original.as_ref().is_some_and(|birth| birth.same(&self.original)),
+            "restore_writer_creator_original_changed"
         );
         let file = state.creator.as_ref().context("restore_creator_missing")?;
         let held = file.metadata()?;
@@ -108,9 +166,15 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Guard<'_, '_, A, F, W> 
 impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
     fn retained(&mut self, target: &Target) -> Result<()> {
         self.session.require_join(&target.binding, &target.original)?;
-        self.owner.current()?;
-        self.owner.state().join()?;
-        target.join(self.owner.state())
+        let checked = self.owner.current().and_then(|()| {
+            self.owner.state().join()?;
+            target.join(self.owner.state())
+        });
+        // Metadata/owner work above can take time. The actual original must
+        // remain current AFTER it, immediately before the next concrete IO.
+        let post = self.session.require_join(&target.binding, &target.original);
+        checked?;
+        post
     }
     fn current(&mut self, target: &Target, admission: Option<&Admission>) -> Result<()> {
         self.retained(target)?;
@@ -186,7 +250,7 @@ impl<'a, 'original, A: Checks, F: fence::Source, W: Source<F>> Candidate<'a, 'or
         guard.owner.state().writer_attempted = true;
         let target = Target {
             binding,
-            original: guard.session.identity(),
+            original: guard.owner.state().birth_original.clone().context("restore_creator_original_missing")?,
             settled_root,
             image: guard.owner.state().frozen_image.clone().context("restore_reset_image_missing")?,
             creator: guard.owner.state().creator_identity.context("restore_creator_identity_missing")?,

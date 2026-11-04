@@ -60,6 +60,7 @@ struct State {
     creator: Option<File>,
     creator_identity: Option<(u64, u64)>,
     frozen_image: Option<(Digest, u64)>,
+    birth_original: Option<super::restore_fencing::ApprovalIdentity>,
     source: Option<File>,
     sql: Option<Connection>,
     consumed: u64,

@@ -37,3 +37,13 @@ staged image remains the previously documented credential-unit reset, not the
 complete application/session-disable policy. Tests use real SQLite/files and
 controlled unqualified suppliers. They do not qualify native exclusion, epoch
 settlement, physical fencing, custody, operator execution or crash power-loss.
+
+The joined stage entry captures original continuity from the actual borrowed
+drain session before reset or creation, not at candidate admission. Raw mechanical
+staging leaves that field absent and cannot produce a candidate. The wrapper
+retains the actual session through staging and checks it before/after the whole
+call. This establishes structural birth continuity only. It does not qualify
+native approval freshness at each internal staging effect: the future genuine
+Checks supplier must retain the same actual original and check it at every IO
+boundary and local SQL/COMMIT using a qualified cheap local clock, without
+fencing/provider RPC inside a transaction. No accepting supplier exists here.

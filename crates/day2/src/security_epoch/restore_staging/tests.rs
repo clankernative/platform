@@ -84,6 +84,7 @@ pub(super) struct Fixture {
     calls: usize,
     fail_after_directory: bool,
     reject_application: bool,
+    pub(super) expire_current: Option<Rc<Cell<(u64, u64)>>>,
 }
 impl sealed::Sealed for Fixture {}
 impl Checks for Fixture {
@@ -92,6 +93,7 @@ impl Checks for Fixture {
     }
     fn current(&mut self) -> Result<()> {
         self.calls += 1;
+        if let Some(clock) = self.expire_current.take() { clock.set((99, 100)); }
         ensure!(!self.refused, "fixture_refused");
         ensure!(
             !(self.fail_after_directory && self.state.directory_may_exist),
@@ -160,6 +162,7 @@ pub(super) fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Diges
         creator: None,
         creator_identity: None,
         frozen_image: None,
+        birth_original: None,
         source: None,
         sql: None,
         consumed: 0,
@@ -173,6 +176,7 @@ pub(super) fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Diges
         calls: 0,
         fail_after_directory: false,
         reject_application: false,
+        expire_current: None,
     })
 }
 
