@@ -122,7 +122,7 @@ impl SelectedAuthority {
         entries: Vec<Selection>,
         keys: Arc<dyn ApprovalKeyProvider>,
     ) -> Result<Self> {
-        struct Source(Arc<RwLock<Selections>>);
+        struct Source(Arc<RwLock<Selections>>, Mutex<i64>);
         impl VerificationSource for Source {
             fn current(
                 &self,
@@ -131,11 +131,19 @@ impl SelectedAuthority {
                 minimum_time: i64,
             ) -> Result<VerificationObservation> {
                 let entries = self.0.read().unwrap();
+                // A request minimum can precede a previous fresh read. Keep
+                // this simulated source clock monotonic, and select readiness
+                // at that SAME time rather than renewing its fixed window.
+                let read_at = {
+                    let mut clock = self.1.lock().unwrap();
+                    *clock = (*clock).max(minimum_time);
+                    *clock
+                };
                 let selected = SelectedAuthority::verification_selection(
                     &entries.current,
                     binding,
                     management,
-                    minimum_time,
+                    read_at,
                 )?;
                 Ok(VerificationObservation {
                     namespace: selected.binding.namespace.clone(),
@@ -149,7 +157,7 @@ impl SelectedAuthority {
                     enabled: true,
                     observed_at: selected.observed_at,
                     ready_until: selected.ready_until,
-                    read_at: minimum_time,
+                    read_at,
                 })
             }
         }
@@ -165,7 +173,7 @@ impl SelectedAuthority {
             }
         }
         let mut result = Self::new(entries, keys, Arc::new(Unavailable))?;
-        result.verification = Arc::new(Source(result.entries.clone()));
+        result.verification = Arc::new(Source(result.entries.clone(), Mutex::new(0)));
         Ok(result)
     }
 
