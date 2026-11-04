@@ -860,12 +860,12 @@ fn history_with_fault(seed: u64, events: &[Event], wrong_oracle: bool, fault: Fa
         Ok(())
     })();
     Run {
-        failure: result.err().map(|_| Failure {
+        failure: result.err().map(|_| Box::new(Failure {
             stage,
             index: steps.len(),
             event: event_index,
             frontier,
-        }),
+        })),
         steps,
         fault,
     }
