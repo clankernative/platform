@@ -884,7 +884,9 @@ mod tests {
             &events,
         )
         .unwrap_err();
-        let failure = error.downcast_ref::<Failure>().context("real child outcome")?;
+        let failure = error
+            .downcast_ref::<Failure>()
+            .context("real child outcome")?;
         assert_eq!(failure.process.category, "exit");
         assert_eq!(failure.process.code, Some(7));
         assert_eq!(failure.capture, None);
