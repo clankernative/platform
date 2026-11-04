@@ -1674,6 +1674,8 @@ fn configure_tests(
             "managed_credentials::simulation::actual_credential_http_inherits_ports_and_replays_exact_ids",
             "managed_credentials::simulation::crash_reopen::fixed_client_and_personal_issuance_survive_real_process_loss_and_reopen",
             "managed_credentials::simulation::crash_reopen::real_child_cut_and_death_guards_refuse_normal_exit_and_missing_checkpoint",
+            "managed_credentials::simulation::crash_reopen::delivery::reveal_and_acknowledgement_survive_real_process_loss_without_claiming_delivery",
+            "managed_credentials::simulation::crash_reopen::delivery::delivery_child_guards_require_the_actual_cut_and_signal_death",
             "managed_credentials::store::tests::schema_native_runtime_initialization_reopens_with_installed_peers",
             "unsecured_restore_refuses_declared_credentials_and_oauth_before_output_mutation",
             "managed_credentials::issuance::tests::native_issuance_rolls_back_and_recovers_the_same_public_receipt",
