@@ -554,6 +554,18 @@ fn request_binding(
     })
 }
 
+/// Test access to the existing pure request/holder binding, never a peer or
+/// writer constructor. All arguments and results remain ordinary DATA.
+#[cfg(test)]
+pub(in crate::security_epoch) fn request_binding_fixture(
+    expected: &Bootstrap,
+    first: &Holder,
+    selection: &EpochStore,
+    request: &Request,
+) -> Result<StoragePeerRequest> {
+    request_binding(expected, first, selection, request)
+}
+
 impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
     /// Closed authentication DATA leaf. The transport must release this leaf's
     /// material borrow, then run the unchanged FULL composite check before any

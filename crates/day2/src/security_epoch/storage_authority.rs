@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
 mod initial;
+#[cfg(test)]
+pub(super) use initial::request_binding_fixture;
 mod native_volume;
 pub(crate) use initial::{
     AppInitialStorageContinuity, CurrentAppStorageBootstrapPhase, CurrentAppStoragePhase,

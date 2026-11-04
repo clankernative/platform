@@ -31,16 +31,38 @@ pub(in crate::security_epoch) fn observe_read_only(
     selected: &EpochStore,
     request: &Request,
 ) -> Result<Snapshot> {
+    observe_read_only_captured(path, selected, request).0
+}
+
+/// Same read-only fixture operation, with its complete auxiliary call prefix.
+/// It preserves the original Result and creates no schema, writer or authority.
+pub(in crate::security_epoch) fn observe_read_only_captured(
+    path: &Path,
+    selected: &EpochStore,
+    request: &Request,
+) -> (Result<Snapshot>, Value) {
+    let db = match Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(db) => db,
+        Err(error) => {
+            return (
+                Err(error.into()),
+                json!({"opened":false,"calls":[],"port_refused":null}),
+            );
+        }
+    };
     let mut reader = Provider {
-        db: Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?,
+        db,
         fault: Fault::None,
         tick: Duration::from_secs(100),
         samples: VecDeque::new(),
         read_override: None,
-        calls: Vec::new(),
+        calls: vec![],
         refused: false,
     };
-    Ok(observe_selected(&mut reader, selected, request)?.into_data())
+    let result =
+        observe_selected(&mut reader, selected, request).map(|observation| observation.into_data());
+    let captured = json!({"opened":true,"calls":reader.calls,"port_refused":reader.refused});
+    (result, captured)
 }
 
 pub(in crate::security_epoch) fn observe_selected(
