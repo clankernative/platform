@@ -466,7 +466,7 @@ fn incomplete_child_failure_records_preserve_closed_stage_and_unresolved_cleanup
     let unredacted = decode_contents(&invalid).err().context("missing raw crash decoder refusal")?;
     assert!(unredacted.to_string().contains(marker));
     let refused = decode(&invalid).err().context("missing closed crash decoder refusal")?;
-    assert_eq!(refused.to_string(), "secure_restore_crash_replay_refused");
+    assert!(refused.to_string() == "secure_restore_crash_replay_refused", "crash replay error boundary was not closed");
     assert_eq!(saved.first, first);
     assert!(saved.second.is_none());
     assert!(!saved.first.attempt.reaped);

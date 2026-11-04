@@ -97,6 +97,10 @@ Crash failures retain actual checkpoint/kill/reap/EOF observations and optional
 readback; an unresolved child is not reported as reaped or launched again. They
 contain no token, verifier, ciphertext, key bytes or foreign error text. Optional
 external replay input being absent is not a saved-corpus pass.
+Both actual replay decoders replace parser/admission errors with a fixed
+refusal, so malformed input-owned field names cannot be formatted into test
+output. Compressed unknown-field canaries exercise those same boundaries;
+their assertions never print the untrusted error value on failure.
 
 ```console
 bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::kernel::restore::tests:: --test-threads=1
