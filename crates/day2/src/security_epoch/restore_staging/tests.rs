@@ -138,6 +138,9 @@ fn world() -> Result<World> {
     })
 }
 fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Result<Fixture> {
+    // The fixture supplies the private-root precondition explicitly, independent
+    // of the process umask. Production admission must still refuse public roots.
+    std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700))?;
     let root = File::open(&root_path)?;
     let scope = Rc::new(());
     let state = State {
@@ -843,4 +846,16 @@ fn creation_stays_under_held_parent_descriptors_during_parent_path_swaps() -> Re
         );
         Ok(())
     })
+}
+
+#[test]
+fn production_staging_refuses_a_public_root_without_repairing_it() -> Result<()> {
+    let mut w = world()?;
+    let root = w.owner.state.root_path.clone();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))?;
+    assert!(execute(&mut w.owner).is_err());
+    assert!(w.owner.refused);
+    assert_eq!(std::fs::metadata(&root)?.mode() & 0o777, 0o755);
+    assert!(!w.owner.state.target_dir()?.try_exists()?);
+    Ok(())
 }
