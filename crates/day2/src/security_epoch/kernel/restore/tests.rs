@@ -673,8 +673,22 @@ fn different_backup_target_schema_key_manifest_and_selected_store_cannot_share_a
         assert!(unsupported.commitment(&selected).is_err());
     }
     for operation in [
-        before.root.as_ref().unwrap().value.bootstrap.create_operation.clone(),
-        before.activate.as_ref().unwrap().value.request.operation().clone(),
+        before
+            .root
+            .as_ref()
+            .unwrap()
+            .value
+            .bootstrap
+            .create_operation
+            .clone(),
+        before
+            .activate
+            .as_ref()
+            .unwrap()
+            .value
+            .request
+            .operation()
+            .clone(),
     ] {
         let mut reused = request.intent.clone();
         reused.operation = operation;
@@ -827,8 +841,15 @@ fn closed_restore_codec_rejects_extras_duplicates_and_unpinned_keys() -> Result<
     );
     assert_ne!(duplicate, encoded);
     assert!(crate::json::decode_evidence::<Request>(duplicate.as_bytes()).is_err());
-    for version in ["latest".to_owned(), "LATEST".to_owned(), "current".to_owned(),
-        "Current".to_owned(), "latest/alias".to_owned(), String::new(), "x".repeat(129)] {
+    for version in [
+        "latest".to_owned(),
+        "LATEST".to_owned(),
+        "current".to_owned(),
+        "Current".to_owned(),
+        "latest/alias".to_owned(),
+        String::new(),
+        "x".repeat(129),
+    ] {
         let mut malformed = request.intent.clone();
         malformed.archive.required_keys[0].version = version;
         assert!(malformed.commitment(&selected).is_err());
