@@ -69,6 +69,15 @@ missing programs, bin-unit harnesses, integration harnesses or extra targets
 refuse qualification. Actual configured Rust providers must also match each
 record's source, name, type and test identity before output installation.
 
+The day2 and day2-control libraries declare their complete `src/` module trees.
+Their standalone executable and bin-unit targets declare their own root file
+and depend on the library; unrelated integration-test sources are not compiler
+inputs to those targets. Integration harnesses retain their complete source
+sets, and explicit embedded `compile_data` inputs remain. This keeps unrelated
+test changes from invalidating otherwise identical compiled actions on either
+host. The complete target catalog, compiler flags, byte admission and fresh
+runtime campaigns remain mandatory.
+
 Development workspace crates use optimization level 1; dependencies and build
 tools use level 2, with assertions and overflow checks enabled and debug info
 disabled. Native non-incremental builds leave codegen partitioning at the
