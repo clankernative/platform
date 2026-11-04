@@ -1807,16 +1807,20 @@ mod delivery_tests {
         fn domain(&self) -> u64 {
             effects::Hooks::domain(&*self.world)
         }
+
         fn wall_time(&self) -> Result<i64> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             effects::Hooks::wall_time(&*self.world)
         }
+
         fn monotonic(&self) -> Duration {
             effects::Hooks::monotonic(&*self.world)
         }
+
         fn fill_id(&self, bytes: &mut [u8]) -> Result<()> {
             effects::Hooks::fill_id(&*self.world, bytes)
         }
+
         fn fill_secret(&self, bytes: &mut [u8]) -> Result<()> {
             effects::Hooks::fill_secret(&*self.world, bytes)
         }
