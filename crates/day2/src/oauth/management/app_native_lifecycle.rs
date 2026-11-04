@@ -6,7 +6,9 @@ use crate::{
     oauth::native_management,
     protocol::{Instruction, Request},
     security_epoch::{
-        ConsumerEvent, ConsumerHandshakeProgress, ConsumerLifecycle, ConsumerShellReference,
+        ConsumerControllerAction, ConsumerEvent, ConsumerHandshakeProgress, ConsumerLifecycle,
+        ConsumerShellReference, ConsumerStorageEvent, ConsumerStorageFault,
+        ConsumerStorageReference,
     },
 };
 use day2_capabilities::security_epoch::{AuthorityScope, bootstrap::NativeRole};
@@ -48,6 +50,7 @@ struct RefreshCrash;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 enum Step {
+    Storage { event: ConsumerStorageEvent },
     Capture { disconnect: bool },
     Approve,
     Authorize,
@@ -73,7 +76,42 @@ enum Step {
 struct Program {
     version: u32,
     seed: u64,
+    setup: Setup,
     steps: Vec<Step>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Setup {
+    Active,
+    FirstHolder,
+}
+
+fn consumer_scope() -> Result<AuthorityScope> {
+    Ok(AuthorityScope {
+        installation: "company".to_owned().try_into()?,
+        environment: "production".to_owned().try_into()?,
+        app: "workspace".to_owned().try_into()?,
+    })
+}
+
+fn initial_storage(setup: Setup) -> Vec<ConsumerEvent> {
+    if setup == Setup::FirstHolder {
+        return vec![];
+    }
+    let mut events = vec![ConsumerEvent::FirstHolder { death_cut: None }];
+    for activation in [false, true] {
+        events.extend([
+            ConsumerEvent::Reserve { activation },
+            ConsumerEvent::Dispatch { activation },
+            ConsumerEvent::Settle { activation },
+        ]);
+    }
+    events.push(ConsumerEvent::Current {
+        death_cut: None,
+        rewrite_provider: false,
+    });
+    events
 }
 
 struct Native {
@@ -101,6 +139,21 @@ fn native_event(event: ConsumerEvent) -> Result<()> {
         let native = slot.as_mut().context("native lifecycle supplier absent")?;
         native.records.push(native.lifecycle.step(event)?);
         Ok(())
+    })
+}
+
+fn native_storage(event: ConsumerStorageEvent) -> Result<bool> {
+    NATIVE.with(|slot| {
+        let mut slot = slot.try_borrow_mut()?;
+        let native = slot.as_mut().context("native lifecycle supplier absent")?;
+        let record = native
+            .lifecycle
+            .step(ConsumerEvent::Storage { input: event })?;
+        let accepted = record["actual"]["accepted"]
+            .as_bool()
+            .context("storage action result missing")?;
+        native.records.push(record);
+        Ok(accepted)
     })
 }
 
@@ -317,11 +370,7 @@ impl World {
             journal: Default::default(),
             fault: Default::default(),
         });
-        let scope = AuthorityScope {
-            installation: "company".to_owned().try_into()?,
-            environment: "production".to_owned().try_into()?,
-            app: "workspace".to_owned().try_into()?,
-        };
+        let scope = consumer_scope()?;
         NATIVE.with(|slot| {
             ensure!(
                 slot.borrow().is_none(),
@@ -350,17 +399,10 @@ impl World {
         })
     }
 
-    fn boot(&mut self) -> Result<()> {
-        native_event(ConsumerEvent::FirstHolder { death_cut: None })?;
-        for activation in [false, true] {
-            native_event(ConsumerEvent::Reserve { activation })?;
-            native_event(ConsumerEvent::Dispatch { activation })?;
-            native_event(ConsumerEvent::Settle { activation })?;
+    fn boot(&mut self, setup: Setup) -> Result<()> {
+        for event in initial_storage(setup) {
+            native_event(event)?;
         }
-        native_event(ConsumerEvent::Current {
-            death_cut: None,
-            rewrite_provider: false,
-        })?;
         native_event(ConsumerEvent::Shell { death_cut: None })?;
         Ok(())
     }
@@ -435,6 +477,7 @@ impl World {
         let now = self.fixture.port.now.load(SeqCst);
         let identity = &self.fixture.identity;
         match step {
+            Step::Storage { event } => return native_storage(event),
             Step::Capture { disconnect } => {
                 self.view = Some(self.fixture.manager.capture(
                     "calendar",
@@ -621,7 +664,8 @@ impl World {
             "exchanges":self.fixture.port.posts.load(SeqCst),"refreshes":self.port.refreshes.load(SeqCst),
             "reads":self.port.reads.load(SeqCst),"revokes":self.fixture.port.revokes.load(SeqCst),"journal":*self.port.journal.lock().unwrap(),"refresh_rows":refresh_rows,"tokens":tokens},"sql":crate::oauth::simulation::snapshot(&db)?,
             "native":NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?,
-            "shell_reference":model.shell_reference.observation(),"shell_progress":model.shell_reference.progress()?}),
+            "shell_reference":model.shell_reference.observation(),"shell_progress":model.shell_reference.progress()?,
+            "storage_reference":model.storage_reference.observation()}),
         )
     }
 }
@@ -632,6 +676,8 @@ impl World {
 struct Oracle {
     #[serde(skip)]
     shell_reference: ConsumerShellReference,
+    #[serde(skip)]
+    storage_reference: ConsumerStorageReference,
     stage: u8,
     disconnect: bool,
     pending: bool,
@@ -653,14 +699,22 @@ struct Oracle {
 }
 
 impl Oracle {
-    fn new(seed: u64) -> Result<Self> {
+    fn new(seed: u64, setup: Setup) -> Result<Self> {
         let mut shell_reference = ConsumerShellReference::new(seed)?;
         ensure!(
             shell_reference.exchange(None)?,
             "reference Shell setup refused"
         );
+        let mut storage_reference = ConsumerStorageReference::new(seed, &consumer_scope()?)?;
+        for event in initial_storage(setup) {
+            ensure!(
+                storage_reference.step(event)?,
+                "reference storage setup refused"
+            );
+        }
         Ok(Self {
             shell_reference,
+            storage_reference,
             stage: 0,
             disconnect: false,
             pending: false,
@@ -681,9 +735,15 @@ impl Oracle {
             journal: vec![],
         })
     }
-    fn resolve_read(&mut self, fault: Option<RefreshFault>) -> bool {
+    fn resolve_read(&mut self, fault: Option<RefreshFault>) -> Result<bool> {
+        // The real usage adapter enters the selected App role before resolving
+        // connection DATA. A denied pending storage check refuses that owner;
+        // completing storage later is not another App admission.
+        if self.app && self.controller && !self.storage_reference.current() {
+            self.app = false;
+        }
         if !self.app || !self.controller || self.stage != 3 {
-            return false;
+            return Ok(false);
         }
         if self
             .token_expires
@@ -700,7 +760,11 @@ impl Oracle {
                     .push((base, "may_have_been_sent".into(), None));
                 self.app = false;
                 self.controller = false;
-                return false;
+                self.storage_reference.step(ConsumerEvent::Current {
+                    death_cut: Some(0),
+                    rewrite_provider: false,
+                })?;
+                return Ok(false);
             }
             self.refreshes += 1;
             self.journal.push(ProviderEvent::Refresh);
@@ -713,7 +777,7 @@ impl Oracle {
                 self.refresh_rows
                     .push((base, "may_have_been_sent".into(), None));
                 self.app = false;
-                return false;
+                return Ok(false);
             }
             self.journal.push(ProviderEvent::Account);
             if fault
@@ -725,7 +789,11 @@ impl Oracle {
                     .push((base, "may_have_been_sent".into(), None));
                 self.app = false;
                 self.controller = false;
-                return false;
+                self.storage_reference.step(ConsumerEvent::Current {
+                    death_cut: Some(0),
+                    rewrite_provider: false,
+                })?;
+                return Ok(false);
             }
             self.publications += 1;
             self.token_expires = Some(self.now + 90);
@@ -738,11 +806,15 @@ impl Oracle {
             {
                 self.app = false;
                 self.controller = false;
-                return false;
+                self.storage_reference.step(ConsumerEvent::Current {
+                    death_cut: Some(0),
+                    rewrite_provider: false,
+                })?;
+                return Ok(false);
             }
             if fault == Some(RefreshFault::LatePublication) {
                 self.app = false;
-                return false;
+                return Ok(false);
             }
         }
         self.reads += 1;
@@ -750,13 +822,31 @@ impl Oracle {
         if self.cached.is_none() {
             self.cached = Some((1 + self.publications, self.now + 60));
         }
-        true
+        Ok(true)
     }
 
     fn step(&mut self, step: Step) -> Result<bool> {
+        if matches!(step, Step::Capture { .. })
+            && self.app
+            && self.controller
+            && !self.storage_reference.current()
+        {
+            self.app = false;
+        }
+        if step == Step::CachedRead
+            && self.cached.is_some()
+            && self.app
+            && self.controller
+            && !self.storage_reference.current()
+        {
+            self.app = false;
+        }
         let app = self.app && self.controller;
         let original = app && self.pending && self.now < self.created + 300;
         Ok(match step {
+            Step::Storage { event } => self
+                .storage_reference
+                .step(ConsumerEvent::Storage { input: event })?,
             Step::Capture { disconnect } => {
                 let accepted = app
                     && if disconnect {
@@ -782,7 +872,8 @@ impl Oracle {
                 // completing DATA later never renews its original or role.
                 if self.pending
                     && self.shell
-                    && self.shell_reference.progress()? != ConsumerHandshakeProgress::Completed
+                    && (self.shell_reference.progress()? != ConsumerHandshakeProgress::Completed
+                        || !self.storage_reference.current())
                 {
                     self.shell = false;
                 }
@@ -829,14 +920,14 @@ impl Oracle {
                 }
                 accepted
             }
-            Step::Read => self.resolve_read(None),
+            Step::Read => self.resolve_read(None)?,
             Step::Refresh => {
                 self.now += 31;
-                self.resolve_read(None)
+                self.resolve_read(None)?
             }
             Step::FaultRefresh { fault } => {
                 self.now += 31;
-                self.resolve_read(Some(fault))
+                self.resolve_read(Some(fault))?
             }
             Step::CachedRead => {
                 let accepted = app
@@ -855,6 +946,10 @@ impl Oracle {
             Step::Fail { owner, cut } => {
                 match owner {
                     Failure::App => {
+                        self.storage_reference.step(ConsumerEvent::Current {
+                            death_cut: Some(cut),
+                            rewrite_provider: false,
+                        })?;
                         self.app = false;
                         self.controller = false;
                     }
@@ -862,7 +957,18 @@ impl Oracle {
                         self.shell_reference.exchange(Some(cut))?;
                         self.shell = false;
                     }
-                    Failure::Controller | Failure::Epoch => self.controller = false,
+                    Failure::Controller => {
+                        self.storage_reference
+                            .step(ConsumerEvent::ControllerDeath { cut })?;
+                        self.controller = false;
+                    }
+                    Failure::Epoch => {
+                        self.storage_reference.step(ConsumerEvent::Current {
+                            death_cut: None,
+                            rewrite_provider: true,
+                        })?;
+                        self.controller = false;
+                    }
                 };
                 true
             }
@@ -870,7 +976,9 @@ impl Oracle {
                 self.now += seconds as i64;
                 true
             }
-            Step::Reopen | Step::Restore | Step::ResetMonotonic => true,
+            Step::Reopen => self.storage_reference.step(ConsumerEvent::Reopen)?,
+            Step::Restore => self.storage_reference.step(ConsumerEvent::RestoreClock)?,
+            Step::ResetMonotonic => true,
             Step::Restart => {
                 self.app = false;
                 self.shell = false;
@@ -969,6 +1077,7 @@ enum OracleControl {
     None,
     OvercountFirstRead,
     PendingShellCompletes,
+    PendingStorageCompletes,
 }
 
 fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
@@ -981,11 +1090,11 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
         "consumer clock input bound");
     let mut world = World::new(program.seed)?;
     let hooks = world.port.clone();
-    let mut model = Oracle::new(program.seed)?;
+    let mut model = Oracle::new(program.seed, program.setup)?;
     effects::scope(hooks.clone(), || -> Result<()> {
         let scope = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().scope.clone());
         native_management::fixtures::select_app_scope(&scope)?;
-        if world.boot().is_err() {
+        if world.boot(program.setup).is_err() {
             return Err(Divergence {
                 category: "setup",
                 index: 0,
@@ -1009,6 +1118,12 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
             && model.shell_reference.progress()? == ConsumerHandshakeProgress::Pending
         {
             // Negative expectation only, never supplied to the real consumer.
+            expected = true;
+        }
+        if control == OracleControl::PendingStorageCompletes
+            && step == Step::Read
+            && !model.storage_reference.current()
+        {
             expected = true;
         }
         if !corrupted
@@ -1055,7 +1170,10 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
         };
         let category = if panicked {
             Some("adapter_panic")
-        } else if native_divergence || !shell_reference_matches(&record) {
+        } else if native_divergence
+            || !shell_reference_matches(&record)
+            || !storage_reference_matches(&record)
+        {
             Some("native_model")
         } else if actual != expected {
             Some("acceptance")
@@ -1097,6 +1215,25 @@ fn shell_reference_matches(record: &Value) -> bool {
             Some("pending" | "completed" | "refused")
         )
         && record["native"]["serving_progress"] == record["shell_progress"]
+}
+
+fn storage_reference_matches(record: &Value) -> bool {
+    let native = &record["native"];
+    let expected = &record["storage_reference"];
+    let handshake = &native["storage"]["handshake"];
+    let reference = &expected["handshake"];
+    expected["state"].is_object()
+        && reference["world"].is_object()
+        && reference["schedule"].is_object()
+        && reference["failed"] == false
+        && handshake["failed"] == false
+        && expected["current"].is_boolean()
+        && native["storage"]["state"] == expected["state"]
+        && native["expected"] == expected["state"]
+        && native["expected_current"] == expected["current"]
+        && handshake["oracle"] == reference["world"]
+        && handshake["schedule"] == reference["schedule"]
+        && native["reference"] == *reference
 }
 
 fn source() -> Digest {
@@ -1561,6 +1698,7 @@ fn decode_descriptor(bytes: &[u8]) -> Result<Bundle> {
     ensure!(
         bundle.original.version == 1
             && bundle.original.seed == bundle.reduced.seed
+            && bundle.original.setup == bundle.reduced.setup
             && bundle.reduced.version == 1
             && !bundle.original.steps.is_empty()
             && bundle.original.steps.len() <= MAX_STEPS
@@ -1717,6 +1855,7 @@ fn saved_replay_checks_source_wire_shape_and_original_history_before_execution()
     let program = Program {
         version: 1,
         seed: 93,
+        setup: Setup::Active,
         steps: happy(),
     };
     let first = replay_pair(&program, OracleControl::OvercountFirstRead);
@@ -1889,6 +2028,7 @@ fn complete_consumer_failure_larger_than_transport_budget_replays_without_trunca
     let program = Program {
         version: 1,
         seed: 94,
+        setup: Setup::Active,
         steps,
     };
     let pair = replay_pair(&program, OracleControl::OvercountFirstRead);
@@ -1984,6 +2124,7 @@ fn shell_progress_drives_selected_oauth_decisions_without_reviving_a_refused_own
                 let records = verify(&Program {
                     version: 1,
                     seed,
+                    setup: Setup::Active,
                     steps,
                 })?;
                 let expected_approval = !attempt || pause == count;
@@ -2040,6 +2181,7 @@ fn shell_peer_death_and_reopen_do_not_reclassify_app_or_restore_shell() -> Resul
         let records = verify(&Program {
             version: 1,
             seed,
+            setup: Setup::Active,
             steps,
         })?;
         ensure!(
@@ -2063,6 +2205,7 @@ fn pending_shell_oracle_mutation_is_retained_and_replayed_as_a_real_consumer_dis
     let program = Program {
         version: 1,
         seed: 71,
+        setup: Setup::Active,
         steps: vec![
             Step::Capture { disconnect: false },
             Step::Advance { seconds: 2 },
@@ -2099,7 +2242,7 @@ fn pending_shell_hook_checks_exact_role_scope_and_model_errors() -> Result<()> {
     let mut world = World::new(71)?;
     let hooks = world.port.clone();
     effects::scope(hooks.clone(), || -> Result<()> {
-        world.boot()?;
+        world.boot(Setup::Active)?;
         native_event(ConsumerEvent::BeginShell { death_cut: None })?;
         let scope = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().scope.clone());
         let mut before =
@@ -2177,6 +2320,7 @@ fn consumer_progress_requires_complete_known_reference_observations() -> Result<
     let records = verify(&Program {
         version: 1,
         seed: 4,
+        setup: Setup::Active,
         steps: vec![Step::BeginShell { death_cut: None }],
     })?;
     let original = &records[0];
@@ -2268,12 +2412,639 @@ fn shell_batch_bounds_and_overlapping_begin_preserve_the_pending_original() -> R
     Ok(())
 }
 
+// Generator inputs and cuts come only from the independent storage model.
+// Adjacent generated wire events may share one bounded batch, retaining every
+// per-event wait, retry, clock and postcheck. Batches never cross a consumer,
+// provider/file obligation or another explicitly scheduled cut.
+fn schedule_storage(
+    steps: &mut Vec<Step>,
+    reference: &mut ConsumerStorageReference,
+    event: ConsumerStorageEvent,
+) -> Result<bool> {
+    let accepted = reference.step(ConsumerEvent::Storage { input: event })?;
+    let merged = match (steps.last_mut(), event) {
+        (
+            Some(Step::Storage {
+                event: ConsumerStorageEvent::AdvanceFirstHolder { events },
+            }),
+            ConsumerStorageEvent::AdvanceFirstHolder { events: 1 },
+        )
+        | (
+            Some(Step::Storage {
+                event: ConsumerStorageEvent::AdvanceCompletion { events },
+            }),
+            ConsumerStorageEvent::AdvanceCompletion { events: 1 },
+        ) if *events < 64 => {
+            *events += 1;
+            true
+        }
+        _ => false,
+    };
+    if !merged {
+        steps.push(Step::Storage { event });
+    }
+    ensure!(steps.len() <= MAX_STEPS, "storage consumer history bound");
+    Ok(accepted)
+}
+
+fn reference_storage(seed: u64, setup: Setup) -> Result<ConsumerStorageReference> {
+    let mut reference = ConsumerStorageReference::new(seed, &consumer_scope()?)?;
+    for event in initial_storage(setup) {
+        ensure!(reference.step(event)?, "reference storage setup");
+    }
+    Ok(reference)
+}
+
+fn drive_storage_until(
+    steps: &mut Vec<Step>,
+    reference: &mut ConsumerStorageReference,
+    phase: Option<&str>,
+) -> Result<()> {
+    for _ in 0..512 {
+        let observation = reference.observation();
+        if phase.is_some_and(|target| {
+            observation["state"]["holder_phase"] == target
+                || observation["state"]["completion"]["phase"] == target
+        }) {
+            return Ok(());
+        }
+        let Some(event) = reference.next()? else {
+            ensure!(
+                phase.is_none(),
+                "reference did not reach requested storage cut"
+            );
+            return Ok(());
+        };
+        ensure!(
+            schedule_storage(steps, reference, event)?,
+            "reference storage continuation refused"
+        );
+    }
+    anyhow::bail!("reference storage event bound")
+}
+
+fn controller_ready(steps: &mut Vec<Step>, reference: &mut ConsumerStorageReference) -> Result<()> {
+    for activation in [false, true] {
+        for action in [
+            ConsumerControllerAction::Reserve,
+            ConsumerControllerAction::Dispatch,
+            ConsumerControllerAction::Settle,
+        ] {
+            ensure!(
+                schedule_storage(
+                    steps,
+                    reference,
+                    ConsumerStorageEvent::Controller {
+                        activation,
+                        action,
+                        fault: ConsumerStorageFault::None
+                    }
+                )?,
+                "reference controller setup"
+            );
+        }
+    }
+    ensure!(
+        schedule_storage(
+            steps,
+            reference,
+            ConsumerStorageEvent::BeginCurrent {
+                death_cut: None,
+                rewrite_provider: false
+            }
+        )?,
+        "reference current setup"
+    );
+    drive_storage_until(steps, reference, None)?;
+    Ok(())
+}
+
+#[test]
+fn pending_first_holder_app_requests_stay_refused_after_controller_completion() -> Result<()> {
+    for seed in 0..3 {
+        for phase in ["before_offer", "app_observation", "controller_retention"] {
+            for attempt in [false, true] {
+                let mut reference = reference_storage(seed, Setup::FirstHolder)?;
+                let mut steps = vec![];
+                ensure!(
+                    schedule_storage(
+                        &mut steps,
+                        &mut reference,
+                        ConsumerStorageEvent::BeginFirstHolder { death_cut: None }
+                    )?,
+                    "first holder begin"
+                );
+                drive_storage_until(&mut steps, &mut reference, Some(phase))?;
+                let at = steps.len();
+                if attempt {
+                    steps.extend([Step::Read, Step::Refresh]);
+                }
+                drive_storage_until(&mut steps, &mut reference, None)?;
+                controller_ready(&mut steps, &mut reference)?;
+                steps.extend(happy()[..7].iter().copied());
+                let records = verify(&Program {
+                    version: 1,
+                    seed,
+                    setup: Setup::FirstHolder,
+                    steps,
+                })?;
+                ensure!(
+                    records.last().context("consumer history missing")?["accepted"] == !attempt,
+                    "late storage completion revived App or denied ready App"
+                );
+                ensure!(
+                    records.last().unwrap()["storage_reference"]["current"] == true,
+                    "controller did not complete storage"
+                );
+                if attempt {
+                    ensure!(
+                        records[at]["accepted"] == false && records[at + 1]["accepted"] == false,
+                        "pending first holder admitted App"
+                    );
+                    ensure!(
+                        records[at]["owners"]["roles"]
+                            .as_array()
+                            .context("role observations absent")?
+                            .iter()
+                            .any(|role| role["role"] == "app_host"
+                                && role["app"] == "workspace"
+                                && role["refused"] == true),
+                        "pending App request never reached the selected role's refusal"
+                    );
+                    ensure!(
+                        records.last().unwrap()["projection"]["journal"] == json!([]),
+                        "refused App sent provider work"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn controller_actions_before_first_holder_retention_cannot_dispatch_or_recover() -> Result<()> {
+    for phase in ["before_offer", "app_observation", "controller_retention"] {
+        for action in [
+            ConsumerControllerAction::Reserve,
+            ConsumerControllerAction::Dispatch,
+            ConsumerControllerAction::Settle,
+        ] {
+            let seed = 71;
+            let mut reference = reference_storage(seed, Setup::FirstHolder)?;
+            let mut steps = vec![];
+            ensure!(
+                schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::BeginFirstHolder { death_cut: None }
+                )?,
+                "first holder begin"
+            );
+            drive_storage_until(&mut steps, &mut reference, Some(phase))?;
+            let at = steps.len();
+            ensure!(
+                !schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::Controller {
+                        activation: false,
+                        action,
+                        fault: ConsumerStorageFault::None
+                    }
+                )?,
+                "unretained controller admitted"
+            );
+            steps.extend([
+                Step::Reopen,
+                Step::Restore,
+                Step::Storage {
+                    event: ConsumerStorageEvent::RetainFirstHolder { work_nanos: 0 },
+                },
+                Step::Read,
+                Step::Refresh,
+            ]);
+            let records = verify(&Program {
+                version: 1,
+                seed,
+                setup: Setup::FirstHolder,
+                steps,
+            })?;
+            let before = &records[at - 1]["native"]["storage"]["state"];
+            for row in &records[at..] {
+                let state = &row["native"]["storage"]["state"];
+                ensure!(
+                    state["first_holder"] == false
+                        && state["continuation"] == false
+                        && state["holder_phase"] == "refused"
+                        && state["counter"] == before["counter"]
+                        && state["slots"] == before["slots"]
+                        && state["counter_posts"] == before["counter_posts"]
+                        && state["slot_posts"] == before["slot_posts"],
+                    "unretained controller mutated storage or recovered"
+                );
+            }
+            ensure!(
+                records[at]["accepted"] == false && records.last().unwrap()["accepted"] == false,
+                "first-holder refusal recovered"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pending_current_keeps_app_reads_and_refresh_fenced_after_resume() -> Result<()> {
+    for seed in 0..3 {
+        for phase in ["wire", "release", "final_file"] {
+            for attempt in [false, true] {
+                let mut reference = reference_storage(seed, Setup::Active)?;
+                let mut steps = happy()[..6].to_vec(); // Keep a genuine fixture Use too.
+                ensure!(
+                    schedule_storage(
+                        &mut steps,
+                        &mut reference,
+                        ConsumerStorageEvent::BeginCurrent {
+                            death_cut: None,
+                            rewrite_provider: false
+                        }
+                    )?,
+                    "current begin"
+                );
+                drive_storage_until(&mut steps, &mut reference, Some(phase))?;
+                let at = steps.len();
+                if attempt {
+                    steps.extend([Step::Read, Step::CachedRead, Step::Refresh]);
+                }
+                drive_storage_until(&mut steps, &mut reference, None)?;
+                steps.extend([Step::Reopen, Step::Restore, Step::Read, Step::Refresh]);
+                let records = verify(&Program {
+                    version: 1,
+                    seed,
+                    setup: Setup::Active,
+                    steps,
+                })?;
+                ensure!(
+                    records.last().unwrap()["storage_reference"]["current"] == true,
+                    "resumed Current did not complete"
+                );
+                ensure!(
+                    records.last().unwrap()["accepted"] == !attempt,
+                    "resumed storage regranted App"
+                );
+                if attempt {
+                    for row in &records[at..at + 3] {
+                        ensure!(row["accepted"] == false, "pending Current admitted App");
+                    }
+                    ensure!(
+                        records[at]["owners"]["roles"]
+                            .as_array()
+                            .context("role observations absent")?
+                            .iter()
+                            .any(|role| role["role"] == "app_host"
+                                && role["app"] == "workspace"
+                                && role["refused"] == true),
+                        "pending Current did not refuse the actual App role"
+                    );
+                    ensure!(
+                        records.last().unwrap()["projection"] == records[at]["projection"],
+                        "refused App changed provider or durable projection"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn controller_actions_during_pending_current_permanently_refuse_the_storage_continuation()
+-> Result<()> {
+    for seed in 0..3 {
+        for action in [
+            ConsumerControllerAction::Reserve,
+            ConsumerControllerAction::Dispatch,
+            ConsumerControllerAction::Settle,
+        ] {
+            let mut reference = reference_storage(seed, Setup::Active)?;
+            let mut steps = happy()[..5].to_vec();
+            ensure!(
+                schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::BeginCurrent {
+                        death_cut: None,
+                        rewrite_provider: false
+                    }
+                )?,
+                "current begin"
+            );
+            drive_storage_until(&mut steps, &mut reference, Some("final_file"))?;
+            let at = steps.len();
+            ensure!(
+                !schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::Controller {
+                        activation: true,
+                        action,
+                        fault: ConsumerStorageFault::None
+                    }
+                )?,
+                "overlapping controller admitted"
+            );
+            steps.extend([
+                Step::Reopen,
+                Step::Restore,
+                Step::Storage {
+                    event: ConsumerStorageEvent::FinishCompletion,
+                },
+                Step::Read,
+                Step::Refresh,
+            ]);
+            let records = verify(&Program {
+                version: 1,
+                seed,
+                setup: Setup::Active,
+                steps,
+            })?;
+            ensure!(
+                records[at]["accepted"] == false && records.last().unwrap()["accepted"] == false,
+                "controller refusal cleared"
+            );
+            let before = &records[at - 1]["native"]["storage"]["state"];
+            for row in &records[at..] {
+                let state = &row["native"]["storage"]["state"];
+                ensure!(
+                    state["counter"] == before["counter"]
+                        && state["slots"] == before["slots"]
+                        && state["counter_posts"] == before["counter_posts"]
+                        && state["slot_posts"] == before["slot_posts"]
+                        && state["continuation"] == false
+                        && row["storage_reference"]["current"] == false,
+                    "pending controller action sent or repaired state"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn uncertain_controller_mutations_preserve_may_and_refuse_oauth_after_restore() -> Result<()> {
+    for activation in [false, true] {
+        for fault in [
+            ConsumerStorageFault::LostAfter,
+            ConsumerStorageFault::Rollback,
+            ConsumerStorageFault::Malformed,
+        ] {
+            let seed = 17;
+            let mut reference = reference_storage(seed, Setup::FirstHolder)?;
+            let mut steps = vec![];
+            ensure!(
+                schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::BeginFirstHolder { death_cut: None }
+                )?,
+                "first holder begin"
+            );
+            drive_storage_until(&mut steps, &mut reference, None)?;
+            if activation {
+                for action in [
+                    ConsumerControllerAction::Reserve,
+                    ConsumerControllerAction::Dispatch,
+                    ConsumerControllerAction::Settle,
+                ] {
+                    ensure!(
+                        schedule_storage(
+                            &mut steps,
+                            &mut reference,
+                            ConsumerStorageEvent::Controller {
+                                activation: false,
+                                action,
+                                fault: ConsumerStorageFault::None
+                            }
+                        )?,
+                        "creation prefix"
+                    );
+                }
+            }
+            ensure!(
+                schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::Controller {
+                        activation,
+                        action: ConsumerControllerAction::Reserve,
+                        fault: ConsumerStorageFault::None
+                    }
+                )?,
+                "reserve prefix"
+            );
+            ensure!(
+                schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::BeginBootstrap {
+                        activation,
+                        action: ConsumerControllerAction::Dispatch,
+                        fault,
+                        death_cut: None
+                    }
+                )?,
+                "dispatch begin"
+            );
+            drive_storage_until(&mut steps, &mut reference, Some("mutation"))?;
+            let at = steps.len();
+            ensure!(
+                !schedule_storage(
+                    &mut steps,
+                    &mut reference,
+                    ConsumerStorageEvent::MutateCompletion
+                )?,
+                "uncertain mutation accepted"
+            );
+            steps.extend([
+                Step::Read,
+                Step::Refresh,
+                Step::Reopen,
+                Step::Restore,
+                Step::Storage {
+                    event: ConsumerStorageEvent::FinishCompletion,
+                },
+                Step::Storage {
+                    event: ConsumerStorageEvent::Controller {
+                        activation,
+                        action: ConsumerControllerAction::Settle,
+                        fault: ConsumerStorageFault::None,
+                    },
+                },
+                Step::Read,
+            ]);
+            let records = verify(&Program {
+                version: 1,
+                seed,
+                setup: Setup::FirstHolder,
+                steps,
+            })?;
+            let failed = &records[at]["native"]["storage"]["state"];
+            ensure!(
+                records[at]["accepted"] == false
+                    && failed["completion"]["phase"] == "refused"
+                    && failed["completion"]["mutation_known"] == false
+                    && failed["completion"]["peer_complete"] == false,
+                "uncertain write became completion"
+            );
+            let before = &records[at - 1]["native"]["storage"]["state"]["counter"]["documents"];
+            ensure!(
+                (failed["counter"]["documents"] == *before)
+                    == (fault == ConsumerStorageFault::Rollback),
+                "committed and rolled-back uncertainty collapsed"
+            );
+            for row in &records[at..] {
+                let state = &row["native"]["storage"]["state"];
+                ensure!(
+                    state["counter"] == failed["counter"]
+                        && state["slots"] == failed["slots"]
+                        && state["continuation"] == false
+                        && row["projection"]["journal"] == json!([]),
+                    "refused storage changed or sent provider work"
+                );
+            }
+            ensure!(
+                records.last().unwrap()["accepted"] == false,
+                "restored observation revived OAuth"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn false_pending_storage_expectation_is_retained_and_replayed_without_owner_construction()
+-> Result<()> {
+    let mut steps = happy()[..5].to_vec();
+    steps.extend([
+        Step::Storage {
+            event: ConsumerStorageEvent::BeginCurrent {
+                death_cut: None,
+                rewrite_provider: false,
+            },
+        },
+        Step::Read,
+    ]);
+    let program = Program {
+        version: 1,
+        seed: 71,
+        setup: Setup::Active,
+        steps,
+    };
+    let pair = replay_pair(&program, OracleControl::PendingStorageCompletes);
+    ensure!(
+        pair.failure() == Some(FailureKind::Acceptance),
+        "pending storage expectation escaped"
+    );
+    let failed = pair
+        .first
+        .records()
+        .last()
+        .context("pending read observation absent")?;
+    ensure!(
+        failed["accepted"] == false
+            && failed["storage_reference"]["current"] == false
+            && failed["native"]["storage"]["state"]["completion"]["phase"] == "wire",
+        "pending evidence lost"
+    );
+    let root = tempfile::tempdir()?;
+    let path = retain_at(
+        root.path(),
+        &program,
+        pair,
+        OracleControl::PendingStorageCompletes,
+    )?;
+    replay_file(&path)?;
+    let original = std::fs::read(&path)?;
+    let mut changed: Value = crate::json::decode_evidence(&original)?;
+    changed["reduced"]["setup"] = json!("first_holder");
+    std::fs::write(&path, serde_json::to_vec(&changed)?)?;
+    ensure!(
+        replay_file(&path).is_err(),
+        "reduction changed immutable setup"
+    );
+    std::fs::write(&path, original)?;
+    replay_file(&path)?;
+    Ok(())
+}
+
+#[test]
+fn storage_reference_comparison_requires_complete_originals_rows_and_refusal() -> Result<()> {
+    let records = verify(&Program {
+        version: 1,
+        seed: 71,
+        setup: Setup::FirstHolder,
+        steps: vec![Step::Storage {
+            event: ConsumerStorageEvent::BeginFirstHolder { death_cut: None },
+        }],
+    })?;
+    let original = &records[0];
+    ensure!(
+        storage_reference_matches(original),
+        "pending storage reference mismatch"
+    );
+    for field in ["state", "handshake", "current"] {
+        let mut changed = original.clone();
+        changed["storage_reference"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        ensure!(
+            !storage_reference_matches(&changed),
+            "missing storage reference accepted"
+        );
+    }
+    let mut changed = original.clone();
+    ensure!(
+        changed["storage_reference"]["handshake"]["world"]["now"].is_object(),
+        "clock mutation target absent"
+    );
+    changed["storage_reference"]["handshake"]["world"]["now"]["secs"] = json!(101);
+    ensure!(
+        !storage_reference_matches(&changed),
+        "changed original clock ignored"
+    );
+    let mut changed = original.clone();
+    ensure!(
+        changed["storage_reference"]["current"] == false,
+        "pending current mutation target"
+    );
+    changed["storage_reference"]["current"] = json!(true);
+    ensure!(
+        !storage_reference_matches(&changed),
+        "wrong current prediction accepted"
+    );
+    let mut changed = original.clone();
+    changed["storage_reference"]["handshake"]["failed"] = json!(true);
+    ensure!(
+        !storage_reference_matches(&changed),
+        "failed storage reference accepted"
+    );
+    let mut changed = original.clone();
+    changed["storage_reference"]["state"]["counter"] = json!({});
+    ensure!(
+        !storage_reference_matches(&changed),
+        "provider rows not compared"
+    );
+    Ok(())
+}
+
 #[test]
 fn native_oauth_consumer_happy_lifecycle_replays_with_both_native_models() -> Result<()> {
     for seed in 0..4 {
         let program = Program {
             version: 1,
             seed,
+            setup: Setup::Active,
             steps: happy(),
         };
         verify(&program)?;
@@ -2311,6 +3082,7 @@ fn seeded_native_oauth_failures_cannot_restore_originals_or_current_authority() 
         let program = Program {
             version: 1,
             seed,
+            setup: Setup::Active,
             steps,
         };
         let records = verify(&program)?;
@@ -2363,6 +3135,7 @@ fn original_deadline_is_not_reset_by_native_reobservation_or_sqlite_reopen() -> 
         let records = verify(&Program {
             version: 1,
             seed: at as u64,
+            setup: Setup::Active,
             steps,
         })?;
         let boundary = &records[at + 1 + usize::from(at == 1)];
@@ -2383,6 +3156,7 @@ fn post_pending_freshness_and_unexpired_old_version_remain_distinct_fences() -> 
     let records = verify(&Program {
         version: 1,
         seed: 12,
+        setup: Setup::Active,
         steps: vec![
             Step::Capture { disconnect: false },
             Step::Approve,
@@ -2400,6 +3174,7 @@ fn post_pending_freshness_and_unexpired_old_version_remain_distinct_fences() -> 
     let records = verify(&Program {
         version: 1,
         seed: 13,
+        setup: Setup::Active,
         steps,
     })?;
     ensure!(
@@ -2454,6 +3229,7 @@ fn refresh_final_checks_and_durable_cuts_do_not_regrant_authority() -> Result<()
         let records = verify(&Program {
             version: 1,
             seed: seed as u64,
+            setup: Setup::Active,
             steps,
         })?;
         ensure!(
@@ -2485,6 +3261,7 @@ fn vanished_executor_cannot_restore_originals_or_use_from_durable_rows() -> Resu
         let records = verify(&Program {
             version: 1,
             seed: at as u64,
+            setup: Setup::Active,
             steps,
         })?;
         ensure!(
@@ -2505,7 +3282,7 @@ fn another_company_runtime_cannot_borrow_the_selected_simulated_owner() -> Resul
     effects::scope(world.port.clone(), || -> Result<()> {
         let scope = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().scope.clone());
         native_management::fixtures::select_app_scope(&scope)?;
-        world.boot()?;
+        world.boot(Setup::Active)?;
         let before = native_management::fixtures::observation()?;
         let path = world
             .fixture
@@ -2556,6 +3333,7 @@ fn successful_consumer_execution_is_not_a_saved_disagreement() -> Result<()> {
     let program = Program {
         version: 1,
         seed: 95,
+        setup: Setup::Active,
         steps: happy(),
     };
     let pair = replay_pair(&program, OracleControl::None);
@@ -2580,6 +3358,7 @@ fn intermittent_consumer_failure_keeps_actual_winning_evidence_without_rerunning
     let program = Program {
         version: 1,
         seed: 96,
+        setup: Setup::Active,
         steps: happy(),
     };
     let original = replay_pair(&program, OracleControl::OvercountFirstRead);
@@ -2637,6 +3416,7 @@ fn replay_unknown_causes_refuse_and_repeated_records_borrow_one_bounded_value() 
     let program = Program {
         version: 1,
         seed: 97,
+        setup: Setup::Active,
         steps: happy(),
     };
     let unknown = ReplayPair {
@@ -2757,6 +3537,7 @@ fn unobserved_consumer_failure_never_reduces_to_invalid_empty_input() -> Result<
     let program = Program {
         version: 1,
         seed: 98,
+        setup: Setup::Active,
         steps: happy(),
     };
     let outcome = Outcome::Failed {

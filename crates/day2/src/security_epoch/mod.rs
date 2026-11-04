@@ -70,8 +70,9 @@ mod runtime_identity_tests;
 mod control_slot_tests;
 #[cfg(test)]
 pub(crate) use control_slot_tests::lifecycle::{
-    ConsumerEvent, ConsumerHandshakeProgress, ConsumerLifecycle, ConsumerModelError,
-    ConsumerShellReference,
+    ConsumerControllerAction, ConsumerEvent, ConsumerHandshakeProgress, ConsumerLifecycle,
+    ConsumerModelError, ConsumerShellReference, ConsumerStorageEvent, ConsumerStorageFault,
+    ConsumerStorageReference,
 };
 #[cfg(test)]
 mod identity_tests;

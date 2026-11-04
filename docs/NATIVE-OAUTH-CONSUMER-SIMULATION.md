@@ -41,6 +41,36 @@ disagrees only in the reference transcript: even when peer death produces the
 expected denial and the complete outer storage state still matches, the model
 error must fail the composition.
 
+Storage interleavings use the same first-holder and bootstrap/Current steppers.
+Each program explicitly starts either with active storage or before first holder;
+reduction cannot change that immutable setup. Closed events expose checked Offer,
+App observation, Controller retention, mutation, release and final completion.
+Adjacent wire events may share a batch of at most 64 events, retaining each
+event's wait, original clock, retry and postcheck; batches do not conceal a
+consumer or provider/file obligation. The whole history keeps its 64-step bound.
+
+A reference-only storage model is initialized from controlled immutable scope
+and core inputs, without constructing an actual world or reading SQLite or
+consumer outcomes. It independently predicts rows, versions, continuation,
+current usability and the complete retained handshake. Every consumer cut
+compares those predictions with the real conditional adapters and their existing
+independent model. Expected-current observations remain DATA, not witnesses or
+permission. Actual App reads/refresh still enter the selected runtime hook.
+
+Generated first-holder and Current pauses exercise both outcomes: avoiding an
+early request permits later use after complete storage, while a request during
+the pause permanently refuses that App owner even after storage completes.
+The histories require the actual selected-role refusal, not merely an unavailable
+connection result. Controller reserve/dispatch/settle before retention or during
+pending Current must refuse without writes and cannot recover by reopening or
+restoring observations. Lost or malformed mutation replies retain applied rows
+and durable May; an actual rollback retains the old rows. Neither uncertainty
+nor an already active row establishes known mutation, wire completion, usable
+Current or permission to settle again. Complete observations replay twice;
+a deliberately false pending-storage expectation is saved and replayed through
+the existing source-bound counterexample path. No enrolled execution owner is
+constructed by these histories.
+
 A separate reference-only serving world consumes the seed and explicit
 begin/advance/death inputs. It never reads the consumer transcript, SQL, hook
 results or provider journal to predict progress or approval. Every consumer step
