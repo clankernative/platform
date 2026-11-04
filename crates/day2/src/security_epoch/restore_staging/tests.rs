@@ -43,7 +43,9 @@ pub(super) fn cut(point: Point) -> Result<()> {
     CRASH.with(|c| -> Result<()> {
         if let Some((selected, marker)) = &*c.borrow() {
             if *selected == point {
-                std::fs::write(marker, b"staging-cut-ready")?;
+                let pending=marker.with_extension("pending");
+                std::fs::write(&pending,b"staging-cut-ready")?;
+                std::fs::rename(&pending,marker)?;
                 // Parent retains the child's stdin and kills the same Child
                 // object after reading the closed marker. This is process loss,
                 // not a power-loss or hostile-kernel claim.
