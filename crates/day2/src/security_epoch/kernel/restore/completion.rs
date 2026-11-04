@@ -2,6 +2,7 @@
 //! admits a target, changes the fenced epoch, nor permits copy, key or writer use.
 use super::{Current, EpochStore, Phase, Snapshot, Versioned, advance};
 use anyhow::{Result, ensure};
+use crate::security_epoch::kernel::restore::Policy;
 use day2_capabilities::Digest;
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +68,7 @@ pub(in crate::security_epoch) struct Receipt {
     request: Digest,
     reserved: Digest,
     disposition: Disposition,
-    policy: super::Policy,
+    policy: Policy,
     // Preparation time, not a claim about provider commit time or target age.
     prepared_at: i64,
 }
@@ -213,7 +214,7 @@ impl Request {
                 request,
                 reserved: captured,
                 disposition: self.disposition.clone(),
-                policy: super::Policy::ReissueAndReauthorizeV1,
+                policy: Policy::ReissueAndReauthorizeV1,
                 prepared_at: self.prepared_at,
             },
         })
