@@ -18,7 +18,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Selection {
     pub binding: CredentialFamilyBinding,
     pub security_origin: String,
@@ -447,6 +447,43 @@ impl SelectedAuthority {
         );
         Ok(())
     }
+
+    fn delivery_snapshot(
+        &self,
+        binding: &CredentialFamilyBinding,
+        management: &ManagementPolicy,
+        actor: &str,
+        subject: &str,
+        now: i64,
+    ) -> Result<(Selection, u64)> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
+        Ok((
+            Self::selected(&entries.current, binding, management, actor, subject, now)?.clone(),
+            entries.revision,
+        ))
+    }
+
+    fn check_delivery_snapshot(
+        &self,
+        selected: &Selection,
+        revision: u64,
+        actor: &str,
+        subject: &str,
+        previous: i64,
+    ) -> Result<i64> {
+        let now = super::effects::wall_time()?;
+        ensure!(now >= previous, "credential delivery clock rewound");
+        let (current, current_revision) =
+            self.delivery_snapshot(&selected.binding, &selected.management, actor, subject, now)?;
+        ensure!(
+            current_revision == revision && &current == selected,
+            "credential delivery selection changed during key acquisition"
+        );
+        Ok(now)
+    }
 }
 
 impl Authority for SelectedAuthority {
@@ -621,17 +658,31 @@ impl Authority for SelectedAuthority {
         permit: &HumanRevealPermit,
         now: i64,
     ) -> Result<KeyLease> {
-        let entries = self
-            .entries
-            .read()
-            .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        let selected = Self::selected(&entries.current, binding, management, actor, subject, now)?;
-        ensure!(
-            permit.encryption_version() == selected.encryption.version
-                && permit.security_epoch() == selected.security_epoch,
-            "credential delivery key or epoch retired"
-        );
-        self.lease(selected)
+        let (selected, revision) =
+            self.delivery_snapshot(binding, management, actor, subject, now)?;
+        permit.require_selection(
+            binding,
+            actor,
+            selected.security_epoch,
+            &selected.encryption.version,
+        )?;
+        // Provider I/O holds no selection lock. Always evaluate its postcheck,
+        // including on provider error, while retaining that error as primary.
+        let loaded = self.key(&selected.verifier, ApprovalKeyPurpose::CustodyVerifier);
+        let checked = self.check_delivery_snapshot(&selected, revision, actor, subject, now);
+        let verifier = loaded?;
+        let after_verifier = checked?;
+        let loaded = self.key(&selected.encryption, ApprovalKeyPurpose::CustodyEncryption);
+        let checked =
+            self.check_delivery_snapshot(&selected, revision, actor, subject, after_verifier);
+        let encryption = loaded?;
+        checked?;
+        KeyLease::new(
+            &verifier[..],
+            &encryption,
+            selected.verifier.version,
+            selected.encryption.version,
+        )
     }
 }
 
@@ -1717,6 +1768,636 @@ mod tests {
         }
         assert!(history(&[], false).is_err());
         assert!(history(&vec![Event::Acquire; 65], false).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use crate::managed_credentials::{effects, simulation, store};
+    use crate::oauth::approval_registry::ApprovalKeyMaterial;
+    use day2_capabilities::{
+        BindingRef, Name,
+        credentials::{DeliveryProfile, ManagementPredicate, RotationProfile},
+        oauth::{ResourceAudienceRef, SecurityOriginRef},
+    };
+    use rusqlite::Connection;
+    use std::sync::{
+        Mutex, Weak,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+
+    struct Clock {
+        world: Arc<simulation::World>,
+        reads: AtomicUsize,
+    }
+
+    impl Clock {
+        fn new(seed: u64) -> Arc<Self> {
+            Arc::new(Self {
+                world: simulation::World::new(seed),
+                reads: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl effects::Hooks for Clock {
+        fn domain(&self) -> u64 {
+            effects::Hooks::domain(&*self.world)
+        }
+        fn wall_time(&self) -> Result<i64> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            effects::Hooks::wall_time(&*self.world)
+        }
+        fn monotonic(&self) -> Duration {
+            effects::Hooks::monotonic(&*self.world)
+        }
+        fn fill_id(&self, bytes: &mut [u8]) -> Result<()> {
+            effects::Hooks::fill_id(&*self.world, bytes)
+        }
+        fn fill_secret(&self, bytes: &mut [u8]) -> Result<()> {
+            effects::Hooks::fill_secret(&*self.world, bytes)
+        }
+    }
+
+    fn pin(value: &str) -> BindingRef {
+        BindingRef::pin(Name::try_from(value.to_owned()).unwrap(), &value).unwrap()
+    }
+
+    fn selection() -> Selection {
+        let issue = simulation::issue(1000);
+        let binding = CredentialFamilyBinding {
+            namespace: issue.namespace,
+            family: simulation::family().id,
+            approved_authority: pin("authority"),
+            management: pin("management"),
+            rotation: RotationProfile::AtomicReplace,
+            delivery: DeliveryProfile::AuthenticatedCreatorReveal,
+            verifier: pin("verifier"),
+            custody: pin("custody"),
+            security_shell: SecurityOriginRef(pin("security")),
+            audience: ResourceAudienceRef(pin("audience")),
+            epoch_store: pin("epoch"),
+            max_lifetime_seconds: 2000,
+            reveal_window_seconds: 100,
+            quota: pin("quota"),
+        };
+        Selection {
+            verifier: ApprovalKeyRef {
+                binding: binding.verifier.clone(),
+                version: "verifier-v1".into(),
+            },
+            encryption: ApprovalKeyRef {
+                binding: binding.custody.clone(),
+                version: "encryption-v1".into(),
+            },
+            binding,
+            security_origin: "https://security.example.com".into(),
+            management: ManagementPolicy {
+                identity_authority: pin("identity"),
+                issue: ManagementPredicate::Creator,
+                read_metadata: ManagementPredicate::Creator,
+                rotate: ManagementPredicate::Creator,
+                revoke: ManagementPredicate::Creator,
+            },
+            security_epoch: 7,
+            observed_at: 900,
+            ready_until: 1200,
+            grant_until: 5000,
+            max_active_lineages: 10,
+            issuers: BTreeMap::from([("issuer/human".into(), "subject-1".into())]),
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Change {
+        None,
+        Remove,
+        EqualReplace,
+        RemoveRestore,
+        Epoch,
+        Subject,
+        Encryption,
+        RenewWindow,
+        Expire,
+        Rewind,
+        RewindAfterProgress,
+        InvalidReplace,
+    }
+
+    struct Provider {
+        authority: Mutex<Weak<SelectedAuthority>>,
+        original: Selection,
+        clock: Arc<Clock>,
+        calls: AtomicUsize,
+        at: usize,
+        change: Change,
+        fail: bool,
+        substitute: u8,
+    }
+
+    #[derive(Debug)]
+    struct ProviderFailure;
+
+    impl std::fmt::Display for ProviderFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("controlled delivery provider unavailable")
+        }
+    }
+    impl std::error::Error for ProviderFailure {}
+
+    impl ApprovalKeyProvider for Provider {
+        fn load(
+            &self,
+            reference: &ApprovalKeyRef,
+            purpose: ApprovalKeyPurpose,
+        ) -> Result<ApprovalKeyMaterial> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let authority = self
+                .authority
+                .lock()
+                .unwrap()
+                .upgrade()
+                .context("fixture authority missing")?;
+            // Probe the actual writer lock before reentrant replacement: the
+            // old held-lock implementation fails promptly instead of hanging.
+            drop(
+                authority
+                    .entries
+                    .try_write()
+                    .map_err(|_| anyhow::anyhow!("provider called under admission lock"))?,
+            );
+            if matches!(self.change, Change::RewindAfterProgress) && call == 1 {
+                self.clock.world.set_wall(1100);
+            }
+            if call == self.at {
+                let mut changed = self.original.clone();
+                match self.change {
+                    Change::None => {}
+                    Change::Remove => authority.replace(Vec::new())?,
+                    Change::EqualReplace => authority.replace(vec![changed])?,
+                    Change::RemoveRestore => {
+                        authority.replace(Vec::new())?;
+                        authority.replace(vec![changed])?;
+                    }
+                    Change::Epoch => {
+                        changed.security_epoch += 1;
+                        authority.replace(vec![changed])?;
+                    }
+                    Change::Subject => {
+                        changed
+                            .issuers
+                            .insert("issuer/human".into(), "foreign-subject".into());
+                        authority.replace(vec![changed])?;
+                    }
+                    Change::Encryption => {
+                        changed.encryption.version = "encryption-v2".into();
+                        authority.replace(vec![changed])?;
+                    }
+                    Change::RenewWindow => {
+                        changed.observed_at = 1000;
+                        changed.ready_until = 1300;
+                        authority.replace(vec![changed])?;
+                    }
+                    Change::Expire => self.clock.world.set_wall(1200),
+                    Change::Rewind => self.clock.world.set_wall(999),
+                    Change::RewindAfterProgress => self.clock.world.set_wall(1099),
+                    Change::InvalidReplace => {
+                        changed.ready_until = changed.observed_at + 301;
+                        ensure!(
+                            authority.replace(vec![changed]).is_err(),
+                            "invalid replacement published"
+                        );
+                    }
+                }
+                if self.fail {
+                    return Err(ProviderFailure.into());
+                }
+            }
+            let bytes = match purpose {
+                ApprovalKeyPurpose::CustodyVerifier => [3; 32],
+                ApprovalKeyPurpose::CustodyEncryption => [4; 32],
+                _ => anyhow::bail!("unexpected delivery key purpose"),
+            };
+            let mut material = ApprovalKeyMaterial {
+                binding: reference.binding.clone(),
+                version: reference.version.clone(),
+                purpose,
+                bytes,
+            };
+            if call == self.at {
+                match self.substitute {
+                    1 => material.binding = pin("foreign-key"),
+                    2 => material.version = "foreign-version".into(),
+                    3 => material.purpose = ApprovalKeyPurpose::ShellAttestation,
+                    _ => {}
+                }
+            }
+            Ok(material)
+        }
+    }
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        db: Connection,
+        selected: Selection,
+        provider: Arc<Provider>,
+        authority: Arc<SelectedAuthority>,
+        permit: HumanRevealPermit,
+    }
+
+    impl Fixture {
+        fn new(
+            clock: Arc<Clock>,
+            at: usize,
+            change: Change,
+            fail: bool,
+            substitute: u8,
+        ) -> Result<Self> {
+            let directory = tempfile::tempdir()?;
+            let mut db = Connection::open(directory.path().join("app.sqlite"))?;
+            store::install_schema(&db)?;
+            let selected = selection();
+            let prepared = store::prepare_issue(
+                &simulation::lease(),
+                &simulation::family(),
+                simulation::issue(1000),
+            )?;
+            let tx = db.transaction()?;
+            let receipt = store::stage_issue(&tx, prepared)?.public_identity().clone();
+            tx.commit()?;
+            let permit = store::authorize_reveal(
+                &mut db,
+                store::VerifiedHumanPost {
+                    namespace: selected.binding.namespace.clone(),
+                    version: receipt.version.context("version missing")?,
+                    recipient: "issuer/human".into(),
+                    session: "session-1".into(),
+                    attempt: "reveal-1".into(),
+                    now: 1000,
+                    security_epoch: 7,
+                },
+            )?
+            .context("fixture reveal unavailable")?;
+            let provider = Arc::new(Provider {
+                authority: Mutex::new(Weak::new()),
+                original: selected.clone(),
+                clock: clock.clone(),
+                calls: AtomicUsize::new(0),
+                at,
+                change,
+                fail,
+                substitute,
+            });
+            let authority = Arc::new(SelectedAuthority::fixture(
+                vec![selected.clone()],
+                provider.clone(),
+            )?);
+            *provider.authority.lock().unwrap() = Arc::downgrade(&authority);
+            clock.reads.store(0, Ordering::SeqCst);
+            Ok(Self {
+                _directory: directory,
+                db,
+                selected,
+                provider,
+                authority,
+                permit,
+            })
+        }
+
+        fn keys(&self) -> Result<KeyLease> {
+            self.authority.human_keys(
+                &self.selected.binding,
+                &self.selected.management,
+                "issuer/human",
+                "subject-1",
+                &self.permit,
+                1000,
+            )
+        }
+
+        fn authorization_only(&self) -> Result<()> {
+            ensure!(
+                self.db
+                    .query_row("SELECT count(*) FROM day2_credential_reveals", [], |r| r
+                        .get::<_, i64>(0))?
+                    == 1,
+                "authorization history changed"
+            );
+            ensure!(
+                self.db
+                    .query_row("SELECT state FROM day2_credential_deliveries", [], |r| {
+                        r.get::<_, String>(0)
+                    })?
+                    == "available",
+                "key fetch completed or acknowledged delivery"
+            );
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn delivery_keys_use_committed_permit_and_allow_reentrant_selection_checks() -> Result<()> {
+        for change in [Change::None, Change::InvalidReplace] {
+            let clock = Clock::new(901);
+            effects::scope(clock.clone(), || -> Result<()> {
+                let f = Fixture::new(clock.clone(), 1, change, false, 0)?;
+                let before = f.authority.entries.read().unwrap().revision;
+                let keys = f.keys()?;
+                ensure!(
+                    f.provider.calls.load(Ordering::SeqCst) == 2
+                        && clock.reads.load(Ordering::SeqCst) == 2,
+                    "provider/postcheck count"
+                );
+                ensure!(
+                    f.authority.entries.read().unwrap().revision == before,
+                    "failed replacement published"
+                );
+                f.authorization_only()?;
+                let token = f.permit.into_response_body(&keys)?;
+                let family = simulation::family();
+                ensure!(
+                    store::verify_ingress(
+                        &f.db,
+                        &simulation::lease(),
+                        store::IngressVerification {
+                            namespace: &f.selected.binding.namespace,
+                            family: family.id.as_str(),
+                            family_contract: &family.contract,
+                            security_epoch: 7,
+                            now: 1000,
+                            operation: &family.roots["fixture.submit"],
+                        },
+                        &token
+                    )?
+                    .is_some(),
+                    "delivery token identity changed"
+                );
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_keys_reject_every_successful_republication_including_aba() -> Result<()> {
+        for at in [1, 2] {
+            for change in [
+                Change::Remove,
+                Change::EqualReplace,
+                Change::RemoveRestore,
+                Change::Epoch,
+                Change::Subject,
+                Change::Encryption,
+                Change::RenewWindow,
+            ] {
+                let clock = Clock::new(902);
+                effects::scope(clock.clone(), || -> Result<()> {
+                    let f = Fixture::new(clock.clone(), at, change, false, 0)?;
+                    ensure!(
+                        f.keys().is_err(),
+                        "selection change returned keys: {at}/{change:?}"
+                    );
+                    ensure!(
+                        f.provider.calls.load(Ordering::SeqCst) == at
+                            && clock.reads.load(Ordering::SeqCst) == at,
+                        "refused key boundary did extra work"
+                    );
+                    f.authorization_only()
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_keys_reject_expiry_and_rewind_using_the_latest_checked_time() -> Result<()> {
+        for at in [1, 2] {
+            for change in [Change::Expire, Change::Rewind] {
+                let clock = Clock::new(903);
+                effects::scope(clock.clone(), || -> Result<()> {
+                    let f = Fixture::new(clock.clone(), at, change, false, 0)?;
+                    ensure!(
+                        f.keys().is_err(),
+                        "clock change returned keys: {at}/{change:?}"
+                    );
+                    ensure!(
+                        f.provider.calls.load(Ordering::SeqCst) == at
+                            && clock.reads.load(Ordering::SeqCst) == at,
+                        "clock boundary skipped"
+                    );
+                    f.authorization_only()
+                })?;
+            }
+        }
+        let clock = Clock::new(904);
+        effects::scope(clock.clone(), || -> Result<()> {
+            let f = Fixture::new(clock.clone(), 2, Change::RewindAfterProgress, false, 0)?;
+            ensure!(
+                f.keys().is_err(),
+                "post-first-load rewind to a time after the original was accepted"
+            );
+            ensure!(
+                clock.reads.load(Ordering::SeqCst) == 2,
+                "latest clock boundary not reached"
+            );
+            f.authorization_only()
+        })
+    }
+
+    #[test]
+    fn delivery_provider_error_stays_primary_and_postcheck_still_runs() -> Result<()> {
+        for at in [1, 2] {
+            let clock = Clock::new(905);
+            effects::scope(clock.clone(), || -> Result<()> {
+                let f = Fixture::new(clock.clone(), at, Change::Remove, true, 0)?;
+                let error = f.keys().err().context("provider error accepted")?;
+                ensure!(
+                    error.downcast_ref::<ProviderFailure>().is_some(),
+                    "provider primary error replaced"
+                );
+                ensure!(
+                    clock.reads.load(Ordering::SeqCst) == at,
+                    "provider error skipped actual postcheck"
+                );
+                f.authorization_only()
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_keys_reject_substituted_provider_identity_at_each_load() -> Result<()> {
+        for at in [1, 2] {
+            for substitution in 1..=3 {
+                let clock = Clock::new(906);
+                effects::scope(clock.clone(), || -> Result<()> {
+                    let f = Fixture::new(clock.clone(), at, Change::None, false, substitution)?;
+                    ensure!(f.keys().is_err(), "substituted delivery key accepted");
+                    ensure!(
+                        f.provider.calls.load(Ordering::SeqCst) == at
+                            && clock.reads.load(Ordering::SeqCst) == at,
+                        "identity refusal skipped postcheck"
+                    );
+                    f.authorization_only()
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_selection_revision_exhaustion_preserves_current_state_and_epoch_floors()
+    -> Result<()> {
+        let clock = Clock::new(907);
+        effects::scope(clock.clone(), || -> Result<()> {
+            let f = Fixture::new(clock, 0, Change::None, false, 0)?;
+            let before = {
+                let mut entries = f.authority.entries.write().unwrap();
+                entries.revision = u64::MAX;
+                (entries.current.clone(), entries.epoch_floor.clone())
+            };
+            let mut changed = f.selected.clone();
+            changed.security_epoch += 1;
+            ensure!(
+                f.authority.replace(vec![changed]).is_err(),
+                "exhausted revision published"
+            );
+            let after = f.authority.entries.read().unwrap();
+            ensure!(
+                after.revision == u64::MAX
+                    && after.current == before.0
+                    && after.epoch_floor == before.1,
+                "failed publication changed state"
+            );
+            f.authorization_only()
+        })
+    }
+
+    #[test]
+    fn delivery_permit_key_and_epoch_must_match_before_provider_access() -> Result<()> {
+        for epoch in [false, true] {
+            let clock = Clock::new(908);
+            effects::scope(clock.clone(), || -> Result<()> {
+                let f = Fixture::new(clock.clone(), 0, Change::None, false, 0)?;
+                let mut changed = f.selected.clone();
+                if epoch {
+                    changed.security_epoch += 1;
+                } else {
+                    changed.encryption.version = "encryption-v2".into();
+                }
+                f.authority.replace(vec![changed])?;
+                ensure!(f.keys().is_err(), "retired permit returned keys");
+                ensure!(
+                    f.provider.calls.load(Ordering::SeqCst) == 0
+                        && clock.reads.load(Ordering::SeqCst) == 0,
+                    "retired permit contacted provider"
+                );
+                f.authorization_only()
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_committed_permit_cannot_be_paired_with_a_foreign_selection() -> Result<()> {
+        for fault in 0..4 {
+            let clock = Clock::new(910);
+            effects::scope(clock.clone(), || -> Result<()> {
+                let mut f = Fixture::new(clock.clone(), 0, Change::None, false, 0)?;
+                let actor = if fault == 3 {
+                    "other/human"
+                } else {
+                    "issuer/human"
+                };
+                match fault {
+                    0 => f.selected.binding.namespace.binding_generation += 1,
+                    1 => {
+                        f.selected.binding.namespace.app = Name::try_from("foreign-app".to_owned())?
+                    }
+                    2 => f.selected.binding.family = Name::try_from("foreign-family".to_owned())?,
+                    3 => {
+                        f.selected.issuers.insert(actor.into(), "subject-1".into());
+                    }
+                    _ => unreachable!(),
+                }
+                // Epoch and key version deliberately remain identical. The
+                // actual independently committed permit keeps its original scope.
+                f.authority.replace(vec![f.selected.clone()])?;
+                ensure!(
+                    f.authority
+                        .human_keys(
+                            &f.selected.binding,
+                            &f.selected.management,
+                            actor,
+                            "subject-1",
+                            &f.permit,
+                            1000
+                        )
+                        .is_err(),
+                    "foreign committed-permit pairing accepted: {fault}"
+                );
+                ensure!(
+                    f.provider.calls.load(Ordering::SeqCst) == 0
+                        && clock.reads.load(Ordering::SeqCst) == 0,
+                    "foreign permit reached a provider"
+                );
+                f.authorization_only()
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn committed_reveal_can_finish_after_lifecycle_closure_without_new_authorization() -> Result<()>
+    {
+        for revoke in [false, true] {
+            let clock = Clock::new(909);
+            effects::scope(clock.clone(), || -> Result<()> {
+                let mut f = Fixture::new(clock.clone(), 0, Change::None, false, 0)?;
+                let version: String =
+                    f.db.query_row("SELECT id FROM day2_credential_versions", [], |r| r.get(0))?;
+                let lineage: String =
+                    f.db.query_row("SELECT id FROM day2_credential_lineages", [], |r| r.get(0))?;
+                let tx = f.db.transaction()?;
+                if revoke {
+                    store::stage_revoke(&tx, &f.selected.binding.namespace, &lineage)?;
+                } else {
+                    store::close_delivery(&tx, &version, "acknowledged")?;
+                }
+                tx.commit()?;
+                let keys = f.keys()?;
+                ensure!(
+                    !f.permit.into_response_body(&keys)?.is_empty(),
+                    "known authorization lost its cutoff"
+                );
+                ensure!(
+                    store::authorize_reveal(
+                        &mut f.db,
+                        store::VerifiedHumanPost {
+                            namespace: f.selected.binding.namespace.clone(),
+                            version,
+                            recipient: "issuer/human".into(),
+                            session: "session-1".into(),
+                            attempt: "too-late".into(),
+                            now: 1000,
+                            security_epoch: 7,
+                        }
+                    )?
+                    .is_none(),
+                    "closed delivery authorized again"
+                );
+                ensure!(
+                    f.db.query_row("SELECT count(*) FROM day2_credential_reveals", [], |r| r
+                        .get::<_, i64>(0))?
+                        == 1,
+                    "finish was a new reveal authorization"
+                );
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 }
