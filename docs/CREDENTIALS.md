@@ -645,3 +645,11 @@ The current private crypto and state code is an implementation foundation, not
 evidence of production readiness. In particular, it must not be activated by
 adding an HTTP route that constructs `IssueIntent` or `VerifiedHumanPost` from
 caller input.
+
+### Closed native credential intent protocol
+
+The private fresh-owner exchange now distinguishes issue, rotate and revoke
+intent actions, derived from the actual Pending and bound through the complete
+original and SQLite context. See [the protocol](CREDENTIAL-PURPOSE-PROTOCOL.md).
+This does not enable the native credential authentication producer, reveal/ack
+transport or a live key/epoch authority adapter.

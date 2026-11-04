@@ -48,9 +48,42 @@ impl CredentialContextData {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 pub(in crate::oauth) enum FreshPurpose {
     OAuthApproval,
-    CredentialIntent,
+    CredentialIssueIntent,
+    CredentialRotateIntent,
+    CredentialRevokeIntent,
     OAuthConnect,
     OAuthDisconnect,
+}
+
+impl FreshPurpose {
+    /// Closed classification DATA only, never authentication or permission.
+    pub(in crate::oauth) fn is_credential_intent(self) -> bool {
+        matches!(
+            self,
+            Self::CredentialIssueIntent | Self::CredentialRotateIntent | Self::CredentialRevokeIntent
+        )
+    }
+}
+
+/// Closed intent selection DATA from the host's actual Pending. Delivery and
+/// acknowledgement are separate operations, never intent variants or permits.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::oauth) enum CredentialIntentAction {
+    Issue,
+    Rotate,
+    Revoke,
+}
+
+impl CredentialIntentAction {
+    fn from_pending(pending: &Pending) -> Self {
+        use crate::managed_credentials::lifecycle::Intent;
+        match &pending.intent {
+            Intent::Issue { .. } => Self::Issue,
+            Intent::Rotate { .. } => Self::Rotate,
+            Intent::Revoke { .. } => Self::Revoke,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
@@ -62,6 +95,7 @@ enum Context {
         expires_at: i64,
     },
     Credential {
+        action: CredentialIntentAction,
         scope: String,
         app: String,
         artifact: String,
@@ -180,6 +214,7 @@ impl FreshIntent {
         );
         Ok(Self {
             context: Context::Credential {
+                action: CredentialIntentAction::from_pending(pending),
                 scope: runtime.scope().into(),
                 app: runtime.app().into(),
                 artifact: runtime.artifact().id().into(),
@@ -198,7 +233,11 @@ impl FreshIntent {
     pub(in crate::oauth) fn purpose(&self) -> FreshPurpose {
         match &self.context {
             Context::OAuth { .. } => FreshPurpose::OAuthApproval,
-            Context::Credential { .. } => FreshPurpose::CredentialIntent,
+            Context::Credential { action, .. } => match action {
+                CredentialIntentAction::Issue => FreshPurpose::CredentialIssueIntent,
+                CredentialIntentAction::Rotate => FreshPurpose::CredentialRotateIntent,
+                CredentialIntentAction::Revoke => FreshPurpose::CredentialRevokeIntent,
+            },
             Context::Management { action, .. } => match action {
                 super::management::Action::Connect => FreshPurpose::OAuthConnect,
                 super::management::Action::Disconnect => FreshPurpose::OAuthDisconnect,
@@ -245,6 +284,34 @@ impl FreshIntent {
             "fresh intent security origin changed"
         );
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(in crate::oauth) fn fixture_credential(
+        pending: &Pending,
+        identity: &iap::Verified,
+    ) -> Result<Self> {
+        ensure!(pending.actor == identity.email, "fixture credential owner changed");
+        let mut intent = Self::fixture_oauth(
+            identity,
+            &pending.attempt,
+            &pending.challenge()?,
+            "https://security.example.com",
+            pending.created_at,
+            pending.expires_at,
+        )?;
+        // DATA fixture only: this cannot pass the OAuth management producer or
+        // construct a native original, role, human proof or serving consumer.
+        intent.context = Context::Credential {
+            action: CredentialIntentAction::from_pending(pending),
+            scope: "fixture/development/app".into(),
+            app: "app".into(),
+            artifact: pending.artifact.clone(),
+            app_origin: "https://app.example.com".into(),
+            shell_origin: "https://security.example.com".into(),
+            expires_at: pending.expires_at,
+        };
+        Ok(intent)
     }
 
     #[cfg(test)]
@@ -312,6 +379,7 @@ impl VerifiedAuthTime {
         self.require_credential_authentication(current, identity, entry_now)?;
         let intent = self.google.intent();
         let Context::Credential {
+            action: _,
             scope,
             app,
             artifact,
@@ -354,8 +422,7 @@ impl VerifiedAuthTime {
         entry_now: i64,
     ) -> Result<()> {
         ensure!(
-            self.purpose() == FreshPurpose::CredentialIntent
-                && current.purpose() == FreshPurpose::CredentialIntent,
+            self.purpose().is_credential_intent() && current.purpose().is_credential_intent(),
             "credential original purpose required"
         );
         self.require_intent(current, identity)?;
@@ -483,6 +550,7 @@ mod purpose_tests {
         assert!(intent.require_oauth_management().is_err());
         let approval = intent.commitment()?;
         intent.context = Context::Credential {
+            action: CredentialIntentAction::Issue,
             scope: "example/development/app".into(),
             app: "app".into(),
             artifact: Digest::new(b"artifact").as_str().to_owned(),
@@ -490,8 +558,16 @@ mod purpose_tests {
             shell_origin: "https://security.example.com".into(),
             expires_at: 305,
         };
-        assert!(intent.require_oauth_management().is_err());
-        assert_ne!(intent.commitment()?, approval);
+        let mut credential_commitments = std::collections::BTreeSet::new();
+        for action in [CredentialIntentAction::Issue, CredentialIntentAction::Rotate, CredentialIntentAction::Revoke] {
+            let Context::Credential { action: selected, .. } = &mut intent.context else { unreachable!() };
+            *selected = action;
+            assert!(intent.purpose().is_credential_intent());
+            assert!(intent.require_oauth_management().is_err());
+            let commitment = intent.commitment()?;
+            assert_ne!(commitment, approval);
+            assert!(credential_commitments.insert(commitment));
+        }
         let mut connect = None;
         for action in [
             super::super::management::Action::Connect,

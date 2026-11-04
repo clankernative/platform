@@ -35,22 +35,55 @@ impl GoogleBundleData {
 
 /// A closed selector for the receiver's real Pending. This is not a serialized
 /// FreshIntent: the receiver constructs that only from its own current runtime.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PurposeData {
     OAuthApproval,
-    CredentialIntent,
+    CredentialIssueIntent,
+    CredentialRotateIntent,
+    CredentialRevokeIntent,
     OAuthConnect,
     OAuthDisconnect,
 }
 
+impl<'de> Deserialize<'de> for PurposeData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // One canonical string per purpose. Externally tagged maps, sequences,
+        // a generic credential intent and delivery actions are not this protocol.
+        struct StringOnly;
+        impl serde::de::Visitor<'_> for StringOnly {
+            type Value = PurposeData;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("one closed fresh-owner purpose string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(match value {
+                    "o_auth_approval" => PurposeData::OAuthApproval,
+                    "credential_issue_intent" => PurposeData::CredentialIssueIntent,
+                    "credential_rotate_intent" => PurposeData::CredentialRotateIntent,
+                    "credential_revoke_intent" => PurposeData::CredentialRevokeIntent,
+                    "o_auth_connect" => PurposeData::OAuthConnect,
+                    "o_auth_disconnect" => PurposeData::OAuthDisconnect,
+                    _ => return Err(E::custom("unsupported fresh-owner purpose")),
+                })
+            }
+        }
+        deserializer.deserialize_str(StringOnly)
+    }
+}
+
 impl PurposeData {
     fn from_intent(intent: &FreshIntent) -> Self {
+        use super::fresh_auth::FreshPurpose;
         match intent.purpose() {
-            super::fresh_auth::FreshPurpose::OAuthApproval => Self::OAuthApproval,
-            super::fresh_auth::FreshPurpose::CredentialIntent => Self::CredentialIntent,
-            super::fresh_auth::FreshPurpose::OAuthConnect => Self::OAuthConnect,
-            super::fresh_auth::FreshPurpose::OAuthDisconnect => Self::OAuthDisconnect,
+            FreshPurpose::OAuthApproval => Self::OAuthApproval,
+            FreshPurpose::CredentialIssueIntent => Self::CredentialIssueIntent,
+            FreshPurpose::CredentialRotateIntent => Self::CredentialRotateIntent,
+            FreshPurpose::CredentialRevokeIntent => Self::CredentialRevokeIntent,
+            FreshPurpose::OAuthConnect => Self::OAuthConnect,
+            FreshPurpose::OAuthDisconnect => Self::OAuthDisconnect,
         }
     }
 }
@@ -228,7 +261,7 @@ const SCHEMA: &str = r#"
             original TEXT PRIMARY KEY NOT NULL CHECK(length(original)=71 AND substr(original,1,7)='sha256:'
                 AND substr(original,8) NOT GLOB '*[^0-9a-f]*'),
             attempt TEXT NOT NULL CHECK(length(attempt) BETWEEN 1 AND 256),
-            purpose TEXT NOT NULL CHECK(purpose IN ('OAuthApproval','CredentialIntent','OAuthConnect','OAuthDisconnect')),
+            purpose TEXT NOT NULL CHECK(purpose IN ('OAuthApproval','CredentialIssueIntent','CredentialRotateIntent','CredentialRevokeIntent','OAuthConnect','OAuthDisconnect')),
             human TEXT NOT NULL CHECK(length(human) BETWEEN 1 AND 320),
             subject TEXT NOT NULL CHECK(length(subject) BETWEEN 1 AND 256),
             context TEXT NOT NULL CHECK(length(context) BETWEEN 1 AND 32768 AND json_valid(context)
@@ -241,7 +274,12 @@ const SCHEMA: &str = r#"
                     AND length(json_extract(context,'$.challenge'))=71
                     AND CASE purpose
                         WHEN 'OAuthApproval' THEN json_extract(context,'$.context.OAuth.expires_at')
-                        WHEN 'CredentialIntent' THEN json_extract(context,'$.context.Credential.expires_at')
+                        WHEN 'CredentialIssueIntent' THEN CASE WHEN json_extract(context,'$.context.Credential.action')='issue'
+                            THEN json_extract(context,'$.context.Credential.expires_at') END
+                        WHEN 'CredentialRotateIntent' THEN CASE WHEN json_extract(context,'$.context.Credential.action')='rotate'
+                            THEN json_extract(context,'$.context.Credential.expires_at') END
+                        WHEN 'CredentialRevokeIntent' THEN CASE WHEN json_extract(context,'$.context.Credential.action')='revoke'
+                            THEN json_extract(context,'$.context.Credential.expires_at') END
                         WHEN 'OAuthConnect' THEN CASE WHEN json_extract(context,'$.context.Management.action')='connect'
                             THEN json_extract(context,'$.context.Management.expires_at') END
                         WHEN 'OAuthDisconnect' THEN CASE WHEN json_extract(context,'$.context.Management.action')='disconnect'
@@ -320,7 +358,7 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
         &[super::schema::Invariant { table: "native_fresh_owners", predicate:
             "length(original)=71 AND substr(original,1,7)='sha256:' AND substr(original,8) NOT GLOB '*[^0-9a-f]*'
              AND length(attempt) BETWEEN 1 AND 256
-             AND purpose IN ('OAuthApproval','CredentialIntent','OAuthConnect','OAuthDisconnect')
+             AND purpose IN ('OAuthApproval','CredentialIssueIntent','CredentialRotateIntent','CredentialRevokeIntent','OAuthConnect','OAuthDisconnect')
              AND length(human) BETWEEN 1 AND 320 AND length(subject) BETWEEN 1 AND 256
              AND length(context) BETWEEN 1 AND 32768 AND json_valid(context) AND json_type(context)='object'
              AND json_extract(context,'$.attempt')=attempt AND json_extract(context,'$.human')=human
@@ -328,7 +366,12 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
              AND json_type(context,'$.challenge')='text' AND length(json_extract(context,'$.challenge'))=71
              AND CASE purpose
                  WHEN 'OAuthApproval' THEN json_extract(context,'$.context.OAuth.expires_at')
-                 WHEN 'CredentialIntent' THEN json_extract(context,'$.context.Credential.expires_at')
+                 WHEN 'CredentialIssueIntent' THEN CASE WHEN json_extract(context,'$.context.Credential.action')='issue'
+                            THEN json_extract(context,'$.context.Credential.expires_at') END
+                        WHEN 'CredentialRotateIntent' THEN CASE WHEN json_extract(context,'$.context.Credential.action')='rotate'
+                            THEN json_extract(context,'$.context.Credential.expires_at') END
+                        WHEN 'CredentialRevokeIntent' THEN CASE WHEN json_extract(context,'$.context.Credential.action')='revoke'
+                            THEN json_extract(context,'$.context.Credential.expires_at') END
                  WHEN 'OAuthConnect' THEN CASE WHEN json_extract(context,'$.context.Management.action')='connect'
                      THEN json_extract(context,'$.context.Management.expires_at') END
                  WHEN 'OAuthDisconnect' THEN CASE WHEN json_extract(context,'$.context.Management.action')='disconnect'
@@ -554,6 +597,129 @@ mod tests {
     use super::*;
     use crate::iap;
     use rusqlite::TransactionBehavior;
+
+    fn credential_intent(index: u8) -> Result<FreshIntent> {
+        use crate::managed_credentials::{browser::Pending, lifecycle::{Intent, IssueGrant, RotateGrant}};
+        let pending = Pending {
+            attempt: "credential-same-attempt".into(), invocation: "same-invocation".into(),
+            operation: "fixture".into(), actor: "alice@example.com".into(),
+            input: serde_json::json!({"label":"Fixture"}), family: "fixture-family".into(),
+            intent: match index {
+                0 => Intent::Issue { label: "Fixture".into(), grant: IssueGrant::Fixed {} },
+                1 => Intent::Rotate { lineage: "lineage".into(), head: "head".into(), revision: 1, grant: RotateGrant::Fixed },
+                2 => Intent::Revoke { lineage: "lineage".into() },
+                _ => anyhow::bail!("unsupported fixture intent"),
+            },
+            rotation: None, artifact: Digest::new(b"synthetic artifact DATA").as_str().into(),
+            authority: crate::authority_state::AuthorityStamp { epoch: Digest::new(b"fixture epoch").as_str().into(), revision: 1 },
+            binding: Digest::new(b"fixture binding"), created_at: 0, expires_at: 300, product_return: None,
+        };
+        FreshIntent::fixture_credential(&pending, &iap::Verified { email: pending.actor.clone(), subject: "google:alice".into() })
+    }
+
+    const PURPOSES: [PurposeData; 6] = [
+        PurposeData::OAuthApproval, PurposeData::OAuthConnect, PurposeData::OAuthDisconnect,
+        PurposeData::CredentialIssueIntent, PurposeData::CredentialRotateIntent, PurposeData::CredentialRevokeIntent,
+    ];
+
+    #[test]
+    fn fresh_purposes_have_one_canonical_closed_wire_and_no_delivery_variant() -> Result<()> {
+        let names = ["o_auth_approval", "o_auth_connect", "o_auth_disconnect", "credential_issue_intent", "credential_rotate_intent", "credential_revoke_intent"];
+        for (purpose, name) in PURPOSES.into_iter().zip(names) {
+            let bytes = serde_json::to_vec(&purpose)?;
+            ensure!(bytes == serde_json::to_vec(name)?, "noncanonical fresh purpose");
+            ensure!(crate::json::decode::<PurposeData>(&bytes)? == purpose, "purpose roundtrip changed");
+            ensure!(serde_json::from_value::<PurposeData>(serde_json::json!(name))? == purpose, "Value purpose roundtrip changed");
+            for wrong in [serde_json::Value::Object(serde_json::Map::from_iter([(name.to_owned(), serde_json::Value::Null)])), serde_json::json!([name]), serde_json::Value::Null, serde_json::json!(17)] {
+                ensure!(crate::json::decode::<PurposeData>(&serde_json::to_vec(&wrong)?).is_err()
+                    && serde_json::from_value::<PurposeData>(wrong).is_err(), "alternate purpose encoding accepted");
+            }
+        }
+        for wrong in ["credential_intent", "CredentialIntent", "credential_reveal", "credential_ack", "credential_acknowledge", "approval", "issue", "", "credential_issue_intent "] {
+            ensure!(crate::json::decode::<PurposeData>(&serde_json::to_vec(wrong)?).is_err(), "unknown or delivery purpose accepted");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn credential_calls_bind_the_actual_intent_before_any_sql_change() -> Result<()> {
+        let expected = [PurposeData::CredentialIssueIntent, PurposeData::CredentialRotateIntent, PurposeData::CredentialRevokeIntent];
+        let mut originals = std::collections::BTreeSet::new();
+        for (index, purpose) in expected.into_iter().enumerate() {
+            let intent = credential_intent(index.try_into()?)?;
+            ensure!(intent.require_oauth_management().is_err(), "credential DATA entered OAuth producer");
+            ensure!(originals.insert(intent.commitment()?), "credential actions shared an original");
+            let owner = Digest::new(b"one original bundle owner DATA");
+            let call = CallData::claim(&intent, owner.clone())?;
+            ensure!(call.purpose == purpose, "actual Pending action changed");
+            let bytes = serde_json::to_vec(&call)?;
+            let decoded: CallData = crate::json::decode(&bytes)?;
+            decoded.require_intent(&intent)?;
+            let mut db = Connection::open_in_memory()?;
+            install(&db)?;
+            for wrong in PURPOSES.into_iter().filter(|candidate| *candidate != purpose) {
+                let mut forged = call.clone();
+                forged.purpose = wrong;
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                ensure!(apply_in_current_app_transaction(&tx, &intent, &forged, 1).is_err(), "foreign action selected current Pending");
+                tx.commit()?;
+                ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners", [], |r|r.get::<_, i64>(0))? == 0, "foreign action mutated allocation");
+            }
+            for other in 0..3 {
+                if usize::from(other) != index {
+                    ensure!(decoded.require_intent(&credential_intent(other)?).is_err(), "another Pending action adopted call");
+                }
+            }
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let reply = apply_in_current_app_transaction(&tx, &intent, &decoded, 1)?;
+            reply.require_call(&decoded, &intent)?;
+            ensure!(matches!(reply.outcome, OutcomeData::Allocation { state: AllocationData::Allocated }), "first claim was not allocated");
+            tx.commit()?;
+            // Independent expected state: exactly one immutable allocated row.
+            let expected_purpose = ["CredentialIssueIntent", "CredentialRotateIntent", "CredentialRevokeIntent"][index];
+            ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners WHERE purpose=?1 AND stage='allocated'", [expected_purpose], |r|r.get::<_, i64>(0))? == 1, "allocation did not bind intent purpose");
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let repeated = apply_in_current_app_transaction(&tx, &intent, &decoded, 2)?;
+            ensure!(matches!(repeated.outcome, OutcomeData::Allocation { state: AllocationData::ExistingOwner }), "duplicate claim granted another allocation");
+            let publication = CallData::publication(&intent, owner, serde_json::to_string(&GoogleBundleData::from_native_parts(intent.commitment()?, Digest::new(b"profile"), Digest::new(b"bundle")))?)?;
+            let mut changed = publication.clone();
+            changed.purpose = PurposeData::OAuthConnect;
+            ensure!(apply_in_current_app_transaction(&tx, &intent, &changed, 2).is_err(), "publication action changed");
+            let published = apply_in_current_app_transaction(&tx, &intent, &publication, 2)?;
+            published.require_call(&publication, &intent)?;
+            ensure!(reply.require_call(&publication, &intent).is_err(), "claim reply became publication");
+            ensure!(published.require_call(&decoded, &intent).is_err(), "publication reply became claim");
+            tx.commit()?;
+            ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners WHERE purpose=?1 AND stage='offered'", [expected_purpose], |r|r.get::<_, i64>(0))? == 1, "publication did not retain the one bound allocation");
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure!(apply_in_current_app_transaction(&tx, &intent, &decoded, 300).is_err(), "deadline equality renewed an allocation");
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_rejects_mismatched_credential_action_even_without_the_rpc_decoder() -> Result<()> {
+        for index in 0..3 {
+            let intent = credential_intent(index)?;
+            let expected = ["CredentialIssueIntent", "CredentialRotateIntent", "CredentialRevokeIntent"][usize::from(index)];
+            for purpose in ["CredentialIntent", "CredentialIssueIntent", "CredentialRotateIntent", "CredentialRevokeIntent", "OAuthConnect", "CredentialReveal", "CredentialAck"] {
+                if purpose == expected { continue; }
+                let db = Connection::open_in_memory()?;
+                install(&db)?;
+                ensure!(db.execute("INSERT INTO native_fresh_owners(original,attempt,purpose,human,subject,context,owner,created_at,expires_at,stage) VALUES(?1,?2,?3,?4,?5,?6,?7,0,300,'allocated')",
+                    params![intent.commitment()?.as_str(), intent.attempt(), purpose, intent.human(), intent.subject(), serde_json::to_string(&intent)?, Digest::new(b"owner").as_str()]).is_err(), "SQLite accepted a foreign intent purpose");
+                ensure!(db.query_row("SELECT count(*) FROM native_fresh_owners", [], |r|r.get::<_, i64>(0))? == 0, "refused purpose left a row");
+            }
+        }
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(&SCHEMA.replacen("CredentialIssueIntent", "CredentialIntent", 1))?;
+        db.execute("INSERT INTO native_fresh_schema_version VALUES(1)", [])?;
+        let before = schema_rows(&db)?;
+        ensure!(install(&db).is_err(), "unknown generic-purpose unit was upgraded");
+        ensure!(schema_rows(&db)? == before, "refused purpose unit was altered");
+        Ok(())
+    }
 
     fn intent() -> Result<FreshIntent> {
         FreshIntent::fixture_oauth(
