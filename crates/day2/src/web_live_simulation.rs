@@ -1423,6 +1423,25 @@ mod transport_histories {
             Ok(Self { subject, pattern })
         }
     }
+    fn terminal_call(node: &syn::ExprMethodCall) -> bool {
+        node.method == "send" && path_is(&node.receiver, "terminal") && node.args.len() == 1 && outer_elements(&node.args[0])
+    }
+
+    fn terminal_predicate(expression: &syn::Expr) -> bool {
+        let syn::Expr::Macro(expression) = expression else { return false; };
+        if !expression.mac.path.is_ident("matches") { return false; }
+        let Ok(args) = syn::parse2::<MatchesArgs>(expression.mac.tokens.clone()) else { return false; };
+        if !matches!(&args.subject,syn::Expr::MethodCall(call) if call.method=="category" && call.args.is_empty() && path_is(&call.receiver,"classified")) { return false; }
+        let syn::Pat::Or(pattern) = args.pattern else { return false; };
+        let mut categories = pattern.cases.iter().filter_map(|pattern| {
+            let syn::Pat::Path(path) = pattern else { return None; };
+            let parts = path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>();
+            (parts.len()==4 && parts[..3]==["crate","error","Category"]).then(|| parts[3].clone())
+        }).collect::<Vec<_>>();
+        categories.sort();
+        pattern.cases.len()==4 && categories==["Authentication","Conflict","Forbidden","NotFound"]
+    }
+
     impl<'ast> syn::visit::Visit<'ast> for Producer {
         fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
             if matches!(node.cond.as_ref(),syn::Expr::MethodCall(check) if check.method=="is_err" && check.args.is_empty() && matches!(check.receiver.as_ref(),syn::Expr::MethodCall(send) if send.method=="try_send" && path_is(&send.receiver,"sender")))
@@ -1434,6 +1453,10 @@ mod transport_histories {
             {
                 self.full_exit += 1;
             }
+            if terminal_predicate(&node.cond) && node.else_branch.is_none()
+                && node.then_branch.stmts.last().is_some_and(|statement| matches!(statement,
+                    syn::Stmt::Local(local) if local.init.as_ref().is_some_and(|init|matches!(init.expr.as_ref(),syn::Expr::MethodCall(call) if terminal_call(call)))))
+            { self.classifications += 1; }
             syn::visit::visit_expr_if(self, node);
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
@@ -1446,45 +1469,7 @@ mod transport_histories {
             }
             syn::visit::visit_expr_method_call(self, node);
         }
-        fn visit_macro(&mut self, node: &'ast syn::Macro) {
-            if node.path.is_ident("matches")
-                && let Ok(args) = syn::parse2::<MatchesArgs>(node.tokens.clone())
-            {
-                let subject = matches!(&args.subject,syn::Expr::MethodCall(call) if call.method=="category" && call.args.is_empty() && path_is(&call.receiver,"classified"));
-                if let syn::Pat::Or(pattern) = args.pattern {
-                    let mut categories = pattern
-                        .cases
-                        .iter()
-                        .filter_map(|pattern| {
-                            if let syn::Pat::Path(path) = pattern {
-                                let parts = path
-                                    .path
-                                    .segments
-                                    .iter()
-                                    .map(|part| part.ident.to_string())
-                                    .collect::<Vec<_>>();
-                                if parts.len() == 4 && parts[..3] == ["crate", "error", "Category"]
-                                {
-                                    Some(parts[3].clone())
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    categories.sort();
-                    if subject
-                        && pattern.cases.len() == 4
-                        && categories == ["Authentication", "Conflict", "Forbidden", "NotFound"]
-                    {
-                        self.classifications += 1;
-                    }
-                }
-            }
-            syn::visit::visit_macro(self, node);
-        }
+
     }
 
     fn production_wiring(source: &str) -> bool {
@@ -1542,6 +1527,8 @@ mod transport_histories {
             .context("live factory")?;
         for (before, after) in [
             ("mpsc::channel(1)", "mpsc::channel(2)"),
+            ("if matches!(", "if !matches!("),
+            ("let _ = terminal.send(elements(&cleared, \"outer\"));", "let _ = || terminal.send(elements(&cleared, \"outer\"));"),
             ("terminal: Some(terminal)", "terminal: None"),
             ("terminal: terminal_sender", "terminal: unrelated_terminal"),
             (
