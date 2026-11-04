@@ -956,14 +956,25 @@ mod tests {
         for (table, rows) in &before.0 {
             let next = &after.0[table];
             if table == "day2_credential_versions" {
-                ensure!(rows.len()==next.len(),"verifier maintenance created a bearer version");
-                let mut changed=0;
-                for (old,new) in rows.iter().zip(next) {
-                    ensure!(old.len()==12 && new.len()==12 && old[..4]==new[..4]
-                        && old[6..11]==new[6..11],"verifier maintenance changed bearer identity or authority");
-                    changed+=usize::from(old!=new);
+                ensure!(
+                    rows.len() == next.len(),
+                    "verifier maintenance created a bearer version"
+                );
+                let mut changed = 0;
+                for (old, new) in rows.iter().zip(next) {
+                    ensure!(
+                        old.len() == 12
+                            && new.len() == 12
+                            && old[..4] == new[..4]
+                            && old[6..11] == new[6..11],
+                        "verifier maintenance changed bearer identity or authority"
+                    );
+                    changed += usize::from(old != new);
                 }
-                ensure!(changed==1,"verifier maintenance changed more or less than one verifier record");
+                ensure!(
+                    changed == 1,
+                    "verifier maintenance changed more or less than one verifier record"
+                );
             } else {
                 ensure!(
                     rows == next,
@@ -1089,34 +1100,78 @@ mod tests {
     }
 
     #[test]
-    fn verifier_maintenance_preserves_a_narrowed_successor_and_cannot_restore_removed_roots() -> Result<()> {
-        use day2_capabilities::credentials::{GrantSelection,RotationGrant};
-        let world=World::new(732);
-        effects::scope(world.clone(),||->Result<()>{
-            let (_dir,mut db)=fixture::database()?;let (family,original)=fixture::selectable_fixture()?;
-            let mut issue=fixture::issue("verifier-selected-issue");issue.family_contract=family.contract.clone();issue.ceiling=original.clone();
-            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let first=super::super::stage_issue(&tx,super::super::prepare_issue(&fixture::lease(),&family,issue)?)?.public_identity().clone();tx.commit()?;
-            let selection=GrantSelection::new(&family,vec!["ReadTranscription".into()])?;
-            let narrowed=family.rotation_ceiling(&original,RotationGrant::Narrow(&selection))?;
+    fn verifier_maintenance_preserves_a_narrowed_successor_and_cannot_restore_removed_roots()
+    -> Result<()> {
+        use day2_capabilities::credentials::{GrantSelection, RotationGrant};
+        let world = World::new(732);
+        effects::scope(world.clone(), || -> Result<()> {
+            let (_dir, mut db) = fixture::database()?;
+            let (family, original) = fixture::selectable_fixture()?;
+            let mut issue = fixture::issue("verifier-selected-issue");
+            issue.family_contract = family.contract.clone();
+            issue.ceiling = original.clone();
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let first = super::super::stage_issue(
+                &tx,
+                super::super::prepare_issue(&fixture::lease(), &family, issue)?,
+            )?
+            .public_identity()
+            .clone();
+            tx.commit()?;
+            let selection = GrantSelection::new(&family, vec!["ReadTranscription".into()])?;
+            let narrowed = family.rotation_ceiling(&original, RotationGrant::Narrow(&selection))?;
             world.set_wall(1100);
-            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let successor=match super::super::stage_rotation(&tx,&fixture::lease(),&fixture::snapshot(&first),super::super::RotationIntent{
-                grant:&narrowed,invocation:"verifier-selected-rotate",instruction_slot:0,recipient:"issuer/human-1",session:"session-1",issued_at:1100,expires_at:2000,reveal_until:1300
-            })?{super::super::RotationResult::Rotated(p)=>p.public_identity().clone(),_=>anyhow::bail!("narrowed rotation refused")};tx.commit()?;
-            let (authority,keys)=verifier_ports(successor.version.as_deref().context("successor")?,family);
-            let token=verifier_token(&db,&authority)?;let before=verifier_image(&db)?;
-            let ready=verifier_prepared(&db,&authority,&keys,&token)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let _pending=stage_verifier(&tx,&authority,ready)?;tx.commit()?;only_verifier_changed(&before,&verifier_image(&db)?)?;
-            let key=crypto::VerifierLease::new(&[9;32],"verify-v2".into())?;
-            for (name,allowed) in [("ReadTranscription",true),("SubmitTranscription",false)] {
-                let found=super::super::verify_ingress(&db,&key,super::super::IngressVerification{
-                    namespace:&authority.binding.namespace,family:authority.family.id.as_str(),family_contract:&authority.family.contract,
-                    security_epoch:7,now:1100,operation:&authority.family.roots[name],
-                },&token)?;
-                ensure!(found.is_some()==allowed,"verifier maintenance broadened narrowed authority");
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let successor = match super::super::stage_rotation(
+                &tx,
+                &fixture::lease(),
+                &fixture::snapshot(&first),
+                super::super::RotationIntent {
+                    grant: &narrowed,
+                    invocation: "verifier-selected-rotate",
+                    instruction_slot: 0,
+                    recipient: "issuer/human-1",
+                    session: "session-1",
+                    issued_at: 1100,
+                    expires_at: 2000,
+                    reveal_until: 1300,
+                },
+            )? {
+                super::super::RotationResult::Rotated(p) => p.public_identity().clone(),
+                _ => anyhow::bail!("narrowed rotation refused"),
+            };
+            tx.commit()?;
+            let (authority, keys) =
+                verifier_ports(successor.version.as_deref().context("successor")?, family);
+            let token = verifier_token(&db, &authority)?;
+            let before = verifier_image(&db)?;
+            let ready = verifier_prepared(&db, &authority, &keys, &token)?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let _pending = stage_verifier(&tx, &authority, ready)?;
+            tx.commit()?;
+            only_verifier_changed(&before, &verifier_image(&db)?)?;
+            let key = crypto::VerifierLease::new(&[9; 32], "verify-v2".into())?;
+            for (name, allowed) in [("ReadTranscription", true), ("SubmitTranscription", false)] {
+                let found = super::super::verify_ingress(
+                    &db,
+                    &key,
+                    super::super::IngressVerification {
+                        namespace: &authority.binding.namespace,
+                        family: authority.family.id.as_str(),
+                        family_contract: &authority.family.contract,
+                        security_epoch: 7,
+                        now: 1100,
+                        operation: &authority.family.roots[name],
+                    },
+                    &token,
+                )?;
+                ensure!(
+                    found.is_some() == allowed,
+                    "verifier maintenance broadened narrowed authority"
+                );
             }
-            super::super::install_schema(&db)?;Ok(())
+            super::super::install_schema(&db)?;
+            Ok(())
         })
     }
 
@@ -1923,9 +1978,9 @@ mod tests {
                         }
                         VerifyStep::Rotate => {
                             let grant = fixture::issue("model-grant").ceiling;
-                        // A new scheduled rotation is a fresh intent. Reusing
-                        // one invocation would exercise receipt recovery instead.
-                        let invocation = format!("model-rotation-{index}");
+                            // A new scheduled rotation is a fresh intent. Reusing
+                            // one invocation would exercise receipt recovery instead.
+                            let invocation = format!("model-rotation-{index}");
                             let tx =
                                 db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                             let accepted = matches!(
