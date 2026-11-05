@@ -357,7 +357,7 @@ fn begin_in(
     super::restore::require_open(tx, super::restore::Kind::Connect, &intent.attempt)?;
     if let Some(guard) = guard {
         guard.check(tx, now)?;
-    } else if super::restore::generation_floor(tx,&intent.slot)?.is_some() {
+    } else if super::restore::generation_floor(tx, &intent.slot)?.is_some() {
         // Floored history needs the actual managed fresh-human entry. A copied
         // row/intent or raw navigation adapter cannot authorize its adoption.
         return Ok(false);
@@ -1041,7 +1041,8 @@ pub(super) fn pending_approval(
                         slot: row.get(0)?,
                         expected_generation: row.get(1)?,
                         expected_epoch: row.get(2)?,
-                        proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
+                        proposed_generation: row.get(3)?,
+                        generation_floor: row.get("generation_floor")?,
                         owner: row.get(4)?,
                         profile: row.get(5)?,
                         registration: row.get(6)?,
@@ -1074,10 +1075,13 @@ pub(super) fn slot_matches(tx: &Transaction<'_>, intent: &ConnectIntent) -> Resu
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let floor=super::restore::generation_floor(tx,&intent.slot)?;
-    let next=super::restore::next_generation(row.as_ref().map(|entry|entry.0),floor.unwrap_or(0))?;
-    let restored=floor.is_some();
-    if intent.generation_floor!=floor.unwrap_or(0) {return Ok(false)}
+    let floor = super::restore::generation_floor(tx, &intent.slot)?;
+    let next =
+        super::restore::next_generation(row.as_ref().map(|entry| entry.0), floor.unwrap_or(0))?;
+    let restored = floor.is_some();
+    if intent.generation_floor != floor.unwrap_or(0) {
+        return Ok(false);
+    }
     Ok(match (row, intent.expected_generation) {
         (None, None) => intent.expected_epoch == 1 && intent.proposed_generation == next,
         (Some((generation, epoch, status)), Some(expected)) => {
@@ -1112,7 +1116,8 @@ fn validate(intent: &ConnectIntent) -> Result<()> {
     );
     ensure!(
         intent.expected_epoch > 0
-            && intent.generation_floor>=0 && intent.generation_floor<i64::MAX
+            && intent.generation_floor >= 0
+            && intent.generation_floor < i64::MAX
             && intent.proposed_generation > 0
             && intent
                 .expected_generation
