@@ -124,6 +124,13 @@ fn exact_read_write_transaction_and_all_five_writes_pin_scope_and_conditions() -
     assert_eq!(strong, json!({"documents":names(&selection,&plan)?}));
     assert!(selected.endpoint("beginTransaction").is_err());
     let value = commit(&selection, &plan, &current)?;
+    let mut combined = initial_reply(&selection, &plan)?;
+    combined.remove(0);
+    combined[0]["transaction"] = json!(TX);
+    let transaction = wire::Names::new(&selection, &plan)?
+        .transaction(&serde_json::to_vec(&combined)?)?;
+    let combined: Value = crate::json::decode(&transaction.commit_body(&selection, &plan, &current, 1000)?)?;
+    assert_eq!(combined, value);
     assert_eq!(value.as_object().unwrap().len(), 2);
     assert_eq!(value["transaction"], TX);
     let writes = value["writes"].as_array().unwrap();
