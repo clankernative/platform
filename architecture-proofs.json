@@ -4174,7 +4174,9 @@
       "type_name": "ControllerCurrentRendezvous",
       "owning_children": [],
       "methods": [
-        "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        "pub (crate) fn accept_admin_read (self , stage : & mut EnrolledRoleStage < '_ > , binding : & Digest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "fn accept_expected (self , stage : & mut EnrolledRoleStage < '_ > , expected : super :: super :: storage_peer_wire :: CurrentExpectation < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >"
       ],
       "factories": [
         {
@@ -4183,6 +4185,14 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "ControllerCurrentRendezvous < 'peer >",
+          "signature": "fn accept_expected (self , stage : & mut EnrolledRoleStage < '_ > , expected : super :: super :: storage_peer_wire :: CurrentExpectation < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerCurrentRendezvous < 'peer >",
+          "signature": "pub (crate) fn accept_admin_read (self , stage : & mut EnrolledRoleStage < '_ > , binding : & Digest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
         {
           "owner": "ControllerCurrentRendezvous < 'peer >",
           "signature": "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
@@ -4261,6 +4271,14 @@
         {
           "owner": "AppHolderPeerContinuity",
           "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , queued : QueuedAppCurrentPeer , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerCurrentRendezvous < 'peer >",
+          "signature": "fn accept_expected (self , stage : & mut EnrolledRoleStage < '_ > , expected : super :: super :: storage_peer_wire :: CurrentExpectation < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerCurrentRendezvous < 'peer >",
+          "signature": "pub (crate) fn accept_admin_read (self , stage : & mut EnrolledRoleStage < '_ > , binding : & Digest) -> Result < CurrentStoragePeerPhase < 'peer > >"
         },
         {
           "owner": "ControllerCurrentRendezvous < 'peer >",
