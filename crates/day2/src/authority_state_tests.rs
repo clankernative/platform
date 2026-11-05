@@ -573,6 +573,111 @@ fn restore_fences_old_work_and_requires_explicit_new_activation() -> Result<()> 
 }
 
 #[test]
+fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reopen() -> Result<()> {
+    use crate::budget::{BudgetContext,Consumption,ReservationRequest,Settlement};
+    use day2_capabilities::resources::{BudgetDefinition,BudgetLimits,BudgetScope};
+    let directory=tempfile::tempdir()?;
+    let path=directory.path().join("app.sqlite");
+    let mut db=Connection::open(&path)?;initialize(&mut db)?;
+    let previous=current(&db)?;
+    let request=|id:&str| ReservationRequest {
+        id:id.into(),binding:"authority+resource+input".into(),
+        context:BudgetContext {app:"app".into(),actor:"alice".into(),connection:"mailbox".into(),invocation_root:"copied".into(),now:100},
+        budgets:BTreeMap::from([("app".into(),BudgetDefinition {revision:1,scope:BudgetScope::App,period_seconds:60,limits:BudgetLimits {calls:Some(100),..Default::default()}})]),
+        quote:Consumption {calls:3,bytes:100,concurrency:1,..Default::default()},
+    };
+    let outgoing=serde_json::to_string(&crate::delegation_commands::Delivery {first_at:90,incarnation:"original-source".into()})?;
+    {
+        let tx=db.transaction()?;
+        tx.execute("INSERT INTO day2_invocations VALUES('copied','pending')",[])?;
+        pin_invocation(&tx,"copied",&previous.stamp)?;
+        crate::delegation_commands::upgrade(&tx)?;
+        tx.execute("INSERT INTO day2_app_outgoing VALUES('unknown-send','exact-fingerprint',?1,'copied')",[&outgoing])?;
+        crate::delegation_commands::restore_fence_in(&tx,200)?;
+        let known=crate::budget::reserve_in(&tx,&request("known"))?;
+        crate::budget::settle_in(&tx,&known,&Settlement::Known {actual:Consumption {calls:2,bytes:80,..Default::default()}})?;
+        let unknown=crate::budget::reserve_in(&tx,&request("unknown"))?;
+        crate::budget::settle_in(&tx,&unknown,&Settlement::Unknown)?;
+        tx.commit()?;
+    }
+    let before=crate::budget::inspect(&mut db)?;
+    assert_eq!(before.known_usage.calls,2);
+    assert_eq!(before.unknown_usage.len(),1);
+    assert!(before.accounts.iter().any(|account|account.used==2 && account.reserved==3));
+    // Preparation itself has no SQL effect and gives no restore permission.
+    let prepared=PreparedRestoreFence::new(previous.clone(),Path::new("/restored/one"),Digest::new(b"fresh-prepared-restore"),100)?;
+    assert!(db.is_autocommit());assert_eq!(current(&db)?,previous);
+    {
+        let tx=db.transaction()?;prepared.apply_in(&tx)?;
+        assert!(is_blocked(&tx,"copied")?);
+        assert!(pin_invocation(&tx,"copied",&current(&tx)?.stamp).is_err());
+        tx.commit()?;
+    }
+    drop(db);
+    for _ in 0..2 {
+        let mut reopened=Connection::open(&path)?;
+        let active=current(&reopened)?;
+        assert!(!active.document.enabled);
+        assert_ne!(active.stamp.epoch,previous.stamp.epoch);
+        assert_eq!(active.stamp.revision,previous.stamp.revision+1);
+        assert_eq!(active.artifact_id,previous.artifact_id);
+        assert_eq!(active.artifact_path,"/restored/one");
+        assert_eq!(invocation_stamp(&reopened,"copied")?,previous.stamp);
+        let after=crate::budget::inspect(&mut reopened)?;
+        assert!(after.frozen_after_restore);
+        assert_eq!(after.ledger_id,before.ledger_id);
+        assert_eq!(after.accounts,before.accounts);
+        assert_eq!(after.known_usage,before.known_usage);
+        assert_eq!(after.unknown_usage,before.unknown_usage);
+        assert_eq!(after.outstanding_attempts,before.outstanding_attempts);
+        assert_eq!(reopened.query_row("SELECT delivery FROM day2_app_outgoing WHERE identity='unknown-send'",[],|r|r.get::<_,String>(0))?,outgoing);
+        assert_eq!(reopened.query_row("SELECT not_before FROM day2_app_restore_fence WHERE singleton=1",[],|r|r.get::<_,i64>(0))?,200);
+        let tx=reopened.transaction()?;
+        assert!(prepared.apply_in(&tx).is_err());
+        assert!(crate::budget::reserve_in(&tx,&request("new-work")).is_err());
+        assert_eq!(current(&tx)?,active);
+        tx.rollback()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn prepared_restore_fence_refuses_changed_snapshot_reused_epoch_and_invalid_input_before_writes() -> Result<()> {
+    for cut in 0..3 {
+        let mut db=Connection::open_in_memory()?;initialize(&mut db)?;
+        let original=current(&db)?;
+        let replacement=Digest::new(b"prepared-target-epoch");
+        let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),replacement.clone(),100)?;
+        let tx=db.transaction()?;
+        match cut {
+            0=>{tx.execute("UPDATE day2_authority SET artifact_path='/different-current-path'",[])?;}
+            1=>{let mut changed=original.clone();changed.document.readers.insert("new-reader".into());tx.execute("UPDATE day2_authority SET document=?1",[serde_json::to_string(&changed.document)?])?;}
+            _=>{tx.execute("INSERT INTO day2_authority_history SELECT ?1,revision,document,artifact_id,artifact_path,operator,reason FROM day2_authority_history LIMIT 1",[replacement.as_str()])?;}
+        }
+        let before=current(&tx)?;
+        assert!(prepared.apply_in(&tx).is_err());
+        assert_eq!(current(&tx)?,before);
+        assert_eq!(tx.query_row("SELECT restored FROM day2_budget_meta WHERE singleton=1",[],|r|r.get::<_,i64>(0))?,0);
+        tx.rollback()?;
+        assert!(prepared.apply_in(&db).is_err());
+        assert!(PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::try_from(original.stamp.epoch.clone())?,100).is_err());
+        assert!(PreparedRestoreFence::new(original,Path::new("/restored/one"),replacement,-1).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn prepared_restore_fence_rollback_preserves_original_authority_and_budget_on_reopen() -> Result<()> {
+    let directory=tempfile::tempdir()?;let path=directory.path().join("app.sqlite");
+    let mut db=Connection::open(&path)?;initialize(&mut db)?;let original=current(&db)?;
+    let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::new(b"uncommitted-fence"),100)?;
+    {let tx=db.transaction()?;prepared.apply_in(&tx)?;assert!(!current(&tx)?.document.enabled);}
+    drop(db);
+    for _ in 0..2 {let db=Connection::open(&path)?;assert_eq!(current(&db)?,original);assert_eq!(db.query_row("SELECT restored FROM day2_budget_meta WHERE singleton=1",[],|r|r.get::<_,i64>(0))?,0);}
+    Ok(())
+}
+
+#[test]
 fn exhaustion_autocommit_and_tampered_history_guards_fail_closed() -> Result<()> {
     let mut connection = Connection::open_in_memory()?;
     initialize(&mut connection)?;
