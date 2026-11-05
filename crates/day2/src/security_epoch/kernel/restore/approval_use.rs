@@ -45,7 +45,38 @@ pub(in crate::security_epoch) struct Plan {
     pub approval_use: UseRecord,
 }
 
+/// Provider selector DATA derived from the validated original plan. No caller
+/// document path, signing key, approval owner or send permission is accepted.
+pub(in crate::security_epoch) struct Selectors {
+    pub bootstrap: super::super::Bootstrap,
+    pub activation: Digest,
+    pub advance: Digest,
+    pub operation: Digest,
+    pub grant: Digest,
+}
+
 impl Plan {
+    pub(in crate::security_epoch) fn selectors(&self, selected: &EpochStore) -> Result<Selectors> {
+        let request = &self.reservation.receipt.request;
+        self.revalidate(
+            selected,
+            &request.authorization,
+            request.prepared_at,
+            &self.reservation.before,
+            None,
+            None,
+        )?;
+        let activation = &self.reservation.before.activate.as_ref()
+            .context("restore_provider_activation_missing")?.value.request;
+        Ok(Selectors {
+            bootstrap: activation.bootstrap().clone(),
+            activation: activation.operation().clone(),
+            advance: request.intent.advance_operation(selected)?,
+            operation: request.intent.operation.clone(),
+            grant: self.approval_use.key(selected)?,
+        })
+    }
+
     pub(in crate::security_epoch) fn new(
         reservation: super::Plan,
         selected: &EpochStore,

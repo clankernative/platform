@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, path::Path};
 
 mod approval_use;
 mod history;
+mod provider_wire;
 #[cfg(unix)]
 mod process;
 
