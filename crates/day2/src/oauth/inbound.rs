@@ -672,37 +672,130 @@ pub(in crate::oauth) mod tests {
     }
 
     #[test]
-    fn restore_cut_refuses_actual_bearer_code_and_refresh_even_after_a_grant_row_rewind() -> Result<()> {
-        let directory=tempdir()?;let path=directory.path().join("app.sqlite");
-        let mut db=crate::oauth::restore::tests::database(&path)?;
-        assert!(record_grant(&db,"grant_1",&ceiling(),1)?);
+    fn restore_cut_refuses_actual_bearer_code_and_refresh_even_after_a_grant_row_rewind()
+    -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("app.sqlite");
+        let mut db = crate::oauth::restore::tests::database(&path)?;
+        assert!(record_grant(&db, "grant_1", &ceiling(), 1)?);
         issue(&mut db);
-        assert!(redeem_code(&mut db,redemption(1,pin("client"),OAuthClientRedirectRef(pin("redirect")),verifier()),|_|Ok(()))?);
-        let current=root("ghostwright.read");
-        let channel=ClientChannelContract::derive("mcp".into(),BTreeMap::from([(current.operation.clone(),current.clone())]))?;
-        assert!(authorize_channel_operation(&db,&hashes(1).access,&pin("client"),&ResourceAudienceRef(pin("resource")),&channel,&current,3)?);
-        let called=std::cell::Cell::new(false);
-        assert!(refresh(&mut db,exchange(1,2,BTreeSet::from(["ghostwright.read".into()])),|_| {
-            called.set(true);anyhow::bail!("controlled no-commit eligibility cut")
-        }).is_err());
+        assert!(redeem_code(
+            &mut db,
+            redemption(
+                1,
+                pin("client"),
+                OAuthClientRedirectRef(pin("redirect")),
+                verifier()
+            ),
+            |_| Ok(())
+        )?);
+        let current = root("ghostwright.read");
+        let channel = ClientChannelContract::derive(
+            "mcp".into(),
+            BTreeMap::from([(current.operation.clone(), current.clone())]),
+        )?;
+        assert!(authorize_channel_operation(
+            &db,
+            &hashes(1).access,
+            &pin("client"),
+            &ResourceAudienceRef(pin("resource")),
+            &channel,
+            &current,
+            3
+        )?);
+        let called = std::cell::Cell::new(false);
+        assert!(
+            refresh(
+                &mut db,
+                exchange(1, 2, BTreeSet::from(["ghostwright.read".into()])),
+                |_| {
+                    called.set(true);
+                    anyhow::bail!("controlled no-commit eligibility cut")
+                }
+            )
+            .is_err()
+        );
         assert!(called.get());
-        assert!(issue_code(&mut db,CodeOffer {code_hash:AuthorizationCodeHash::from_secret(&[b'd';32])?,
-            grant_id:"grant_1".into(),client:pin("client"),redirect:OAuthClientRedirectRef(pin("redirect")),
-            pkce_challenge:challenge_for_verifier(verifier())?,audience:ResourceAudienceRef(pin("resource")),expires_at:100,now:3})?);
-        let old_receipt:String=db.query_row("SELECT receipt FROM oauth_inbound_codes WHERE state='consumed'",[],|r|r.get(0))?;
-        crate::oauth::restore::tests::apply_for_storage(&mut db,94)?;
+        assert!(issue_code(
+            &mut db,
+            CodeOffer {
+                code_hash: AuthorizationCodeHash::from_secret(&[b'd'; 32])?,
+                grant_id: "grant_1".into(),
+                client: pin("client"),
+                redirect: OAuthClientRedirectRef(pin("redirect")),
+                pkce_challenge: challenge_for_verifier(verifier())?,
+                audience: ResourceAudienceRef(pin("resource")),
+                expires_at: 100,
+                now: 3
+            }
+        )?);
+        let old_receipt: String = db.query_row(
+            "SELECT receipt FROM oauth_inbound_codes WHERE state='consumed'",
+            [],
+            |r| r.get(0),
+        )?;
+        crate::oauth::restore::tests::apply_for_storage(&mut db, 94)?;
         // Neither copied row state nor clock rewind can remove the cut.
-        db.execute("UPDATE oauth_inbound_grants SET status='active',epoch=1",[])?;
-        db.execute("UPDATE oauth_inbound_refresh SET state='active' WHERE state='revoked'",[])?;
+        db.execute(
+            "UPDATE oauth_inbound_grants SET status='active',epoch=1",
+            [],
+        )?;
+        db.execute(
+            "UPDATE oauth_inbound_refresh SET state='active' WHERE state='revoked'",
+            [],
+        )?;
         for _ in 0..2 {
-            drop(db);db=Connection::open(&path)?;
-            assert!(authorize_channel_operation(&db,&hashes(1).access,&pin("client"),&ResourceAudienceRef(pin("resource")),&channel,&current,3).is_err());
-            let mut waiting=redemption(3,pin("client"),OAuthClientRedirectRef(pin("redirect")),verifier());
-            waiting.code_hash=AuthorizationCodeHash::from_secret(&[b'd';32])?;
-            assert!(redeem_code(&mut db,waiting,|_|panic!("restored code reached issuance")).is_err());
-            assert!(refresh(&mut db,exchange(1,2,BTreeSet::from(["ghostwright.read".into()])),|_|panic!("restored refresh reached issuance")).is_err());
-            assert_eq!(db.query_row("SELECT receipt FROM oauth_inbound_codes WHERE state='consumed'",[],|r|r.get::<_,String>(0))?,old_receipt);
-            assert_eq!(db.query_row("SELECT count(*) FROM oauth_inbound_codes WHERE state='ready'",[],|r|r.get::<_,i64>(0))?,1);
+            drop(db);
+            db = Connection::open(&path)?;
+            assert!(
+                authorize_channel_operation(
+                    &db,
+                    &hashes(1).access,
+                    &pin("client"),
+                    &ResourceAudienceRef(pin("resource")),
+                    &channel,
+                    &current,
+                    3
+                )
+                .is_err()
+            );
+            let mut waiting = redemption(
+                3,
+                pin("client"),
+                OAuthClientRedirectRef(pin("redirect")),
+                verifier(),
+            );
+            waiting.code_hash = AuthorizationCodeHash::from_secret(&[b'd'; 32])?;
+            assert!(
+                redeem_code(&mut db, waiting, |_| panic!(
+                    "restored code reached issuance"
+                ))
+                .is_err()
+            );
+            assert!(
+                refresh(
+                    &mut db,
+                    exchange(1, 2, BTreeSet::from(["ghostwright.read".into()])),
+                    |_| panic!("restored refresh reached issuance")
+                )
+                .is_err()
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT receipt FROM oauth_inbound_codes WHERE state='consumed'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                old_receipt
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM oauth_inbound_codes WHERE state='ready'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
         }
         Ok(())
     }

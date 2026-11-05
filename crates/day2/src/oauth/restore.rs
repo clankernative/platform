@@ -178,61 +178,109 @@ fn canonical() -> Result<(Connection, Schema)> {
 pub(crate) fn require_no_history(db: &Connection) -> Result<()> {
     // Never install/admit on this connection: archive preflight already owns
     // its VM-step hook. Bound borrowed metadata without replacing that hook.
-    let mut databases=db.prepare("PRAGMA database_list")?;
-    let mut attached=databases.query([])?;
-    let mut database_count=0usize;
-    while let Some(row)=attached.next()? {
-        database_count+=1;
-        ensure!(database_count<=2 && ["main","temp"].contains(&row.get_ref(1)?.as_str()?),"security_restore_preflight_required");
+    let mut databases = db.prepare("PRAGMA database_list")?;
+    let mut attached = databases.query([])?;
+    let mut database_count = 0usize;
+    while let Some(row) = attached.next()? {
+        database_count += 1;
+        ensure!(
+            database_count <= 2 && ["main", "temp"].contains(&row.get_ref(1)?.as_str()?),
+            "security_restore_preflight_required"
+        );
     }
-    let mut rows_seen=0usize;
-    let mut bytes_seen=0usize;
-    let actual=absence_schema(db,"main",&mut rows_seen,&mut bytes_seen)?;
-    ensure!(absence_schema(db,"temp",&mut rows_seen,&mut bytes_seen)?.is_empty(),"security_restore_preflight_required");
+    let mut rows_seen = 0usize;
+    let mut bytes_seen = 0usize;
+    let actual = absence_schema(db, "main", &mut rows_seen, &mut bytes_seen)?;
+    ensure!(
+        absence_schema(db, "temp", &mut rows_seen, &mut bytes_seen)?.is_empty(),
+        "security_restore_preflight_required"
+    );
     if actual.is_empty() {
         return Ok(());
     }
-    let profile=Profile::prepare()?;
-    ensure!(actual.iter().all(|(key,value)|profile.expected.get(key)==Some(value)),"security_restore_preflight_required");
-    for (version,tables) in UNITS {
-        let owned=|table:&str|table==*version||tables.contains(&table);
-        if !actual.values().any(|(table,_)|owned(table)) {continue;}
-        ensure!(profile.expected.iter().filter(|(_, (table,_))|owned(table))
-            .all(|(key,value)|actual.get(key)==Some(value)),"security_restore_preflight_required");
-        let query=format!("SELECT version FROM main.{version}");
-        let read=|connection:&Connection|->Result<Vec<i64>> {
-            let mut q=connection.prepare(&query)?;let mut rows=q.query([])?;let mut values=Vec::new();
-            while let Some(row)=rows.next()? {
-                ensure!(values.len()<2,"security_restore_preflight_required");values.push(row.get(0)?);
+    let profile = Profile::prepare()?;
+    ensure!(
+        actual
+            .iter()
+            .all(|(key, value)| profile.expected.get(key) == Some(value)),
+        "security_restore_preflight_required"
+    );
+    for (version, tables) in UNITS {
+        let owned = |table: &str| table == *version || tables.contains(&table);
+        if !actual.values().any(|(table, _)| owned(table)) {
+            continue;
+        }
+        ensure!(
+            profile
+                .expected
+                .iter()
+                .filter(|(_, (table, _))| owned(table))
+                .all(|(key, value)| actual.get(key) == Some(value)),
+            "security_restore_preflight_required"
+        );
+        let query = format!("SELECT version FROM main.{version}");
+        let read = |connection: &Connection| -> Result<Vec<i64>> {
+            let mut q = connection.prepare(&query)?;
+            let mut rows = q.query([])?;
+            let mut values = Vec::new();
+            while let Some(row) = rows.next()? {
+                ensure!(values.len() < 2, "security_restore_preflight_required");
+                values.push(row.get(0)?);
             }
             Ok(values)
         };
-        ensure!(read(db)?==read(&profile.reference)?,"security_restore_preflight_required");
+        ensure!(
+            read(db)? == read(&profile.reference)?,
+            "security_restore_preflight_required"
+        );
         for table in *tables {
-            let occupied:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.{table})"),[],|row|row.get(0))?;
-            ensure!(!occupied,"security_restore_preflight_required");
+            let occupied: bool = db.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM main.{table})"),
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(!occupied, "security_restore_preflight_required");
         }
     }
     Ok(())
 }
 
-fn absence_schema(db:&Connection,database:&'static str,rows_seen:&mut usize,bytes_seen:&mut usize)->Result<Schema> {
-    let mut result=BTreeMap::new();
-    let mut q=db.prepare(&format!("SELECT type,name,tbl_name,sql FROM {database}.sqlite_master"))?;
-    let mut rows=q.query([])?;
-    while let Some(row)=rows.next()? {
-        *rows_seen=rows_seen.checked_add(1).ok_or_else(||anyhow::anyhow!("security_restore_preflight_required"))?;
-        ensure!(*rows_seen<=4096,"security_restore_preflight_required");
+fn absence_schema(
+    db: &Connection,
+    database: &'static str,
+    rows_seen: &mut usize,
+    bytes_seen: &mut usize,
+) -> Result<Schema> {
+    let mut result = BTreeMap::new();
+    let mut q = db.prepare(&format!(
+        "SELECT type,name,tbl_name,sql FROM {database}.sqlite_master"
+    ))?;
+    let mut rows = q.query([])?;
+    while let Some(row) = rows.next()? {
+        *rows_seen = rows_seen
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("security_restore_preflight_required"))?;
+        ensure!(*rows_seen <= 4096, "security_restore_preflight_required");
         for i in 0..4 {
-            let bytes=match row.get_ref(i)? {ValueRef::Text(bytes)=>bytes.len(),ValueRef::Null=>0,_=>anyhow::bail!("security_restore_preflight_required")};
-            ensure!(bytes<=32768,"security_restore_preflight_required");
-            *bytes_seen=bytes_seen.checked_add(bytes).ok_or_else(||anyhow::anyhow!("security_restore_preflight_required"))?;
-            ensure!(*bytes_seen<=8*1048576,"security_restore_preflight_required");
+            let bytes = match row.get_ref(i)? {
+                ValueRef::Text(bytes) => bytes.len(),
+                ValueRef::Null => 0,
+                _ => anyhow::bail!("security_restore_preflight_required"),
+            };
+            ensure!(bytes <= 32768, "security_restore_preflight_required");
+            *bytes_seen = bytes_seen
+                .checked_add(bytes)
+                .ok_or_else(|| anyhow::anyhow!("security_restore_preflight_required"))?;
+            ensure!(
+                *bytes_seen <= 8 * 1048576,
+                "security_restore_preflight_required"
+            );
         }
-        let name=row.get_ref(1)?.as_str()?;let table=row.get_ref(2)?.as_str()?;
-        if sensitive(name)||sensitive(table) {
-            ensure!(result.len()<256,"security_restore_preflight_required");
-            result.insert((row.get(0)?,name.into()),(table.into(),row.get(3)?));
+        let name = row.get_ref(1)?.as_str()?;
+        let table = row.get_ref(2)?.as_str()?;
+        if sensitive(name) || sensitive(table) {
+            ensure!(result.len() < 256, "security_restore_preflight_required");
+            result.insert((row.get(0)?, name.into()), (table.into(), row.get(3)?));
         }
     }
     Ok(result)
@@ -476,9 +524,10 @@ impl Snapshot {
                         let id = row.get_ref(index)?.as_str()?;
                         ensure!((1..=256).contains(&id.len()), "restore_identity_bound");
                         identities_set.insert((kind, id.into()));
-                        if table=="oauth_use_handles" {
-                            let identity=super::usage::restore_identity(row.get_ref(2)?.as_str()?)?;
-                            identities_set.insert((Kind::UseBinding,identity.as_str().into()));
+                        if table == "oauth_use_handles" {
+                            let identity =
+                                super::usage::restore_identity(row.get_ref(2)?.as_str()?)?;
+                            identities_set.insert((Kind::UseBinding, identity.as_str().into()));
                         }
                         ensure!(identities_set.len() <= 8192, "restore_identity_count_bound");
                     }

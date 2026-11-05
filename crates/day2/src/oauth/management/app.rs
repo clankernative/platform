@@ -1493,29 +1493,68 @@ mod tests {
     }
 
     #[test]
-    fn restore_cut_closes_the_actual_pending_and_finish_checks_without_reclassifying_copies() -> Result<()> {
-        let fixture=Fixture::new(false)?;
-        effects::scope(fixture.port.clone(),||->Result<()> {
-            let view=fixture.manager.capture("calendar",Action::Connect,&fixture.identity,100)?;
-            fixture.manager.pending(&view.id,&fixture.identity,100)?;
-            let path=fixture.manager.runtime.db().to_path_buf();
-            let mut db=store::open(&path)?;
-            fixture.manager.load(&db,&view.id,&fixture.identity,100)?;
-            fixture.manager.check_in(&db,&view,&fixture.identity)?;
-            let original:String=db.query_row("SELECT view FROM oauth_management_intents WHERE id=?1",[&view.id],|r|r.get(0))?;
-            crate::oauth::restore::tests::apply_for_storage(&mut db,81)?;
-            assert!(fixture.manager.pending(&view.id,&fixture.identity,100).is_err());
+    fn restore_cut_closes_the_actual_pending_and_finish_checks_without_reclassifying_copies()
+    -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let view =
+                fixture
+                    .manager
+                    .capture("calendar", Action::Connect, &fixture.identity, 100)?;
+            fixture.manager.pending(&view.id, &fixture.identity, 100)?;
+            let path = fixture.manager.runtime.db().to_path_buf();
+            let mut db = store::open(&path)?;
+            fixture
+                .manager
+                .load(&db, &view.id, &fixture.identity, 100)?;
+            fixture.manager.check_in(&db, &view, &fixture.identity)?;
+            let original: String = db.query_row(
+                "SELECT view FROM oauth_management_intents WHERE id=?1",
+                [&view.id],
+                |r| r.get(0),
+            )?;
+            crate::oauth::restore::tests::apply_for_storage(&mut db, 81)?;
+            assert!(
+                fixture
+                    .manager
+                    .pending(&view.id, &fixture.identity, 100)
+                    .is_err()
+            );
             for _ in 0..2 {
-                drop(db);db=store::open(&path)?;
-                assert!(fixture.manager.load(&db,&view.id,&fixture.identity,100).is_err());
-                assert!(fixture.manager.check_in(&db,&view,&fixture.identity).is_err());
-                assert_eq!(db.query_row("SELECT view FROM oauth_management_intents WHERE id=?1",[&view.id],|r|r.get::<_,String>(0))?,original);
+                drop(db);
+                db = store::open(&path)?;
+                assert!(
+                    fixture
+                        .manager
+                        .load(&db, &view.id, &fixture.identity, 100)
+                        .is_err()
+                );
+                assert!(
+                    fixture
+                        .manager
+                        .check_in(&db, &view, &fixture.identity)
+                        .is_err()
+                );
+                assert_eq!(
+                    db.query_row(
+                        "SELECT view FROM oauth_management_intents WHERE id=?1",
+                        [&view.id],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    original
+                );
             }
-            let mut copied=view.clone();copied.id="copied_old_pending_under_new_id".into();
+            let mut copied = view.clone();
+            copied.id = "copied_old_pending_under_new_id".into();
             db.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state,session) VALUES(?1,?2,?3,'pending',NULL)",
                 params![copied.id,serde_json::to_string(&copied)?,copied.expires_at])?;
-            assert!(fixture.manager.pending(&copied.id,&fixture.identity,100).is_err());
-            assert_eq!(fixture.port.posts.load(SeqCst),0);
+            assert!(
+                fixture
+                    .manager
+                    .pending(&copied.id, &fixture.identity, 100)
+                    .is_err()
+            );
+            assert_eq!(fixture.port.posts.load(SeqCst), 0);
             Ok(())
         })
     }

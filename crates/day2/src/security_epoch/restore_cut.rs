@@ -133,18 +133,28 @@ impl Cut {
 
 #[cfg(test)]
 pub(crate) fn fixture(inventory: Digest, seed: u64) -> Result<Cut> {
-    fixture_for_storage(inventory,seed,"company/canary/calendar",Digest::new(b"schema"))
+    fixture_for_storage(
+        inventory,
+        seed,
+        "company/canary/calendar",
+        Digest::new(b"schema"),
+    )
 }
 
 #[cfg(test)]
-pub(crate) fn fixture_for_storage(inventory:Digest,seed:u64,scope:&str,schema:Digest)->Result<Cut> {
+pub(crate) fn fixture_for_storage(
+    inventory: Digest,
+    seed: u64,
+    scope: &str,
+    schema: Digest,
+) -> Result<Cut> {
     use super::kernel::restore::{Backup, ExactKey};
     let mut selected = super::tests::selection();
-    let parts:Vec<_>=scope.split('/').collect();
-    ensure!(parts.len()==3,"fixture_scope");
-    selected.scope.installation=parts[0].to_owned().try_into()?;
-    selected.scope.environment=parts[1].to_owned().try_into()?;
-    selected.scope.app=parts[2].to_owned().try_into()?;
+    let parts: Vec<_> = scope.split('/').collect();
+    ensure!(parts.len() == 3, "fixture_scope");
+    selected.scope.installation = parts[0].to_owned().try_into()?;
+    selected.scope.environment = parts[1].to_owned().try_into()?;
+    selected.scope.app = parts[2].to_owned().try_into()?;
     let custody = BindingRef {
         id: "vault".try_into()?,
         revision: Digest::new(b"vault-binding"),
