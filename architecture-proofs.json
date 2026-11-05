@@ -4507,6 +4507,7 @@
         }
       ],
       "methods": [
+        "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest) -> Result < () >",
         "pub (crate) fn app (mut app : super :: ActiveAppStorageContinuity , stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
         "pub (crate) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
@@ -4566,6 +4567,10 @@
         {
           "owner": null,
           "signature": "pub (crate) fn with_current_serving < 'role , T > (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < 'role > , intent : & FreshIntent , purpose : ServingUse , response : Option < & ResponseIdentity > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "ServingParticipant",
+          "signature": "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest) -> Result < () >"
         },
         {
           "owner": "ServingParticipant",
