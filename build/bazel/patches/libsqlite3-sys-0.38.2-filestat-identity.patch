@@ -1,6 +1,6 @@
 --- a/sqlite3/sqlite3.c
 +++ b/sqlite3/sqlite3.c
-@@ -44318,6 +44318,24 @@
+@@ -44318,5 +44318,23 @@
   static int unixFcntlExternalReader(unixFile*, int*);
  #endif
  #if defined(SQLITE_DEBUG) || defined(SQLITE_ENABLE_FILESTAT)
@@ -24,7 +24,6 @@
 +}
   static void unixDescribeShm(sqlite3_str*,unixShm*);
  #endif
- 
 @@ -44472,6 +44490,7 @@
        static const char *azLock[] = { "SHARED", "RESERVED",
                                        "PENDING", "EXCLUSIVE" };
