@@ -17,8 +17,8 @@ kernel's supported source epoch is one and target epoch is two.
 
 In one savepoint, reset records the cut and closes every captured single-use
 Connect, Refresh, management, Use, Fresh-owner and inbound-grant identity. Use
-claims also have a canonical binding cut, so copying an old handle under a new
-reference does not bypass it. All connection slots require new authorization
+claims also have a stable invocation cut, so copying or retiming an old handle
+under a new reference does not bypass it. All connection slots require new authorization
 and advance their checked local epoch. Active inbound grants/refresh are
 revoked; allocated or offered Fresh originals are refused. Consumed originals
 remain historical records. These local epochs are independent of the external
