@@ -200,8 +200,9 @@ those measurements and unchanged verification coverage.
 The Roc CLI and operational runner use the complete source-pinned package set
 in `build/bazel/roc-packages.json`. `xtask bootstrap` fetches those archives with
 bounded HTTPS retries, verifies exact archive sizes and SHA-256 values, and
-unbundles them with the pinned compiler into `cli/.cache/roc-packages`. Whole-tree
-hashes cover every file, directory and permission, and reject aliases and extra
+unbundles them with the pinned compiler into `cli/.cache/roc-packages`. Bootstrap
+sets the declared public-input modes during construction. Receivers verify hashes
+covering every file, directory and permission, and reject aliases and extra
 entries. Only these admitted inputs travel with the CLI to its test shard;
 compiler scratch and test outcomes do not. Every receiver rechecks archive and
 tree pins. Compiler calls use explicit URL-to-local replacements for the root

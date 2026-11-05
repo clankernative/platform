@@ -96,7 +96,7 @@ mod tests {
         let pins: Value = serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
         for p in pins["packages"].as_array().unwrap() {
             let hash = p["archive"].as_str().unwrap().strip_suffix(".tar.zst").unwrap();
-            let cached = scratch.0.join("packages").join(hash);
+            let cached = scratch.0.join("roc/packages").join(hash);
             fs::create_dir_all(&cached).unwrap();
             fs::write(cached.join("main.roc"), "intentionally invalid package contents").unwrap();
         }
@@ -104,6 +104,7 @@ mod tests {
             .args(["check", "--no-cache", "main.roc"])
             .current_dir(root())
             .env("ROC_CACHE_DIR", &scratch.0)
+            .env("XDG_CACHE_HOME", &scratch.0)
             .env("HTTPS_PROXY", "http://127.0.0.1:1")
             .env("https_proxy", "http://127.0.0.1:1")
             .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -114,7 +115,7 @@ mod tests {
             .env("no_proxy", "")
             .output()
             .unwrap();
-        assert!(output.status.success(), "offline current-source compiler check failed");
+        assert!(output.status.success(), "offline current-source compiler check failed: code {:?}, stderr bytes {}", output.status.code(), output.stderr.len());
     }
 
     fn run(args: &[&str], instance: Option<&Path>) -> Output {

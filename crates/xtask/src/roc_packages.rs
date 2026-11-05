@@ -27,6 +27,7 @@ struct Package {
 
 impl Package {
     fn hash(&self) -> &str { self.archive.strip_suffix(".tar.zst").unwrap() }
+
     fn url(&self) -> String {
         format!("https://github.com/roc-lang/{}/releases/download/{}/{}", self.name, self.version, self.archive)
     }
@@ -90,7 +91,7 @@ fn tree(path: &Path) -> Result<(String, usize, u64)> {
             if !relative.is_empty() { entries.insert(relative, "directory:0755".into()); }
             for entry in fs::read_dir(path)? { visit(base, &entry?.path(), entries, files, bytes, depth + 1)?; }
         } else {
-            ensure!(metadata.is_file() && mode == 0o644 && metadata.nlink() == 1, "package file type, mode or hardlink changed");
+            ensure!(metadata.is_file() && mode == 0o644 && metadata.nlink() == 1, "package file metadata changed: regular {}, mode {mode:o}, links {}", metadata.is_file(), metadata.nlink());
             let (hash, length) = file_hash(path, MAX_BYTES.saturating_sub(*bytes))?;
             *bytes += length;
             *files += 1;
@@ -146,6 +147,21 @@ fn execute(root: &Path, command: &mut Command, seconds: u64, phase: &str) -> Res
     Ok(())
 }
 
+// The pinned extractor intentionally uses private0600/0700. Normalize only
+// fresh, checksum-verified public inputs; never repair a receiving/cache tree.
+fn publish_modes(path: &Path, depth: usize, entries: &mut usize) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    *entries += 1;
+    ensure!(depth <= 32 && *entries <= MAX_ENTRIES, "package publication tree limits");
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(metadata.is_dir() || metadata.is_file() && metadata.nlink() == 1, "package publication aliases forbidden");
+    fs::set_permissions(path, fs::Permissions::from_mode(if metadata.is_dir() { 0o755 } else { 0o644 }))?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? { publish_modes(&entry?.path(), depth + 1, entries)?; }
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare(root: &Path, roc: &Path) -> Result<()> {
     for path in [root.join("cli"), root.join("cli/.cache"), root.join(DIRECTORY)] {
         match fs::create_dir(&path) {
@@ -171,6 +187,7 @@ pub(crate) fn prepare(root: &Path, roc: &Path) -> Result<()> {
         let (hash, bytes) = file_hash(&archive, p.bytes)?;
         ensure!(hash == p.sha256 && bytes == p.bytes, "pinned Roc archive download mismatch");
         execute(stage.path(), Command::new(roc).arg("unbundle").arg(&archive), 60, "unbundle")?;
+        publish_modes(&stage.path().join(p.hash()), 0, &mut 0)?;
         admit_package(stage.path(), &p)?;
         fs::rename(&archive, base.join(&p.archive))?;
         fs::rename(stage.path().join(p.hash()), base.join(p.hash()))?;
@@ -198,48 +215,51 @@ mod tests {
     #[test]
     fn package_admission_rehashes_archive_and_tree_and_refuses_extra_files() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let p = fixture(temp.path())?;
-        admit_package(temp.path(), &p)?;
-        fs::write(temp.path().join(&p.archive), b"changed")?;
-        assert!(admit_package(temp.path(), &p).is_err());
-        fs::write(temp.path().join(&p.archive), b"fixture")?;
-        fs::write(temp.path().join(p.hash()).join("main.roc"), b"poison []\n")?;
-        assert!(admit_package(temp.path(), &p).is_err());
-        fs::write(temp.path().join(p.hash()).join("main.roc"), b"module []\n")?;
-        fs::write(temp.path().join(p.hash()).join("extra.roc"), b"module []\n")?;
-        assert!(admit_package(temp.path(), &p).is_err());
-        fs::remove_file(temp.path().join(p.hash()).join("extra.roc"))?;
-        fs::create_dir(temp.path().join(p.hash()).join("extra"))?;
-        assert!(admit_package(temp.path(), &p).is_err());
+        let base = temp.path().canonicalize()?;
+        let p = fixture(&base)?;
+        admit_package(&base, &p)?;
+        fs::write(base.join(&p.archive), b"changed")?;
+        assert!(admit_package(&base, &p).is_err());
+        fs::write(base.join(&p.archive), b"fixture")?;
+        fs::write(base.join(p.hash()).join("main.roc"), b"poison []\n")?;
+        assert!(admit_package(&base, &p).is_err());
+        fs::write(base.join(p.hash()).join("main.roc"), b"module []\n")?;
+        fs::write(base.join(p.hash()).join("extra.roc"), b"module []\n")?;
+        assert!(admit_package(&base, &p).is_err());
+        fs::remove_file(base.join(p.hash()).join("extra.roc"))?;
+        fs::create_dir(base.join(p.hash()).join("extra"))?;
+        assert!(admit_package(&base, &p).is_err());
         Ok(())
     }
 
     #[test]
     fn package_admission_refuses_symlinks_hardlinks_and_permission_changes() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let p = fixture(temp.path())?;
-        let main = temp.path().join(p.hash()).join("main.roc");
+        let base = temp.path().canonicalize()?;
+        let p = fixture(&base)?;
+        let main = base.join(p.hash()).join("main.roc");
         fs::set_permissions(&main, fs::Permissions::from_mode(0o600))?;
-        assert!(admit_package(temp.path(), &p).is_err());
+        assert!(admit_package(&base, &p).is_err());
         fs::set_permissions(&main, fs::Permissions::from_mode(0o644))?;
-        fs::hard_link(&main, temp.path().join("alias"))?;
-        assert!(admit_package(temp.path(), &p).is_err());
-        fs::remove_file(temp.path().join("alias"))?;
+        fs::hard_link(&main, base.join("alias"))?;
+        assert!(admit_package(&base, &p).is_err());
+        fs::remove_file(base.join("alias"))?;
         fs::remove_file(&main)?;
-        std::os::unix::fs::symlink(temp.path().join(&p.archive), &main)?;
-        assert!(admit_package(temp.path(), &p).is_err());
+        std::os::unix::fs::symlink(base.join(&p.archive), &main)?;
+        assert!(admit_package(&base, &p).is_err());
         Ok(())
     }
 
     #[test]
     fn missing_offline_inputs_refuse_before_invocation_even_with_warm_default_cache() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let default = temp.path().join("cli/.cache/packages").join(pins()?[0].hash());
+        let base = temp.path().canonicalize()?;
+        let default = base.join("cli/.cache/roc/packages").join(pins()?[0].hash());
         fs::create_dir_all(&default)?;
         fs::write(default.join("main.roc"), b"poisoned default cache")?;
-        fs::create_dir(temp.path().join(DIRECTORY))?;
+        fs::create_dir(base.join(DIRECTORY))?;
         let mut command = Command::new("never-invoked");
-        assert!(configure(temp.path(), &mut command).is_err());
+        assert!(configure(&base, &mut command).is_err());
         assert_eq!(command.get_args().count(), 0);
         Ok(())
     }
@@ -252,6 +272,22 @@ mod tests {
         assert!(root.contains(&packages[0].url()));
         assert!(runner.contains(&packages[0].url()));
         assert_eq!(packages[1].url(), "https://github.com/roc-lang/http/releases/download/1.0.0/6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst");
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_extractor_modes_are_published_without_weakening_receiver_admission() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let p = fixture(&base)?;
+        let directory = base.join(p.hash());
+        fs::set_permissions(directory.join("main.roc"), fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        assert!(admit_package(&base, &p).is_err());
+        publish_modes(&directory, 0, &mut 0)?;
+        admit_package(&base, &p)?;
+        fs::set_permissions(directory.join("main.roc"), fs::Permissions::from_mode(0o600))?;
+        assert!(admit_package(&base, &p).is_err());
         Ok(())
     }
 }
