@@ -444,15 +444,14 @@ fn require_closed_source(source: &str) -> Result<()> {
     }
     let mut calls = Calls(0);
     for item in &file.items {
-        if let syn::Item::Impl(item) = item {
-            if matches!(&*item.self_ty,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="TrustedKey"))
-            {
-                for method in &item.items {
-                    if let syn::ImplItem::Fn(method) = method {
-                        if method.sig.ident == "validate" {
-                            calls.visit_block(&method.block);
-                        }
-                    }
+        if let syn::Item::Impl(item) = item
+            && matches!(&*item.self_ty,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="TrustedKey"))
+        {
+            for method in &item.items {
+                if let syn::ImplItem::Fn(method) = method
+                    && method.sig.ident == "validate"
+                {
+                    calls.visit_block(&method.block);
                 }
             }
         }
