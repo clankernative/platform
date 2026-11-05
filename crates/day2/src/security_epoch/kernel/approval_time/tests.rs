@@ -341,6 +341,9 @@ fn read(
     db: &Connection,
     operation: &Digest,
 ) -> Result<(Versioned<Floor>, Option<Versioned<Receipt>>)> {
+    // Both rows belong to the same actual SQLite read snapshot, including
+    // when this fixture is later exercised with a competing connection.
+    let db = db.unchecked_transaction()?;
     let (body, revision): (String, u64) = db.query_row(
         "SELECT body,version FROM records WHERE name='floor'",
         [],
@@ -357,7 +360,7 @@ fn read(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    Ok((
+    let result = (
         floor,
         receipt
             .map(|(body, revision)| -> Result<_> {
@@ -367,7 +370,9 @@ fn read(
                 })
             })
             .transpose()?,
-    ))
+    );
+    db.commit()?;
+    Ok(result)
 }
 
 fn install_fixture(db: &Connection, before: &Snapshot, floor: &Versioned<Floor>) -> Result<()> {
