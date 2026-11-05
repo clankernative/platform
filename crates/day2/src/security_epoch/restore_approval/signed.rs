@@ -4,7 +4,7 @@
 use super::{AdminIdentity, ApprovalRequest};
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use day2_capabilities::Digest;
+use day2_capabilities::{Digest, restore_signing::KeySelection};
 use ring::signature;
 use serde::{Deserialize, Serialize};
 
@@ -54,12 +54,6 @@ pub(crate) struct SignedApprovalRecord {
     pub signature: String,
 }
 
-/// Public-key identity DATA only. An attacker can compute this same digest;
-/// actual trust must come from the retained producer/consumer key source.
-pub(crate) fn signing_key_id_data(public_key: &[u8; 32]) -> Result<Digest> {
-    Digest::of(&("day2-restore-approval-ed25519-key-v1", public_key))
-}
-
 impl SignedApprovalRecord {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         ensure!(
@@ -88,13 +82,14 @@ impl SignedApprovalRecord {
         Ok(bytes)
     }
 
-    /// Checks cryptographic DATA against an exact expected statement and key.
+    /// Checks cryptographic DATA against the complete expected statement and exact
+    /// selected version plus public key. Same bytes at a new version differ.
     /// It authenticates neither argument. No accepting owner is returned, and
     /// this cannot replace current registry, clock, executor or single-use checks.
     pub(crate) fn verify_signature_data(
         &self,
         expected: &ApprovalStatement,
-        public_key: &[u8; 32],
+        selected: &KeySelection,
     ) -> Result<()> {
         self.statement.validate()?;
         expected.validate()?;
@@ -103,10 +98,10 @@ impl SignedApprovalRecord {
             "restore_approval_signed_statement_changed"
         );
         ensure!(
-            expected.signing_key == signing_key_id_data(public_key)?,
+            expected.signing_key == selected.commitment()?,
             "restore_approval_signing_key_changed"
         );
-        signature::UnparsedPublicKey::new(&signature::ED25519, public_key)
+        signature::UnparsedPublicKey::new(&signature::ED25519, &selected.public_key)
             .verify(
                 &self.statement.signature_input_data()?,
                 &self.signature_bytes()?,
