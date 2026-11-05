@@ -256,7 +256,10 @@ mod tests {
     fn cut_requires_the_same_full_archive_commitment_as_its_intent() -> Result<()> {
         let cut = fixture(Digest::new(b"inventory"), 7)?;
         let record = &cut.record;
-        assert_eq!(record.full_archive, record.intent.archive.full_archive_digest);
+        assert_eq!(
+            record.full_archive,
+            record.intent.archive.full_archive_digest
+        );
         assert_ne!(record.full_archive, record.intent.archive.image);
         Cut::validate_record(&cut.encoded()?, cut.digest().as_str())?;
         let mut changed_intent = record.intent.clone();
