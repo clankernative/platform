@@ -196,8 +196,8 @@ fn semantic_rejection_keeps_the_canonical_transaction_available_only_for_cleanup
             reply.remove(0);
             reply[0]["transaction"] = json!(TX);
         }
-        let transaction =
-            wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+        let transaction = wire::RestoreNames::new(&selection, &plan)?
+            .transaction(&serde_json::to_vec(&reply)?)?;
         assert!(transaction.observed().is_err(), "cut={cut}");
         let cleanup: Value = crate::json::decode(&transaction.rollback_body()?)?;
         assert_eq!(cleanup, json!({"transaction":TX}));
@@ -226,8 +226,8 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
     for index in 1..=4 {
         let mut reply = initial_reply(&selection, &plan)?;
         reply[index]["found"]["updateTime"] = json!(version(4));
-        let transaction =
-            wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+        let transaction = wire::RestoreNames::new(&selection, &plan)?
+            .transaction(&serde_json::to_vec(&reply)?)?;
         assert!(
             transaction
                 .commit_body(&selection, &plan, &current, 1000)
@@ -263,8 +263,8 @@ fn all_four_retained_documents_require_update_before_read_and_keep_cleanup_on_re
         for field in ["updateTime", "createTime"] {
             let mut reply = initial_reply(&selection, &plan)?;
             reply[index]["found"][field] = json!("2026-11-05T00:00:00Z");
-            let transaction =
-                wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+            let transaction = wire::RestoreNames::new(&selection, &plan)?
+                .transaction(&serde_json::to_vec(&reply)?)?;
             assert!(transaction.observed().is_err(), "row={index}field={field}");
             assert!(
                 transaction
@@ -550,7 +550,8 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
     let (_, plan) = approval_use::plan(&selection, &before, 47)?;
     let initial = initial_reply(&selection, &plan)?;
     let strong: Vec<_> = initial.into_iter().skip(1).collect();
-    let observed = wire::RestoreNames::new(&selection, &plan)?.strong(&serde_json::to_vec(&strong)?)?;
+    let observed =
+        wire::RestoreNames::new(&selection, &plan)?.strong(&serde_json::to_vec(&strong)?)?;
     let reply =
         json!({"writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)});
     let record = wire::restore_commit_reply(&serde_json::to_vec(&reply)?)?;
