@@ -115,7 +115,9 @@ Its archive commitment includes the verified manifest's provider/companion state
 historical authority and instance selection, without exporting those contents.
 This is historical DATA for the secure-restore command shell, never current
 approval, a trusted epoch, a consumed grant or a new writer. It does not copy an
-archive or execute maintenance. Ordinary restore still refuses managed credential
+archive, retain file ownership or execute maintenance. A later accepting consumer
+must revalidate that exact graph under its genuine owner; an inspected pathname
+is never a reusable file proof. Ordinary restore still refuses managed credential
 history; passkey approval and the native secure-restore accepting path remain
 separate work.
 
