@@ -2,8 +2,8 @@
 //! carry DATA only; the native sender retains the actual approval, original,
 //! exclusion, creator/P3 and authenticated new holder around every request.
 use super::{
-    RawEntry, Stream, document_times, encode_fields, entries, field_shapes, receipt_write, record, timestamp,
-    transaction_header,
+    RawEntry, Stream, document_times, encode_fields, entries, field_shapes, receipt_write, record,
+    timestamp, transaction_header,
 };
 use crate::security_epoch::kernel::restore::writer as kernel;
 use crate::security_epoch::kernel::{UpdateTime, Versioned, restore};

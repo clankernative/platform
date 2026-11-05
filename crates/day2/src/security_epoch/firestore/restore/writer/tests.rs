@@ -1,8 +1,8 @@
 //! Actual bounded codec controls over synthetic protocol DATA. No HTTP request,
 //! approval/current-role owner or native writer is constructed by these tests.
 use super::*;
-use serde::Serialize;
 use crate::security_epoch::kernel::restore::writer::tests::{Fixture, fixture};
+use serde::Serialize;
 
 const READ: &str = "2026-11-04T00:00:01Z";
 const TX: &str = "d3JpdGVyLXRva2Vu";
