@@ -15,12 +15,47 @@ use serde_json::{Value, json};
 pub(crate) const ACT_AS_HEADER: &str = "x-day2-act-as";
 
 pub(crate) fn session_allowed(runtime: &Runtime, catalog: &Catalog, actor: &str) -> bool {
-    catalog
-        .endpoints
-        .keys()
-        .any(|operation| runtime.authorize(operation, actor).is_ok())
+    runtime
+        .sql_read(|tx| {
+            Ok(catalog.endpoints.keys().any(|operation| {
+                crate::authority_state::authorize_in(tx, runtime, operation, actor).is_ok()
+            }))
+        })
+        .unwrap_or(false)
         || runtime.authorize_audit(actor).is_ok()
         || runtime.may_request_delegation(actor).unwrap_or(false)
+}
+
+/// A current, read-only binding for browser-held query presentation data. It
+/// is not an operation result or a command credential. The requested public
+/// query must still be authorized, including its complete-row requirements.
+pub(crate) fn query_cache_token(
+    runtime: &Runtime,
+    catalog: &Catalog,
+    actor: &str,
+    operation: &str,
+) -> Result<String> {
+    ensure!(
+        catalog.endpoints.contains_key(operation),
+        crate::error::Failure::NotFound
+    );
+    ensure!(
+        runtime.artifact().operation(operation)?.kind == "query",
+        crate::error::Failure::InvalidInput
+    );
+    runtime.sql_read(|db| {
+        let active = crate::authority_state::authorize_in(db, runtime, operation, actor)?;
+        let revision = crate::live::revision(db)?;
+        Ok(crate::digest(&serde_json::to_vec(&(
+            "browser-query-cache-v1",
+            runtime.scope(),
+            runtime.artifact().id(),
+            actor,
+            operation,
+            &active.stamp,
+            revision,
+        ))?))
+    })
 }
 
 pub(crate) fn is_json(path: &str) -> bool {

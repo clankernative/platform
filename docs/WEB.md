@@ -175,6 +175,7 @@ Every admitted app has the same platform-owned endpoints when served with
 | `GET /openapi.json` | OpenAPI 3.1.1 document generated from checked operation contracts |
 | `GET /docs` | Searchable API reference with schemas and a request console |
 | `GET /api/session` | Current actor and session-bound CSRF token |
+| `GET /api/session?operation=<public-query>` | The same session plus a current query-presentation cache token and host time |
 | `GET /api/{operation}` | A registered query, with URL query parameters |
 | `POST /api/{operation}` | A registered command, with an `application/json` body |
 | `POST /mcp` | MCP discovery and tool calls from the shared operation catalog |
@@ -939,12 +940,16 @@ Asset GET and HEAD responses carry a strong content-derived `ETag`. Public
 branding images and theme CSS use their bundle/content-addressed URLs with
 `Cache-Control: public, max-age=31536000, immutable`. Existing platform CSS,
 icons and Datastar URLs use `no-cache`, so browsers may store their bytes but
-must revalidate before reuse. A version in a filename alone is not treated as
-a content-addressing guarantee.
+must revalidate before reuse. The host emits its Datastar/forms/query-coordination
+module URLs with an exact content digest in `?v=`; those URLs are public immutable.
+The server verifies that digest and rejects mismatches, duplicate or extra query
+fields before reuse. A version in a filename alone is not a content-addressing guarantee.
 
-App images, CSS and browser modules use `private, no-cache` and `Vary: Cookie`.
-Even though their URLs include artifact identities, each reuse requires current
-session authorization. Matching `If-None-Match` requests return a bodyless 304
+App images, CSS and browser modules use `private, max-age=31536000, immutable`.
+Their scope/artifact/content-addressed URLs select identical static bytes for every
+actor; they contain neither query results nor command credentials. A browser can
+reuse downloaded bytes across sign-in changes. Requests that reach the server,
+including conditional requests, still require current session authorization. Matching `If-None-Match` requests return a bodyless 304
 with the same ETag and cache policy only after scope, authorization and packaged
 byte checks succeed. Weak validators, lists and wildcard conditions are
 supported; malformed conditions are ignored and receive the full response.
@@ -954,7 +959,7 @@ work and verifies disk bytes; it saves transfer, not those checks.
 Rendered pages, Datastar event streams, commands, sign-in/sign-out, audit and
 error responses retain `no-store`. The HTML templates are not static browser
 documents: rendering inserts current query data and expiring session-bound
-command tickets. Query caching requires a separate freshness contract. Public
+command tickets. Browser-held query presentation data requires the explicit freshness contract below. Public
 immutable assets already cached by a browser may remain reusable after a
 branding change; the new binding produces different URLs.
 
@@ -1155,3 +1160,41 @@ ordinary resource configuration. The executor's transport key and vault key must
 be distinct. Its configured target—not a browser-supplied URL—selects the secret's
 destination. Simulated-provider sessions never open custody sockets or claim that
 a real credential has been enrolled.
+
+### Browser-held query presentation data
+
+`GET /api/session?operation=<name>` checks the current session and the named public
+query's complete ordinary authority, including complete-row requirements. It does
+not invoke the query or advance the business revision. Its `cache_token` binds the
+installation/environment/app scope, artifact, actor, operation, authority epoch and
+revision, and durable business-data revision. Commands, unknown operations, duplicate
+or extra fields and malformed query encodings are refused. Responses remain `no-store`.
+The token is a state/permission comparison, never an operation result or credential.
+`server_time_ms` lets clients check externally bounded expiry without trusting their
+local wall clock; conservatively include the probe round trip in elapsed time.
+Clients must also key their presentation cache by every query input.
+
+An HTML GET can request `X-Day2-Query-Cache: true`. The host checks the page query's
+token before and after rendering, after any declared preparation. A successful
+response carries the same header only if the token stayed unchanged. A client may
+store data under that token only after checking the current session/token again.
+A changed actor, permission denial, epoch/revision change, artifact change or
+business revision invalidates the cache. An A -> B -> A grant cannot revive it.
+The application must additionally bound expiry by all external/time-dependent
+observations used by the query. Persist data only, never rendered HTML, CSRF tokens
+or signed command forms. A failed or unverifiable identity check clears the view.
+
+Every page template can address its checked output through `view`, independent of
+the registered page name. `view` is a reserved page context name. This lets warm
+and explicitly prepared routes share one typed template.
+
+A shell restoring HTTPS icon URLs before its catalog request can explicitly declare
+`data-ui-image-policy="https"` on an app-owned element. That document's `img-src`
+allows HTTPS image origins; other documents retain the exact rendered-origin policy.
+Only this literal policy is admitted, and every rendered remote URL still passes
+the existing credential-free HTTPS checks. This changes browser image presentation,
+not operation/resource authority. Live refresh recognizes the declared HTTPS policy.
+
+At startup the host walks the digest-checked static JavaScript import graph. Pages
+preload those dependencies so entrypoint loading does not create a second network
+round trip. Dynamic `import()` modules remain lazy.
