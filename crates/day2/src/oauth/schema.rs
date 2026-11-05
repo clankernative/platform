@@ -1108,6 +1108,7 @@ mod tests {
             "oauth_exchange_schema_version",
             "oauth_inbound_schema_version",
             "oauth_management_schema_version",
+            "oauth_restore_schema_version",
             "oauth_schema_version",
         ]
         .into_iter()
