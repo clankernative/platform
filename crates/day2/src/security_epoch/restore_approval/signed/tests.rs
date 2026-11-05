@@ -2,6 +2,13 @@ use super::*;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
 
+fn selection(public_key: [u8; 32]) -> Result<KeySelection> {
+    Ok(KeySelection {
+        version: "projects/approval-project/locations/global/keyRings/restore/cryptoKeys/approval/cryptoKeyVersions/7".to_owned().try_into()?,
+        public_key,
+    })
+}
+
 fn statement() -> Result<ApprovalStatement> {
     let request = super::super::tests::request()?;
     let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("fixed fixture key");
@@ -14,11 +21,11 @@ fn statement() -> Result<ApprovalStatement> {
         registry: Digest::new(b"actual-current-registry-binding"),
         credential: Digest::new(b"selected-passkey-id"),
         assertion: Digest::new(b"actual-verified-assertion-and-challenge"),
-        signing_key: signing_key_id_data(key.public_key().as_ref().try_into()?)?,
+        signing_key: selection(key.public_key().as_ref().try_into()?)?.commitment()?,
     })
 }
 
-fn signed(statement: ApprovalStatement) -> Result<(SignedApprovalRecord, [u8; 32])> {
+fn signed(statement: ApprovalStatement) -> Result<(SignedApprovalRecord, KeySelection)> {
     let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("fixed fixture key");
     // Independent fixture encoder fixes the actual purpose string rather than
     // calling the implementation's signature-input method to create evidence.
@@ -29,7 +36,7 @@ fn signed(statement: ApprovalStatement) -> Result<(SignedApprovalRecord, [u8; 32
             statement,
             signature,
         },
-        key.public_key().as_ref().try_into()?,
+        selection(key.public_key().as_ref().try_into()?)?,
     ))
 }
 
@@ -149,14 +156,14 @@ fn another_key_another_purpose_or_unsigned_record_cannot_verify() -> Result<()> 
     let statement = statement()?;
     let (record, public) = signed(statement.clone())?;
     let another = Ed25519KeyPair::from_seed_unchecked(&[8; 32]).expect("other fixture key");
-    let another_public: [u8; 32] = another.public_key().as_ref().try_into()?;
+    let another_public = selection(another.public_key().as_ref().try_into()?)?;
     assert!(
         record
             .verify_signature_data(&statement, &another_public)
             .is_err()
     );
     let mut substituted = record.clone();
-    substituted.statement.signing_key = signing_key_id_data(&another_public)?;
+    substituted.statement.signing_key = another_public.commitment()?;
     assert!(
         substituted
             .verify_signature_data(&substituted.statement, &another_public)
@@ -177,6 +184,39 @@ fn another_key_another_purpose_or_unsigned_record_cannot_verify() -> Result<()> 
     // Decoding is explicitly structural DATA admission, not authentication.
     let decoded = SignedApprovalRecord::decode(&serde_json::to_vec(&unsigned)?)?;
     assert!(decoded.verify_signature_data(&statement, &public).is_err());
+    Ok(())
+}
+
+#[test]
+fn the_same_public_material_at_another_exact_version_cannot_verify() -> Result<()> {
+    let statement = statement()?;
+    let (record, selected) = signed(statement.clone())?;
+    let mut reimported = selected.clone();
+    reimported.version = reimported
+        .version
+        .as_str()
+        .replace("Versions/7", "Versions/8")
+        .try_into()?;
+    assert_eq!(reimported.public_key, selected.public_key);
+    reimported.validate()?;
+    assert_ne!(reimported.commitment()?, selected.commitment()?);
+    assert!(
+        record
+            .verify_signature_data(&statement, &reimported)
+            .is_err()
+    );
+    let mut substituted = record.clone();
+    substituted.statement.signing_key = reimported.commitment()?;
+    assert!(
+        substituted
+            .verify_signature_data(&substituted.statement, &reimported)
+            .is_err()
+    );
+    assert!(
+        substituted
+            .verify_signature_data(&statement, &selected)
+            .is_err()
+    );
     Ok(())
 }
 
