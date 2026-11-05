@@ -1612,7 +1612,7 @@ run "rolling_sqlite_keeps_incumbent_and_requires_same_node" {
     values = { objects = [] }
   }
   override_data {
-    target = data.kubernetes_resources.exclusive_workload[0]
+    target = data.kubernetes_resources.exclusive_workload
     values = { objects = [] }
   }
   assert {
@@ -1637,7 +1637,7 @@ run "rolling_refuses_implicit_statefulset_replacement" {
     values = { objects = [] }
   }
   override_data {
-    target = data.kubernetes_resources.exclusive_workload[0]
+    target = data.kubernetes_resources.exclusive_workload
     values = { objects = [{ metadata = { name = "day2-example-app" } }] }
   }
   expect_failures = [terraform_data.rolling_admission]
@@ -1647,7 +1647,7 @@ run "rolling_refuses_unadmitted_direct_image_change" {
   command = plan
   variables { rolling_deploys = true }
   override_data {
-    target = data.kubernetes_resources.exclusive_workload[0]
+    target = data.kubernetes_resources.exclusive_workload
     values = { objects = [] }
   }
   override_data {
