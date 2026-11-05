@@ -344,6 +344,7 @@ fn blob(
 pub(crate) enum CachePolicy {
     PublicImmutable,
     PublicRevalidate,
+    PrivateRevalidate,
     PrivateImmutable,
 }
 
@@ -377,10 +378,16 @@ pub(crate) fn bytes(
         match policy {
             CachePolicy::PublicImmutable => "public, max-age=31536000, immutable",
             CachePolicy::PublicRevalidate => "no-cache",
+            CachePolicy::PrivateRevalidate => "private, no-cache",
             CachePolicy::PrivateImmutable => "private, max-age=31536000, immutable",
         }
         .parse()?,
     );
+    if matches!(policy, CachePolicy::PrivateRevalidate) {
+        response
+            .headers_mut()
+            .insert(header::VARY, "Cookie".parse()?);
+    }
     Ok(response)
 }
 
