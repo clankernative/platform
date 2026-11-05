@@ -775,7 +775,7 @@ pub(crate) struct AppliedCut<'scope, 'database, 'cut> {
 }
 
 const _: () = {
-    macro_rules! not_impl {
+    macro_rules! assert_not_impl {
         ($bound:path) => {{
             trait AmbiguousIfImpl<A> {
                 fn check() {}
@@ -785,17 +785,17 @@ const _: () = {
             let _ = <AppliedCut<'static, 'static, 'static> as AmbiguousIfImpl<_>>::check;
         }};
     }
-    not_impl!(Clone);
-    not_impl!(Copy);
-    not_impl!(Default);
-    not_impl!(std::fmt::Debug);
-    not_impl!(serde::Serialize);
-    not_impl!(serde::Deserialize<'static>);
-    not_impl!(Send);
-    not_impl!(Sync);
-    not_impl!(std::ops::Deref);
-    not_impl!(AsRef<Connection>);
-    not_impl!(std::borrow::Borrow<Connection>);
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(std::ops::Deref);
+    assert_not_impl!(AsRef<Connection>);
+    assert_not_impl!(std::borrow::Borrow<Connection>);
 };
 
 impl AppliedCut<'_, '_, '_> {
