@@ -107,7 +107,16 @@ fn private_or_configurable_crypto_fields_and_malformed_public_material_refuse() 
         assert!(serde_json::from_value::<KeySelection>(value).is_err());
     }
     let encoded = serde_json::to_string(&original)?;
-    let duplicate = encoded.replacen("{", "{\"version\":\"forged\",", 1);
+    let other_version = original
+        .version
+        .as_str()
+        .replace("Versions/7", "Versions/8");
+    KeyVersion::try_from(other_version.clone())?;
+    let duplicate = encoded.replacen(
+        "{",
+        &format!("{{\"version\":{},", serde_json::to_string(&other_version)?),
+        1,
+    );
     assert!(serde_json::from_str::<KeySelection>(&duplicate).is_err());
     Ok(())
 }
