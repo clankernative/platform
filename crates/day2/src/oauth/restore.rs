@@ -60,15 +60,15 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
              AND EXISTS(SELECT 1 FROM oauth_restore_cuts c WHERE c.digest=cut)" }])
 }
 
-/// Absence in a CURRENT installed unit is only absence of this denial. All
-/// existing authentication, current epoch, purpose and owner checks still run.
-/// A missing/partial unit is an error, never an implicit pre-restore fallback.
 fn validate_id(id:&str)->Result<()> {
     ensure!((1..=256).contains(&id.len()) && id.bytes().all(|byte|
         byte.is_ascii_alphanumeric() || b"._-:/".contains(&byte)),"restore_continuation_identity_bound");
     Ok(())
 }
 
+/// Absence in a CURRENT installed unit is only absence of this denial. All
+/// existing authentication, current epoch, purpose and owner checks still run.
+/// A missing/partial unit is an error, never an implicit pre-restore fallback.
 pub(crate) fn require_open(db: &Connection, kind: Kind, id: &str) -> Result<()> {
     validate_id(id)?;
     let current: bool = db.query_row(
