@@ -111,10 +111,10 @@ fn inspect_in(
         ensure!(present, "restore_reset_existing_unit_required");
     }
     #[cfg(test)]
-    note_work(tx,"credential_pre_before");
+    note_work(tx, "credential_pre_before");
     let installed = install_schema(tx);
     #[cfg(test)]
-    note_work(tx,"credential_pre_after");
+    note_work(tx, "credential_pre_after");
     installed.context("restore_credential_pre_admission")?;
     // The credential-only profile still refuses all peer history. The complete
     // profile has already proved both cuts on this same transaction; the actual
@@ -204,7 +204,7 @@ fn reset_in(
     // No epoch, grant, selector, verifier, custody envelope, receipt or origin
     // is rewritten. Reuse the canonical active->revoked transition exactly.
     #[cfg(test)]
-    note_work(tx,"credential_revoke_before");
+    note_work(tx, "credential_revoke_before");
     for lineage in &active {
         ensure!(
             stage_revoke(tx, namespace, lineage)?,
@@ -212,10 +212,10 @@ fn reset_in(
         );
     }
     #[cfg(test)]
-    note_work(tx,"credential_revoke_after");
+    note_work(tx, "credential_revoke_after");
     let installed = install_schema(tx);
     #[cfg(test)]
-    note_work(tx,"credential_post_after");
+    note_work(tx, "credential_post_after");
     installed.context("restore_credential_post_admission")?;
     let unreset:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_credential_lineages WHERE state!='revoked') OR EXISTS(SELECT 1 FROM day2_credential_versions WHERE state!='revoked') OR EXISTS(SELECT 1 FROM day2_credential_deliveries WHERE state!='closed')",[],|r|r.get(0))?;
     ensure!(!unreset, "restore_reset_terminal_postcondition");
@@ -229,7 +229,10 @@ fn reset_in(
 
 #[cfg(test)]
 fn note_work(db: &Connection, step: &'static str) {
-    eprintln!("restore_test_work step={step} remaining={:?}", schema::remaining_steps_for_tests(db));
+    eprintln!(
+        "restore_test_work step={step} remaining={:?}",
+        schema::remaining_steps_for_tests(db)
+    );
 }
 
 /// Create genuine encrypted epoch-one material through the ordinary store

@@ -131,7 +131,11 @@ pub(crate) fn require_admission(db: &Connection) -> Result<()> {
 #[cfg(test)]
 pub(crate) fn remaining_steps_for_tests(db: &Connection) -> Option<usize> {
     ADMISSION.with(|active| {
-        active.borrow().as_ref().filter(|budget| budget.connection == std::ptr::from_ref(db) as usize).map(|budget| budget.steps)
+        active
+            .borrow()
+            .as_ref()
+            .filter(|budget| budget.connection == std::ptr::from_ref(db) as usize)
+            .map(|budget| budget.steps)
     })
 }
 
