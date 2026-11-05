@@ -501,6 +501,9 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
         json!({"writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)});
     let record = wire::commit_reply(&serde_json::to_vec(&reply)?)?;
     observed.after_commit(&record)?;
+    assert!(matches!(model::reconcile(&selection, &plan, &observed.snapshot,
+        observed.advance.as_ref(), observed.reservation.as_ref(), observed.grant.as_ref())?,
+        Outcome::NotApplied));
     for cut in 0..7 {
         let mut changed = reply.clone();
         match cut {
