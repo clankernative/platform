@@ -1155,9 +1155,13 @@ pub fn invalidate_restored(connection: &Connection) -> Result<()> {
 pub(crate) fn freeze_current_restore_in(connection: &Connection) -> Result<()> {
     require_transaction(connection)?;
     let _ = ledger(connection)?;
-    ensure!(connection.execute(
-        "UPDATE day2_budget_meta SET restored=1 WHERE singleton=1", [],
-    )? == 1, "restore_budget_ledger_missing");
+    ensure!(
+        connection.execute(
+            "UPDATE day2_budget_meta SET restored=1 WHERE singleton=1",
+            [],
+        )? == 1,
+        "restore_budget_ledger_missing"
+    );
     Ok(())
 }
 

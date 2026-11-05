@@ -1366,31 +1366,55 @@ impl PreparedRestoreFence {
         not_before: i64,
     ) -> Result<Self> {
         ensure!(not_before >= 0, "restore_delegation_clock_invalid");
-        ensure!(fresh_epoch.as_str() != previous.stamp.epoch, "restore_authority_epoch_reused");
+        ensure!(
+            fresh_epoch.as_str() != previous.stamp.epoch,
+            "restore_authority_epoch_reused"
+        );
         let mut disabled = previous.clone();
         disabled.stamp.epoch = fresh_epoch.as_str().into();
-        disabled.stamp.revision = previous.stamp.revision.checked_add(1)
+        disabled.stamp.revision = previous
+            .stamp
+            .revision
+            .checked_add(1)
             .context("authority_revision_exhausted")?;
         i64::try_from(disabled.stamp.revision).context("authority_revision_exhausted")?;
         disabled.document.enabled = false;
         disabled.artifact_path = relocated.to_string_lossy().into_owned();
-        Ok(Self { previous, disabled, not_before })
+        Ok(Self {
+            previous,
+            disabled,
+            not_before,
+        })
     }
 
     /// SQL only. No clock, entropy, artifact/provider IO, outer commit or
     /// readiness is produced. The enclosing complete reset owns rollback.
-    pub(crate) fn apply_in(&self, connection: &Connection, schema: &RestoreFenceSchema) -> Result<()> {
+    pub(crate) fn apply_in(
+        &self,
+        connection: &Connection,
+        schema: &RestoreFenceSchema,
+    ) -> Result<()> {
         require_transaction(connection)?;
         require_single_restore_database(connection)?;
         schema.require_current_in(connection)?;
-        ensure!(current(connection)? == self.previous, "restore_authority_snapshot_changed");
+        ensure!(
+            current(connection)? == self.previous,
+            "restore_authority_snapshot_changed"
+        );
         let reused: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM day2_authority_history WHERE epoch=?1)",
-            [&self.disabled.stamp.epoch], |row| row.get(0))?;
+            [&self.disabled.stamp.epoch],
+            |row| row.get(0),
+        )?;
         ensure!(!reused, "restore_authority_epoch_reused");
         crate::budget::freeze_current_restore_in(connection)?;
         crate::delegation_commands::fence_current_restore_in(connection, self.not_before)?;
-        store_record_in(connection, &self.disabled, "platform-restore", "restore-fence")?;
+        store_record_in(
+            connection,
+            &self.disabled,
+            "platform-restore",
+            "restore-fence",
+        )?;
         discard_restored_sessions_in(connection)
     }
 }
@@ -1426,7 +1450,10 @@ impl RestoreFenceSchema {
         require_single_restore_database(connection)?;
         crate::oauth::schema::admit_with_runtime_hook(connection, |db| {
             let expected = Self::objects(&self.reference)?;
-            ensure!(Self::objects(db)? == expected, "restore_denial_schema_changed");
+            ensure!(
+                Self::objects(db)? == expected,
+                "restore_denial_schema_changed"
+            );
             for (kind, name, _) in expected {
                 match kind.as_str() {
                     "table" => crate::oauth::schema::exact_layout(db, &self.reference, &name)?,
@@ -1435,7 +1462,7 @@ impl RestoreFenceSchema {
                             == crate::oauth::schema::schema_sql(&self.reference, "trigger", &name)?,
                         "restore_denial_guard_changed"
                     ),
-                    "index" => {},
+                    "index" => {}
                     _ => anyhow::bail!("restore_denial_schema_changed"),
                 }
             }
@@ -1452,21 +1479,29 @@ impl RestoreFenceSchema {
             let mut rows = statement.query([])?;
             let first = rows.next()?.context("restore_integrity_result_missing")?;
             crate::oauth::schema::materialize(first)?;
-            ensure!(first.get_ref(0)?.as_str()? == "ok" && rows.next()?.is_none(), "restore_integrity_refused");
+            ensure!(
+                first.get_ref(0)?.as_str()? == "ok" && rows.next()?.is_none(),
+                "restore_integrity_refused"
+            );
             Ok(())
         })
     }
 
     fn owns(name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        name.starts_with("day2_authority") || name.starts_with("day2_budget_")
-            || name.starts_with("day2_app_") || name == "day2_invocation_authority"
-            || name == "day2_inherited_origins" || name == "day2_web_sessions"
+        name.starts_with("day2_authority")
+            || name.starts_with("day2_budget_")
+            || name.starts_with("day2_app_")
+            || name == "day2_invocation_authority"
+            || name == "day2_inherited_origins"
+            || name == "day2_web_sessions"
             || name == "day2_web_secret"
     }
 
-    fn objects(db: &Connection) -> Result<Vec<(String,String,String)>> {
-        let mut statement = db.prepare("SELECT type,name,tbl_name FROM main.sqlite_master ORDER BY type,name,tbl_name")?;
+    fn objects(db: &Connection) -> Result<Vec<(String, String, String)>> {
+        let mut statement = db.prepare(
+            "SELECT type,name,tbl_name FROM main.sqlite_master ORDER BY type,name,tbl_name",
+        )?;
         let mut rows = statement.query([])?;
         let mut objects = Vec::new();
         while let Some(row) = rows.next()? {
@@ -1474,7 +1509,7 @@ impl RestoreFenceSchema {
             let name = row.get_ref(1)?.as_str()?;
             let table = row.get_ref(2)?.as_str()?;
             if Self::owns(name) || Self::owns(table) {
-                objects.push((row.get(0)?,row.get(1)?,row.get(2)?));
+                objects.push((row.get(0)?, row.get(1)?, row.get(2)?));
             }
         }
         Ok(objects)
@@ -1482,15 +1517,22 @@ impl RestoreFenceSchema {
 }
 
 fn require_single_restore_database(connection: &Connection) -> Result<()> {
-    let mut statement=connection.prepare("PRAGMA database_list")?;
-    let mut rows=statement.query([])?;
-    let mut count=0;
-    while let Some(row)=rows.next()? {
-        count+=1;
-        ensure!(count<=2 && ["main","temp"].contains(&row.get_ref(1)?.as_str()?),"restore_attached_database_refused");
+    let mut statement = connection.prepare("PRAGMA database_list")?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        count += 1;
+        ensure!(
+            count <= 2 && ["main", "temp"].contains(&row.get_ref(1)?.as_str()?),
+            "restore_attached_database_refused"
+        );
     }
-    let temporary:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM temp.sqlite_master)",[],|row|row.get(0))?;
-    ensure!(!temporary,"restore_temporary_schema_refused");
+    let temporary: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM temp.sqlite_master)",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(!temporary, "restore_temporary_schema_refused");
     Ok(())
 }
 
@@ -1501,8 +1543,12 @@ fn discard_restored_sessions_in(connection: &Connection) -> Result<()> {
     for table in ["day2_web_sessions", "day2_web_secret"] {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?1)",
-            [table], |row| row.get(0))?;
-        if exists {connection.execute(&format!("DELETE FROM main.{table}"), [])?;}
+            [table],
+            |row| row.get(0),
+        )?;
+        if exists {
+            connection.execute(&format!("DELETE FROM main.{table}"), [])?;
+        }
     }
     Ok(())
 }
