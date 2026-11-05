@@ -579,6 +579,11 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
     let directory=tempfile::tempdir()?;
     let path=directory.path().join("app.sqlite");
     let mut db=Connection::open(&path)?;initialize(&mut db)?;
+    db.execute_batch("CREATE TABLE day2_web_sessions(hash TEXT PRIMARY KEY,actor TEXT NOT NULL,expires INTEGER NOT NULL) STRICT; CREATE TABLE day2_web_secret(id INTEGER PRIMARY KEY CHECK(id=1),secret BLOB NOT NULL) STRICT;")?;
+    let token="a".repeat(43);
+    db.execute("INSERT INTO day2_web_sessions VALUES(?1,'alice',200)",[crate::digest(token.as_bytes())])?;
+    db.execute("INSERT INTO day2_web_secret VALUES(1,?1)",[&[7u8;32][..]])?;
+    assert_eq!(crate::web_security::session_for_token_in(&db,&token,100)?.actor,"alice");
     let previous=current(&db)?;
     let request=|id:&str| ReservationRequest {
         id:id.into(),binding:"authority+resource+input".into(),
@@ -622,6 +627,8 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
         assert_eq!(active.stamp.revision,previous.stamp.revision+1);
         assert_eq!(active.artifact_id,previous.artifact_id);
         assert_eq!(active.artifact_path,"/restored/one");
+        assert!(crate::web_security::session_for_token_in(&reopened,&token,100).is_err());
+        assert_eq!(reopened.query_row("SELECT count(*) FROM day2_web_secret",[],|r|r.get::<_,i64>(0))?,0);
         assert_eq!(invocation_stamp(&reopened,"copied")?,previous.stamp);
         let after=crate::budget::inspect(&mut reopened)?;
         assert!(after.frozen_after_restore);
@@ -643,7 +650,7 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
 
 #[test]
 fn prepared_restore_fence_refuses_changed_snapshot_reused_epoch_and_invalid_input_before_writes() -> Result<()> {
-    for cut in 0..3 {
+    for cut in 0..5 {
         let mut db=Connection::open_in_memory()?;initialize(&mut db)?;
         let original=current(&db)?;
         let replacement=Digest::new(b"prepared-target-epoch");
@@ -652,7 +659,9 @@ fn prepared_restore_fence_refuses_changed_snapshot_reused_epoch_and_invalid_inpu
         match cut {
             0=>{tx.execute("UPDATE day2_authority SET artifact_path='/different-current-path'",[])?;}
             1=>{let mut changed=original.clone();changed.document.readers.insert("new-reader".into());tx.execute("UPDATE day2_authority SET document=?1",[serde_json::to_string(&changed.document)?])?;}
-            _=>{tx.execute("INSERT INTO day2_authority_history SELECT ?1,revision,document,artifact_id,artifact_path,operator,reason FROM day2_authority_history LIMIT 1",[replacement.as_str()])?;}
+            2=>{tx.execute("INSERT INTO day2_authority_history SELECT ?1,revision,document,artifact_id,artifact_path,operator,reason FROM day2_authority_history LIMIT 1",[replacement.as_str()])?;}
+            3=>{tx.execute_batch("CREATE TEMP TABLE day2_authority AS SELECT * FROM main.day2_authority")?;}
+            _=>{tx.execute_batch("ATTACH ':memory:' AS unselected")?;}
         }
         let before=current(&tx)?;
         assert!(prepared.apply_in(&tx).is_err());
