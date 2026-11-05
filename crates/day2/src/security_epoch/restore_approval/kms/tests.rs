@@ -132,7 +132,7 @@ fn peer(replies: Vec<Reply>) -> (Kms, thread::JoinHandle<Calls>) {
                 head.to_ascii_lowercase()
                     .contains("authorization: bearer fixture-token\r\n")
             );
-            let length: usize = head
+            let request_length: usize = head
                 .lines()
                 .find_map(|line| {
                     line.to_ascii_lowercase()
@@ -140,8 +140,8 @@ fn peer(replies: Vec<Reply>) -> (Kms, thread::JoinHandle<Calls>) {
                         .map(str::to_owned)
                 })
                 .map_or(0, |n| n.parse().unwrap());
-            assert!(length <= REQUEST_LIMIT);
-            let mut request = vec![0; length];
+            assert!(request_length <= REQUEST_LIMIT);
+            let mut request = vec![0; request_length];
             stream.read_exact(&mut request).unwrap();
             calls.push((
                 head.lines().next().unwrap().to_owned(),
@@ -518,6 +518,9 @@ fn is_closed(source: &str) -> Result<bool> {
                     }
                 }
             }
+            syn::Item::Fn(item) if !matches!(item.vis, syn::Visibility::Inherited) => {
+                return Ok(false);
+            }
             _ => (),
         }
     }
@@ -533,6 +536,7 @@ fn production_data_transport_has_no_reachable_signer_factory_or_general_frame_ap
         ("struct Kms {", "pub(super) struct Kms {"),
         ("fn new()", "pub(super) fn new()"),
         ("fn sign(", "pub(super) fn sign("),
+        ("fn client(", "pub(super) fn client("),
     ] {
         assert_eq!(source.matches(from).count(), 1);
         assert!(!is_closed(&source.replacen(from, to, 1))?);
