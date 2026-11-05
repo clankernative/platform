@@ -254,6 +254,7 @@ pub(super) fn delete_code(
 }
 
 pub(super) fn delete_attempt_material(tx: &Transaction<'_>, attempt: &str) -> Result<()> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, attempt)?;
     tx.execute(
         "DELETE FROM oauth_external_quarantine WHERE attempt = ?1",
         [attempt],
