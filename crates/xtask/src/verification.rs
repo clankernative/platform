@@ -2507,12 +2507,17 @@ mod tests {
         }
         let mac = ci_job("verify-mac-compatibility");
         let checked = mac.find("name: Verify the pinned Mac Bazel bytes").unwrap();
-        let installed = mac.find("name: Install the pinned Mac Bazel executable").unwrap();
-        let invoked = mac.find("name: Compile and install the current verifier with Bazel").unwrap();
+        let installed = mac
+            .find("name: Install the pinned Mac Bazel executable")
+            .unwrap();
+        let invoked = mac
+            .find("name: Compile and install the current verifier with Bazel")
+            .unwrap();
         assert!(checked < installed && installed < invoked);
-        assert!(ci_step(&mac, "Verify the pinned Mac Bazel bytes").contains(
-            "f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a"
-        ));
+        assert!(
+            ci_step(&mac, "Verify the pinned Mac Bazel bytes")
+                .contains("f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a")
+        );
     }
 
     #[test]

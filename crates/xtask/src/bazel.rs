@@ -966,14 +966,18 @@ pub(crate) fn standalone(root: &Path) -> Result<PathBuf> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()?;
-        let response = bazel_response(Duration::from_secs(120), Duration::from_secs(2), |remaining| {
-            client
-                .get(format!(
-                    "https://github.com/bazelbuild/bazel/releases/download/9.3.0/{asset}"
-                ))
-                .timeout(remaining)
-                .send()
-        })?;
+        let response = bazel_response(
+            Duration::from_secs(120),
+            Duration::from_secs(2),
+            |remaining| {
+                client
+                    .get(format!(
+                        "https://github.com/bazelbuild/bazel/releases/download/9.3.0/{asset}"
+                    ))
+                    .timeout(remaining)
+                    .send()
+            },
+        )?;
         let received = std::io::copy(
             &mut std::io::Read::take(response, bytes + 1),
             &mut temporary,
@@ -1139,7 +1143,9 @@ pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn scripted_download(statuses: Vec<u16>) -> Result<(Result<reqwest::blocking::Response>, usize)> {
+    fn scripted_download(
+        statuses: Vec<u16>,
+    ) -> Result<(Result<reqwest::blocking::Response>, usize)> {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
@@ -1151,7 +1157,10 @@ mod tests {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            ensure!(std::time::Instant::now() < deadline, "fixture accept budget");
+                            ensure!(
+                                std::time::Instant::now() < deadline,
+                                "fixture accept budget"
+                            );
                             std::thread::sleep(Duration::from_millis(1));
                         }
                         Err(error) => return Err(error.into()),
@@ -1160,7 +1169,10 @@ mod tests {
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                 ensure!(stream.read(&mut [0; 4096])? > 0, "fixture request required");
-                write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture")?;
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Fixture\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture"
+                )?;
             }
             Ok(())
         });
@@ -1172,7 +1184,9 @@ mod tests {
                 client.get(&url).timeout(remaining).send()
             })
         })();
-        server.join().map_err(|_| anyhow::anyhow!("HTTP fixture thread panicked"))??;
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("HTTP fixture thread panicked"))??;
         Ok((result, attempts))
     }
 
