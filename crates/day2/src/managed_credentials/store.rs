@@ -2382,12 +2382,14 @@ pub(crate) mod tests {
     #[test]
     fn canonical_core_layout_is_validated_once_before_peers_and_rows() -> Result<()> {
         fn body(source: &str, name: &str) -> Result<syn::Block> {
-            let functions: Vec<_> = syn::parse_file(source)?.items.into_iter().filter_map(|item| {
-                match item {
+            let functions: Vec<_> = syn::parse_file(source)?
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
                     syn::Item::Fn(item) if item.sig.ident == name => Some(*item.block),
                     _ => None,
-                }
-            }).collect();
+                })
+                .collect();
             ensure!(functions.len() == 1, "test_layout_owner_target");
             Ok(functions.into_iter().next().unwrap())
         }
@@ -2396,8 +2398,13 @@ pub(crate) mod tests {
                 .map(|part| part.ident.to_string()).collect::<Vec<_>>().join("::") == target)
         }
         fn call<'a>(statement: &'a syn::Stmt, target: &str) -> Option<&'a syn::ExprCall> {
-            let syn::Stmt::Expr(expression, _) = statement else { return None; };
-            let expression=match expression { syn::Expr::Try(value)=>&*value.expr,_=>expression };
+            let syn::Stmt::Expr(expression, _) = statement else {
+                return None;
+            };
+            let expression = match expression {
+                syn::Expr::Try(value) => &*value.expr,
+                _ => expression,
+            };
             match expression {
                 syn::Expr::Call(value) if path(&value.func, target) => Some(value),
                 _ => None,
@@ -2405,86 +2412,202 @@ pub(crate) mod tests {
         }
         fn valid(store: &str, schema: &str) -> Result<bool> {
             let owner = body(store, "install_schema_in")?;
-            let builders:Vec<_>=owner.stmts.iter().filter_map(|s| {
-                let syn::Stmt::Local(local)=s else { return None; };
-                let syn::Pat::Type(typed)=&local.pat else { return None; };
-                matches!(&*typed.pat,syn::Pat::Ident(id) if id.ident=="invariants")
-                    .then_some(local)
-            }).collect();
-            if builders.len()!=1 { return Ok(false); }
-            let Some(initializer)=&builders[0].init else { return Ok(false); };
-            let syn::Expr::MethodCall(collect)=&*initializer.expr else { return Ok(false); };
-            let syn::Expr::MethodCall(map)=&*collect.receiver else { return Ok(false); };
-            let syn::Expr::MethodCall(iter)=&*map.receiver else { return Ok(false); };
-            if collect.method!="collect" || !collect.args.is_empty() || map.method!="map"
-                || map.args.len()!=1 || iter.method!="iter" || !iter.args.is_empty()
-                || !path(&iter.receiver,"predicates") { return Ok(false); }
-            let Some(syn::Expr::Closure(closure))=map.args.first() else { return Ok(false); };
-            let syn::Expr::Struct(mapped)=&*closure.body else { return Ok(false); };
-            if mapped.path.segments.iter().map(|p|p.ident.to_string()).collect::<Vec<_>>().join("::")!="schema::Invariant"
-                || mapped.fields.len()!=2 || mapped.rest.is_some()
-                || !mapped.fields.iter().all(|f| match &f.member {
-                    syn::Member::Named(id) if id=="table"=>path(&f.expr,"table"),
-                    syn::Member::Named(id) if id=="predicate"=>path(&f.expr,"predicate"),
-                    _=>false,
-                }) { return Ok(false); }
-            let core: Vec<_> = owner.stmts.iter().enumerate().filter_map(|(i, s)|
-                call(s, "schema::install_current").map(|value| (i,value))).collect();
-            let peer: Vec<_> = owner.stmts.iter().enumerate().filter_map(|(i, s)| {
-                let syn::Stmt::Expr(syn::Expr::ForLoop(value), _) = s else { return None; };
-                if path(&value.expr, "CREDENTIAL_TABLES") { return Some((i, false)); }
-                let syn::Expr::Reference(value_ref) = &*value.expr else { return None; };
-                path(&value_ref.expr, "peers").then(|| (i, value.body.stmts.len() == 1
-                    && call(&value.body.stmts[0], "schema::exact_layout").is_some()))
-            }).collect();
-            let rows: Vec<_> = owner.stmts.iter().enumerate().filter_map(|(i,s)|
-                call(s, "validate_credential_rows").map(|_|i)).collect();
-            let peers: Vec<_> = owner.stmts.iter().enumerate().filter_map(|(i,s)|
-                call(s, "validate_credential_peers").map(|_|i)).collect();
-            if core.len()!=1 || peer.len()!=1 || !peer[0].1 || rows.len()!=1 || peers.len()!=1 {
+            let builders: Vec<_> = owner
+                .stmts
+                .iter()
+                .filter_map(|s| {
+                    let syn::Stmt::Local(local) = s else {
+                        return None;
+                    };
+                    let syn::Pat::Type(typed) = &local.pat else {
+                        return None;
+                    };
+                    matches!(&*typed.pat,syn::Pat::Ident(id) if id.ident=="invariants")
+                        .then_some(local)
+                })
+                .collect();
+            if builders.len() != 1 {
                 return Ok(false);
             }
-            let arguments=&core[0].1.args;
-            if arguments.len()!=5 || !path(&arguments[0],"db")
-                || !path(&arguments[3],"CREDENTIAL_DDL")
+            let Some(initializer) = &builders[0].init else {
+                return Ok(false);
+            };
+            let syn::Expr::MethodCall(collect) = &*initializer.expr else {
+                return Ok(false);
+            };
+            let syn::Expr::MethodCall(map) = &*collect.receiver else {
+                return Ok(false);
+            };
+            let syn::Expr::MethodCall(iter) = &*map.receiver else {
+                return Ok(false);
+            };
+            if collect.method != "collect"
+                || !collect.args.is_empty()
+                || map.method != "map"
+                || map.args.len() != 1
+                || iter.method != "iter"
+                || !iter.args.is_empty()
+                || !path(&iter.receiver, "predicates")
+            {
+                return Ok(false);
+            }
+            let Some(syn::Expr::Closure(closure)) = map.args.first() else {
+                return Ok(false);
+            };
+            let syn::Expr::Struct(mapped) = &*closure.body else {
+                return Ok(false);
+            };
+            if mapped
+                .path
+                .segments
+                .iter()
+                .map(|p| p.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::")
+                != "schema::Invariant"
+                || mapped.fields.len() != 2
+                || mapped.rest.is_some()
+                || !mapped.fields.iter().all(|f| match &f.member {
+                    syn::Member::Named(id) if id == "table" => path(&f.expr, "table"),
+                    syn::Member::Named(id) if id == "predicate" => path(&f.expr, "predicate"),
+                    _ => false,
+                })
+            {
+                return Ok(false);
+            }
+            let core: Vec<_> = owner
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| call(s, "schema::install_current").map(|value| (i, value)))
+                .collect();
+            let peer: Vec<_> = owner
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    let syn::Stmt::Expr(syn::Expr::ForLoop(value), _) = s else {
+                        return None;
+                    };
+                    if path(&value.expr, "CREDENTIAL_TABLES") {
+                        return Some((i, false));
+                    }
+                    let syn::Expr::Reference(value_ref) = &*value.expr else {
+                        return None;
+                    };
+                    path(&value_ref.expr, "peers").then(|| {
+                        (
+                            i,
+                            value.body.stmts.len() == 1
+                                && call(&value.body.stmts[0], "schema::exact_layout").is_some(),
+                        )
+                    })
+                })
+                .collect();
+            let rows: Vec<_> = owner
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| call(s, "validate_credential_rows").map(|_| i))
+                .collect();
+            let peers: Vec<_> = owner
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| call(s, "validate_credential_peers").map(|_| i))
+                .collect();
+            if core.len() != 1
+                || peer.len() != 1
+                || !peer[0].1
+                || rows.len() != 1
+                || peers.len() != 1
+            {
+                return Ok(false);
+            }
+            let arguments = &core[0].1.args;
+            if arguments.len() != 5
+                || !path(&arguments[0], "db")
+                || !path(&arguments[3], "CREDENTIAL_DDL")
                 || !matches!(&arguments[4],syn::Expr::Reference(r) if path(&r.expr,"invariants"))
-                || !(core[0].0 < peer[0].0 && peer[0].0 < rows[0] && rows[0] < peers[0]) {
+                || !(core[0].0 < peer[0].0 && peer[0].0 < rows[0] && rows[0] < peers[0])
+            {
                 return Ok(false);
             }
             let canonical = body(schema, "install_current_in")?;
-            let version: Vec<_> = canonical.stmts.iter().enumerate().filter_map(|(i,s)|
-                call(s,"exact_layout").filter(|c| c.args.len()==3 && path(&c.args[2],"version_table")).map(|_|i)).collect();
-            let checks: Vec<_> = canonical.stmts.iter().enumerate().filter_map(|(i,s)| {
-                let syn::Stmt::Expr(syn::Expr::ForLoop(value), _) = s else { return None; };
-                path(&value.expr,"checks").then(|| (i, value.body.stmts.first().and_then(|s|
-                    call(s,"exact_layout")).is_some_and(|c| c.args.len()==3 && path(&c.args[2],"table"))))
-            }).collect();
-            Ok(version.len()==1 && checks.len()==1 && checks[0].1 && version[0]<checks[0].0)
+            let version: Vec<_> = canonical
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    call(s, "exact_layout")
+                        .filter(|c| c.args.len() == 3 && path(&c.args[2], "version_table"))
+                        .map(|_| i)
+                })
+                .collect();
+            let checks: Vec<_> = canonical
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    let syn::Stmt::Expr(syn::Expr::ForLoop(value), _) = s else {
+                        return None;
+                    };
+                    path(&value.expr, "checks").then(|| {
+                        (
+                            i,
+                            value
+                                .body
+                                .stmts
+                                .first()
+                                .and_then(|s| call(s, "exact_layout"))
+                                .is_some_and(|c| c.args.len() == 3 && path(&c.args[2], "table")),
+                        )
+                    })
+                })
+                .collect();
+            Ok(version.len() == 1 && checks.len() == 1 && checks[0].1 && version[0] < checks[0].0)
         }
         let expected: BTreeSet<_> = std::iter::once("day2_credential_schema_version")
-            .chain(credential_predicates().into_iter().map(|(table,_)|table)).collect();
-        assert_eq!(expected.len(),CREDENTIAL_TABLES.len());
-        assert_eq!(expected,CREDENTIAL_TABLES.iter().copied().collect());
-        let store=include_str!("store.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
-        let schema=include_str!("../oauth/schema.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
-        assert!(valid(store,schema)?);
-        let peer="for &table in &peers {";
-        assert_eq!(store.matches(peer).count(),1);
-        let repeated="for table in CREDENTIAL_TABLES { schema::exact_layout(db, &expected, table)?; }";
-        assert!(!valid(&store.replace(peer,&format!("{repeated}{peer}")),schema)?);
-        let core="schema::install_current(";
-        assert_eq!(store.matches(core).count(),1);
-        assert!(!valid(&store.replace(core,"unrelated("),schema)?);
-        let mapping=".map(|(table, predicate)| schema::Invariant { table, predicate })";
-        assert_eq!(store.matches(mapping).count(),1);
-        assert!(!valid(&store.replace(mapping,&format!(".take(1){mapping}")),schema)?);
-        for target in ["exact_layout(db, &expected, version_table)?;","exact_layout(db, &expected, table)?;"] {
-            assert_eq!(schema.matches(target).count(),1);
-            assert!(!valid(store,&schema.replace(target,"unrelated()?;"))?);
+            .chain(credential_predicates().into_iter().map(|(table, _)| table))
+            .collect();
+        assert_eq!(expected.len(), CREDENTIAL_TABLES.len());
+        assert_eq!(expected, CREDENTIAL_TABLES.iter().copied().collect());
+        let store = include_str!("store.rs")
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let schema = include_str!("../oauth/schema.rs")
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        assert!(valid(store, schema)?);
+        let peer = "for &table in &peers {";
+        assert_eq!(store.matches(peer).count(), 1);
+        let repeated =
+            "for table in CREDENTIAL_TABLES { schema::exact_layout(db, &expected, table)?; }";
+        assert!(!valid(
+            &store.replace(peer, &format!("{repeated}{peer}")),
+            schema
+        )?);
+        let core = "schema::install_current(";
+        assert_eq!(store.matches(core).count(), 1);
+        assert!(!valid(&store.replace(core, "unrelated("), schema)?);
+        let mapping = ".map(|(table, predicate)| schema::Invariant { table, predicate })";
+        assert_eq!(store.matches(mapping).count(), 1);
+        assert!(!valid(
+            &store.replace(mapping, &format!(".take(1){mapping}")),
+            schema
+        )?);
+        for target in [
+            "exact_layout(db, &expected, version_table)?;",
+            "exact_layout(db, &expected, table)?;",
+        ] {
+            assert_eq!(schema.matches(target).count(), 1);
+            assert!(!valid(store, &schema.replace(target, "unrelated()?;"))?);
         }
-        let rows="validate_credential_rows(db)?;";
-        assert_eq!(store.matches(rows).count(),1);
-        assert!(!valid(&store.replace(rows,"unrelated()?;"),schema)?);
+        let rows = "validate_credential_rows(db)?;";
+        assert_eq!(store.matches(rows).count(), 1);
+        assert!(!valid(&store.replace(rows, "unrelated()?;"), schema)?);
         Ok(())
     }
 
