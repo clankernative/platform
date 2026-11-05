@@ -1180,24 +1180,24 @@ mod tests {
             let path = fixture.runtime.db().to_path_buf();
             let mut db = store::open(&path)?;
             {
-            let tx=db.transaction()?;
-            load(
-                &tx,
-                &fixture.runtime,
-                &fixture.request,
-                "calendar",
-                &fixture.reference,
-                100,
-            )?;
-            for read in [false, true] {
-                validate_cached(
+                let tx = db.transaction()?;
+                load(
                     &tx,
                     &fixture.runtime,
                     &fixture.request,
-                    &fixture.observation(read),
+                    "calendar",
+                    &fixture.reference,
+                    100,
                 )?;
-            }
-            tx.commit()?;
+                for read in [false, true] {
+                    validate_cached(
+                        &tx,
+                        &fixture.runtime,
+                        &fixture.request,
+                        &fixture.observation(read),
+                    )?;
+                }
+                tx.commit()?;
             }
             let old: String = db.query_row(
                 "SELECT claims FROM oauth_use_handles WHERE reference=?1",
@@ -1233,7 +1233,7 @@ mod tests {
             for _ in 0..2 {
                 drop(db);
                 db = store::open(&path)?;
-                let tx=db.transaction()?;
+                let tx = db.transaction()?;
                 assert!(
                     load(
                         &tx,
