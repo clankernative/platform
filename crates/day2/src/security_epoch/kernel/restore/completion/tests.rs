@@ -929,6 +929,7 @@ fn source() -> Result<Digest> {
         include_str!("../../../../managed_credentials/store.rs"),
         include_str!("../../advance.rs"),
         include_str!("../../../kernel.rs"),
+        include_str!("../../../restore_approval.rs"),
         include_str!("../../../../json.rs"),
         include_str!("../../../../../../../Cargo.lock"),
         include_str!("../../../../../../day2-capabilities/src/lib.rs"),
