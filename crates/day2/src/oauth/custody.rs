@@ -193,7 +193,7 @@ pub(super) fn code_exists(
     intent: &ConnectIntent,
     binding: &ExchangeBinding,
 ) -> Result<bool> {
-    super::restore::require_open(db, super::restore::Kind::Connect, &intent.attempt)?;
+    super::restore::require_open(tx, super::restore::Kind::Connect, &intent.attempt)?;
     let expected = Digest::of(&(
         "oauth-private-material-identity-v1",
         identity(MaterialPurpose::AuthorizationCode, intent, binding, None),
@@ -320,7 +320,7 @@ pub(super) fn verifier_exists(
     intent: &ConnectIntent,
     binding: &ExchangeBinding,
 ) -> Result<bool> {
-    super::restore::require_open(db, super::restore::Kind::Connect, &intent.attempt)?;
+    super::restore::require_open(tx, super::restore::Kind::Connect, &intent.attempt)?;
     let expected = Digest::of(&(
         "oauth-private-material-identity-v1",
         identity(MaterialPurpose::PkceVerifier, intent, binding, None),
