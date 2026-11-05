@@ -248,6 +248,14 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
         self.owner.refuse();
     }
 
+    pub(crate) fn require_native_registry_read(&mut self, runtime: &Runtime) -> Result<()> {
+        self.unit(|sql| sql.owner.require_native_registry_read(runtime))
+    }
+
+    pub(crate) fn refuse_registry(&mut self) {
+        self.fail();
+    }
+
     fn unit<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.check()?;
         match catch_unwind(AssertUnwindSafe(|| operation(self))) {

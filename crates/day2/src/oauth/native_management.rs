@@ -1119,6 +1119,28 @@ impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original
         }
     }
 
+    /// A registry key is read only under the real autonomous native App owner.
+    /// Runtime metadata, an OAuth human original and scripted fixtures cannot
+    /// become this source. This does not grant restore approval or maintenance.
+    pub(crate) fn require_native_registry_read(
+        &mut self,
+        runtime: &crate::store::Runtime,
+    ) -> Result<()> {
+        let SqlOwnerSource::Runtime(owner) = &mut self.source else {
+            anyhow::bail!("restore_registry_native_runtime_required")
+        };
+        owner.require_runtime(runtime)?;
+        ensure!(
+            matches!(&owner.source, RuntimeSource::Native { .. })
+                && matches!(
+                    owner.phase,
+                    Some(RuntimePhase::SqlRead | RuntimePhase::SqlWrite)
+                ),
+            "restore_registry_native_runtime_required"
+        );
+        owner.check()
+    }
+
     pub(crate) fn commit_read(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
         self.check()?;
         tx.commit()?;
@@ -3021,6 +3043,31 @@ mod tests {
         db.execute_batch("CREATE TABLE sql_guard_probe(value INTEGER PRIMARY KEY)")?;
         drop(db);
         Ok((directory, runtime))
+    }
+
+    #[test]
+    fn restore_registry_refuses_ordinary_sql_and_substitution_before_any_caller_work() -> Result<()>
+    {
+        for substitute in [false, true] {
+            let (_directory, runtime) = sql_fixture()?;
+            let other = runtime.clone();
+            let entered = std::cell::Cell::new(false);
+            let result = with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {
+                let selected = if substitute { &other } else { &runtime };
+                assert!(sql.require_native_registry_read(selected).is_err());
+                assert!(
+                    sql.read(|_| {
+                        entered.set(true);
+                        Ok(())
+                    })
+                    .is_err()
+                );
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert!(!entered.get());
+        }
+        Ok(())
     }
 
     #[test]
