@@ -376,3 +376,86 @@ fn ordinary_restore_allows_only_empty_current_cut_metadata() -> Result<()> {
     tx.rollback()?;
     Ok(())
 }
+
+#[test]
+fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_check() -> Result<()> {
+    use quote::ToTokens as _;
+    use syn::visit::Visit;
+    struct Calls(usize);
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path)=call.func.as_ref()
+                && path.path.segments.last().is_some_and(|part|part.ident=="require_open") {
+                self.0+=1;
+            }
+            syn::visit::visit_expr_call(self,call);
+        }
+    }
+    fn body(source:&str,name:&str,owner:Option<&str>)->Result<syn::Block> {
+        let syntax=syn::parse_file(source)?;
+        let mut selected=Vec::new();
+        for item in syntax.items {
+            match item {
+                syn::Item::Fn(function) if owner.is_none() && function.sig.ident==name => selected.push(*function.block),
+                syn::Item::Impl(implementation) if owner.is_some_and(|owner|implementation.self_ty.to_token_stream().to_string()==owner) => {
+                    for item in implementation.items {
+                        if let syn::ImplItem::Fn(function)=item && function.sig.ident==name {selected.push(function.block);}
+                    }
+                }
+                _=>{}
+            }
+        }
+        ensure!(selected.len()==1,"actual_cut_gate_selector_count");
+        Ok(selected.remove(0))
+    }
+    fn accepts(block:&syn::Block,prefix:&str,guard:&str)->Result<bool> {
+        let expected:syn::Block=syn::parse_str(&format!("{{{prefix}{guard}}}"))?;
+        let prefix:Vec<_>=expected.stmts.iter().map(|s|s.to_token_stream().to_string()).collect();
+        let actual:Vec<_>=block.stmts.iter().take(prefix.len()).map(|s|s.to_token_stream().to_string()).collect();
+        let mut calls=Calls(0);calls.visit_block(block);
+        Ok(actual==prefix && calls.0==1)
+    }
+    let connect=include_str!("connect.rs");let custody=include_str!("custody.rs");
+    let exchange=include_str!("exchange.rs");let refresh=include_str!("store.rs");
+    let fresh=include_str!("fresh_owner.rs");let management=include_str!("management/app.rs");
+    let usage=include_str!("usage.rs");let inbound=include_str!("inbound.rs");
+    let mut specs=Vec::new();
+    for name in ["begin_in","slot_matches"] {specs.push((connect,name,None,"","Connect","tx","&intent.attempt"));}
+    specs.push((connect,"activate_in",None,"","Connect","tx","attempt"));
+    specs.push((connect,"activate_mapped_in",None,"","Connect","tx","verified.attempt()"));
+    specs.push((connect,"pending_approval",None,"","Connect","db","attempt"));
+    specs.push((connect,"claim_callback",None,"identifier(attempt)?;identifier(code_ref)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
+    specs.push((connect,"authorize_and_commit_exchange",None,"identifier(attempt)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
+    specs.push((connect,"await_account_approval",None,"identifier(attempt)?;identifier(account)?;identifier(scope_evidence)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
+    specs.push((connect,"quarantine_external_bound",None,"let intent=verified.intent();let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","&intent.attempt"));
+    specs.push((exchange,"load_binding",None,"","Connect","db","attempt"));
+    specs.push((exchange,"authorize_in",None,"","Connect","tx","&input.intent.attempt"));
+    for name in ["claim_refresh_in","checked_dispatch_in","commit_replacement_in"] {specs.push((refresh,name,None,"","Refresh","tx","attempt"));}
+    for name in ["claim","publish","consume_in_current_app_transaction","terminal_history"] {specs.push((fresh,name,None,"","Fresh","db","intent.commitment()?.as_str()"));}
+    for name in ["code_exists","verifier_exists"] {specs.push((custody,name,None,"","Connect","tx","&intent.attempt"));}
+    for name in ["load_code","load_verifier","load_bundle"] {specs.push((custody,name,None,"","Connect","db","&intent.attempt"));}
+    for name in ["publish_code","publish_verifier","publish_tokens","replace_tokens","publish_external_quarantine"] {specs.push((custody,name,None,"","Connect","tx","&prepared.attempt"));}
+    specs.push((custody,"quarantine_row",None,"","Connect","db","attempt"));
+    specs.push((usage,"load",None,"","Use","db","reference"));
+    specs.push((inbound,"active_grant",None,"","Inbound","db","id"));
+    specs.push((inbound,"record_grant",None,"","Inbound","db","id"));
+    for (name,id) in [("load","id"),("check_in","&view.id")] {specs.push((management,name,Some("Manager"),"","Management","db",id));}
+    assert_eq!(specs.len(),34);
+    for (source,name,owner,prefix,kind,db,id) in specs {
+        let root=if owner.is_some(){"crate::oauth::restore"}else{"super::restore"};
+        let guard=format!("{root}::require_open({db},{root}::Kind::{kind},{id})?;");
+        let block=body(source,name,owner)?;
+        assert!(accepts(&block,prefix,&guard)?,"{name}");
+        let expected:syn::Block=syn::parse_str(&format!("{{{prefix}{guard}}}"))?;
+        let index=expected.stmts.len()-1;
+        let mut deleted=block.clone();deleted.stmts.remove(index);
+        assert!(!accepts(&deleted,prefix,&guard)?,"deleted {name}");
+        let mut delayed=block.clone();let check=delayed.stmts.remove(index);delayed.stmts.push(check);
+        assert!(!accepts(&delayed,prefix,&guard)?,"delayed {name}");
+        let mut duplicate=block.clone();duplicate.stmts.insert(index,expected.stmts[index].clone());
+        assert!(!accepts(&duplicate,prefix,&guard)?,"duplicate {name}");
+        let mut wrong=block.clone();wrong.stmts[index]=syn::parse_str(&guard.replace(id,"\"different_original\""))?;
+        assert!(!accepts(&wrong,prefix,&guard)?,"retargeted {name}");
+    }
+    Ok(())
+}
