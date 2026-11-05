@@ -37,7 +37,9 @@ trace the owned factory, exact argument forwarding, observation dataflow and
 mandatory postcheck, including actual-source mutations and transitive rejection
 of an added test-only native origin. Binding tests return DATA only.
 
-This source-only composition is not compiled, qualified or operational restore.
+This composition installs no accepting supplier or operational restore command.
+Local compilation and portable tests, when reported, do not supply that missing
+producer or establish native restore qualification.
 Actual producer/storage integration, complete old-rights exclusion, captured-file
 ownership, physical fencing and current-root/P3/writer qualification remain owed.
 No operator execution, cloud changes or new native time ceiling is introduced.
