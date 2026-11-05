@@ -36,6 +36,10 @@ impl Cut {
         inventory: Digest,
     ) -> Result<Self> {
         intent.commitment(selection)?;
+        ensure!(
+            full_archive == intent.archive.full_archive_digest,
+            "restore_cut_full_archive_changed"
+        );
         namespace.validate()?;
         ensure!(
             namespace.installation == selection.scope.installation
@@ -213,6 +217,7 @@ pub(crate) fn fixture_for_storage_epoch(
         app: selected.scope.app.clone(),
         binding_generation: 2,
     };
+    let full_archive = Digest::new(b"complete-held-archive");
     let intent = Intent {
         operation: Digest::of(&("restore-cut-operation", seed))?,
         archive: Backup {
@@ -220,6 +225,7 @@ pub(crate) fn fixture_for_storage_epoch(
             authority: selected.authority_key()?,
             source_incarnation: Digest::new(b"old-db"),
             security_epoch: source_epoch,
+            full_archive_digest: full_archive.clone(),
             image: Digest::new(b"archive-sqlite"),
             schema,
             artifact: Digest::new(b"artifact"),
@@ -236,8 +242,42 @@ pub(crate) fn fixture_for_storage_epoch(
         &selected,
         namespace,
         intent,
-        Digest::new(b"complete-held-archive"),
+        full_archive,
         custody,
         inventory,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cut_requires_the_same_full_archive_commitment_as_its_intent() -> Result<()> {
+        let cut = fixture(Digest::new(b"inventory"), 7)?;
+        let record = &cut.record;
+        assert_eq!(
+            record.full_archive,
+            record.intent.archive.full_archive_digest
+        );
+        assert_ne!(record.full_archive, record.intent.archive.image);
+        Cut::validate_record(&cut.encoded()?, cut.digest().as_str())?;
+        let mut changed_intent = record.intent.clone();
+        changed_intent.archive.full_archive_digest = Digest::new(b"foreign-full-archive");
+        for (intent, full_archive) in [
+            (record.intent.clone(), Digest::new(b"foreign-full-archive")),
+            (changed_intent, record.full_archive.clone()),
+        ] {
+            let refused = Cut::new(
+                &record.selection,
+                record.namespace.clone(),
+                intent,
+                full_archive,
+                record.custody.clone(),
+                record.inventory.clone(),
+            );
+            assert!(refused.is_err());
+        }
+        Ok(())
+    }
 }

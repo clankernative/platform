@@ -62,6 +62,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "scope": "const",
+      "fingerprint": "sha256:66c3c27701e9557d5a6b623d5cac42849f4d8418eadff9d28a298f1faaf8324a",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_authority.rs",
       "scope": "const",
       "fingerprint": "sha256:c96a85d06d7a68e858d065bd5bf17b2fd3e75307b22c178ca24e6c4dec23d2d2",
@@ -2318,6 +2324,13 @@
             "source": "crates/day2/src/security_epoch/firestore.rs",
             "module": "paired"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/firestore/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/firestore.rs",
+            "module": "restore"
+          }
         }
       ],
       "methods": [
@@ -4328,6 +4341,76 @@
       "consuming_methods": [
         "into_data"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "ConsumedRestoreApproval",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ConsumedRestoreApproval < '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >"
+        },
+        {
+          "owner": "ConsumedRestoreApproval < '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "NativeRestoreApproval",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
+        },
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "NativeSource",
+      "owning_children": [],
+      "methods": [
+        "fn refuse (& mut self)"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "NativeSource",
+          "signature": "fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:9e709bf1f2908884cd621e09f31eb12b03f20cca0bbc54d52e5888f37002147b"
     },
     {
       "source": "crates/day2/src/security_epoch/restore_authority.rs",
