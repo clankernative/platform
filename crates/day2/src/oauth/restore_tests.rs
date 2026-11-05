@@ -581,19 +581,38 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         };
         Some(match value {
             syn::Expr::Path(path) if path.qself.is_none() && path.attrs.is_empty() => {
-                let parts = path.path.segments.iter().map(|part| {
-                    matches!(part.arguments, syn::PathArguments::None).then(|| part.ident.to_string())
-                }).collect::<Option<Vec<_>>>()?;
+                let parts = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| {
+                        matches!(part.arguments, syn::PathArguments::None)
+                            .then(|| part.ident.to_string())
+                    })
+                    .collect::<Option<Vec<_>>>()?;
                 format!("path:{:?}:{parts:?}", path.path.leading_colon.is_some())
             }
             syn::Expr::Call(call) if call.attrs.is_empty() => {
-                format!("call:{:?}:{:?}", expression(&call.func)?, arguments(&call.args)?)
+                format!(
+                    "call:{:?}:{:?}",
+                    expression(&call.func)?,
+                    arguments(&call.args)?
+                )
             }
             syn::Expr::MethodCall(call) if call.attrs.is_empty() && call.turbofish.is_none() => {
-                format!("method:{:?}:{}:{:?}", expression(&call.receiver)?, call.method, arguments(&call.args)?)
+                format!(
+                    "method:{:?}:{}:{:?}",
+                    expression(&call.receiver)?,
+                    call.method,
+                    arguments(&call.args)?
+                )
             }
             syn::Expr::Reference(reference) if reference.attrs.is_empty() => {
-                format!("reference:{}:{:?}", reference.mutability.is_some(), expression(&reference.expr)?)
+                format!(
+                    "reference:{}:{:?}",
+                    reference.mutability.is_some(),
+                    expression(&reference.expr)?
+                )
             }
             syn::Expr::Try(attempt) if attempt.attrs.is_empty() => {
                 format!("try:{:?}", expression(&attempt.expr)?)
@@ -607,21 +626,43 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     }
     fn statement(value: &syn::Stmt) -> Option<String> {
         match value {
-            syn::Stmt::Expr(expr, semicolon) => Some(format!("expr:{}:{:?}", semicolon.is_some(), expression(expr)?)),
+            syn::Stmt::Expr(expr, semicolon) => Some(format!(
+                "expr:{}:{:?}",
+                semicolon.is_some(),
+                expression(expr)?
+            )),
             syn::Stmt::Local(local) if local.attrs.is_empty() => {
                 let binding = match &local.pat {
-                    syn::Pat::Ident(binding) if binding.attrs.is_empty() && binding.subpat.is_none() => binding,
+                    syn::Pat::Ident(binding)
+                        if binding.attrs.is_empty() && binding.subpat.is_none() =>
+                    {
+                        binding
+                    }
                     syn::Pat::Type(typed) if typed.attrs.is_empty() => {
-                        let syn::Pat::Ident(binding) = typed.pat.as_ref() else {return None};
-                        let syn::Type::Path(path) = typed.ty.as_ref() else {return None};
-                        if !path.path.is_ident("Claims") || path.qself.is_some() {return None}
+                        let syn::Pat::Ident(binding) = typed.pat.as_ref() else {
+                            return None;
+                        };
+                        let syn::Type::Path(path) = typed.ty.as_ref() else {
+                            return None;
+                        };
+                        if !path.path.is_ident("Claims") || path.qself.is_some() {
+                            return None;
+                        }
                         binding
                     }
                     _ => return None,
                 };
                 let init = local.init.as_ref()?;
-                if init.diverge.is_some() {return None}
-                Some(format!("let:{}:{}:{}:{:?}", binding.ident, binding.by_ref.is_some(), binding.mutability.is_some(), expression(&init.expr)?))
+                if init.diverge.is_some() {
+                    return None;
+                }
+                Some(format!(
+                    "let:{}:{}:{}:{:?}",
+                    binding.ident,
+                    binding.by_ref.is_some(),
+                    binding.mutability.is_some(),
+                    expression(&init.expr)?
+                ))
             }
             _ => None,
         }
@@ -670,12 +711,11 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     }
     fn accepts(block: &syn::Block, prefix: &str, guard: &str, count: usize) -> Result<bool> {
         let expected: syn::Block = syn::parse_str(&format!("{{{prefix}{guard}}}"))?;
-        let prefix: Vec<_> = expected
-            .stmts
-            .iter()
-            .map(statement)
-            .collect();
-        ensure!(prefix.iter().all(Option::is_some),"closed_guard_prefix_shape");
+        let prefix: Vec<_> = expected.stmts.iter().map(statement).collect();
+        ensure!(
+            prefix.iter().all(Option::is_some),
+            "closed_guard_prefix_shape"
+        );
         let actual: Vec<_> = block
             .stmts
             .iter()
@@ -826,19 +866,14 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
                 .stmts
                 .iter()
                 .enumerate()
-                .filter(|(_, actual_statement)| {
-                    statement(actual_statement) == statement(&decoded)
-                })
+                .filter(|(_, actual_statement)| statement(actual_statement) == statement(&decoded))
                 .map(|(i, _)| i)
                 .collect();
             assert_eq!(positions.len(), 1);
             let check: syn::Stmt = syn::parse_str(
                 "super::restore::require_open(db,super::restore::Kind::UseOriginal,claim_identity(&claims)?.as_str())?;",
             )?;
-            assert_eq!(
-                statement(&block.stmts[positions[0] + 1]),
-                statement(&check)
-            );
+            assert_eq!(statement(&block.stmts[positions[0] + 1]), statement(&check));
             let mut omitted = block.clone();
             omitted.stmts.remove(positions[0] + 1);
             assert!(!accepts(&omitted, prefix, &guard, count)?);
