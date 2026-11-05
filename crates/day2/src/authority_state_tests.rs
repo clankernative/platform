@@ -1,4 +1,5 @@
 use super::*;
+use crate::security_epoch::restore_authority::RestoreFenceSchema;
 use crate::authority::{Mode, OperationPolicy};
 use day2_capabilities::{
     BindingRef, Name,
