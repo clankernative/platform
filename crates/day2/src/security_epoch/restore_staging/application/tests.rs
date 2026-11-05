@@ -404,3 +404,133 @@ fn first_restore_selection_refuses_noninitial_source_epochs() -> Result<()> {
     }
     Ok(())
 }
+
+#[derive(Clone, Copy)]
+enum Action {
+    Inspect,
+    DropReset,
+    WrongEpoch,
+    Commit,
+    Reopen,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Observation {
+    enabled: bool,
+    old_authority: bool,
+    frozen_debt: bool,
+    revoked_versions: i64,
+    open_deliveries: i64,
+    sessions: i64,
+    secrets: i64,
+    reauthorization_required: bool,
+    old_token_accepted: bool,
+}
+
+fn observation(db: &Connection, token: &str) -> Result<Observation> {
+    let authority = authority_state::current(db)?;
+    let budget = ledger(db)?;
+    ensure!(budget.known_usage.calls == 2 && budget.unknown_usage.len() == 1, "test_debt_changed");
+    let unknown: String = db.query_row("SELECT state FROM oauth_refresh_attempts WHERE attempt='old-refresh'", [], |row| row.get(0))?;
+    ensure!(unknown == "uncertain", "test_unknown_refresh_erased");
+    Ok(Observation {
+        enabled: authority.document.enabled,
+        old_authority: authority.stamp.epoch == Digest::new(b"old-application-authority").as_str(),
+        frozen_debt: budget.frozen_after_restore,
+        revoked_versions: db.query_row("SELECT count(*) FROM day2_credential_versions WHERE state='revoked'", [], |row| row.get(0))?,
+        open_deliveries: db.query_row("SELECT count(*) FROM day2_credential_deliveries WHERE state!='closed'", [], |row| row.get(0))?,
+        sessions: db.query_row("SELECT count(*) FROM day2_web_sessions", [], |row| row.get(0))?,
+        secrets: db.query_row("SELECT count(*) FROM day2_web_secret", [], |row| row.get(0))?,
+        reauthorization_required: db.query_row("SELECT status='reauth_required' AND security_epoch=2 FROM oauth_connection_slots WHERE slot='old-slot'", [], |row| row.get(0))?,
+        old_token_accepted: credentials::restore::first_epoch_ingress_for_tests(db, token, 1)?,
+    })
+}
+
+fn expected(reset: bool) -> Observation {
+    // This oracle knows only the two allowed terminal states. It never reads
+    // reset counts, cut rows, production transitions or a returned authority.
+    if reset {
+        Observation { enabled: false, old_authority: false, frozen_debt: true, revoked_versions: 1, open_deliveries: 0, sessions: 0, secrets: 0, reauthorization_required: true, old_token_accepted: false }
+    } else {
+        Observation { enabled: true, old_authority: true, frozen_debt: false, revoked_versions: 0, open_deliveries: 1, sessions: 1, secrets: 1, reauthorization_required: false, old_token_accepted: true }
+    }
+}
+
+fn history(seed: u64, actions: &[Action]) -> Result<Vec<Observation>> {
+    effects::scope(simulation::World::new(seed), || {
+        let fixture = Fixture::new()?;
+        let material = rows(&fixture.db, "day2_credential_material")?;
+        let receipts = rows(&fixture.db, "day2_credential_receipts")?;
+        let mut reset_committed = false;
+        let mut trace = Vec::new();
+        for action in actions {
+            match action {
+                Action::Inspect => {}
+                Action::DropReset | Action::WrongEpoch => {
+                    let before = snapshot(&fixture.db)?;
+                    let tx = Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
+                    let result = crate::oauth::restore::reset_application_in(
+                        &tx, &fixture.fence, &fixture.authority_schema, &fixture.oauth_schema,
+                        &fixture.cut, &fixture.namespace,
+                        if matches!(action, Action::WrongEpoch) { 8 } else { 1 },
+                    );
+                    assert_eq!(result.is_ok(), matches!(action, Action::DropReset) && !reset_committed);
+                    if matches!(action, Action::WrongEpoch) {
+                        // Even a caller that catches the error and commits the
+                        // surrounding transaction cannot retain a partial cut.
+                        tx.commit()?;
+                    } else {
+                        // A real complete reset ran, but the actual outer
+                        // transaction drops before its commit or image copy.
+                        drop(tx);
+                    }
+                    assert!(before == snapshot(&fixture.db)?);
+                }
+                Action::Commit => {
+                    let result = reset(&fixture.db, &fixture.selection());
+                    assert_eq!(result.is_ok(), !reset_committed);
+                    reset_committed = true;
+                }
+                Action::Reopen => {
+                    let before = snapshot(&fixture.db)?;
+                    let image = fixture.db.serialize(MAIN_DB)?;
+                    let directory = tempfile::tempdir()?;
+                    let path = directory.path().join("observation.sqlite");
+                    std::fs::write(&path, &*image)?;
+                    for _ in 0..2 {
+                        let reopened = Connection::open(&path)?;
+                        assert!(before == snapshot(&reopened)?);
+                        assert_eq!(observation(&reopened, &fixture.token)?, expected(reset_committed));
+                    }
+                }
+            }
+            let observed = observation(&fixture.db, &fixture.token)?;
+            assert_eq!(observed, expected(reset_committed));
+            assert!(material == rows(&fixture.db, "day2_credential_material")?);
+            assert!(receipts == rows(&fixture.db, "day2_credential_receipts")?);
+            trace.push(observed);
+        }
+        Ok(trace)
+    })
+}
+
+#[test]
+fn generated_offline_reset_histories_replay_twice_with_independent_terminal_expectations() -> Result<()> {
+    // These are SQL-denial histories, not retries of native effects or consumed
+    // approvals. Reopen observes copied DATA; it never adopts a target/writer.
+    for seed in 0..12u64 {
+        let mut actions = vec![Action::Inspect, Action::DropReset, Action::WrongEpoch, Action::Reopen];
+        for index in 0..8 {
+            actions.push(match seed.rotate_left(index) % 5 {
+                0 => Action::Inspect,
+                1 => Action::DropReset,
+                2 => Action::WrongEpoch,
+                3 => Action::Commit,
+                _ => Action::Reopen,
+            });
+        }
+        actions.extend([Action::Commit, Action::Reopen]);
+        assert_eq!(history(seed, &actions)?, history(seed, &actions)?);
+    }
+    Ok(())
+}
