@@ -867,10 +867,10 @@ pub(crate) fn reset_application_in(
     source_epoch: u64,
 ) -> Result<ApplicationResetSummary> {
     super::schema::admit_memory_transaction(tx, |tx| {
-        let before = Snapshot::capture(tx, oauth_schema)?;
-        fence.apply_in(tx, authority_schema)?;
-        let applied = apply_in(tx, before, cut, oauth_schema)?;
-        let credentials = applied.stage_closed_credentials(fence, namespace, source_epoch)?;
+        let before = Snapshot::capture(tx, oauth_schema).context("restore_snapshot_admission")?;
+        fence.apply_in(tx, authority_schema).context("restore_authority_fence")?;
+        let applied = apply_in(tx, before, cut, oauth_schema).context("restore_oauth_cut")?;
+        let credentials = applied.stage_closed_credentials(fence, namespace, source_epoch).context("restore_credential_cut")?;
         Ok(ApplicationResetSummary {
             credentials,
             closed_oauth_originals: applied.closed_count(),
