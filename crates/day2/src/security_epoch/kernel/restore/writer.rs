@@ -100,7 +100,7 @@ mod report_json {
         if text.len() > 2048 {
             return Err(serde::ser::Error::custom("restore_writer_report_bound"));
         }
-        text.serialize(serializer)
+        serializer.serialize_str(&text)
     }
 
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
