@@ -594,8 +594,9 @@ impl Operations {
                 struct Input {
                     directory: PathBuf,
                 }
-                let manifest = backup::verify(&input::<Input>(&request)?.directory)?;
-                Ok(json!({"artifact":manifest.artifact,"database":manifest.database}))
+                Ok(serde_json::to_value(backup::inspect(
+                    &input::<Input>(&request)?.directory,
+                )?)?)
             }
             "maintenance-open" => {
                 #[derive(Deserialize)]

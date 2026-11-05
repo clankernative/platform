@@ -7,6 +7,65 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[test]
+fn restore_inspection_only_verifies_the_exact_archive_without_entering_restore() -> Result<()> {
+    let expected = json!({
+        "kind":"restore_archive_inspection_v1",
+        "archive":"sha256:fixture-only-archive",
+        "scope":"example/sandbox/app",
+        "app":"app",
+        "artifact":"sha256:fixture-only-artifact",
+        "database":"sha256:fixture-only-database"
+    });
+    let mut effects = Vec::new();
+    let actual = automation::run(
+        &automation::runner()?,
+        &["platform", "restore", "inspect", "chosen-archive"],
+        |request| {
+            effects.push(request.action.clone());
+            assert_eq!(request.action, "backup-verify");
+            assert_eq!(
+                request.decode::<Value>()?,
+                json!({"directory":"chosen-archive"})
+            );
+            Ok(expected.clone())
+        },
+    )?;
+    assert_eq!(effects, ["backup-verify"]);
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
+fn restore_inspection_refusal_and_extra_arguments_never_copy_or_claim_approval() -> Result<()> {
+    let runner = automation::runner()?;
+    let mut effects = Vec::new();
+    let refused = automation::run(
+        &runner,
+        &["platform", "restore", "inspect", "chosen-archive"],
+        |request| {
+            effects.push(request.action.clone());
+            bail!("injected archive verification refusal")
+        },
+    );
+    assert!(refused.is_err());
+    assert_eq!(effects, ["backup-verify"]);
+    for suffix in ["--approved", "--execute", "replacement-directory"] {
+        let mut calls = 0;
+        let refused = automation::run(
+            &runner,
+            &["platform", "restore", "inspect", "chosen-archive", suffix],
+            |_| {
+                calls += 1;
+                bail!("invalid inspection reached a native capability")
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(calls, 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn owners_recipe_forwards_one_bounded_atomic_operation() -> Result<()> {
     for action in ["list", "check", "add", "remove"] {
         let mut effects = Vec::new();

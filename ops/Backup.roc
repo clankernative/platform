@@ -15,4 +15,9 @@ Backup :: [].{
 		_ = Capability.call!("backup-verify", Json.to_str({ directory: backup }), host!)?
 		Capability.call!("backup-restore", Json.to_str({ backup, output }), host!)
 	}
+
+	# Historical archive identity only. This does not obtain or consume approval,
+	# fence a holder, copy files, select current epochs or admit a new writer.
+	inspect! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	inspect! = |backup, host!| Capability.call!("backup-verify", Json.to_str({ directory: backup }), host!)
 }
