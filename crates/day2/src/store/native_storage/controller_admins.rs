@@ -262,12 +262,12 @@ mod tests {
                 format!("{{\"{marker}\":"),
             ],
         )?;
-        let original = crate::authority_state::current(&db)
-            .err()
-            .expect("actual authority decoder rejects");
-        let error = current_authority(&db)
-            .err()
-            .expect("closed projection refuses");
+        let Err(original) = crate::authority_state::current(&db) else {
+            anyhow::bail!("actual authority decoder must reject");
+        };
+        let Err(error) = current_authority(&db) else {
+            anyhow::bail!("closed projection must refuse");
+        };
         assert_eq!(error.to_string(), "controller_admin_authority_refused");
         assert!(!format!("{error:#}").contains(marker));
         assert!(
