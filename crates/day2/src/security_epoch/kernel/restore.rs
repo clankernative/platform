@@ -428,3 +428,13 @@ pub(in crate::security_epoch) fn reconcile(
 
 #[cfg(test)]
 mod tests;
+
+/// Controlled selection/request DATA reused by the typed-input wiring tests.
+/// This supplies no native input, consumed approval or source implementation.
+#[cfg(test)]
+pub(in crate::security_epoch) fn native_input_fixture(seed: u64) -> (EpochStore, Intent, Current) {
+    let (selected, before) = tests::initial();
+    let intent = tests::intent(&selected, seed);
+    let current = tests::current(&selected, &intent, &before);
+    (selected, intent, current)
+}
