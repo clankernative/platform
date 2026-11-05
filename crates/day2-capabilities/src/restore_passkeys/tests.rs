@@ -283,7 +283,7 @@ fn fields_and_total_registry_bytes_are_bounded_before_use() {
         ("user_handle", json!(vec![1; 65])),
         ("credential_id", json!("PRIVATE-INPUT")),
         ("subject", json!("x".repeat(1025))),
-        ("email", json!("x".repeat(257))),
+        ("email", json!(format!("{}@a", "x".repeat(255)))),
         ("rp_id", json!("x".repeat(254))),
         ("origin", json!("x".repeat(2049))),
     ] {

@@ -38,7 +38,9 @@ required; duplicate, unknown and private labels, tags, indefinite forms and
 trailing bytes are refused. Conversion returns the public 65-byte uncompressed
 point. This is a shape check, not proof that the point is on the curve or that an
 admin possesses the key. The actual assertion signature still needs verification
-under the ES256 WebAuthn rules, including DER-encoded ECDSA signatures.
+under the [WebAuthn signature rules](https://www.w3.org/TR/webauthn-3/#sctn-signature-attestation-types),
+including DER-encoded ECDSA signatures. The public coordinate profile follows
+[RFC 9053, section 7.1.1](https://www.rfc-editor.org/rfc/rfc9053.html#section-7.1.1).
 
 `content_digest()` identifies canonical registry DATA only. Removing a key and
 restoring identical bytes restores the same digest. It is therefore explicitly
