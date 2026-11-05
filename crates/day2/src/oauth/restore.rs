@@ -63,11 +63,14 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
 /// Absence in a CURRENT installed unit is only absence of this denial. All
 /// existing authentication, current epoch, purpose and owner checks still run.
 /// A missing/partial unit is an error, never an implicit pre-restore fallback.
+fn validate_id(id:&str)->Result<()> {
+    ensure!((1..=256).contains(&id.len()) && id.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || b"._-:/".contains(&byte)),"restore_continuation_identity_bound");
+    Ok(())
+}
+
 pub(crate) fn require_open(db: &Connection, kind: Kind, id: &str) -> Result<()> {
-    ensure!(
-        (1..=256).contains(&id.len()),
-        "restore_continuation_identity_bound"
-    );
+    validate_id(id)?;
     let current: bool = db.query_row(
         "SELECT count(*)=1 AND min(version)=1 FROM main.oauth_restore_schema_version",
         [],
@@ -522,7 +525,7 @@ impl Snapshot {
                     }
                     if let Some((kind, index)) = selector {
                         let id = row.get_ref(index)?.as_str()?;
-                        ensure!((1..=256).contains(&id.len()), "restore_identity_bound");
+                        validate_id(id)?;
                         identities_set.insert((kind, id.into()));
                         if table == "oauth_use_handles" {
                             let identity =
