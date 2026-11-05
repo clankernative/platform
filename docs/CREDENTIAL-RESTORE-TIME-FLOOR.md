@@ -38,3 +38,16 @@ cuts, plus an independent integer-time model with generated histories and
 source-bound replay. They do not claim real child death, power-loss, native,
 Firestore-provider or whole approval qualification. Failed model traces are
 retained for replay. No cloud resources or provider permissions are created.
+
+Positive historical readback additionally requires BOTH changed documents to
+have the same provider update version, strictly newer than the prior floor.
+The floor always changes its operation and the receipt is create-only, so the
+unchanged-write exception cannot qualify either write. Equal bodies at
+different versions, a later floor rewrite or old metadata refuse. The future
+Firestore adapter must retain and validate these actual provider fields; row
+contents alone are insufficient. Provider versions remain concurrency metadata,
+never host/approval time. This follows the transaction commit-time model in
+[Firestore transaction isolation](https://firebase.google.com/docs/firestore/transaction-data-contention)
+and the changed-document rule in
+[WriteResult](https://cloud.google.com/firestore/docs/reference/rest/v1/WriteResult).
+Known native send/postchecks remain necessary even with matching metadata.

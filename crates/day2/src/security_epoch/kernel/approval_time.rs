@@ -222,6 +222,14 @@ pub(in crate::security_epoch) enum Outcome {
     Conflict,
 }
 
+// Ordering provider document versions does not make them host/approval time.
+fn newer(candidate: &UpdateTime, prior: &UpdateTime) -> Result<bool> {
+    let format = &time::format_description::well_known::Rfc3339;
+    let candidate = time::OffsetDateTime::parse(&candidate.0, format)?;
+    let prior = time::OffsetDateTime::parse(&prior.0, format)?;
+    Ok(candidate > prior)
+}
+
 /// Coherent readback classifies only the exact attempted operation. Even
 /// Applied is historical DATA, never a grant, renewed clock or send permission.
 pub(in crate::security_epoch) fn reconcile(
@@ -241,7 +249,8 @@ pub(in crate::security_epoch) fn reconcile(
         (Some(floor), None) if *floor == plan.prior => Outcome::NotApplied,
         (Some(floor), Some(receipt))
             if floor.value == plan.after
-                && floor.version != plan.prior.version
+                && floor.version == receipt.version
+                && newer(&floor.version, &plan.prior.version)?
                 && receipt.value == plan.receipt =>
         {
             Outcome::Applied

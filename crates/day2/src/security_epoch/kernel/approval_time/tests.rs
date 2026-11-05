@@ -493,6 +493,50 @@ fn stale_concurrent_floor_cannot_win_or_turn_another_receipt_into_success() -> R
 }
 
 #[test]
+fn matching_bodies_from_separate_or_later_writes_are_not_atomic_completion() -> Result<()> {
+    let (selected, before, floor) = fixture();
+    let plan = Plan::prepare(
+        &selected,
+        &before,
+        Some(&floor),
+        Digest::new(b"op"),
+        interval(101_000_000_000, 101_000_000_001),
+    )?;
+    let after = Versioned {
+        value: plan.after.clone(),
+        version: version(4),
+    };
+    let receipt = Versioned {
+        value: plan.receipt.clone(),
+        version: version(4),
+    };
+    assert_eq!(
+        reconcile(&plan, &selected, &before, Some(&after), Some(&receipt))?,
+        Outcome::Applied
+    );
+    // Hold both full bodies exact. Alter only provider metadata: separate
+    // receipt creation, later floor rewrite, or a retained/stale prior version.
+    for (floor_version, receipt_version) in [(4, 5), (5, 4), (4, 3), (3, 4), (3, 3), (2, 2)] {
+        let mut changed_floor = after.clone();
+        changed_floor.version = version(floor_version);
+        let mut changed_receipt = receipt.clone();
+        changed_receipt.version = version(receipt_version);
+        assert_eq!(
+            reconcile(
+                &plan,
+                &selected,
+                &before,
+                Some(&changed_floor),
+                Some(&changed_receipt)
+            )?,
+            Outcome::Conflict,
+            "{floor_version}/{receipt_version}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn malformed_time_and_floor_wire_cannot_become_a_plan() -> Result<()> {
     let (selected, before, floor) = fixture();
     for bad in [
