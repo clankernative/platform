@@ -508,8 +508,10 @@ fn provider_owned_parse_details_and_oversize_bytes_never_escape_closed_errors() 
     let (selection, before) = initial();
     let (_, plan) = approval_use::plan(&selection, &before, 48)?;
     let mut reply = initial_reply(&selection, &plan)?;
-    reply[1]["found"]["fields"]["phase"]["mapValue"]["fields"]["phase"]["stringValue"] = json!(PRIVATE);
-    let transaction = wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+    reply[1]["found"]["fields"]["phase"]["mapValue"]["fields"]["phase"]["stringValue"] =
+        json!(PRIVATE);
+    let transaction =
+        wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
     let error = match transaction.observed() {
         Ok(_) => anyhow::bail!("unexpected provider admission"),
         Err(error) => error,

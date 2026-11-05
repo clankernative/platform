@@ -184,8 +184,13 @@ impl Names {
                 initial.push(Entry {
                     transaction: None,
                     read_time: entry.read_time,
-                    found: entry.found.map(|value| serde_json::from_value(value)
-                        .map_err(|_| anyhow::anyhow!("restore_provider_initial_document"))).transpose()?,
+                    found: entry
+                        .found
+                        .map(|value| {
+                            serde_json::from_value(value)
+                                .map_err(|_| anyhow::anyhow!("restore_provider_initial_document"))
+                        })
+                        .transpose()?,
                     missing: entry.missing,
                 });
             } else if name == self.advance {
