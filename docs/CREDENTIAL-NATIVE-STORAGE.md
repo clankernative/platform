@@ -510,6 +510,27 @@ refusing prerequisite-only configuration; epoch catalog DATA alone does not
 select native mode. Native Runtime connection opens retain existing-file and
 NOFOLLOW semantics and never chmod/initialize the original.
 
+The native Controller admin reader is not yet an accepting source for restore
+approval. Its SQLite connection must be joined to genuine creator continuity
+for MAIN, WAL and SHM. A matching pathname, MAIN inode, seed or stable read view
+does not establish that continuity: a compatible older WAL can restore an
+administrator that current policy removed while MAIN keeps the same inode.
+
+The pinned bundled SQLite enables `SQLITE_ENABLE_FILESTAT`. The test-only
+`store::native_storage::opened_files` fixture borrows an actual transaction and
+observes the Unix VFS handles that SQLite opened, without reconstructing C
+structures or opening/closing a duplicate database descriptor. It covers a
+regular-file MAIN substitution, compatible older WAL/SHM retained for the
+whole read, and SHM recreation by a read-only connection. The sidecar fixture
+uses a separate process so SQLite cannot reuse an in-process cached SHM node.
+It compares actual authority rows and actual opened file identities with the
+distinct current fixture result; pathname checks alone are insufficient.
+
+These are mechanism and counterexample tests, not a creator-owner factory,
+native reader permission or live qualification. The accepting reader still
+needs the retained creator cohort and authenticated peer handoff, with explicit
+sidecar replacement/recreation rules, before it may supply approval authority.
+
 No local filesystem test, mock deployment plan, static proof inventory or
 earlier CI receipt establishes actual native P3, serving or end-to-end OAuth
 success. Live provider/kernel/deployment qualification remains separate.
