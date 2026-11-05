@@ -13,6 +13,7 @@ pub mod oauth;
 pub mod registry;
 pub mod resources;
 pub mod restore_passkeys;
+pub mod restore_signing;
 pub mod runtime;
 pub mod security_epoch;
 
@@ -269,6 +270,9 @@ pub struct InstallationControl {
     /// Reviewed public admin passkeys; metadata alone is never authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_passkeys: Option<restore_passkeys::Registry>,
+    /// Reviewed restore-only public key selection; never signing permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_approval_signing: Option<restore_signing::KeySelection>,
 }
 
 impl InstallationControl {
@@ -305,9 +309,13 @@ impl InstallationControl {
                     && self.secrets.is_empty()
                     && self.security_epochs.is_empty()
                     && self.security_bootstraps.is_empty()
-                    && self.restore_passkeys.is_none()),
+                    && self.restore_passkeys.is_none()
+                    && self.restore_approval_signing.is_none()),
             "operator_only_control_cannot_have_provider_bindings"
         );
+        if let Some(key) = &self.restore_approval_signing {
+            key.validate()?;
+        }
         for provider in self.builders.values() {
             let BuildProvider::LocalMacos {
                 platform_root,
@@ -526,6 +534,49 @@ mod security_epoch_catalog_tests {
                     "iam_source":{"kind":"gke_workload_identity_v1","service_account":"epochs@company-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
                 "key_set":Digest::new(b"selected keys"),"max_lease_seconds":30
             }}})).unwrap()
+    }
+
+    #[test]
+    fn restore_signing_selection_is_explicit_public_data_and_validated_in_place() -> Result<()> {
+        let mut selected = control();
+        selected.validate(["reports"])?;
+        assert!(
+            serde_json::to_value(&selected)?
+                .get("restore_approval_signing")
+                .is_none()
+        );
+        let key=restore_signing::KeySelection {
+            version:restore_signing::KeyVersion::try_from("projects/one-project/locations/global/keyRings/restore/cryptoKeys/approval/cryptoKeyVersions/7".to_owned())?,
+            public_key:[7;32],
+        };
+        selected.restore_approval_signing = Some(key.clone());
+        selected.validate(["reports"])?;
+        let decoded: InstallationControl =
+            serde_json::from_value(serde_json::to_value(&selected)?)?;
+        decoded.validate(["reports"])?;
+        assert_eq!(decoded.restore_approval_signing, Some(key));
+        selected
+            .restore_approval_signing
+            .as_mut()
+            .expect("key")
+            .public_key = [0; 32];
+        assert!(selected.validate(["reports"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn operator_only_projection_cannot_hide_restore_signing_selection() -> Result<()> {
+        let mut selected = control();
+        selected.apps.clear();
+        selected.sources.clear();
+        selected.security_epochs.clear();
+        selected.validate(std::iter::empty::<&str>())?;
+        selected.restore_approval_signing=Some(restore_signing::KeySelection {
+            version:restore_signing::KeyVersion::try_from("projects/one-project/locations/global/keyRings/restore/cryptoKeys/approval/cryptoKeyVersions/7".to_owned())?,
+            public_key:[7;32],
+        });
+        assert!(selected.validate(std::iter::empty::<&str>()).is_err());
+        Ok(())
     }
 
     #[test]
