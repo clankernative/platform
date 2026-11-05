@@ -111,6 +111,11 @@ pub(super) struct Held {
     stamp: Stamp,
 }
 impl Held {
+    pub(super) fn require_path(&self, path: &Path) -> Result<()> {
+        ensure!(self.path == path, "restore_registry_config_path_changed");
+        Ok(())
+    }
+
     pub(super) fn open(path: &Path) -> Result<Self> {
         let (parents, file) =
             open(path).map_err(|_| anyhow::anyhow!("restore_registry_config_unavailable"))?;

@@ -3066,6 +3066,7 @@ mod tests {
     {
         for substitute in [false, true] {
             let (_directory, runtime) = sql_fixture()?;
+            assert!(runtime.restore_registry_path().is_err());
             let other = runtime.clone();
             let entered = std::cell::Cell::new(false);
             let result = with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {

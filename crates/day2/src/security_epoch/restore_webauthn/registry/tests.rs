@@ -507,3 +507,230 @@ fn actual_native_sql_origin_cannot_drop_runtime_identity_native_kind_phase_or_cu
     }
     Ok(())
 }
+
+#[test]
+fn retained_config_path_cannot_be_substituted_by_identical_configuration() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let root = root.path().canonicalize()?;
+    let first = config_path(&root);
+    let bytes = serde_json::to_vec(&configuration())?;
+    fs::write(&first, &bytes)?;
+    let second = root.join("different-instance.json");
+    fs::write(&second, &bytes)?;
+    let held = file::Held::open(&first)?;
+    held.require_path(&first)?;
+    assert!(held.require_path(&second).is_err());
+    assert_eq!(held.read()?, bytes); // A handle check is DATA, not an owner grant.
+    Ok(())
+}
+#[test]
+fn current_selection_checks_actual_runtime_path_before_reading_retained_bytes() -> Result<()> {
+    fn validate(block: &syn::Block) -> Result<()> {
+        fn path(expr: &syn::Expr, name: &str) -> bool {
+            matches!(expr,syn::Expr::Path(path) if path.path.is_ident(name))
+        }
+        let [first, second, third, ..] = block.stmts.as_slice() else {
+            anyhow::bail!("selected prefix")
+        };
+        ensure!(
+            matches!(first,syn::Stmt::Expr(syn::Expr::Try(expr),Some(_)) if matches!(&*expr.expr,syn::Expr::MethodCall(call) if path(&call.receiver,"sql") && call.method=="require_native_registry_read" && call.args.len()==1 && path(&call.args[0],"runtime"))),
+            "native owner before config selection"
+        );
+        ensure!(
+            matches!(second,syn::Stmt::Expr(syn::Expr::Try(expr),Some(_)) if matches!(&*expr.expr,syn::Expr::MethodCall(call) if path(&call.receiver,"held") && call.method=="require_path" && call.args.len()==1 && matches!(&call.args[0],syn::Expr::Try(selected) if matches!(&*selected.expr,syn::Expr::MethodCall(inner) if path(&inner.receiver,"runtime") && inner.method=="restore_registry_path" && inner.args.is_empty())))),
+            "actual runtime instance path before retained read"
+        );
+        ensure!(
+            matches!(third,syn::Stmt::Local(local) if local.init.as_ref().is_some_and(|init|matches!(&*init.expr,syn::Expr::Try(expr) if matches!(&*expr.expr,syn::Expr::MethodCall(call) if path(&call.receiver,"held") && call.method=="read" && call.args.is_empty())))),
+            "actual retained read follows both guards"
+        );
+        Ok(())
+    }
+    let source = syn::parse_file(include_str!("../registry.rs"))?;
+    let selected = source
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "selected" => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ensure!(selected.len() == 1, "actual current selector");
+    let block = &selected[0].block;
+    validate(block)?;
+    for index in 0..3 {
+        let mut changed = block.clone();
+        if index == 0 {
+            changed.stmts.remove(1);
+        } else if index == 1 {
+            changed.stmts.swap(1, 2);
+        } else {
+            changed.stmts[1] =
+                syn::parse_quote!(held.require_path(other.restore_registry_path()?)?;);
+        }
+        assert!(validate(&changed).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn published_selector_symlink_must_not_be_replaced_by_its_startup_canonical_target() -> Result<()> {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir()?;
+    let root = root.path().canonicalize()?;
+    let old_directory = root.join("versions/old");
+    let new_directory = root.join("versions/new");
+    fs::create_dir_all(&old_directory)?;
+    fs::create_dir_all(&new_directory)?;
+    let old = old_directory.join("instance.json");
+    let new = new_directory.join("instance.json");
+    let published = root.join("published");
+    let selector = published.join("instance.json");
+    fs::write(&old, serde_json::to_vec(&configuration())?)?;
+    let mut removed = configuration();
+    removed.control.as_mut().unwrap().restore_passkeys = None;
+    fs::write(&new, serde_json::to_vec(&removed)?)?;
+    symlink(&old_directory, &published)?;
+    assert!(fs::symlink_metadata(&selector)?.is_file());
+    let startup_resolved = selector.canonicalize()?;
+    assert!(file::Held::open(&selector).is_err());
+    // Concrete negative control: resolving first admits the stale target. The
+    // actual source must retain the published selector and reject this layout.
+    let stale = file::Held::open(&startup_resolved)?;
+    fs::remove_file(&published)?;
+    symlink(&new_directory, &published)?;
+    assert!(fs::symlink_metadata(&selector)?.is_file());
+    assert!(file::Held::open(&selector).is_err());
+    let unchanged_old = file::Held::open(&startup_resolved)?;
+    assert!(
+        Instance::from_bytes(&unchanged_old.read()?)?
+            .control
+            .unwrap()
+            .restore_passkeys
+            .is_some()
+    );
+    stale.check_local()?; // Old version directory and handles still look valid.
+    Ok(())
+}
+#[test]
+fn native_input_retains_published_selector_before_canonicalization_and_actual_runtime_carries_it()
+-> Result<()> {
+    fn select(file: &syn::File) -> Result<&syn::ImplItemFn> {
+        let methods=file.items.iter().filter_map(|item|match item {
+            syn::Item::Impl(block) if matches!(&*block.self_ty,syn::Type::Path(path) if path.path.is_ident("InitialStoreMetadata"))=>Some(block),_=>None,
+        }).flat_map(|block|&block.items).filter_map(|item|match item {syn::ImplItem::Fn(method) if method.sig.ident=="load"=>Some(method),_=>None}).collect::<Vec<_>>();
+        ensure!(methods.len() == 1, "actual native input load selector");
+        Ok(methods[0])
+    }
+    fn retains_first(block: &syn::Block) -> Result<()> {
+        ensure!(
+            matches!(block.stmts.first(),Some(syn::Stmt::Local(local)) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="instance_selector") && local.init.as_ref().is_some_and(|init|matches!(&*init.expr,syn::Expr::MethodCall(call) if call.method=="to_path_buf" && call.args.is_empty() && matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("instance_path"))))),
+            "original published selector captured before path canonicalization"
+        );
+        ensure!(
+            calls(block)
+                .iter()
+                .filter(|call| call.as_str() == "canonicalize")
+                .count()
+                == 1,
+            "one existing native input canonicalization"
+        );
+        Ok(())
+    }
+    let file = syn::parse_file(include_str!("../../../store.rs"))?;
+    let load = select(&file)?;
+    retains_first(&load.block)?;
+    let mut removed = load.block.clone();
+    removed.stmts.remove(0);
+    assert!(retains_first(&removed).is_err());
+    let mut late = load.block.clone();
+    late.stmts.swap(0, 1);
+    assert!(retains_first(&late).is_err());
+    // The actual native Runtime initializer must carry this original DATA,
+    // while all ordinary Runtime constructors leave it absent.
+    use syn::visit::Visit;
+    struct Fields(Vec<syn::Expr>);
+    impl<'ast> Visit<'ast> for Fields {
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            for field in &node.fields {
+                if matches!(&field.member,syn::Member::Named(name) if name=="restore_registry_selector")
+                {
+                    self.0.push(field.expr.clone());
+                }
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+    }
+    let native = syn::parse_file(include_str!("../../../store/native_storage.rs"))?;
+    let mut fields = Fields(Vec::new());
+    fields.visit_file(&native);
+    ensure!(
+        fields.0.len() == 1
+            && matches!(&fields.0[0],syn::Expr::Call(call) if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("Some")) && call.args.len()==1 && matches!(&call.args[0],syn::Expr::Field(field) if matches!(&*field.base,syn::Expr::Path(path) if path.path.is_ident("metadata")) && matches!(&field.member,syn::Member::Named(name) if name=="instance_selector"))),
+        "native runtime retains actual selector DATA"
+    );
+    Ok(())
+}
+
+#[test]
+fn native_serving_forwards_the_published_input_not_the_layout_resolved_path() -> Result<()> {
+    fn path(expr: &syn::Expr, name: &str) -> bool {
+        matches!(expr,syn::Expr::Path(path) if path.path.is_ident(name))
+    }
+    fn validate(block: &syn::Block) -> Result<()> {
+        ensure!(
+            matches!(block.stmts.first(),Some(syn::Stmt::Local(local)) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="published_instance_path") && local.init.as_ref().is_some_and(|init|path(&init.expr,"instance_path"))),
+            "published selector retained before layout"
+        );
+        let selected=block.stmts.iter().filter_map(|statement|match statement {
+            syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="runtime")=>Some(local),_=>None,
+        }).collect::<Vec<_>>();
+        ensure!(selected.len() == 1, "actual startup runtime selector");
+        let syn::Expr::If(branch) = &*selected[0].init.as_ref().unwrap().expr else {
+            anyhow::bail!("actual initial branch")
+        };
+        ensure!(
+            path(&branch.cond, "initial_storage") && branch.then_branch.stmts.len() == 3,
+            "closed native input branch"
+        );
+        let syn::Stmt::Local(local) = &branch.then_branch.stmts[0] else {
+            anyhow::bail!("metadata before bind")
+        };
+        ensure!(matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="metadata") && local.init.as_ref().is_some_and(|init|matches!(&*init.expr,syn::Expr::Try(expr) if matches!(&*expr.expr,syn::Expr::Call(call) if matches!(&*call.func,syn::Expr::Path(path) if path.path.segments.iter().map(|part|part.ident.to_string()).collect::<Vec<_>>()==["crate","store","InitialStoreMetadata","load"]) && call.args.len()==2 && path(&call.args[0],"published_instance_path") && path(&call.args[1],"app")))),"actual published selector reaches native input");
+        ensure!(
+            matches!(&branch.then_branch.stmts[1],syn::Stmt::Expr(syn::Expr::Try(expr),Some(_)) if matches!(&*expr.expr,syn::Expr::MethodCall(call) if path(&call.receiver,"metadata") && call.method=="require_input_path" && call.args.len()==1 && matches!(&call.args[0],syn::Expr::Reference(reference) if reference.mutability.is_none() && path(&reference.expr,"instance_path")))),
+            "selected canonical layout must still match"
+        );
+        Ok(())
+    }
+    let file = syn::parse_file(include_str!("../../../deployment.rs"))?;
+    let selected = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "serve_configured" => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ensure!(selected.len() == 1, "actual serving selector");
+    let block = &selected[0].block;
+    validate(block)?;
+    let mut late = block.clone();
+    let original = late.stmts.remove(0);
+    late.stmts.push(original);
+    assert!(validate(&late).is_err());
+    for mode in 0..2 {
+        let mut changed = block.clone();
+        let local=changed.stmts.iter_mut().find_map(|statement|match statement {syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="runtime")=>Some(local),_=>None}).unwrap();
+        let syn::Expr::If(branch) = &mut *local.init.as_mut().unwrap().expr else {
+            unreachable!()
+        };
+        if mode == 0 {
+            branch.then_branch.stmts[0] = syn::parse_quote!(let metadata=crate::store::InitialStoreMetadata::load(&instance_path,app)?;);
+        } else {
+            branch.then_branch.stmts.remove(1);
+        }
+        assert!(validate(&changed).is_err());
+    }
+    Ok(())
+}

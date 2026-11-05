@@ -57,6 +57,7 @@ fn runtime(directory: &Path) -> Result<Runtime> {
         credentials: None,
         connections: None,
         rolling: false,
+        restore_registry_selector: None,
         instance_path: directory.join("instance.json"),
         app: "app".into(),
         db,
