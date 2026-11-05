@@ -425,36 +425,56 @@ fn production_approval_stop_proofs_and_sources_have_no_construction_or_default_p
         let mut audit = Audit::default();
         audit.visit_file(&syn::parse_file(source).unwrap());
         let input = syn::parse_file(native).unwrap();
-        let origins: Vec<_> = input.items.iter().filter_map(|i| match i {
-            syn::Item::Enum(e) if e.ident == "NativeOrigin" => Some(e), _ => None,
-        }).collect();
+        let origins: Vec<_> = input
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Enum(e) if e.ident == "NativeOrigin" => Some(e),
+                _ => None,
+            })
+            .collect();
         // No cfg(test) exemption here: a model NativeOrigin would let DATA
         // manufacture the very typed owner whose absence keeps this closed.
-        audit.approval == 1 && audit.typed_native && audit.stop == 0
-            && audit.impls == 0 && audit.defaults == 0
-            && origins.len() == 1 && origins[0].variants.is_empty()
+        audit.approval == 1
+            && audit.typed_native
+            && audit.stop == 0
+            && audit.impls == 0
+            && audit.defaults == 0
+            && origins.len() == 1
+            && origins[0].variants.is_empty()
     }
     let source = include_str!("../restore_fencing.rs");
     let native = include_str!("../restore_approval/native.rs");
     assert!(closed(source, native));
     let anchor = "enum ApprovalOrigin<'source> {";
     assert_eq!(source.matches(anchor).count(), 1);
-    assert!(!closed(&source.replacen(
-        anchor,
-        "enum ApprovalOrigin<'source> { UntrustedData,",
-        1
-    ), native));
-    assert!(!closed(&source.replacen(
-        "enum StopOrigin {",
-        "enum StopOrigin { Receipt,",
-        1
-    ), native));
     assert!(!closed(
-        &(source.to_owned() + "\nimpl Source for UntrustedData {}"), native
+        &source.replacen(anchor, "enum ApprovalOrigin<'source> { UntrustedData,", 1),
+        native
     ));
-    assert!(!closed(&source.replace("Native(ConsumedRestoreApproval<'source>)", "Native(Digest)"), native));
-    assert!(!closed(source, &native.replace("enum NativeOrigin {}", "enum NativeOrigin { WireData }")));
-    assert!(!closed(source, &native.replace("enum NativeOrigin {}", "enum NativeOrigin { #[cfg(test)] Model }")));
+    assert!(!closed(
+        &source.replacen("enum StopOrigin {", "enum StopOrigin { Receipt,", 1),
+        native
+    ));
+    assert!(!closed(
+        &(source.to_owned() + "\nimpl Source for UntrustedData {}"),
+        native
+    ));
+    assert!(!closed(
+        &source.replace("Native(ConsumedRestoreApproval<'source>)", "Native(Digest)"),
+        native
+    ));
+    assert!(!closed(
+        source,
+        &native.replace("enum NativeOrigin {}", "enum NativeOrigin { WireData }")
+    ));
+    assert!(!closed(
+        source,
+        &native.replace(
+            "enum NativeOrigin {}",
+            "enum NativeOrigin { #[cfg(test)] Model }"
+        )
+    ));
     macro_rules! opaque {
         ($ty:ty,$bound:path) => {{
             trait Ambiguous<A> {
@@ -602,7 +622,10 @@ fn native_entry_checks_archive_target_and_operation_without_constructing_an_inpu
             10 => binding.target_epoch += 1,
             _ => binding.scope.app = "other-app".to_owned().try_into()?,
         }
-        assert!(require_native_binding(&selected, &intent, &binding, &expected).is_err(), "cut={cut}");
+        assert!(
+            require_native_binding(&selected, &intent, &binding, &expected).is_err(),
+            "cut={cut}"
+        );
     }
     // These are shape/binding checks only. Executor/custody authentication and
     // the fixed signed interval still belong to the ACTUAL input.consume.
@@ -613,18 +636,28 @@ fn native_entry_checks_archive_target_and_operation_without_constructing_an_inpu
 fn actual_native_factory_moves_the_typed_consumed_owner_and_preserves_original_clock_dataflow() {
     use quote::ToTokens;
     fn method(source: &str, name: &str) -> syn::ImplItemFn {
-        syn::parse_file(source).unwrap().items.into_iter().find_map(|item| {
-            let syn::Item::Impl(item) = item else { return None };
-            item.items.into_iter().find_map(|item| match item {
-                syn::ImplItem::Fn(f) if f.sig.ident == name => Some(f), _ => None,
+        syn::parse_file(source)
+            .unwrap()
+            .items
+            .into_iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                item.items.into_iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(f) if f.sig.ident == name => Some(f),
+                    _ => None,
+                })
             })
-        }).unwrap()
+            .unwrap()
     }
     fn factory(source: &str) -> bool {
         let m = method(source, "consume_native");
         let typed = m.sig.inputs.iter().any(|input| match input {
-            syn::FnArg::Typed(input) => matches!(input.pat.as_ref(), syn::Pat::Ident(p) if p.ident=="input")
-                && input.ty.to_token_stream().to_string()=="NativeRestoreApproval < 'source >",
+            syn::FnArg::Typed(input) => {
+                matches!(input.pat.as_ref(), syn::Pat::Ident(p) if p.ident=="input")
+                    && input.ty.to_token_stream().to_string() == "NativeRestoreApproval < 'source >"
+            }
             _ => false,
         });
         let b = m.block.to_token_stream().to_string();
@@ -632,45 +665,80 @@ fn actual_native_factory_moves_the_typed_consumed_owner_and_preserves_original_c
         let consume = "input . consume (expected , & binding . operation) ?";
         let observe = "native . check () ?";
         let carried = "origin : ApprovalOrigin :: Native (native)";
-        typed && [bind,consume,observe,carried].iter().all(|s| b.matches(s).count()==1)
-            && b.find(bind)<b.find(consume) && b.find(consume)<b.find(observe)
-            && b.find(observe)<b.find(carried)
-            && b.contains("issued_at : origin") && b.contains("expires_at : deadline")
+        typed
+            && [bind, consume, observe, carried]
+                .iter()
+                .all(|s| b.matches(s).count() == 1)
+            && b.find(bind) < b.find(consume)
+            && b.find(consume) < b.find(observe)
+            && b.find(observe) < b.find(carried)
+            && b.contains("issued_at : origin")
+            && b.contains("expires_at : deadline")
             && !b.contains("approved_at")
     }
     fn refresh(source: &str) -> bool {
         let m = method(source, "refresh");
-        let arm = m.block.stmts.iter().find_map(|s| match s {
-            syn::Stmt::Expr(syn::Expr::Match(m), _) => m.arms.iter().find(|a|
-                a.pat.to_token_stream().to_string()=="ApprovalOrigin :: Native (_)").map(|a|
-                    a.body.to_token_stream().to_string()),
-            _ => None,
-        }).unwrap();
-        arm.matches("self . observe_native ()").count()==2
-            && arm.matches("source . current (self)").count()==1
-            && ["let post = self . observe_native ()", "let clock = result ?", "post ?"].iter()
-                .all(|marker| arm.matches(marker).count()==1)
-            && arm.find("self . observe_native ()")<arm.find("source . current (self)")
-            && arm.find("let post = self . observe_native ()")<arm.find("let clock = result ?")
-            && arm.find("let clock = result ?")<arm.find("post ?")
+        let arm = m
+            .block
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                syn::Stmt::Expr(syn::Expr::Match(m), _) => m
+                    .arms
+                    .iter()
+                    .find(|a| a.pat.to_token_stream().to_string() == "ApprovalOrigin :: Native (_)")
+                    .map(|a| a.body.to_token_stream().to_string()),
+                _ => None,
+            })
+            .unwrap();
+        arm.matches("self . observe_native ()").count() == 2
+            && arm.matches("source . current (self)").count() == 1
+            && [
+                "let post = self . observe_native ()",
+                "let clock = result ?",
+                "post ?",
+            ]
+            .iter()
+            .all(|marker| arm.matches(marker).count() == 1)
+            && arm.find("self . observe_native ()") < arm.find("source . current (self)")
+            && arm.find("let post = self . observe_native ()") < arm.find("let clock = result ?")
+            && arm.find("let clock = result ?") < arm.find("post ?")
             && !arm.contains("self . observe (clock)")
-            && !arm.contains("clock . lower") && !arm.contains("clock . upper")
+            && !arm.contains("clock . lower")
+            && !arm.contains("clock . upper")
     }
     let source = include_str!("../restore_fencing.rs");
     assert!(factory(source));
     assert!(refresh(source));
-    for (from,to) in [
-        ("require_native_binding(selected, intent, &binding, expected)?;", "Ok::<(), anyhow::Error>(())?;"),
-        ("input.consume(expected, &binding.operation)?", "input.consume(expected, &binding.intent)?"),
-        ("let observed = native.check()?;", "let observed = untrusted_data();"),
+    for (from, to) in [
+        (
+            "require_native_binding(selected, intent, &binding, expected)?;",
+            "Ok::<(), anyhow::Error>(())?;",
+        ),
+        (
+            "input.consume(expected, &binding.operation)?",
+            "input.consume(expected, &binding.intent)?",
+        ),
+        (
+            "let observed = native.check()?;",
+            "let observed = untrusted_data();",
+        ),
     ] {
         assert_eq!(source.matches(from).count(), 1);
-        assert!(!factory(&source.replacen(from,to,1)));
+        assert!(!factory(&source.replacen(from, to, 1)));
     }
-    let from="let post = self.observe_native();";
+    let from = "let post = self.observe_native();";
     assert_eq!(source.matches(from).count(), 1);
-    assert!(!refresh(&source.replacen(from,"let post = Ok::<(), anyhow::Error>(());",1)));
-    let from="                Ok(())";
+    assert!(!refresh(&source.replacen(
+        from,
+        "let post = Ok::<(), anyhow::Error>(());",
+        1
+    )));
+    let from = "                Ok(())";
     assert_eq!(source.matches(from).count(), 1);
-    assert!(!refresh(&source.replacen(from,"                self.observe(clock)?; Ok(())",1)));
+    assert!(!refresh(&source.replacen(
+        from,
+        "                self.observe(clock)?; Ok(())",
+        1
+    )));
 }

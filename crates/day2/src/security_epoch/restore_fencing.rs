@@ -1,9 +1,18 @@
 //! Closed restore lease-drain foundation. No genuine approval/complete-stop
 //! supplier exists. Controlled tests exercise the same state machine, not native
 //! owners. Serializable epoch/fence records and elapsed local time cannot enter.
+use super::{
+    kernel::restore::Intent,
+    restore_approval::{
+        ApprovalRequest,
+        native::{ConsumedRestoreApproval, NativeRestoreApproval},
+    },
+};
 use anyhow::{Context, Result, ensure};
-use day2_capabilities::{Digest, security_epoch::{AuthorityScope, EpochStore}};
-use super::{kernel::restore::Intent, restore_approval::{ApprovalRequest, native::{NativeRestoreApproval, ConsumedRestoreApproval}}};
+use day2_capabilities::{
+    Digest,
+    security_epoch::{AuthorityScope, EpochStore},
+};
 use std::{cell::Cell, marker::PhantomData, rc::Rc};
 
 const MAX_OUTSTANDING: usize = 1024;
@@ -142,7 +151,12 @@ impl<'source> Approval<'source> {
         let observed = native.check()?;
         let (domain, origin, deadline) = observed.interval_data();
         let (lower, upper) = observed.observation_data();
-        let clock = Clock { binding: binding.clone(), domain: domain.clone(), lower, upper };
+        let clock = Clock {
+            binding: binding.clone(),
+            domain: domain.clone(),
+            lower,
+            upper,
+        };
         let mut approval = Self {
             origin: ApprovalOrigin::Native(native),
             binding,
@@ -170,7 +184,12 @@ impl<'source> Approval<'source> {
             "restore_native_original_changed"
         );
         let (lower, upper) = observation.observation_data();
-        self.observe(Clock { binding: self.binding.clone(), domain: domain.clone(), lower, upper })
+        self.observe(Clock {
+            binding: self.binding.clone(),
+            domain: domain.clone(),
+            lower,
+            upper,
+        })
     }
 
     fn refresh(&mut self, source: &mut impl Source) -> Result<()> {
@@ -182,8 +201,10 @@ impl<'source> Approval<'source> {
                 let post = self.observe_native();
                 let clock = result?;
                 post?;
-                ensure!(clock.binding == self.binding && clock.domain == self.domain,
-                    "restore_native_source_clock_domain_changed");
+                ensure!(
+                    clock.binding == self.binding && clock.domain == self.domain,
+                    "restore_native_source_clock_domain_changed"
+                );
                 // The source's scalar bounds cannot replace the actual typed
                 // producer observation or freshen the retained original.
                 Ok(())
@@ -225,7 +246,7 @@ impl<'source> Approval<'source> {
         match &mut self.origin {
             ApprovalOrigin::Native(native) => native.refuse(),
             #[cfg(test)]
-            ApprovalOrigin::UnqualifiedModel => {},
+            ApprovalOrigin::UnqualifiedModel => {}
         }
     }
 }

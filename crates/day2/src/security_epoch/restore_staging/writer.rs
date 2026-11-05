@@ -263,7 +263,9 @@ struct Candidate<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<
     target: Target,
     admission: Admission,
 }
-impl<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>> Candidate<'a, 'original, 'source, A, F, W> {
+impl<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>>
+    Candidate<'a, 'original, 'source, A, F, W>
+{
     fn admit(
         owner: &'a mut A,
         session: &'a mut Session<'original, 'source, F>,

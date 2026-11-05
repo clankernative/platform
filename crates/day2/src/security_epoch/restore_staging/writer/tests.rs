@@ -356,7 +356,8 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
 
 #[test]
 fn candidate_and_admission_are_not_copyable_serialized_transferable_permissions() {
-    type Borrowed = Candidate<'static, 'static, 'static, super::super::tests::Fixture, drain::Model, Model>;
+    type Borrowed =
+        Candidate<'static, 'static, 'static, super::super::tests::Fixture, drain::Model, Model>;
     macro_rules! opaque {
         ($ty:ty, $bound:path) => {{
             trait Ambiguous<A> {
