@@ -2269,6 +2269,13 @@
             "source": "crates/day2/src/security_epoch/firestore.rs",
             "module": "paired"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/firestore/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/firestore.rs",
+            "module": "restore"
+          }
         }
       ],
       "methods": [

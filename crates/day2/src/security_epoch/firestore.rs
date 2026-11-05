@@ -17,8 +17,11 @@ use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 
 mod paired;
-pub(in crate::security_epoch) mod restore;
+mod restore;
 pub(super) use paired::{ActionTransaction, begin_action, read_with_slot};
+pub(super) use restore::{
+    Names as RestoreNames, Transaction as RestoreTransaction, commit_reply as restore_commit_reply,
+};
 
 const MAX_BYTES: usize = 65_536;
 const ACQUISITION_BUDGET: Duration = Duration::from_secs(5);

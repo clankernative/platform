@@ -1,6 +1,6 @@
 //! Local wire/SQLite conformance, not a live Firestore or native owner test.
 use super::*;
-use crate::security_epoch::{firestore::restore as wire, kernel::restore::approval_use as model};
+use crate::security_epoch::{firestore as wire, kernel::restore::approval_use as model};
 use serde_json::json;
 
 const TX: &str = "cmVzdG9yZS1maXh0dXJl";
@@ -103,7 +103,7 @@ fn initial_reply(selection: &EpochStore, plan: &model::Plan) -> Result<Vec<Value
 
 fn commit(selection: &EpochStore, plan: &model::Plan, current: &Current) -> Result<Value> {
     let reply = serde_json::to_vec(&initial_reply(selection, plan)?)?;
-    let transaction = wire::Names::new(selection, plan)?.transaction(&reply)?;
+    let transaction = wire::RestoreNames::new(selection, plan)?.transaction(&reply)?;
     assert_eq!(transaction.observed()?.snapshot, plan.reservation.before);
     Ok(crate::json::decode(
         &transaction.commit_body(selection, plan, current, 1000)?,
@@ -114,7 +114,7 @@ fn commit(selection: &EpochStore, plan: &model::Plan, current: &Current) -> Resu
 fn exact_read_write_transaction_and_all_five_writes_pin_scope_and_conditions() -> Result<()> {
     let (selection, before) = initial();
     let (current, plan) = approval_use::plan(&selection, &before, 41)?;
-    let selected = wire::Names::new(&selection, &plan)?;
+    let selected = wire::RestoreNames::new(&selection, &plan)?;
     let read: Value = crate::json::decode(&selected.begin_body()?)?;
     assert_eq!(
         read,
@@ -128,7 +128,7 @@ fn exact_read_write_transaction_and_all_five_writes_pin_scope_and_conditions() -
     combined.remove(0);
     combined[0]["transaction"] = json!(TX);
     let transaction =
-        wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&combined)?)?;
+        wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&combined)?)?;
     let combined: Value =
         crate::json::decode(&transaction.commit_body(&selection, &plan, &current, 1000)?)?;
     assert_eq!(combined, value);
@@ -197,7 +197,7 @@ fn semantic_rejection_keeps_the_canonical_transaction_available_only_for_cleanup
             reply[0]["transaction"] = json!(TX);
         }
         let transaction =
-            wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+            wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
         assert!(transaction.observed().is_err(), "cut={cut}");
         let cleanup: Value = crate::json::decode(&transaction.rollback_body()?)?;
         assert_eq!(cleanup, json!({"transaction":TX}));
@@ -206,13 +206,13 @@ fn semantic_rejection_keeps_the_canonical_transaction_available_only_for_cleanup
         let mut reply = original.clone();
         reply[0]["transaction"] = json!(header);
         assert!(
-            wire::Names::new(&selection, &plan)?
+            wire::RestoreNames::new(&selection, &plan)?
                 .transaction(&serde_json::to_vec(&reply)?)
                 .is_err()
         );
     }
     assert!(
-        wire::Names::new(&selection, &plan)?
+        wire::RestoreNames::new(&selection, &plan)?
             .transaction(br#"[["cmVzdG9yZS1maXh0dXJl",null,null,null]]"#)
             .is_err()
     );
@@ -227,7 +227,7 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
         let mut reply = initial_reply(&selection, &plan)?;
         reply[index]["found"]["updateTime"] = json!(version(4));
         let transaction =
-            wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+            wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
         assert!(
             transaction
                 .commit_body(&selection, &plan, &current, 1000)
@@ -236,7 +236,7 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
         );
     }
     let original = serde_json::to_vec(&initial_reply(&selection, &plan)?)?;
-    let transaction = wire::Names::new(&selection, &plan)?.transaction(&original)?;
+    let transaction = wire::RestoreNames::new(&selection, &plan)?.transaction(&original)?;
     assert!(
         transaction
             .commit_body(&selection, &plan, &current, 1005)
@@ -245,7 +245,7 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
     let cleanup: Value = crate::json::decode(&transaction.rollback_body()?)?;
     assert_eq!(cleanup, json!({"transaction":TX}));
     let (_, other) = approval_use::plan(&selection, &before, 44)?;
-    let transaction = wire::Names::new(&selection, &plan)?.transaction(&original)?;
+    let transaction = wire::RestoreNames::new(&selection, &plan)?.transaction(&original)?;
     assert!(
         transaction
             .commit_body(&selection, &other, &current, 1000)
@@ -264,7 +264,7 @@ fn all_four_retained_documents_require_update_before_read_and_keep_cleanup_on_re
             let mut reply = initial_reply(&selection, &plan)?;
             reply[index]["found"][field] = json!("2026-11-05T00:00:00Z");
             let transaction =
-                wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+                wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
             assert!(transaction.observed().is_err(), "row={index}field={field}");
             assert!(
                 transaction
@@ -275,7 +275,7 @@ fn all_four_retained_documents_require_update_before_read_and_keep_cleanup_on_re
             assert_eq!(cleanup, json!({"transaction":TX}));
             let strong: Vec<_> = reply.into_iter().skip(1).collect();
             assert!(
-                wire::Names::new(&selection, &plan)?
+                wire::RestoreNames::new(&selection, &plan)?
                     .strong(&serde_json::to_vec(&strong)?)
                     .is_err()
             );
@@ -412,7 +412,7 @@ fn five_wire_write_cuts_and_unknown_completion_reopen_against_independent_expect
                 let count: i64 = db.query_row("SELECT count(*) FROM records", [], |r| r.get(0))?;
                 assert_eq!(count, if committed { 7 } else { 4 });
                 let bytes = read_back(&db, &names)?;
-                let observed = wire::Names::new(&selection, &plan)?.strong(&bytes)?;
+                let observed = wire::RestoreNames::new(&selection, &plan)?.strong(&bytes)?;
                 assert_eq!(
                     observed.snapshot.root.as_ref().unwrap().value.epoch.value(),
                     if committed { 2 } else { 1 }
@@ -517,7 +517,7 @@ fn canonical_receipt_envelopes_refuse_mutation_after_known_commit() -> Result<()
             _ => changed[6]["found"]["fields"]["restore_json"] = json!(["{}"]),
         }
         assert!(
-            wire::Names::new(&selection, &plan)?
+            wire::RestoreNames::new(&selection, &plan)?
                 .strong(&serde_json::to_vec(&changed)?)
                 .is_err(),
             "cut={cut}"
@@ -530,7 +530,7 @@ fn canonical_receipt_envelopes_refuse_mutation_after_known_commit() -> Result<()
             }
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
-            let _ = <wire::Transaction as Ambiguous<_>>::check;
+            let _ = <wire::RestoreTransaction as Ambiguous<_>>::check;
         }};
     }
     opaque!(Clone);
@@ -550,10 +550,10 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
     let (_, plan) = approval_use::plan(&selection, &before, 47)?;
     let initial = initial_reply(&selection, &plan)?;
     let strong: Vec<_> = initial.into_iter().skip(1).collect();
-    let observed = wire::Names::new(&selection, &plan)?.strong(&serde_json::to_vec(&strong)?)?;
+    let observed = wire::RestoreNames::new(&selection, &plan)?.strong(&serde_json::to_vec(&strong)?)?;
     let reply =
         json!({"writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)});
-    let record = wire::commit_reply(&serde_json::to_vec(&reply)?)?;
+    let record = wire::restore_commit_reply(&serde_json::to_vec(&reply)?)?;
     observed.after_commit(&record)?;
     assert!(matches!(
         model::reconcile(
@@ -583,12 +583,12 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
             _ => changed = json!([vec![json!({"updateTime":version(3)}); 5], version(3)]),
         }
         assert!(
-            wire::commit_reply(&serde_json::to_vec(&changed)?).is_err(),
+            wire::restore_commit_reply(&serde_json::to_vec(&changed)?).is_err(),
             "cut={cut}"
         );
     }
     let future = json!({"writeResults":vec![json!({"updateTime":"2026-11-05T00:00:00Z"});5],"commitTime":"2026-11-05T00:00:00Z"});
-    let record = wire::commit_reply(&serde_json::to_vec(&future)?)?;
+    let record = wire::restore_commit_reply(&serde_json::to_vec(&future)?)?;
     assert!(observed.after_commit(&record).is_err());
     Ok(())
 }
@@ -602,7 +602,7 @@ fn provider_owned_parse_details_and_oversize_bytes_never_escape_closed_errors() 
     reply[1]["found"]["fields"]["phase"]["mapValue"]["fields"]["phase"]["stringValue"] =
         json!(PRIVATE);
     let transaction =
-        wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+        wire::RestoreNames::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
     let error = match transaction.observed() {
         Ok(_) => anyhow::bail!("unexpected provider admission"),
         Err(error) => error,
@@ -612,14 +612,14 @@ fn provider_owned_parse_details_and_oversize_bytes_never_escape_closed_errors() 
     assert_eq!(cleanup, json!({"transaction":TX}));
     let duplicate = format!("[{{\"transaction\":\"{TX}\",\"transaction\":\"{PRIVATE}\"}}]");
     for bytes in [duplicate.into_bytes(), vec![b' '; 65_537]] {
-        let error = match wire::Names::new(&selection, &plan)?.transaction(&bytes) {
+        let error = match wire::RestoreNames::new(&selection, &plan)?.transaction(&bytes) {
             Ok(_) => anyhow::bail!("unexpected malformed transaction"),
             Err(error) => error,
         };
         assert!(!format!("{error:#}").contains(PRIVATE));
     }
     let invalid = format!("{{\"writeResults\":\"{PRIVATE}\",\"commitTime\":\"{PRIVATE}\"}}");
-    let error = match wire::commit_reply(invalid.as_bytes()) {
+    let error = match wire::restore_commit_reply(invalid.as_bytes()) {
         Ok(_) => anyhow::bail!("unexpected malformed acknowledgement"),
         Err(error) => error,
     };
