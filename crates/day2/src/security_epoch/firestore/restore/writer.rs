@@ -1,14 +1,17 @@
 //! Bounded messages for the distinct restored-writer transition. These codecs
 //! carry DATA only; the native sender retains the actual approval, original,
 //! exclusion, creator/P3 and authenticated new holder around every request.
-use super::{RawEntry, Stream, document_times, entries, field_shapes, receipt_write, record, timestamp, transaction_header};
+use super::{
+    RawEntry, Stream, document_times, entries, field_shapes, receipt_write, record, timestamp,
+    transaction_header,
+};
+use crate::security_epoch::kernel::restore::writer as kernel;
+use crate::security_epoch::kernel::{UpdateTime, Versioned, restore};
 use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::{Digest, security_epoch::EpochStore};
-use crate::security_epoch::kernel::{UpdateTime, Versioned, restore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, marker::PhantomData, rc::Rc};
-use crate::security_epoch::kernel::restore::writer as kernel;
 
 pub(in crate::security_epoch) struct Names {
     base: super::Names,
