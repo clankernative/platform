@@ -430,8 +430,15 @@ struct Observation {
 fn observation(db: &Connection, token: &str) -> Result<Observation> {
     let authority = authority_state::current(db)?;
     let budget = ledger(db)?;
-    ensure!(budget.known_usage.calls == 2 && budget.unknown_usage.len() == 1, "test_debt_changed");
-    let unknown: String = db.query_row("SELECT state FROM oauth_refresh_attempts WHERE attempt='old-refresh'", [], |row| row.get(0))?;
+    ensure!(
+        budget.known_usage.calls == 2 && budget.unknown_usage.len() == 1,
+        "test_debt_changed"
+    );
+    let unknown: String = db.query_row(
+        "SELECT state FROM oauth_refresh_attempts WHERE attempt='old-refresh'",
+        [],
+        |row| row.get(0),
+    )?;
     ensure!(unknown == "uncertain", "test_unknown_refresh_erased");
     Ok(Observation {
         enabled: authority.document.enabled,
@@ -450,9 +457,29 @@ fn expected(reset: bool) -> Observation {
     // This oracle knows only the two allowed terminal states. It never reads
     // reset counts, cut rows, production transitions or a returned authority.
     if reset {
-        Observation { enabled: false, old_authority: false, frozen_debt: true, revoked_versions: 1, open_deliveries: 0, sessions: 0, secrets: 0, reauthorization_required: true, old_token_accepted: false }
+        Observation {
+            enabled: false,
+            old_authority: false,
+            frozen_debt: true,
+            revoked_versions: 1,
+            open_deliveries: 0,
+            sessions: 0,
+            secrets: 0,
+            reauthorization_required: true,
+            old_token_accepted: false,
+        }
     } else {
-        Observation { enabled: true, old_authority: true, frozen_debt: false, revoked_versions: 0, open_deliveries: 1, sessions: 1, secrets: 1, reauthorization_required: false, old_token_accepted: true }
+        Observation {
+            enabled: true,
+            old_authority: true,
+            frozen_debt: false,
+            revoked_versions: 0,
+            open_deliveries: 1,
+            sessions: 1,
+            secrets: 1,
+            reauthorization_required: false,
+            old_token_accepted: true,
+        }
     }
 }
 
@@ -468,13 +495,25 @@ fn history(seed: u64, actions: &[Action]) -> Result<Vec<Observation>> {
                 Action::Inspect => {}
                 Action::DropReset | Action::WrongEpoch => {
                     let before = snapshot(&fixture.db)?;
-                    let tx = Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
+                    let tx =
+                        Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
                     let result = crate::oauth::restore::reset_application_in(
-                        &tx, &fixture.fence, &fixture.authority_schema, &fixture.oauth_schema,
-                        &fixture.cut, &fixture.namespace,
-                        if matches!(action, Action::WrongEpoch) { 8 } else { 1 },
+                        &tx,
+                        &fixture.fence,
+                        &fixture.authority_schema,
+                        &fixture.oauth_schema,
+                        &fixture.cut,
+                        &fixture.namespace,
+                        if matches!(action, Action::WrongEpoch) {
+                            8
+                        } else {
+                            1
+                        },
                     );
-                    assert_eq!(result.is_ok(), matches!(action, Action::DropReset) && !reset_committed);
+                    assert_eq!(
+                        result.is_ok(),
+                        matches!(action, Action::DropReset) && !reset_committed
+                    );
                     if matches!(action, Action::WrongEpoch) {
                         // Even a caller that catches the error and commits the
                         // surrounding transaction cannot retain a partial cut.
@@ -500,7 +539,10 @@ fn history(seed: u64, actions: &[Action]) -> Result<Vec<Observation>> {
                     for _ in 0..2 {
                         let reopened = Connection::open(&path)?;
                         assert!(before == snapshot(&reopened)?);
-                        assert_eq!(observation(&reopened, &fixture.token)?, expected(reset_committed));
+                        assert_eq!(
+                            observation(&reopened, &fixture.token)?,
+                            expected(reset_committed)
+                        );
                     }
                 }
             }
@@ -515,11 +557,17 @@ fn history(seed: u64, actions: &[Action]) -> Result<Vec<Observation>> {
 }
 
 #[test]
-fn generated_offline_reset_histories_replay_twice_with_independent_terminal_expectations() -> Result<()> {
+fn generated_offline_reset_histories_replay_twice_with_independent_terminal_expectations()
+-> Result<()> {
     // These are SQL-denial histories, not retries of native effects or consumed
     // approvals. Reopen observes copied DATA; it never adopts a target/writer.
     for seed in 0..12u64 {
-        let mut actions = vec![Action::Inspect, Action::DropReset, Action::WrongEpoch, Action::Reopen];
+        let mut actions = vec![
+            Action::Inspect,
+            Action::DropReset,
+            Action::WrongEpoch,
+            Action::Reopen,
+        ];
         for index in 0..8 {
             actions.push(match seed.rotate_left(index) % 5 {
                 0 => Action::Inspect,
