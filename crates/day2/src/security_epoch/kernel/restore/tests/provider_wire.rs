@@ -501,3 +501,35 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
     assert!(observed.after_commit(&record).is_err());
     Ok(())
 }
+
+#[test]
+fn provider_owned_parse_details_and_oversize_bytes_never_escape_closed_errors() -> Result<()> {
+    const PRIVATE: &str = "PRIVATE-provider-fixture-not-operator-data";
+    let (selection, before) = initial();
+    let (_, plan) = approval_use::plan(&selection, &before, 48)?;
+    let mut reply = initial_reply(&selection, &plan)?;
+    reply[1]["found"]["fields"]["phase"]["mapValue"]["fields"]["phase"]["stringValue"] = json!(PRIVATE);
+    let transaction = wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&reply)?)?;
+    let error = match transaction.observed() {
+        Ok(_) => anyhow::bail!("unexpected provider admission"),
+        Err(error) => error,
+    };
+    assert_eq!(format!("{error:#}"), "restore_provider_initial_snapshot");
+    let cleanup: Value = crate::json::decode(&transaction.rollback_body()?)?;
+    assert_eq!(cleanup, json!({"transaction":TX}));
+    let duplicate = format!("[{{\"transaction\":\"{TX}\",\"transaction\":\"{PRIVATE}\"}}]");
+    for bytes in [duplicate.into_bytes(), vec![b' '; 65_537]] {
+        let error = match wire::Names::new(&selection, &plan)?.transaction(&bytes) {
+            Ok(_) => anyhow::bail!("unexpected malformed transaction"),
+            Err(error) => error,
+        };
+        assert!(!format!("{error:#}").contains(PRIVATE));
+    }
+    let invalid = format!("{{\"writeResults\":\"{PRIVATE}\",\"commitTime\":\"{PRIVATE}\"}}");
+    let error = match wire::commit_reply(invalid.as_bytes()) {
+        Ok(_) => anyhow::bail!("unexpected malformed acknowledgement"),
+        Err(error) => error,
+    };
+    assert!(!format!("{error:#}").contains(PRIVATE));
+    Ok(())
+}

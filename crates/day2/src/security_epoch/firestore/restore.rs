@@ -184,7 +184,8 @@ impl Names {
                 initial.push(Entry {
                     transaction: None,
                     read_time: entry.read_time,
-                    found: entry.found.map(serde_json::from_value).transpose()?,
+                    found: entry.found.map(|value| serde_json::from_value(value)
+                        .map_err(|_| anyhow::anyhow!("restore_provider_initial_document"))).transpose()?,
                     missing: entry.missing,
                 });
             } else if name == self.advance {
@@ -200,7 +201,8 @@ impl Names {
             "restore_provider_incomplete_snapshot"
         );
         Ok(Observed {
-            snapshot: decode_snapshot(&self.initial, initial)?,
+            snapshot: decode_snapshot(&self.initial, initial)
+                .map_err(|_| anyhow::anyhow!("restore_provider_initial_snapshot"))?,
             advance,
             reservation,
             grant,
