@@ -278,7 +278,7 @@ pub fn mark_uncertain(db: &Connection, attempt: &str) -> Result<bool> {
 /// only if this attempt still owns the active base version. A stale rejection
 /// cannot disable a successor connection.
 #[cfg(test)]
-fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<bool> {
+pub(super) fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<bool> {
     validate_id(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = definitive_rejection_in(&tx, attempt)?;
@@ -298,6 +298,7 @@ pub(super) fn reject_current_refresh(
 }
 
 fn definitive_rejection_in(tx: &Transaction<'_>, attempt: &str) -> Result<bool> {
+    super::restore::require_open(tx, super::restore::Kind::Refresh, attempt)?;
     let row: Option<RefreshEligibility> = tx
         .query_row(
             "SELECT slot, generation, base_version, security_epoch, profile, account, affinity

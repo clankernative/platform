@@ -499,6 +499,7 @@ pub fn mark_uncertain(db: &Connection, attempt: &str) -> Result<bool> {
 /// A validated provider denial consumes only an awaiting attempt. The parser's
 /// provider description is discarded before this durable transition.
 pub fn record_denial(db: &Connection, attempt: &str, now: i64) -> Result<bool> {
+    super::restore::require_open(db, super::restore::Kind::Connect, attempt)?;
     identifier(attempt)?;
     Ok(db.execute(
         "UPDATE oauth_connect_attempts SET state = 'denied'
