@@ -4343,22 +4343,50 @@
       ]
     },
     {
-      "source": "crates/day2/src/security_epoch/restore_authority.rs",
-      "type_name": "ClosedCredentialPeers",
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "ConsumedRestoreApproval",
       "owning_children": [],
       "methods": [
-        "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+        "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >",
+        "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
         {
-          "owner": "PreparedRestoreFence",
-          "signature": "pub (crate) fn closed_credential_peers < 'db > (& 'db self , connection : & 'db rusqlite :: Transaction < '_ > , applied : & 'db crate :: oauth :: restore :: AppliedCut < '_ , '_ , '_ > , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < ClosedCredentialPeers < 'db > >"
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
         }
       ],
       "material_uses": [
         {
-          "owner": "ClosedCredentialPeers < '_ >",
-          "signature": "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+          "owner": "ConsumedRestoreApproval < '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >"
+        },
+        {
+          "owner": "ConsumedRestoreApproval < '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "NativeRestoreApproval",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
+        },
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn refuse (& mut self)"
         }
       ],
       "proof_uses": [],
@@ -4383,6 +4411,29 @@
       "kind": "private_material",
       "consuming_methods": [],
       "destructor": "sha256:9e709bf1f2908884cd621e09f31eb12b03f20cca0bbc54d52e5888f37002147b"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_authority.rs",
+      "type_name": "ClosedCredentialPeers",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedRestoreFence",
+          "signature": "pub (crate) fn closed_credential_peers < 'db > (& 'db self , connection : & 'db rusqlite :: Transaction < '_ > , applied : & 'db crate :: oauth :: restore :: AppliedCut < '_ , '_ , '_ > , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < ClosedCredentialPeers < 'db > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ClosedCredentialPeers < '_ >",
+          "signature": "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     },
     {
       "source": "crates/day2/src/security_epoch/serving.rs",
@@ -5728,57 +5779,6 @@
       ],
       "proof_uses": [],
       "owning_children": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
-      "type_name": "ConsumedRestoreApproval",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >",
-        "pub (crate) fn refuse (& mut self)"
-      ],
-      "factories": [
-        {
-          "owner": "NativeRestoreApproval < 'source >",
-          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "ConsumedRestoreApproval < '_ >",
-          "signature": "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >"
-        },
-        {
-          "owner": "ConsumedRestoreApproval < '_ >",
-          "signature": "pub (crate) fn refuse (& mut self)"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
-      "type_name": "NativeRestoreApproval",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >",
-        "pub (crate) fn refuse (& mut self)"
-      ],
-      "factories": [],
-      "material_uses": [
-        {
-          "owner": "NativeRestoreApproval < 'source >",
-          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
-        },
-        {
-          "owner": "NativeRestoreApproval < 'source >",
-          "signature": "pub (crate) fn refuse (& mut self)"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
     }
   ],
   "buffer_destructors": [
