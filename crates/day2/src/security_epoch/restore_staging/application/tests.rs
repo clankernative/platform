@@ -223,7 +223,9 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
     effects::scope(simulation::World::new(98311), || {
         let fixture = Fixture::new()?;
         assert!(credentials::restore::first_epoch_ingress_for_tests(
-            &fixture.db, &fixture.token, 1
+            &fixture.db,
+            &fixture.token,
+            1
         )?);
         let material = rows(&fixture.db, "day2_credential_material")?;
         let receipts = rows(&fixture.db, "day2_credential_receipts")?;
@@ -268,7 +270,9 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
             );
             for current_epoch in [1, 2] {
                 assert!(!credentials::restore::first_epoch_ingress_for_tests(
-                    &db, &fixture.token, current_epoch
+                    &db,
+                    &fixture.token,
+                    current_epoch
                 )?);
             }
             assert_eq!(
@@ -384,14 +388,16 @@ fn credential_only_profile_still_refuses_closed_peer_history_and_nested_budget_c
 #[test]
 fn first_restore_selection_refuses_noninitial_source_epochs() -> Result<()> {
     for source_epoch in [7, 8] {
-        assert!(restore_cut::fixture_for_storage_epoch(
-            Digest::new(b"inventory"),
-            911,
-            "wonderly/dev/transcriber",
-            Digest::new(b"schema"),
-            source_epoch,
-        )
-        .is_err());
+        assert!(
+            restore_cut::fixture_for_storage_epoch(
+                Digest::new(b"inventory"),
+                911,
+                "wonderly/dev/transcriber",
+                Digest::new(b"schema"),
+                source_epoch,
+            )
+            .is_err()
+        );
     }
     Ok(())
 }

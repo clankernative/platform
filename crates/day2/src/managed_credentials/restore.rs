@@ -4,20 +4,20 @@
 use super::{
     CREDENTIAL_PEER_TABLES, CREDENTIAL_TABLES, install_schema, namespace_key, stage_revoke,
 };
-use crate::oauth::schema;
-use anyhow::{Result, ensure};
-use day2_capabilities::credentials::Namespace;
-use rusqlite::{Transaction, params};
-use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::{
     IngressVerification, PublicReceipt, VerifiedHumanPost, authorize_reveal, prepare_issue,
     stage_issue, verify_ingress,
 };
+use crate::oauth::schema;
 #[cfg(test)]
 use anyhow::Context;
+use anyhow::{Result, ensure};
+use day2_capabilities::credentials::Namespace;
 #[cfg(test)]
 use rusqlite::Connection;
+use rusqlite::{Transaction, params};
+use serde::{Deserialize, Serialize};
 
 const MAX_LINEAGES: usize = 1024;
 const MAX_VERSIONS: i64 = 4096;
