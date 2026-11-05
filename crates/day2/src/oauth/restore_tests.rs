@@ -166,9 +166,9 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
                 .is_err()
             );
             assert!(connect::begin(&mut db, &intent("pending"), 5).is_err());
-            assert!(connect::record_denial(&db,"pending",5).is_err());
-            for attempt in ["refresh_1","refresh_2"] {
-                assert!(store::mark_definitive_rejection(&mut db,attempt).is_err());
+            assert!(connect::record_denial(&db, "pending", 5).is_err());
+            for attempt in ["refresh_1", "refresh_2"] {
+                assert!(store::mark_definitive_rejection(&mut db, attempt).is_err());
             }
             for attempt in ["pending", "sent"] {
                 assert!(
@@ -260,41 +260,99 @@ fn late_prepared_code_and_tokens_cannot_publish_or_decrypt_after_cut() -> Result
 }
 
 #[test]
-fn actual_code_and_provider_denial_callbacks_cannot_change_cut_closed_rows_or_material() -> Result<()> {
-    fn rows(db:&Connection,sql:&str)->Result<Vec<Vec<rusqlite::types::Value>>> {
-        let mut query=db.prepare(sql)?;
-        let result=query.query_map([],|row|(0..row.as_ref().column_count()).map(|i|row.get(i)).collect())?
+fn actual_code_and_provider_denial_callbacks_cannot_change_cut_closed_rows_or_material()
+-> Result<()> {
+    fn rows(db: &Connection, sql: &str) -> Result<Vec<Vec<rusqlite::types::Value>>> {
+        let mut query = db.prepare(sql)?;
+        let result = query
+            .query_map([], |row| {
+                (0..row.as_ref().column_count())
+                    .map(|i| row.get(i))
+                    .collect()
+            })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(result)
     }
-    crate::oauth::effects::scope(crate::oauth::simulation::World::new(9722),|| {
-        for denied in [false,true] {
-            for restored in [false,true] {
-                let directory=tempfile::tempdir()?;let path=directory.path().join("callback.sqlite");
-                let mut db=database(&path)?;
-                let fixture=profiles::tests::external_fixture();let key=profiles::tests::exchange_key();
-                let authorization=exchange::prepare_authorization(fixture.input(),&key,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")?;
-                let code_ref=authorization.code_ref().to_owned();
-                assert!(authorization.begin(&mut db,1)?);
-                let raw:&[u8]=if denied {b"state=0123456789abcdefghijklmnopqrstuvwxyzABCDEF&error=access_denied&iss=https%3A%2F%2Fissuer.example%2Ftenant"}
-                    else {b"state=0123456789abcdefghijklmnopqrstuvwxyzABCDEF&code=fixture_code&iss=https%3A%2F%2Fissuer.example%2Ftenant"};
-                let ingress=||outbound::CallbackIngress {attempt:&fixture.intent.attempt,raw_query:raw,route:&fixture.instance.registration.callback,session:fixture.binding.session(),issuer_binding:&fixture.reviewed.issuer,code_ref:&code_ref,now:2};
+    crate::oauth::effects::scope(crate::oauth::simulation::World::new(9722), || {
+        for denied in [false, true] {
+            for restored in [false, true] {
+                let directory = tempfile::tempdir()?;
+                let path = directory.path().join("callback.sqlite");
+                let mut db = database(&path)?;
+                let fixture = profiles::tests::external_fixture();
+                let key = profiles::tests::exchange_key();
+                let authorization = exchange::prepare_authorization(
+                    fixture.input(),
+                    &key,
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+                )?;
+                let code_ref = authorization.code_ref().to_owned();
+                assert!(authorization.begin(&mut db, 1)?);
+                let raw: &[u8] = if denied {
+                    b"state=0123456789abcdefghijklmnopqrstuvwxyzABCDEF&error=access_denied&iss=https%3A%2F%2Fissuer.example%2Ftenant"
+                } else {
+                    b"state=0123456789abcdefghijklmnopqrstuvwxyzABCDEF&code=fixture_code&iss=https%3A%2F%2Fissuer.example%2Ftenant"
+                };
+                let ingress = || outbound::CallbackIngress {
+                    attempt: &fixture.intent.attempt,
+                    raw_query: raw,
+                    route: &fixture.instance.registration.callback,
+                    session: fixture.binding.session(),
+                    issuer_binding: &fixture.reviewed.issuer,
+                    code_ref: &code_ref,
+                    now: 2,
+                };
                 if !restored {
-                    let outcome=exchange::handle_qualified_callback(&mut db,fixture.input(),ingress(),&key)?;
-                    assert!(if denied {matches!(outcome,outbound::CallbackOutcome::Denied{..})}
-                        else {matches!(outcome,outbound::CallbackOutcome::CodeAccepted{..})});
+                    let outcome = exchange::handle_qualified_callback(
+                        &mut db,
+                        fixture.input(),
+                        ingress(),
+                        &key,
+                    )?;
+                    assert!(if denied {
+                        matches!(outcome, outbound::CallbackOutcome::Denied { .. })
+                    } else {
+                        matches!(outcome, outbound::CallbackOutcome::CodeAccepted { .. })
+                    });
                     continue;
                 }
-                let original=rows(&db,"SELECT * FROM oauth_connect_attempts ORDER BY attempt")?;
-                let verifier=rows(&db,"SELECT * FROM oauth_private_verifiers ORDER BY reference")?;
+                let original = rows(&db, "SELECT * FROM oauth_connect_attempts ORDER BY attempt")?;
+                let verifier = rows(
+                    &db,
+                    "SELECT * FROM oauth_private_verifiers ORDER BY reference",
+                )?;
                 assert!(!verifier.is_empty());
-                cut(&mut db,&Profile::prepare()?,92)?;
+                cut(&mut db, &Profile::prepare()?, 92)?;
                 for _ in 0..2 {
-                    drop(db);db=Connection::open(&path)?;
-                    assert!(outbound::handle_callback_profile(&mut db,ingress(),&protocol::CallbackParameters {require_issuer:true,allowed_extras:BTreeSet::new()},|_,_|panic!("closed real callback entered custody")).is_err());
-                    assert_eq!(rows(&db,"SELECT * FROM oauth_connect_attempts ORDER BY attempt")?,original);
-                    assert_eq!(rows(&db,"SELECT * FROM oauth_private_verifiers ORDER BY reference")?,verifier);
-                    assert!(rows(&db,"SELECT * FROM oauth_private_codes ORDER BY reference")?.is_empty());
+                    drop(db);
+                    db = Connection::open(&path)?;
+                    assert!(
+                        outbound::handle_callback_profile(
+                            &mut db,
+                            ingress(),
+                            &protocol::CallbackParameters {
+                                require_issuer: true,
+                                allowed_extras: BTreeSet::new()
+                            },
+                            |_, _| panic!("closed real callback entered custody")
+                        )
+                        .is_err()
+                    );
+                    assert_eq!(
+                        rows(&db, "SELECT * FROM oauth_connect_attempts ORDER BY attempt")?,
+                        original
+                    );
+                    assert_eq!(
+                        rows(
+                            &db,
+                            "SELECT * FROM oauth_private_verifiers ORDER BY reference"
+                        )?,
+                        verifier
+                    );
+                    assert!(
+                        rows(&db, "SELECT * FROM oauth_private_codes ORDER BY reference")?
+                            .is_empty()
+                    );
                 }
             }
         }
@@ -841,9 +899,33 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     specs.push((connect,"await_account_approval",None,"identifier(attempt)?;identifier(account)?;identifier(scope_evidence)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
     specs.push((connect,"quarantine_external_bound",None,"let intent=verified.intent();let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","&intent.attempt"));
     specs.push((connect,"finish_blocked",None,"identifier(attempt)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
-    specs.push((outbound,"handle_callback_in",None,"","Connect","tx","ingress.attempt"));
-    specs.push((connect,"record_denial",None,"","Connect","db","attempt"));
-    specs.push((refresh,"definitive_rejection_in",None,"","Refresh","tx","attempt"));
+    specs.push((
+        outbound,
+        "handle_callback_in",
+        None,
+        "",
+        "Connect",
+        "tx",
+        "ingress.attempt",
+    ));
+    specs.push((
+        connect,
+        "record_denial",
+        None,
+        "",
+        "Connect",
+        "db",
+        "attempt",
+    ));
+    specs.push((
+        refresh,
+        "definitive_rejection_in",
+        None,
+        "",
+        "Refresh",
+        "tx",
+        "attempt",
+    ));
     specs.push((
         exchange,
         "load_binding",
@@ -973,22 +1055,34 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         assert!(!accepts(&deleted, prefix, &guard, count)?, "deleted {name}");
         let mut delayed = block.clone();
         let check = delayed.stmts.remove(index);
-        let commit:syn::Stmt=syn::parse_str("tx.commit()?;")?;
-        let commits:Vec<_>=delayed.stmts.iter().enumerate()
-            .filter(|(_,value)|statement(value)==statement(&commit)).map(|(i,_)|i).collect();
-        assert!(commits.len()<=1);
-        if let Some(position)=commits.first() {
+        let commit: syn::Stmt = syn::parse_str("tx.commit()?;")?;
+        let commits: Vec<_> = delayed
+            .stmts
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| statement(value) == statement(&commit))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(commits.len() <= 1);
+        if let Some(position) = commits.first() {
             // Move after real work but before consuming the owned transaction.
-            delayed.stmts.insert(*position,check);
+            delayed.stmts.insert(*position, check);
         } else {
-            let last=delayed.stmts.pop().ok_or_else(||anyhow::anyhow!("guard_tail_missing"))?;
-            let syn::Stmt::Expr(value, None)=last else {anyhow::bail!("guard_tail_shape")};
-            let mut saved:syn::Stmt=syn::parse_str("let restore_guard_delayed_result=();")?;
-            let syn::Stmt::Local(local)=&mut saved else {unreachable!()};
-            local.init.as_mut().unwrap().expr=Box::new(value);
+            let last = delayed
+                .stmts
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("guard_tail_missing"))?;
+            let syn::Stmt::Expr(value, None) = last else {
+                anyhow::bail!("guard_tail_shape")
+            };
+            let mut saved: syn::Stmt = syn::parse_str("let restore_guard_delayed_result=();")?;
+            let syn::Stmt::Local(local) = &mut saved else {
+                unreachable!()
+            };
+            local.init.as_mut().unwrap().expr = Box::new(value);
             delayed.stmts.push(saved);
             delayed.stmts.push(check);
-            let tail:syn::Block=syn::parse_str("{restore_guard_delayed_result}")?;
+            let tail: syn::Block = syn::parse_str("{restore_guard_delayed_result}")?;
             delayed.stmts.extend(tail.stmts);
         }
         assert!(!accepts(&delayed, prefix, &guard, count)?, "delayed {name}");
