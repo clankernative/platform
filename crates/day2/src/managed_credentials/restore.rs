@@ -231,7 +231,7 @@ fn reset_in(
 fn note_work(db: &Connection, step: &'static str) {
     eprintln!(
         "restore_test_work step={step} remaining={:?}",
-        schema::remaining_steps_for_tests(db)
+        schema::remaining_work_for_tests(db)
     );
 }
 
