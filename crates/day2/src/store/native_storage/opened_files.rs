@@ -239,7 +239,6 @@ mod tests {
             ensure!(bytes.len() <= 5, "SQLite writer probe bound");
             let acquired: bool = crate::json::decode(&bytes)?;
             assert_eq!(acquired, close_duplicate);
-            drop(files);
             transaction.rollback()?;
         }
         Ok(())
@@ -313,13 +312,13 @@ mod tests {
         );
         let bytes = fs::read(root.join("creator-identities.json"))?;
         ensure!(bytes.len() < 512, "SQLite sidecar fixture bound");
-        Ok(crate::json::decode(&bytes)?)
+        crate::json::decode(&bytes)
     }
 
     fn current_authority(root: &Path) -> Result<crate::authority_state::ActiveAuthority> {
         let bytes = fs::read(root.join("current-authority.json"))?;
         ensure!(bytes.len() < 4096, "SQLite authority fixture bound");
-        Ok(crate::json::decode(&bytes)?)
+        crate::json::decode(&bytes)
     }
 
     #[test]
@@ -381,7 +380,6 @@ mod tests {
         // the complete read. MAIN/path/seed checks and a stable observed view
         // can all pass; genuine creator-sidecar comparison must still refuse.
         files.check_live()?;
-        drop(files);
         transaction.rollback()?;
         Ok(())
     }
@@ -433,7 +431,6 @@ mod tests {
             expected[2]
         );
         files.check_live()?;
-        drop(files);
         transaction.rollback()?;
         Ok(())
     }
@@ -472,7 +469,6 @@ mod tests {
         );
         assert_eq!(named_inode(root.join("creator-shm"))?, expected[2]);
         files.check_live()?;
-        drop(files);
         transaction.rollback()?;
         Ok(())
     }
@@ -501,7 +497,6 @@ mod tests {
             );
         }
         files.check_live()?;
-        drop(files);
         transaction.rollback()?;
         assert!(read(&connection).is_err());
         Ok(())
@@ -540,7 +535,6 @@ mod tests {
         // A live matching handle view alone is deliberately NOT current-file
         // permission. The future owner must compare genuine creator handles.
         files.check_live()?;
-        drop(files);
         transaction.rollback()?;
         Ok(())
     }
