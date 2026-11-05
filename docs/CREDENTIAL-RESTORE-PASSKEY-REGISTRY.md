@@ -14,7 +14,7 @@ Each key contains exactly these fields:
 
 | Field | Meaning and bound |
 | --- | --- |
-| `email` | Exact canonical lowercase ASCII admin email, at most 254 bytes. |
+| `email` | Exact admin email under the existing identity grammar, at most 256 bytes. ASCII uppercase is refused; Unicode bytes are preserved without normalization. |
 | `subject` | Exact authenticated admin subject, 1–1,024 bytes, no control characters. |
 | `credential_id` | Public credential identifier, a JSON array of 1–1,023 unsigned bytes. |
 | `user_handle` | The actual authenticator enrollment user handle, 1–64 unsigned bytes. Never derive one from email or subject. |

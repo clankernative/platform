@@ -164,7 +164,7 @@ fn bounded_text<'de, D: Deserializer<'de>, const N: usize>(
         .map_err(|_| de::Error::custom("restore_passkey_text_encoding"))
 }
 fn email_text<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
-    bounded_text::<D, 254>(d)
+    bounded_text::<D, 256>(d)
 }
 fn subject_text<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
     bounded_text::<D, 1024>(d)
@@ -271,14 +271,15 @@ fn dns_host(host: &str) -> bool {
 impl AdminPasskey {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.email.len() <= 254 && self.subject.len() <= 1024 && self.origin.len() <= 2048,
+            self.email.len() <= 256 && self.subject.len() <= 1024 && self.origin.len() <= 2048,
             "restore_passkey_text_bound"
         );
         let parts = self.email.split('@').collect::<Vec<_>>();
         ensure!(
             !self.email.is_empty()
-                && self.email.is_ascii()
-                && self.email.len() <= 254
+                && self.email.len() <= 256
+                && !self.email.starts_with("domain:")
+                && !self.email.starts_with("credential_client:")
                 && self.email.to_ascii_lowercase() == self.email
                 && !self
                     .email

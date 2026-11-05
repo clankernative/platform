@@ -27,7 +27,7 @@ fn key() -> AdminPasskey {
 fn registry() -> Registry {
     Registry {
         version: 1,
-        keys: BTreeMap::from([(Name::try_from("primary".into()).unwrap(), key())]),
+        keys: BTreeMap::from([(Name::try_from("primary".to_owned()).unwrap(), key())]),
     }
 }
 
@@ -210,7 +210,7 @@ fn rp_and_origin_are_exact_canonical_https_and_never_suffix_matches() {
 #[test]
 fn credential_selection_is_unique_and_admin_binding_is_unambiguous() {
     let mut r = registry();
-    let label = Name::try_from("second".into()).unwrap();
+    let label = Name::try_from("second".to_owned()).unwrap();
     r.keys.insert(label.clone(), key());
     assert!(r.validate().is_err());
     r.keys.get_mut(&label).unwrap().credential_id.push(4);
@@ -227,15 +227,51 @@ fn credential_selection_is_unique_and_admin_binding_is_unambiguous() {
     k.validate().unwrap();
     for email in [
         "Admin@example.test",
-        "é@example.test",
         "a@@example.test",
         "@example.test",
         "a @example.test",
+        "domain:a@example.test",
+        "credential_client:a@example.test",
     ] {
         let mut k = key();
         k.email = email.into();
         assert!(k.validate().is_err());
     }
+}
+
+#[test]
+fn unicode_admins_roundtrip_as_distinct_exact_identity_bytes() {
+    let mut r = registry();
+    let nfc = "álîce@example.org";
+    let nfd = "a\u{301}lîce@example.org";
+    let primary = r.keys.values_mut().next().unwrap();
+    primary.email = nfc.to_owned();
+    primary.subject = "opaque-主体".to_owned();
+    let mut second = key();
+    second.email = nfd.to_owned();
+    second.subject = "opaque-主體".to_owned();
+    second.credential_id.push(99);
+    r.keys
+        .insert(Name::try_from("second".to_owned()).unwrap(), second);
+    r.validate().unwrap();
+    let decoded: Registry = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
+    assert_eq!(decoded, r);
+    let identities = decoded
+        .keys
+        .values()
+        .map(|k| (k.email.as_str(), k.subject.as_str()))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        identities,
+        BTreeSet::from([(nfc, "opaque-主体"), (nfd, "opaque-主體")])
+    );
+    let mut maximum = key();
+    maximum.email = format!("{}@a", "x".repeat(254));
+    assert_eq!(maximum.email.len(), 256);
+    assert_eq!(
+        serde_json::from_value::<AdminPasskey>(serde_json::to_value(&maximum).unwrap()).unwrap(),
+        maximum
+    );
 }
 
 #[test]
@@ -247,7 +283,7 @@ fn fields_and_total_registry_bytes_are_bounded_before_use() {
         ("user_handle", json!(vec![1; 65])),
         ("credential_id", json!("PRIVATE-INPUT")),
         ("subject", json!("x".repeat(1025))),
-        ("email", json!("x".repeat(255))),
+        ("email", json!("x".repeat(257))),
         ("rp_id", json!("x".repeat(254))),
         ("origin", json!("x".repeat(2049))),
     ] {
@@ -284,7 +320,7 @@ fn fields_and_total_registry_bytes_are_bounded_before_use() {
     let mut extra = key();
     extra.credential_id = vec![255, 255];
     r.keys
-        .insert(Name::try_from("one_too_many".into()).unwrap(), extra);
+        .insert(Name::try_from("one_too_many".to_owned()).unwrap(), extra);
     assert!(r.validate().is_err());
     assert!(serde_json::from_value::<Registry>(serde_json::to_value(&r).unwrap()).is_err());
 }
