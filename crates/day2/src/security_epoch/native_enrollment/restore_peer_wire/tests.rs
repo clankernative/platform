@@ -18,9 +18,9 @@ fn projection() -> Projection {
         full_archive: d("complete-captured-archive"),
         target: TargetBinding {
             scope: day2_capabilities::security_epoch::AuthorityScope {
-                installation: "installation".into(),
-                environment: "production".into(),
-                app: "app".into(),
+                installation: "installation".to_owned().try_into().unwrap(),
+                environment: "production".to_owned().try_into().unwrap(),
+                app: "app".to_owned().try_into().unwrap(),
             },
             binding_generation: 1,
             authority: d("authority"),
@@ -91,9 +91,9 @@ fn phases(app: &StageStatement, controller: &StageStatement) -> Vec<RestoreBody>
         receipt: Digest::new(b"writer-receipt"),
         root: Digest::new(b"restored-root"),
         sentinel: Digest::new(b"restored-sentinel"),
-        root_version: "2026-11-05T00:00:00Z".try_into().unwrap(),
-        sentinel_version: "2026-11-05T00:00:00Z".try_into().unwrap(),
-        receipt_version: "2026-11-05T00:00:00Z".try_into().unwrap(),
+        root_version: "2026-11-05T00:00:00Z".to_owned().try_into().unwrap(),
+        sentinel_version: "2026-11-05T00:00:00Z".to_owned().try_into().unwrap(),
+        receipt_version: "2026-11-05T00:00:00Z".to_owned().try_into().unwrap(),
     };
     let a = Digest::of(&activation).unwrap();
     vec![
@@ -217,7 +217,7 @@ fn real_selection_nonce_stage_and_projection_helpers_reject_substitution() -> Re
             4 => other.target.incarnation = Digest::new(b"other"),
             5 => other.target.security_epoch += 1,
             6 => other.target.binding_generation += 1,
-            _ => other.target.scope.app = "foreign".into(),
+            _ => other.target.scope.app = "foreign".to_owned().try_into().unwrap(),
         }
         assert!(phases[0].ready(&other).is_err());
         assert!(phases[1].hello(&other, nonce).is_err());
