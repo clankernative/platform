@@ -127,9 +127,10 @@ fn exact_read_write_transaction_and_all_five_writes_pin_scope_and_conditions() -
     let mut combined = initial_reply(&selection, &plan)?;
     combined.remove(0);
     combined[0]["transaction"] = json!(TX);
-    let transaction = wire::Names::new(&selection, &plan)?
-        .transaction(&serde_json::to_vec(&combined)?)?;
-    let combined: Value = crate::json::decode(&transaction.commit_body(&selection, &plan, &current, 1000)?)?;
+    let transaction =
+        wire::Names::new(&selection, &plan)?.transaction(&serde_json::to_vec(&combined)?)?;
+    let combined: Value =
+        crate::json::decode(&transaction.commit_body(&selection, &plan, &current, 1000)?)?;
     assert_eq!(combined, value);
     assert_eq!(value.as_object().unwrap().len(), 2);
     assert_eq!(value["transaction"], TX);
@@ -524,7 +525,9 @@ fn canonical_receipt_envelopes_refuse_mutation_after_known_commit() -> Result<()
     }
     macro_rules! opaque {
         ($bound:path) => {{
-            trait Ambiguous<A> { fn check() {} }
+            trait Ambiguous<A> {
+                fn check() {}
+            }
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <wire::Transaction as Ambiguous<_>>::check;
