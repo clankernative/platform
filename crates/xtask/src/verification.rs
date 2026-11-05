@@ -443,9 +443,11 @@ impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
             "all-runtime" => 9000,
-            "workspace-runtime" | "workspace-day2" | "workspace-day2-lifecycle" | "workspace-control" | "workspace-other" => {
-                12600
-            }
+            "workspace-runtime"
+            | "workspace-day2"
+            | "workspace-day2-runtime"
+            | "workspace-control"
+            | "workspace-other" => 12600,
             "control" => 3600,
             "isolated-build" | "installation-build" | "isolated-build-probe" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
@@ -2159,7 +2161,7 @@ mod tests {
         );
         let replays = ci_step(&shards, "Retain redacted DST counterexamples for replay");
         assert!(replays.contains(
-            "failure() && (contains(fromJSON('[\"workspace-day2\",\"workspace-day2-lifecycle\"]'), matrix.shard) || matrix.shard == 'simulation')"
+            "failure() && (contains(fromJSON('[\"workspace-day2\",\"workspace-day2-runtime\"]'), matrix.shard) || matrix.shard == 'simulation')"
         ));
         assert!(replays.contains("            artifacts/control-slot-replays/*/replay.json.gz\n"));
         assert!(!replays.contains("artifacts/control-slot-replays/**"));
@@ -2398,7 +2400,7 @@ mod tests {
             )));
         }
         let shards = ci_job("verify-shards");
-        assert!(shards.contains("shard: [workspace-day2, workspace-day2-lifecycle, workspace-control, workspace-other, simulation, parallel-runtime]"));
+        assert!(shards.contains("shard: [workspace-day2, workspace-day2-runtime, workspace-control, workspace-other, simulation, parallel-runtime]"));
         assert!(shards.contains("artifact-ids: ${{ steps.artifact_plan.outputs.binaries }}"));
         assert!(
             ci_step(&shards, "Download this workspace shard's test executables")
@@ -2763,7 +2765,7 @@ mod tests {
             ("all-runtime", 9000),
             ("workspace-runtime", 12600),
             ("workspace-day2", 12600),
-            ("workspace-day2-lifecycle", 12600),
+            ("workspace-day2-runtime", 12600),
             ("workspace-control", 12600),
             ("workspace-other", 12600),
             ("control", 3600),
@@ -2785,7 +2787,7 @@ mod tests {
             ("workspace-runtime", 0),
             ("workspace-runtime", 12601),
             ("workspace-day2", 12601),
-            ("workspace-day2-lifecycle", 12601),
+            ("workspace-day2-runtime", 12601),
             ("workspace-control", 12601),
             ("workspace-other", 12601),
             ("workspace-runtime", u64::MAX),

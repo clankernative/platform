@@ -72,7 +72,13 @@ pub(super) struct Session {
 
 impl Session {
     pub(super) fn start(root: &Path, suite: &str) -> Result<Option<Self>> {
-        if !["workspace-day2", "workspace-day2-lifecycle", "workspace-runtime"].contains(&suite) {
+        if ![
+            "workspace-day2",
+            "workspace-day2-runtime",
+            "workspace-runtime",
+        ]
+        .contains(&suite)
+        {
             return Ok(None);
         }
         let parent = root.join("artifacts/dst");
@@ -108,11 +114,14 @@ impl Session {
             ensure!(bytes.len() <= 4096, "DST observation byte bound");
             observations.push(day2::json::decode::<Observation>(&bytes)?);
         }
-        fs::write(self.directory.join("coverage.json"), serde_json::to_vec_pretty(&serde_json::json!({
-            "format":1,"status":"partial","suite":self.suite,
-            "scope":"portable_oracle_and_replay_observations_not_native_qualification",
-            "observations":observations,
-        }))?)?;
+        fs::write(
+            self.directory.join("coverage.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "format":1,"status":"partial","suite":self.suite,
+                "scope":"portable_oracle_and_replay_observations_not_native_qualification",
+                "observations":observations,
+            }))?,
+        )?;
         Ok(observations)
     }
 
@@ -127,29 +136,38 @@ impl Session {
 fn write_coverage(directory: &Path, suite: &str, observations: &[&Observation]) -> Result<()> {
     let campaigns = aggregate(observations)?;
     fs::write(
-            directory.join("coverage.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "format":1,"status":"passed","suite":suite,
-                "scope":"portable_oracle_and_replay_observations_not_native_qualification",
-                "campaigns":campaigns,
-            }))?,
-        )?;
-        println!(
-            "DST coverage: {}",
-            directory.join("coverage.json").display()
-        );
-        Ok(())
+        directory.join("coverage.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "format":1,"status":"passed","suite":suite,
+            "scope":"portable_oracle_and_replay_observations_not_native_qualification",
+            "campaigns":campaigns,
+        }))?,
+    )?;
+    println!(
+        "DST coverage: {}",
+        directory.join("coverage.json").display()
+    );
+    Ok(())
 }
 
-pub(super) fn join<'a>(root: &Path, observations: impl IntoIterator<Item = &'a Observation>) -> Result<()> {
-    let observations: Vec<_> = observations.into_iter().take(MAX_OBSERVATIONS + 1).collect();
+pub(super) fn join<'a>(
+    root: &Path,
+    observations: impl IntoIterator<Item = &'a Observation>,
+) -> Result<()> {
+    let observations: Vec<_> = observations
+        .into_iter()
+        .take(MAX_OBSERVATIONS + 1)
+        .collect();
     let directory = root.join("artifacts/dst");
     fs::create_dir_all(&directory)?;
     write_coverage(&directory, "workspace-day2-joined", &observations)
 }
 
 pub(super) fn validate<'a>(observations: impl IntoIterator<Item = &'a Observation>) -> Result<()> {
-    let observations: Vec<_> = observations.into_iter().take(MAX_OBSERVATIONS + 1).collect();
+    let observations: Vec<_> = observations
+        .into_iter()
+        .take(MAX_OBSERVATIONS + 1)
+        .collect();
     aggregate(&observations)?;
     Ok(())
 }
@@ -178,7 +196,10 @@ pub(super) mod tests {
 
     #[test]
     fn every_declared_campaign_and_seed_must_actually_report_progress() -> Result<()> {
-        assert_eq!(aggregate(&complete().iter().collect::<Vec<_>>())?.len(), Campaign::ALL.len());
+        assert_eq!(
+            aggregate(&complete().iter().collect::<Vec<_>>())?.len(),
+            Campaign::ALL.len()
+        );
         let missing: Vec<_> = complete()
             .into_iter()
             .filter(|o| o.campaign != Campaign::StorageLifecycle)

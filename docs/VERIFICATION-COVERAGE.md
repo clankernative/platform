@@ -2,7 +2,7 @@
 
 ## CI simulation evidence
 
-The full Linux `workspace-day2` and `workspace-day2-lifecycle` campaigns jointly
+The full Linux `workspace-day2` and `workspace-day2-runtime` campaigns jointly
 admit fresh observations from the
 required portable DST campaigns: OAuth and inbound OAuth, the three registration
 drivers, credential lifecycle, host-loop scheduling, the four native handshake
@@ -11,7 +11,7 @@ models, and fixed/generated command crash schedules. The existing simulation
 shard independently admits the control-world corpus and generated schedules.
 
 Download `day2-dst-workspace-day2-<run>-<attempt>`,
-`day2-dst-workspace-day2-lifecycle-<run>-<attempt>` and
+`day2-dst-workspace-day2-runtime-<run>-<attempt>` and
 `day2-dst-simulation-<run>-<attempt>` from the CI run. The day2 reports are explicitly
 partial observations. Final `verify` publishes their complete joined `dst/coverage.json`
 in the verification receipt artifact; only that joined report claims all day2
@@ -33,13 +33,15 @@ progress guard. A test failure can leave partial observations; absence of a
 passing `coverage.json` means incomplete coverage, never a successful campaign.
 No simulation results enter the compiled-action caches.
 
-The two day2 jobs remain serial internally. The lifecycle job owns exactly
-`oauth::management::app::tests::native_lifecycle::` from the library harness;
-the other job owns its complement and every existing day2 integration/bin harness.
+The two day2 jobs remain serial internally. The runtime job owns exactly
+`oauth::management::app::tests::native_lifecycle::` from the library harness and
+the integration harness; the other job owns the library complement and all bin-unit harnesses.
 Before execution, each current hash-admitted binary lists its original configured
 case and ignored-case sets, and its exact partition is listed again. Successful
 execution must report every selected nonignored name and matching passed/ignored
-counts. Each source/run/preparation-bound result retains that inventory. Final
+counts. Each source/run/preparation-bound result retains selected names and
+canonical digests of the original list and actually observed names, keeping the
+existing one-MiB receipt limit without repeating whole lists. Final
 composition lists the admitted current binaries again and requires the two parts
 to be disjoint and exhaustive, with identical declared ignored status. Zero-test,
 missing, duplicate, foreign or changed selections cannot issue full proof. Both

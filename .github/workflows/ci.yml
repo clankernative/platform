@@ -1004,7 +1004,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [workspace-day2, workspace-day2-lifecycle, workspace-control, workspace-other, simulation, parallel-runtime]
+        shard: [workspace-day2, workspace-day2-runtime, workspace-control, workspace-other, simulation, parallel-runtime]
     env:
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
@@ -1192,7 +1192,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Publish fresh DST campaigns, seeds and observed transitions
-        if: ${{ always() && (contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) || matrix.shard == 'simulation') }}
+        if: ${{ always() && (contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) || matrix.shard == 'simulation') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
@@ -1205,7 +1205,7 @@ jobs:
           if-no-files-found: ${{ steps.verify_shard.outcome == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted DST counterexamples for replay
-        if: ${{ failure() && (contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) || matrix.shard == 'simulation') }}
+        if: ${{ failure() && (contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) || matrix.shard == 'simulation') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
@@ -1228,7 +1228,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Retain failed storage lifecycle replay bundles
-        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) }}
+        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
@@ -1246,7 +1246,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Retain failed native OAuth consumer histories
-        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) }}
+        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
@@ -1277,7 +1277,7 @@ jobs:
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted Linear replay seeds
-        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) }}
+        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
@@ -1295,7 +1295,7 @@ jobs:
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted operator-alert replay seeds
-        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) }}
+        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
@@ -1315,7 +1315,7 @@ jobs:
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted credential process-loss cases
-        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) }}
+        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
@@ -1335,7 +1335,7 @@ jobs:
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted Notifications replay seeds
-        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-lifecycle"]'), matrix.shard) }}
+        if: ${{ failure() && contains(fromJSON('["workspace-day2","workspace-day2-runtime"]'), matrix.shard) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
