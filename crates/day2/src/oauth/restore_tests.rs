@@ -614,6 +614,13 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
                     expression(&reference.expr)?
                 )
             }
+            syn::Expr::Field(field) if field.attrs.is_empty() => {
+                let member = match &field.member {
+                    syn::Member::Named(name) => format!("named:{name}"),
+                    syn::Member::Unnamed(index) => format!("index:{}", index.index),
+                };
+                format!("field:{:?}:{member}", expression(&field.base)?)
+            }
             syn::Expr::Try(attempt) if attempt.attrs.is_empty() => {
                 format!("try:{:?}", expression(&attempt.expr)?)
             }
@@ -632,6 +639,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
                 expression(expr)?
             )),
             syn::Stmt::Local(local) if local.attrs.is_empty() => {
+                let typed = matches!(&local.pat, syn::Pat::Type(_));
                 let binding = match &local.pat {
                     syn::Pat::Ident(binding)
                         if binding.attrs.is_empty() && binding.subpat.is_none() =>
@@ -652,15 +660,17 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
                     }
                     _ => return None,
                 };
+                if !binding.attrs.is_empty() || binding.subpat.is_some() {return None}
                 let init = local.init.as_ref()?;
                 if init.diverge.is_some() {
                     return None;
                 }
                 Some(format!(
-                    "let:{}:{}:{}:{:?}",
+                    "let:{}:{}:{}:{}:{:?}",
                     binding.ident,
                     binding.by_ref.is_some(),
                     binding.mutability.is_some(),
+                    typed,
                     expression(&init.expr)?
                 ))
             }
@@ -862,6 +872,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         if kind == "Use" {
             let decoded: syn::Stmt =
                 syn::parse_str("let claims:Claims=crate::json::decode(encoded.as_bytes())?;")?;
+            ensure!(statement(&decoded).is_some(),"closed_decode_statement_shape");
             let positions: Vec<_> = block
                 .stmts
                 .iter()
@@ -873,6 +884,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             let check: syn::Stmt = syn::parse_str(
                 "super::restore::require_open(db,super::restore::Kind::UseOriginal,claim_identity(&claims)?.as_str())?;",
             )?;
+            ensure!(statement(&check).is_some(),"closed_original_guard_shape");
             assert_eq!(statement(&block.stmts[positions[0] + 1]), statement(&check));
             let mut omitted = block.clone();
             omitted.stmts.remove(positions[0] + 1);
