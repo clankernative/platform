@@ -204,9 +204,10 @@ mod tests {
     #[test]
     fn first_connection_keeps_actual_sidecars_alive_without_a_business_transaction() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let anchor = File::open(directory.path())?;
+        let fixture_root = directory.path().canonicalize()?;
+        let anchor = File::open(fixture_root.as_path())?;
         require_unopened(&anchor)?;
-        let path = directory.path().join("day2-initial.sqlite");
+        let path = fixture_root.as_path().join("day2-initial.sqlite");
         let (original, mut keeper) = opened(&path)?;
         NativeSqliteKeeper::require_initial_main(&keeper.connection, &original)?;
         activate(&mut keeper)?;
@@ -251,14 +252,15 @@ mod tests {
     #[test]
     fn existing_sidecar_or_another_main_cannot_supply_the_first_cohort() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let anchor = File::open(directory.path())?;
+        let fixture_root = directory.path().canonicalize()?;
+        let anchor = File::open(fixture_root.as_path())?;
         for name in [WAL, SHM, JOURNAL] {
-            fs::write(directory.path().join(name), b"foreign")?;
+            fs::write(fixture_root.as_path().join(name), b"foreign")?;
             assert!(require_unopened(&anchor).is_err());
-            fs::remove_file(directory.path().join(name))?;
+            fs::remove_file(fixture_root.as_path().join(name))?;
         }
-        let (original, keeper) = opened(&directory.path().join("day2-initial.sqlite"))?;
-        let (foreign, other) = opened(&directory.path().join("foreign.sqlite"))?;
+        let (original, keeper) = opened(&fixture_root.as_path().join("day2-initial.sqlite"))?;
+        let (foreign, other) = opened(&fixture_root.as_path().join("foreign.sqlite"))?;
         NativeSqliteKeeper::require_initial_main(&keeper.connection, &original)?;
         assert!(NativeSqliteKeeper::require_initial_main(&other.connection, &original).is_err());
         assert!(NativeSqliteKeeper::require_initial_main(&keeper.connection, &foreign).is_err());
@@ -268,12 +270,13 @@ mod tests {
     #[test]
     fn sidecar_replacement_and_repair_cannot_restore_a_refused_keeper() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let anchor = File::open(directory.path())?;
-        let (original, mut keeper) = opened(&directory.path().join("day2-initial.sqlite"))?;
+        let fixture_root = directory.path().canonicalize()?;
+        let anchor = File::open(fixture_root.as_path())?;
+        let (original, mut keeper) = opened(&fixture_root.as_path().join("day2-initial.sqlite"))?;
         activate(&mut keeper)?;
         keeper.check(&anchor, &original)?;
-        let shm = directory.path().join(SHM);
-        let retained = directory.path().join("held-shm");
+        let shm = fixture_root.as_path().join(SHM);
+        let retained = fixture_root.as_path().join("held-shm");
         fs::rename(&shm, &retained)?;
         fs::copy(&retained, &shm)?;
         assert!(keeper.check(&anchor, &original).is_err());
@@ -287,8 +290,9 @@ mod tests {
     #[test]
     fn a_live_keeper_is_not_writer_exclusion_or_fresh_admin_authority() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let anchor = File::open(directory.path())?;
-        let path = directory.path().join("day2-initial.sqlite");
+        let fixture_root = directory.path().canonicalize()?;
+        let anchor = File::open(fixture_root.as_path())?;
+        let path = fixture_root.as_path().join("day2-initial.sqlite");
         let (original, mut keeper) = opened(&path)?;
         activate(&mut keeper)?;
         let mut reader = super::super::open_existing(&path)?;
