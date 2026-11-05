@@ -354,6 +354,10 @@ fn begin_in(
     super::restore::require_open(tx, super::restore::Kind::Connect, &intent.attempt)?;
     if let Some(guard) = guard {
         guard.check(tx, now)?;
+    } else if super::restore::generation_floor(tx,&intent.slot)?.is_some() {
+        // Floored history needs the actual managed fresh-human entry. A copied
+        // row/intent or raw navigation adapter cannot authorize its adoption.
+        return Ok(false);
     }
     if !slot_matches(tx, intent)? {
         return Ok(false);
@@ -1071,13 +1075,16 @@ pub(super) fn slot_matches(tx: &Transaction<'_>, intent: &ConnectIntent) -> Resu
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
+    let floor=super::restore::generation_floor(tx,&intent.slot)?;
+    let next=super::restore::next_generation(row.as_ref().map(|entry|entry.0),floor.unwrap_or(0))?;
+    let restored=floor.is_some();
     Ok(match (row, intent.expected_generation) {
-        (None, None) => intent.expected_epoch == 1 && intent.proposed_generation == 1,
+        (None, None) => intent.expected_epoch == 1 && intent.proposed_generation == next,
         (Some((generation, epoch, status)), Some(expected)) => {
             generation == expected
                 && epoch == intent.expected_epoch
-                && status == "active"
-                && intent.proposed_generation == expected + 1
+                && (status == "active" || (restored && status == "reauth_required"))
+                && intent.proposed_generation == next
         }
         _ => false,
     })

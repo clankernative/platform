@@ -272,7 +272,8 @@ impl Manager {
         crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, &view.id)?;
         ensure!(
             self.authority_in(db, identity)? == view.authority
-                && Self::fence(db, &view.slot)? == view.fence,
+                && Self::fence(db, &view.slot)? == view.fence
+                && crate::oauth::restore::generation_floor(db,view.slot.as_str())?.unwrap_or(0)==view.generation_floor,
             "OAuth management authority or slot changed"
         );
         if view.action == Action::Connect {
@@ -354,6 +355,7 @@ impl Manager {
                 selection: selection.identity()?,
                 slot: selection.slot.clone(),
                 fence: Self::fence(tx, &selection.slot)?,
+                generation_floor: crate::oauth::restore::generation_floor(tx,selection.slot.as_str())?.unwrap_or(0),
                 binding_namespace: admission::binding_namespace(&selection.binding)?,
                 usage: selection.requirement.usage.clone(),
                 scopes: selection
@@ -540,12 +542,13 @@ impl Manager {
                     product_return: selection.binding.product_return.clone(),
                 },
             )?;
+            let (expected_generation,expected_epoch,proposed_generation)=view.connect_generations()?;
             let intent = crate::oauth::connect::ConnectIntent {
                 attempt: view.id.clone(),
                 slot: view.slot.as_str().into(),
-                expected_generation: None,
-                expected_epoch: 1,
-                proposed_generation: 1,
+                expected_generation,
+                expected_epoch,
+                proposed_generation,
                 owner: view.human.clone(),
                 profile: selection.permission.profile.id.as_str().into(),
                 registration: Digest::of(&selection.instance.registration.registration)?
@@ -1062,16 +1065,16 @@ fn require_connect_intent(
     view: &View,
     intent: &crate::oauth::connect::ConnectIntent,
 ) -> Result<()> {
+    let (expected_generation,expected_epoch,proposed_generation)=view.connect_generations()?;
     ensure!(
         view.action == Action::Connect
-            && view.fence.is_none()
             && intent.attempt == view.id
             && intent.slot == view.slot.as_str()
             && intent.owner == view.human
             && intent.expires_at == view.expires_at
-            && intent.expected_generation.is_none()
-            && intent.expected_epoch == 1
-            && intent.proposed_generation == 1,
+            && intent.expected_generation == expected_generation
+            && intent.expected_epoch == expected_epoch
+            && intent.proposed_generation == proposed_generation,
         "OAuth consumer original intent or slot/version changed"
     );
     Ok(())
