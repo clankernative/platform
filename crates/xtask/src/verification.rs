@@ -443,7 +443,7 @@ impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
             "all-runtime" => 9000,
-            "workspace-runtime" | "workspace-day2" | "workspace-control" | "workspace-other" => {
+            "workspace-runtime" | "workspace-day2" | "workspace-day2-lifecycle" | "workspace-control" | "workspace-other" => {
                 12600
             }
             "control" => 3600,
@@ -468,6 +468,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
     let mut executed_binaries = BTreeSet::new();
+    let mut day2_evidence = None;
     let mut mac_campaigns = BTreeMap::new();
     let mut simulation = None;
     let mut simulation_started = None;
@@ -562,7 +563,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     )
                 })();
                 let observations = shard_storage(root, &campaign.suite, StoragePhase::After);
-                executed_binaries = preserve_campaign_error(tests, observations)?;
+                let execution = preserve_campaign_error(tests, observations)?;
+                executed_binaries = execution.binaries;
+                day2_evidence = execution.day2;
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
@@ -722,6 +725,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     &passed,
                     &timings.steps_ms,
                     &executed_binaries,
+                    day2_evidence.take(),
                 )?;
                 return Ok(json!({}));
             }
@@ -2155,7 +2159,7 @@ mod tests {
         );
         let replays = ci_step(&shards, "Retain redacted DST counterexamples for replay");
         assert!(replays.contains(
-            "failure() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation')"
+            "failure() && (contains(fromJSON('[\"workspace-day2\",\"workspace-day2-lifecycle\"]'), matrix.shard) || matrix.shard == 'simulation')"
         ));
         assert!(replays.contains("            artifacts/control-slot-replays/*/replay.json.gz\n"));
         assert!(!replays.contains("artifacts/control-slot-replays/**"));
@@ -2394,7 +2398,7 @@ mod tests {
             )));
         }
         let shards = ci_job("verify-shards");
-        assert!(shards.contains("shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]"));
+        assert!(shards.contains("shard: [workspace-day2, workspace-day2-lifecycle, workspace-control, workspace-other, simulation, parallel-runtime]"));
         assert!(shards.contains("artifact-ids: ${{ steps.artifact_plan.outputs.binaries }}"));
         assert!(
             ci_step(&shards, "Download this workspace shard's test executables")
@@ -2759,6 +2763,7 @@ mod tests {
             ("all-runtime", 9000),
             ("workspace-runtime", 12600),
             ("workspace-day2", 12600),
+            ("workspace-day2-lifecycle", 12600),
             ("workspace-control", 12600),
             ("workspace-other", 12600),
             ("control", 3600),
@@ -2780,6 +2785,7 @@ mod tests {
             ("workspace-runtime", 0),
             ("workspace-runtime", 12601),
             ("workspace-day2", 12601),
+            ("workspace-day2-lifecycle", 12601),
             ("workspace-control", 12601),
             ("workspace-other", 12601),
             ("workspace-runtime", u64::MAX),

@@ -31,7 +31,7 @@ releases an uncertain reservation or raises the budget to continue. Missing camp
 CI artifact step, including if the seeded test stops running.
 
 CI retains `day2-notifications-coverage-<run>-<attempt>` and, on failure,
-`day2-notifications-replays-<run>-<attempt>` for 14 days. Replay seeds contain only
+`day2-notifications-replays-<shard>-<run>-<attempt>` for 14 days. Replay seeds contain only
 the format, compiled campaign digest and numeric seed, never bodies, handles,
 credentials, raw snapshots, environments or error strings:
 

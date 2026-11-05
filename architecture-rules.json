@@ -581,6 +581,7 @@
     "crates/xtask/src/verification/dst.rs",
     "crates/xtask/src/verification/shards.rs",
     "crates/xtask/src/verification/shards/artifacts.rs",
+    "crates/xtask/src/verification/shards/cases.rs",
     "crates/xtask/src/verification/shards/mac.rs",
     "crates/xtask/src/verification/shards/reuse.rs",
     "crates/xtask/src/verification/shards/transport.rs",

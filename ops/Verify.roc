@@ -165,7 +165,7 @@ Verify :: [].{
 	shard! = |shard, host!| {
 		_ = match shard {
 			"simulation" => Simulation.campaign!(3_664_912_422, 32, host!)
-			"workspace-day2" | "workspace-control" | "workspace-other" =>
+			"workspace-day2" | "workspace-day2-lifecycle" | "workspace-control" | "workspace-other" =>
 				Capability.call!(
 					"verify-prebuilt-tests",
 					Json.to_str({ suite: shard, budget_seconds: 12_600.U64 }),
