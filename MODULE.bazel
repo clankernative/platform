@@ -88,6 +88,8 @@ crate.annotation(
 crate.annotation(
     crate = "libsqlite3-sys",
     version = "0.38.2",
+    patches = ["//build/bazel:patches/libsqlite3-sys-0.38.2-filestat-identity.patch"],
+    patch_args = ["-p1"],
     build_script_env = {"LIBSQLITE3_FLAGS": "-DSQLITE_ENABLE_FILESTAT"},
 )
 

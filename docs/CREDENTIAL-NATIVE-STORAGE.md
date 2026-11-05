@@ -516,7 +516,13 @@ for MAIN, WAL and SHM. A matching pathname, MAIN inode, seed or stable read view
 does not establish that continuity: a compatible older WAL can restore an
 administrator that current policy removed while MAIN keeps the same inode.
 
-The pinned bundled SQLite enables `SQLITE_ENABLE_FILESTAT`. The test-only
+The pinned bundled SQLite enables `SQLITE_ENABLE_FILESTAT`. A scoped Unix VFS
+patch appends device/inode observations from `osFstat` on its actual held
+MAIN/WAL/SHM descriptors. Failed, nonregular or wider-than-64-bit observations
+produce null and refuse decoding. No descriptor is opened, duplicated or closed,
+and no guessed C layout or unsafe Rust is used. This also avoids interpreting
+macOS `/dev/fd` metadata as the underlying volume's device identity.
+The test-only
 `store::native_storage::opened_files` fixture borrows an actual transaction and
 observes the Unix VFS handles that SQLite opened, without reconstructing C
 structures or opening/closing a duplicate database descriptor. It covers a

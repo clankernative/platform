@@ -9,9 +9,16 @@ const MAX_OBSERVATION: usize = 8192;
 
 #[derive(PartialEq, Eq)]
 struct Handles {
-    main: i32,
-    journal: Option<i32>,
-    shm: Option<i32>,
+    main: Handle,
+    journal: Option<Handle>,
+    shm: Option<Handle>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Handle {
+    fd: i32,
+    device: u64,
+    inode: u64,
 }
 
 /// Borrows the actual transaction. No connection/handle getter, codec, clone,
@@ -30,16 +37,34 @@ fn descriptor(value: &Value) -> Result<i32> {
     Ok(fd)
 }
 
-fn unix_file(value: &Value) -> Result<i32> {
+fn handle(value: &Value) -> Result<Handle> {
+    let fd = descriptor(
+        value
+            .get("h")
+            .ok_or_else(|| anyhow::anyhow!("native_sqlite_handle_missing"))?,
+    )?;
+    let identity = value
+        .get("identity")
+        .ok_or_else(|| anyhow::anyhow!("native_sqlite_identity_missing"))?;
+    let field = |name| {
+        identity
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("native_sqlite_identity_missing"))
+    };
+    Ok(Handle {
+        fd,
+        device: field("device")?,
+        inode: field("inode")?,
+    })
+}
+
+fn unix_file(value: &Value) -> Result<Handle> {
     ensure!(
         value.get("vfs").and_then(Value::as_str) == Some("unix"),
         "native_sqlite_vfs_unsupported"
     );
-    descriptor(
-        value
-            .get("h")
-            .ok_or_else(|| anyhow::anyhow!("native_sqlite_handle_missing"))?,
-    )
+    handle(value)
 }
 
 fn decode(bytes: &[u8]) -> Result<Handles> {
@@ -56,17 +81,13 @@ fn decode(bytes: &[u8]) -> Result<Handles> {
         .ok_or_else(|| anyhow::anyhow!("native_sqlite_main_missing"))?;
     let main = unix_file(db)?;
     let journal = root.get("journal").map(unix_file).transpose()?;
-    let shm = db
-        .get("shm")
-        .map(|v| {
-            descriptor(
-                v.get("h")
-                    .ok_or_else(|| anyhow::anyhow!("native_sqlite_shm_missing"))?,
-            )
-        })
-        .transpose()?;
+    let shm = db.get("shm").map(handle).transpose()?;
+    let journal_fd = journal.map(|h| h.fd);
+    let shm_fd = shm.map(|h| h.fd);
     ensure!(
-        journal != Some(main) && shm != Some(main) && (shm.is_none() || shm != journal),
+        journal_fd != Some(main.fd)
+            && shm_fd != Some(main.fd)
+            && (shm_fd.is_none() || shm_fd != journal_fd),
         "native_sqlite_handle_alias"
     );
     Ok(Handles { main, journal, shm })
@@ -140,11 +161,10 @@ mod tests {
         }
     }
 
-    fn inode(fd: i32) -> Result<(u64, u64)> {
-        // Metadata only: never open/close a duplicate database fd, which could
-        // release this process's POSIX SQLite locks. Not a native owner fixture.
-        let file = fs::metadata(format!("/dev/fd/{fd}"))?;
-        Ok((file.dev(), file.ino()))
+    fn opened_identity(handle: Handle) -> (u64, u64) {
+        // The pinned FILESTAT implementation fstats SQLite's actual retained
+        // descriptor. No /dev/fd namespace or open/close duplicate is involved.
+        (handle.device, handle.inode)
     }
 
     fn named_inode(path: impl AsRef<Path>) -> Result<(u64, u64)> {
@@ -198,7 +218,7 @@ mod tests {
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let files = inspect(&transaction)?;
-            assert_eq!(inode(files.handles.main)?, named_inode(&path)?);
+            assert_eq!(opened_identity(files.handles.main), named_inode(&path)?);
             files.check_live()?;
             if close_duplicate {
                 // Intentional negative control on this disposable fixture.
@@ -267,9 +287,9 @@ mod tests {
         )?;
         let files = inspect(&transaction)?;
         let expected = [
-            inode(files.handles.main)?,
-            inode(files.handles.journal.expect("writer WAL"))?,
-            inode(files.handles.shm.expect("writer SHM"))?,
+            opened_identity(files.handles.main),
+            opened_identity(files.handles.journal.expect("writer WAL")),
+            opened_identity(files.handles.shm.expect("writer SHM")),
         ];
         fs::write(
             root.join("creator-identities.json"),
@@ -345,14 +365,14 @@ mod tests {
         assert!(!stale.policy()?.admins.contains(CURRENT_ADMIN));
         assert!(!expected_current.policy()?.admins.contains(OLD_ADMIN));
         let files = inspect(&transaction)?;
-        assert_eq!(inode(files.handles.main)?, expected[0]);
+        assert_eq!(opened_identity(files.handles.main), expected[0]);
         assert_eq!(named_inode(&path)?, expected[0]);
         assert_eq!(
-            inode(files.handles.journal.expect("substituted WAL"))?,
+            opened_identity(files.handles.journal.expect("substituted WAL")),
             installed[1]
         );
         assert_eq!(
-            inode(files.handles.shm.expect("substituted SHM"))?,
+            opened_identity(files.handles.shm.expect("substituted SHM")),
             installed[2]
         );
         assert_eq!(named_inode(sidecar(&path, "-wal"))?, installed[1]);
@@ -403,13 +423,13 @@ mod tests {
             BTreeSet::from([CURRENT_ADMIN.to_owned()])
         );
         let files = inspect(&transaction)?;
-        assert_eq!(inode(files.handles.main)?, expected[0]);
+        assert_eq!(opened_identity(files.handles.main), expected[0]);
         assert_eq!(
-            inode(files.handles.journal.expect("same-inode WAL"))?,
+            opened_identity(files.handles.journal.expect("same-inode WAL")),
             expected[1]
         );
         assert_eq!(
-            inode(files.handles.shm.expect("same-inode SHM"))?,
+            opened_identity(files.handles.shm.expect("same-inode SHM")),
             expected[2]
         );
         files.check_live()?;
@@ -437,17 +457,17 @@ mod tests {
             current_authority(&root)?
         );
         let files = inspect(&transaction)?;
-        assert_eq!(inode(files.handles.main)?, expected[0]);
+        assert_eq!(opened_identity(files.handles.main), expected[0]);
         assert_eq!(
-            inode(files.handles.journal.expect("current WAL"))?,
+            opened_identity(files.handles.journal.expect("current WAL")),
             expected[1]
         );
         assert_ne!(
-            inode(files.handles.shm.expect("recreated SHM"))?,
+            opened_identity(files.handles.shm.expect("recreated SHM")),
             expected[2]
         );
         assert_eq!(
-            inode(files.handles.shm.expect("recreated SHM"))?,
+            opened_identity(files.handles.shm.expect("recreated SHM")),
             named_inode(sidecar(&path, "-shm"))?,
         );
         assert_eq!(named_inode(root.join("creator-shm"))?, expected[2]);
@@ -469,11 +489,14 @@ mod tests {
         let transaction = connection.transaction()?;
         let files = inspect(&transaction)?;
         let main = fs::metadata(&path)?;
-        assert_eq!(inode(files.handles.main)?, (main.dev(), main.ino()));
+        assert_eq!(
+            opened_identity(files.handles.main),
+            (main.dev(), main.ino())
+        );
         for (fd, suffix) in [(files.handles.journal, "-wal"), (files.handles.shm, "-shm")] {
             let named = fs::metadata(format!("{}{suffix}", path.display()))?;
             assert_eq!(
-                inode(fd.expect("actual WAL/SHM handle"))?,
+                opened_identity(fd.expect("actual WAL/SHM handle")),
                 (named.dev(), named.ino())
             );
         }
@@ -509,7 +532,10 @@ mod tests {
             "older"
         );
         let files = inspect(&transaction)?;
-        assert_ne!(inode(files.handles.main)?, (expected.dev(), expected.ino()));
+        assert_ne!(
+            opened_identity(files.handles.main),
+            (expected.dev(), expected.ino())
+        );
         assert_eq!(fs::metadata(&live)?.ino(), expected.ino());
         // A live matching handle view alone is deliberately NOT current-file
         // permission. The future owner must compare genuine creator handles.
@@ -521,6 +547,52 @@ mod tests {
 
     #[test]
     fn missing_memory_unsupported_alias_and_oversized_observations_refuse() -> Result<()> {
+        let valid = serde_json::json!({
+            "db": {"h":3,"vfs":"unix","identity":{"device":1,"inode":10},
+                "shm":{"h":5,"identity":{"device":1,"inode":12}}},
+            "journal":{"h":4,"vfs":"unix","identity":{"device":1,"inode":11}}
+        });
+        let expected = decode(&serde_json::to_vec(&valid)?)?;
+        for path in [
+            "/db/identity",
+            "/db/identity/device",
+            "/db/identity/inode",
+            "/journal/identity",
+            "/journal/identity/device",
+            "/journal/identity/inode",
+            "/db/shm/identity",
+            "/db/shm/identity/device",
+            "/db/shm/identity/inode",
+        ] {
+            let mut malformed = valid.clone();
+            *malformed.pointer_mut(path).expect("fixture identity path") = Value::Null;
+            assert!(decode(&serde_json::to_vec(&malformed)?).is_err());
+        }
+        for path in [
+            "/db/identity/device",
+            "/journal/identity/inode",
+            "/db/shm/identity/inode",
+        ] {
+            for value in [
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!("1"),
+            ] {
+                let mut malformed = valid.clone();
+                *malformed.pointer_mut(path).expect("fixture identity path") = value;
+                assert!(decode(&serde_json::to_vec(&malformed)?).is_err());
+            }
+        }
+        for path in ["/journal/h", "/db/shm/h"] {
+            let mut malformed = valid.clone();
+            *malformed
+                .pointer_mut(path)
+                .expect("fixture descriptor path") = serde_json::json!(3);
+            assert!(decode(&serde_json::to_vec(&malformed)?).is_err());
+        }
+        let mut different = valid.clone();
+        *different.pointer_mut("/journal/identity/inode").unwrap() = serde_json::json!(20);
+        assert!(decode(&serde_json::to_vec(&different)?)? != expected);
         for raw in [
             b"{}".as_slice(),
             b"{\"db\":null}",
