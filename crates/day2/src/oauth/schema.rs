@@ -110,6 +110,18 @@ pub(crate) fn materialize(row: &rusqlite::Row<'_>) -> Result<()> {
     })
 }
 
+/// A nested denial leaf cannot invent callback ownership. The enclosing real
+/// raw adapter or Runtime loan must have entered the same cumulative scope.
+pub(crate) fn require_admission(db: &Connection) -> Result<()> {
+    ADMISSION.with(|active| {
+        let active = active.borrow();
+        let budget = active.as_ref().context("restore_requires_owned_admission_scope")?;
+        ensure!(budget.connection == std::ptr::from_ref(db) as usize && !budget.exhausted,
+            "restore_admission_scope_changed");
+        Ok(())
+    })
+}
+
 /// Raw SQLite adapters explicitly grant ownership of their progress callback:
 /// this installs/removes a temporary hook, and cannot preserve an unknown hook.
 /// Production connections use `admit_with_runtime_hook` instead.
