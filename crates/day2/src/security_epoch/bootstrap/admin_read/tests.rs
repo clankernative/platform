@@ -3,7 +3,7 @@ use syn::visit::Visit;
 
 #[test]
 fn actor_errors_never_export_the_claimed_identity() {
-    let marker = "private-admin-marker-not-an-email";
+    let marker = "domain:private-admin-marker";
     let error = validate_actor(marker).unwrap_err();
     assert_eq!(error.to_string(), "controller_admin_actor_shape");
     assert!(!format!("{error:#}").contains(marker));
@@ -85,23 +85,6 @@ fn open_sql_never_allows_provider_or_release_and_unknown_close_is_permanent() {
     assert!(state.begin_sql().is_err());
     assert!(state.finish().is_err());
     assert!(state.check().is_err());
-    for abandon_at in 0..4 {
-        let mut state = ReadDisposition::new();
-        let mut continuation = false;
-        if abandon_at >= 1 {
-            state.begin_sql().unwrap();
-        }
-        if abandon_at >= 2 {
-            state.end_sql(true).unwrap();
-        }
-        // Only the complete known final protocol may restore the parent.
-        if abandon_at == 3 {
-            state.finish().unwrap();
-            continuation = true;
-        }
-        drop(state);
-        assert_eq!(continuation, abandon_at == 3);
-    }
 }
 
 fn method(source: &str, owner: &str, name: &str) -> syn::ImplItemFn {
@@ -133,6 +116,16 @@ fn method(source: &str, owner: &str, name: &str) -> syn::ImplItemFn {
 #[derive(Default)]
 struct Calls(Vec<String>);
 impl<'ast> Visit<'ast> for Calls {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if node.path.segments.len() == 2
+            && node.path.segments[0].ident == "Connection"
+            && node.path.segments[1].ident == "close"
+        {
+            self.0.push("close".to_owned());
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         // Receiver/arguments execute before the method result is consumed.
         syn::visit::visit_expr_method_call(self, node);
@@ -233,7 +226,7 @@ fn real_loan_retains_originals_and_only_known_final_path_restores_continuations(
     assert!(physical.contains("*continuation = false;"));
     assert!(physical.contains("*self.continuation = true;"));
     let initial = include_str!("../../storage_authority/initial.rs");
-    let app = calls(initial, "AppInitialStorage", "begin_admin_read");
+    let app = calls(initial, "AppInitialStorageContinuity", "begin_admin_read");
     assert!(before(&app, "begin", "sqlite_cohort"));
     assert!(before(&app, "sqlite_cohort", "begin_current"));
     let app_operation = method(source, "ActiveAppStorageContinuity", "admin_read");

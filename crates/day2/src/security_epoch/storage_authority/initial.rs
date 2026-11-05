@@ -1150,7 +1150,7 @@ mod tests {
         let expected = create.bootstrap().clone();
         let binding = request_binding(&expected, &first(), &selection, &create).unwrap();
         assert!(binding.purpose() == StoragePeerPurpose::BootstrapCreate);
-        assert_eq!(binding.binding, create.digest().unwrap());
+        assert_eq!(*binding.binding(), create.digest().unwrap());
         let mut changed = expected.clone();
         changed.manifest.artifact = Digest::new(b"other artifact");
         assert!(
@@ -1195,7 +1195,7 @@ mod tests {
         };
         let binding = request_binding(create.bootstrap(), &holder, &selection, &request).unwrap();
         assert!(binding.purpose() == StoragePeerPurpose::BootstrapComplete);
-        assert_eq!(binding.binding, request.digest().unwrap());
+        assert_eq!(*binding.binding(), request.digest().unwrap());
         let mut other = holder.clone();
         other.ephemeral_key = Digest::new(b"other process key");
         assert!(request_binding(create.bootstrap(), &other, &selection, &request).is_err());

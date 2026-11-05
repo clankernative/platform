@@ -172,6 +172,7 @@ mod tests {
     fn actual_reader_requires_creator_main_wal_and_shm_but_not_foreign_fd_numbers() -> Result<()> {
         let (_directory, path, mut keeper, original, cohort) = fixture()?;
         let mut reader = open_readonly(&path)?;
+        configure_connection(&mut reader)?;
         reader.pragma_update(None, "query_only", true)?;
         let tx = reader.transaction()?;
         let local = opened_files::snapshot(&tx)?;
@@ -189,16 +190,26 @@ mod tests {
             tx.query_row("SELECT value FROM data", [], |row| row.get::<_, i64>(0))?,
             1
         );
+        let unused = [
+            local.main.inode,
+            local.journal.unwrap().inode,
+            local.shm.unwrap().inode,
+        ]
+        .into_iter()
+        .max()
+        .unwrap()
+        .checked_add(1)
+        .unwrap();
         for changed in [
             SqliteCohort::from_identities(
-                (local.main.device, local.main.inode + 1),
-                (local.main.device, local.main.inode + 2),
-                (local.main.device, local.main.inode + 3),
+                (local.main.device ^ 1, 10),
+                (local.main.device ^ 1, 11),
+                (local.main.device ^ 1, 12),
             )?,
             SqliteCohort::from_identities(
                 (local.main.device, local.main.inode),
-                (local.main.device, local.main.inode + 2),
-                (local.main.device, local.main.inode + 3),
+                (local.main.device, unused),
+                (local.main.device, unused + 1),
             )?,
         ] {
             assert!(check_controller_sqlite_files(&tx, &original, &changed).is_err());
