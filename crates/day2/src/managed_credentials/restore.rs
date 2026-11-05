@@ -212,34 +212,60 @@ fn reset_in(
 /// authentication signature and cannot construct a native or human owner.
 #[cfg(test)]
 pub(crate) fn seed_historical_peers_for_tests(
-    db:&rusqlite::Connection,
-    scope:&str,
-    authority:&crate::authority_state::AuthorityStamp,
-    artifact:&str,
-)->Result<(String,String)> {
-    let source=super::tests::restored_peer_database()?;
-    let raw:String=source.query_row("SELECT intent FROM day2_credential_browser",[],|row|row.get(0))?;
-    let mut pending:super::super::browser::Pending=crate::json::decode(raw.as_bytes())?;
-    pending.authority=authority.clone();pending.artifact=artifact.into();
-    let raw:String=source.query_row("SELECT confirmation FROM day2_credential_confirmations",[],|row|row.get(0))?;
-    let record=super::super::issuance::decode_record(&pending.invocation,raw.as_bytes())?;
-    let mut confirmation=record.confirmation;
-    confirmation.authority=authority.clone();confirmation.artifact=artifact.into();
-    let super::super::issuance::ConfirmationOrigin::Credential(mut original)=record.original else {
+    db: &rusqlite::Connection,
+    scope: &str,
+    authority: &crate::authority_state::AuthorityStamp,
+    artifact: &str,
+) -> Result<(String, String)> {
+    let source = super::tests::restored_peer_database()?;
+    let raw: String =
+        source.query_row("SELECT intent FROM day2_credential_browser", [], |row| {
+            row.get(0)
+        })?;
+    let mut pending: super::super::browser::Pending = crate::json::decode(raw.as_bytes())?;
+    pending.authority = authority.clone();
+    pending.artifact = artifact.into();
+    let raw: String = source.query_row(
+        "SELECT confirmation FROM day2_credential_confirmations",
+        [],
+        |row| row.get(0),
+    )?;
+    let record = super::super::issuance::decode_record(&pending.invocation, raw.as_bytes())?;
+    let mut confirmation = record.confirmation;
+    confirmation.authority = authority.clone();
+    confirmation.artifact = artifact.into();
+    let super::super::issuance::ConfirmationOrigin::Credential(mut original) = record.original
+    else {
         anyhow::bail!("test_expected_credential_history")
     };
-    original.scope=scope.into();
-    original.app=scope.rsplit('/').next().ok_or_else(||anyhow::anyhow!("test_scope"))?.into();
-    original.artifact=artifact.into();original.pending_challenge=pending.challenge()?;
-    let pending_json=serde_json::to_string(&pending)?;
-    let confirmation_json=super::super::issuance::encode_record(
-        confirmation,super::super::issuance::ConfirmationOrigin::Credential(original))?;
+    original.scope = scope.into();
+    original.app = scope
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("test_scope"))?
+        .into();
+    original.artifact = artifact.into();
+    original.pending_challenge = pending.challenge()?;
+    let pending_json = serde_json::to_string(&pending)?;
+    let confirmation_json = super::super::issuance::encode_record(
+        confirmation,
+        super::super::issuance::ConfirmationOrigin::Credential(original),
+    )?;
     super::super::issuance::install(db)?;
-    db.execute("INSERT INTO day2_credential_browser VALUES(?1,?2,?3,?4)",
-        params![pending.invocation,pending.attempt,pending_json,pending.expires_at])?;
-    db.execute("INSERT INTO day2_credential_confirmations VALUES(?1,?2)",
-        params![pending.invocation,confirmation_json])?;
-    Ok((pending_json,confirmation_json))
+    db.execute(
+        "INSERT INTO day2_credential_browser VALUES(?1,?2,?3,?4)",
+        params![
+            pending.invocation,
+            pending.attempt,
+            pending_json,
+            pending.expires_at
+        ],
+    )?;
+    db.execute(
+        "INSERT INTO day2_credential_confirmations VALUES(?1,?2)",
+        params![pending.invocation, confirmation_json],
+    )?;
+    Ok((pending_json, confirmation_json))
 }
 
 #[cfg(test)]

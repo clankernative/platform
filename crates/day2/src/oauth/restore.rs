@@ -680,18 +680,13 @@ fn close_in(
     cut: &Cut,
     profile: &Profile,
 ) -> Result<usize> {
-    let savepoint=tx.savepoint()?;
-    let count=close_rows(&savepoint,before,cut,profile)?;
+    let savepoint = tx.savepoint()?;
+    let count = close_rows(&savepoint, before, cut, profile)?;
     savepoint.commit()?;
     Ok(count)
 }
 
-fn close_rows(
-    tx: &Connection,
-    before: Snapshot,
-    cut: &Cut,
-    profile: &Profile,
-) -> Result<usize> {
+fn close_rows(tx: &Connection, before: Snapshot, cut: &Cut, profile: &Profile) -> Result<usize> {
     cut.check_storage_metadata(tx)?;
     ensure!(
         tx.pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))?,
@@ -830,7 +825,6 @@ fn apply_in<'scope, 'database, 'cut>(
     })
 }
 
-
 /// Counts only; this is not image admission, maintenance or writer authority.
 pub(crate) struct ApplicationResetSummary {
     pub(crate) credentials: crate::managed_credentials::store::restore::ResetSummary,
@@ -848,13 +842,14 @@ pub(crate) fn reset_application_in(
     namespace: &day2_capabilities::credentials::Namespace,
     source_epoch: u64,
 ) -> Result<ApplicationResetSummary> {
-    super::schema::admit_memory_transaction(tx,|tx| {
-        let before=Snapshot::capture(tx,oauth_schema)?;
-        fence.apply_in(tx,authority_schema)?;
-        let applied=apply_in(tx,before,cut,oauth_schema)?;
-        let credentials=applied.stage_closed_credentials(fence,namespace,source_epoch)?;
+    super::schema::admit_memory_transaction(tx, |tx| {
+        let before = Snapshot::capture(tx, oauth_schema)?;
+        fence.apply_in(tx, authority_schema)?;
+        let applied = apply_in(tx, before, cut, oauth_schema)?;
+        let credentials = applied.stage_closed_credentials(fence, namespace, source_epoch)?;
         Ok(ApplicationResetSummary {
-            credentials,closed_oauth_originals:applied.closed_count(),
+            credentials,
+            closed_oauth_originals: applied.closed_count(),
         })
     })
 }

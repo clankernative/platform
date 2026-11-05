@@ -185,7 +185,7 @@ pub(crate) fn fixture_for_storage(
     scope: &str,
     schema: Digest,
 ) -> Result<Cut> {
-    fixture_for_storage_epoch(inventory,seed,scope,schema,1)
+    fixture_for_storage_epoch(inventory, seed, scope, schema, 1)
 }
 
 #[cfg(test)]

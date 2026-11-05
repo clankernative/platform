@@ -272,26 +272,36 @@ fn allocation_floor_requires_the_whole_current_unit_without_repair() -> Result<(
 }
 
 #[test]
-fn applied_cut_rejects_another_real_connection_even_with_that_connections_owned_scope()->Result<()> {
-    let a_dir=tempfile::tempdir()?;let b_dir=tempfile::tempdir()?;
-    let mut a=database(&a_dir.path().join("a.sqlite"))?;
-    let mut b=database(&b_dir.path().join("b.sqlite"))?;
-    let profile=Profile::prepare()?;
-    let a_tx=a.transaction()?;
-    let b_tx=b.transaction()?;
-    let before=Snapshot::capture(&a_tx,&profile)?;
-    let cut=crate::security_epoch::restore_cut::fixture(before.digest().clone(),1234)?;
+fn applied_cut_rejects_another_real_connection_even_with_that_connections_owned_scope() -> Result<()>
+{
+    let a_dir = tempfile::tempdir()?;
+    let b_dir = tempfile::tempdir()?;
+    let mut a = database(&a_dir.path().join("a.sqlite"))?;
+    let mut b = database(&b_dir.path().join("b.sqlite"))?;
+    let profile = Profile::prepare()?;
+    let a_tx = a.transaction()?;
+    let b_tx = b.transaction()?;
+    let before = Snapshot::capture(&a_tx, &profile)?;
+    let cut = crate::security_epoch::restore_cut::fixture(before.digest().clone(), 1234)?;
     // Private helper access is confined to this child test. The production
     // whole-reset entry returns counts and cannot export this transaction loan.
-    let applied=crate::oauth::schema::admit(&a_tx,|_|super::apply_in(&a_tx,before,&cut,&profile))?;
-    assert!(applied.require_connection(&a_tx).is_err(),"no live admission scope remains");
-    crate::oauth::schema::admit(&b_tx,|db| {
+    let applied =
+        crate::oauth::schema::admit(&a_tx, |_| super::apply_in(&a_tx, before, &cut, &profile))?;
+    assert!(
+        applied.require_connection(&a_tx).is_err(),
+        "no live admission scope remains"
+    );
+    crate::oauth::schema::admit(&b_tx, |db| {
         crate::oauth::schema::require_admission(db)?;
-        assert!(applied.require_connection(&b_tx).is_err(),"foreign metadata is not this loan");
+        assert!(
+            applied.require_connection(&b_tx).is_err(),
+            "foreign metadata is not this loan"
+        );
         Ok(())
     })?;
-    crate::oauth::schema::admit(&a_tx,|_|applied.require_connection(&a_tx))?;
-    a_tx.rollback()?;b_tx.rollback()?;
+    crate::oauth::schema::admit(&a_tx, |_| applied.require_connection(&a_tx))?;
+    a_tx.rollback()?;
+    b_tx.rollback()?;
     Ok(())
 }
 

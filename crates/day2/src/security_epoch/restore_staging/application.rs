@@ -34,8 +34,14 @@ fn reset(db: &Connection, selected: &Selection<'_>) -> Result<Summary> {
     // cannot return an applied-cut loan or a raw connection.
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
     let summary = crate::oauth::restore::reset_application_in(
-        &tx,selected.fence,selected.authority_schema,selected.oauth_schema,
-        selected.cut,selected.namespace,selected.source_epoch)?;
+        &tx,
+        selected.fence,
+        selected.authority_schema,
+        selected.oauth_schema,
+        selected.cut,
+        selected.namespace,
+        selected.source_epoch,
+    )?;
     tx.commit()?;
     Ok(summary)
 }
