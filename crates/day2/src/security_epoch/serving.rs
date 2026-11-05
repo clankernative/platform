@@ -62,6 +62,26 @@ pub(crate) trait CurrentServingPhase: sealed::NativeServingOwner {
         db: &rusqlite::Connection,
     ) -> Result<()>;
 
+    /// One birth attempt before the first SQLite open. No caller path or
+    /// previously opened database can adopt an existing native cohort.
+    fn begin_runtime_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        metadata: &crate::store::InitialStoreMetadata,
+    ) -> Result<()>;
+
+    fn check_runtime_opened_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        db: &rusqlite::Connection,
+    ) -> Result<()>;
+
+    fn retain_runtime_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        keeper: crate::store::NativeSqliteKeeper,
+    ) -> Result<()>;
+
     /// Before the actual mutation/send attempt, not after its possibly lost
     /// result. Failure must leave the actual owner permanently refused.
     fn arm(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()>;
@@ -771,6 +791,30 @@ pub(super) struct ServingBorrow<'phase, 'storage> {
 }
 impl sealed::NativeServingOwner for ServingBorrow<'_, '_> {}
 impl CurrentServingPhase for ServingBorrow<'_, '_> {
+    fn begin_runtime_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        metadata: &crate::store::InitialStoreMetadata,
+    ) -> Result<()> {
+        self.owner.begin_runtime_database(stage, metadata)
+    }
+
+    fn check_runtime_opened_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        db: &rusqlite::Connection,
+    ) -> Result<()> {
+        self.owner.check_runtime_opened_database(stage, db)
+    }
+
+    fn retain_runtime_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        keeper: crate::store::NativeSqliteKeeper,
+    ) -> Result<()> {
+        self.owner.retain_runtime_database(stage, keeper)
+    }
+
     fn check_runtime_selection(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,

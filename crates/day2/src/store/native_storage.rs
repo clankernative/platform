@@ -20,8 +20,19 @@ use std::{
 
 const DATABASE: &str = "/state/day2-native/day2-initial.sqlite";
 
-#[cfg(test)]
+mod keeper;
 mod opened_files;
+pub(crate) use keeper::require_unopened as require_unopened_native_sqlite;
+
+/// Actual first SQLite connection, retained by the genuine App file owner.
+/// The handles are resources, not a native permission or immutable-content proof.
+/// Only load_native_storage constructs this resource, before any SQL activation.
+pub(crate) struct NativeSqliteKeeper {
+    connection: Connection,
+    files: Option<opened_files::Handles>,
+    refused: bool,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
 
 impl Runtime {
     /// The sealed native scope is retained before SQLite open/recovery and
@@ -36,11 +47,21 @@ impl Runtime {
             current.check_runtime_selection(stage, &metadata)?;
             // SQLite open can recover a journal; arm BEFORE any such attempt.
             current.arm(stage)?;
-            let mut connection = open_existing(Path::new(DATABASE))?;
-            configure_connection(&mut connection)?;
-            current.admit_runtime_database(stage, &metadata, &connection)?;
-            check_storage_binding(&connection, &metadata.artifact, &metadata.scope)?;
-            let active = crate::authority_state::current(&connection)?;
+            current.begin_runtime_database(stage, &metadata)?;
+            // Own the FIRST connection before configuration, recovery, schema
+            // inspection or WAL activation. It is never closed and readopted.
+            let mut keeper = NativeSqliteKeeper {
+                connection: open_existing(Path::new(DATABASE))?,
+                files: None,
+                refused: false,
+                local: std::marker::PhantomData,
+            };
+            let connection = &mut keeper.connection;
+            current.check_runtime_opened_database(stage, connection)?;
+            configure_connection(connection)?;
+            current.admit_runtime_database(stage, &metadata, connection)?;
+            check_storage_binding(connection, &metadata.artifact, &metadata.scope)?;
+            let active = crate::authority_state::current(connection)?;
             ensure!(
                 active.artifact_id == metadata.artifact.id(),
                 "native_runtime_activated_artifact_changed"
@@ -59,13 +80,15 @@ impl Runtime {
                 .oauth_connections
                 .is_empty()
             {
-                require_existing_oauth_schema(&connection)?;
+                require_existing_oauth_schema(connection)?;
             }
             // Recheck the retained original schema/seed after the bounded,
             // read-only admission; there is no initializer or repair fallback.
-            current.admit_runtime_database(stage, &metadata, &connection)?;
+            current.admit_runtime_database(stage, &metadata, connection)?;
             connection.pragma_update(None, "journal_mode", "WAL")?;
-            current.admit_runtime_database(stage, &metadata, &connection)?;
+            current.admit_runtime_database(stage, &metadata, connection)?;
+            keeper.capture_created_files()?;
+            current.check(stage)?;
             let desired = crate::artifact::Instance::load(&metadata.instance_path)?;
             current.check_runtime_selection(stage, &metadata)?;
             let inputs = crate::host_inputs::Inputs::default();
@@ -88,11 +111,9 @@ impl Runtime {
                 host: Arc::new(crate::host::System(inputs.clone())),
                 inputs,
             };
-            if let Err((connection, error)) = connection.close() {
-                current.refuse();
-                drop(connection);
-                return Err(error).context("native initial SQL close refused");
-            }
+            // Move the same live connection/cohort into the same App file
+            // continuation before recording a known load or publishing Runtime.
+            current.retain_runtime_database(stage, keeper)?;
             current.check(stage)?;
             current.finish_known(stage)?;
             Ok(runtime)

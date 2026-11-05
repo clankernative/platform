@@ -456,6 +456,7 @@
     "crates/day2/src/simulations.rs",
     "crates/day2/src/store.rs",
     "crates/day2/src/store/native_storage.rs",
+    "crates/day2/src/store/native_storage/keeper.rs",
     "crates/day2/src/store/native_storage/opened_files.rs",
     "crates/day2/src/structural_proofs.rs",
     "crates/day2/src/supply_tests.rs",
