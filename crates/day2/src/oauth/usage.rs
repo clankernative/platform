@@ -441,6 +441,7 @@ fn load(
     reference: &str,
     now: i64,
 ) -> Result<Claims> {
+    super::restore::require_open(db, super::restore::Kind::Use, reference)?;
     ensure!(
         reference.starts_with("cu1_") && reference.len() <= 64,
         "invalid connection use reference"

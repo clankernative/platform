@@ -351,6 +351,7 @@ fn begin_in(
     now: i64,
     guard: Option<&super::management::app::StartGuard<'_>>,
 ) -> Result<bool> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &intent.attempt)?;
     if let Some(guard) = guard {
         guard.check(tx, now)?;
     }
@@ -411,6 +412,7 @@ pub(super) fn claim_callback(
     identifier(attempt)?;
     identifier(code_ref)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::restore::require_open(&tx, super::restore::Kind::Connect, attempt)?;
     let eligible: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM oauth_connect_attempts
          WHERE attempt = ?1 AND state = 'awaiting_provider_authorization' AND expires_at > ?2)",
@@ -438,6 +440,7 @@ pub(super) fn authorize_and_commit_exchange(
 ) -> Result<Option<LegacyExchangeDispatchPermit>> {
     identifier(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::restore::require_open(&tx, super::restore::Kind::Connect, attempt)?;
     let row: Option<(ConnectIntent, String)> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
@@ -573,6 +576,7 @@ pub(super) fn await_account_approval(
     identifier(account)?;
     identifier(scope_evidence)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::restore::require_open(&tx, super::restore::Kind::Connect, attempt)?;
     let state: Option<String> = tx
         .query_row(
             "SELECT state FROM oauth_connect_attempts WHERE attempt = ?1 AND expires_at > ?2",
@@ -608,6 +612,7 @@ pub(super) fn quarantine_external_bound(
 ) -> Result<bool> {
     let intent = verified.intent();
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::restore::require_open(&tx, super::restore::Kind::Connect, &intent.attempt)?;
     let stored: Option<(ConnectIntent, String)> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
@@ -730,6 +735,7 @@ pub(super) fn activate_mapped_in(
     now: i64,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, verified.attempt())?;
     let intent: Option<ConnectIntent> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
@@ -847,6 +853,7 @@ fn activate_in(
     now: i64,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, attempt)?;
     let (account, scope_evidence) = account_scope;
     identifier(attempt)?;
     identifier(account)?;
@@ -1009,6 +1016,7 @@ pub(super) fn pending_approval(
     attempt: &str,
     now: i64,
 ) -> Result<Option<(ConnectIntent, CallbackBinding)>> {
+    super::restore::require_open(db, super::restore::Kind::Connect, attempt)?;
     identifier(attempt)?;
     let row: Option<(ConnectIntent, Option<String>)> = db
         .query_row(
@@ -1053,6 +1061,7 @@ pub(super) fn pending_approval(
 }
 
 pub(super) fn slot_matches(tx: &Transaction<'_>, intent: &ConnectIntent) -> Result<bool> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &intent.attempt)?;
     let row: Option<(i64, i64, String)> = tx
         .query_row(
             "SELECT generation, security_epoch, status FROM oauth_connection_slots WHERE slot = ?1",

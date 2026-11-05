@@ -99,6 +99,7 @@ pub fn install_schema(db: &Connection) -> Result<()> {
 }
 
 fn install_schema_in(db: &Connection) -> Result<()> {
+    super::restore::install(db)?;
     let ddl = "PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS oauth_inbound_schema_version (
             version INTEGER PRIMARY KEY
@@ -162,6 +163,7 @@ fn install_schema_in(db: &Connection) -> Result<()> {
 /// The security shell has already obtained exact interactive consent. This
 /// store persists that ceiling without a mutable list of operation names.
 pub fn record_grant(db: &Connection, id: &str, ceiling: &GrantCeiling, epoch: i64) -> Result<bool> {
+    super::restore::require_open(db, super::restore::Kind::Inbound, id)?;
     identifier(id)?;
     ceiling.verify()?;
     ensure!(epoch > 0, "invalid grant epoch");
@@ -495,6 +497,7 @@ fn authorize_operation(
 }
 
 fn active_grant(db: &Connection, id: &str) -> Result<Option<(GrantCeiling, i64)>> {
+    super::restore::require_open(db, super::restore::Kind::Inbound, id)?;
     let row: Option<(String, String, i64)> = db
         .query_row(
             "SELECT ceiling, digest, epoch FROM oauth_inbound_grants

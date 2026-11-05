@@ -171,6 +171,7 @@ pub(super) fn prepare_code(
 }
 
 pub(super) fn publish_code(tx: &Transaction<'_>, prepared: PreparedCode) -> Result<()> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &prepared.attempt)?;
     tx.execute(
         "INSERT INTO oauth_private_codes
          (reference, attempt, identity_digest, key_version, nonce, ciphertext)
@@ -192,6 +193,7 @@ pub(super) fn code_exists(
     intent: &ConnectIntent,
     binding: &ExchangeBinding,
 ) -> Result<bool> {
+    super::restore::require_open(db, super::restore::Kind::Connect, &intent.attempt)?;
     let expected = Digest::of(&(
         "oauth-private-material-identity-v1",
         identity(MaterialPurpose::AuthorizationCode, intent, binding, None),
@@ -215,6 +217,7 @@ pub(super) fn load_code(
     intent: &ConnectIntent,
     binding: &ExchangeBinding,
 ) -> Result<String> {
+    super::restore::require_open(db, super::restore::Kind::Connect, &intent.attempt)?;
     let (digest, version, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db.query_row(
         "SELECT identity_digest, key_version, nonce, ciphertext
          FROM oauth_private_codes WHERE reference = ?1 AND attempt = ?2",
@@ -295,6 +298,7 @@ pub(super) fn prepare_verifier(
 }
 
 pub(super) fn publish_verifier(tx: &Transaction<'_>, prepared: &PreparedVerifier) -> Result<()> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &prepared.attempt)?;
     tx.execute(
         "INSERT INTO oauth_private_verifiers
          (reference, attempt, identity_digest, key_version, nonce, ciphertext)
@@ -316,6 +320,7 @@ pub(super) fn verifier_exists(
     intent: &ConnectIntent,
     binding: &ExchangeBinding,
 ) -> Result<bool> {
+    super::restore::require_open(db, super::restore::Kind::Connect, &intent.attempt)?;
     let expected = Digest::of(&(
         "oauth-private-material-identity-v1",
         identity(MaterialPurpose::PkceVerifier, intent, binding, None),
@@ -341,6 +346,7 @@ pub(super) fn load_verifier(
     intent: &ConnectIntent,
     binding: &ExchangeBinding,
 ) -> Result<String> {
+    super::restore::require_open(db, super::restore::Kind::Connect, &intent.attempt)?;
     let (digest, version, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db.query_row(
         "SELECT identity_digest, key_version, nonce, ciphertext
          FROM oauth_private_verifiers WHERE reference = ?1 AND attempt = ?2",
@@ -380,6 +386,7 @@ pub(super) fn delete_verifier(
 }
 
 pub(super) struct PreparedTokenMaterial {
+    attempt: String,
     slot: String,
     generation: i64,
     account: String,
@@ -422,6 +429,7 @@ pub(super) fn prepare_tokens(
     );
     plaintext.fill(0);
     Ok(PreparedTokenMaterial {
+        attempt: intent.attempt.clone(),
         slot: intent.slot.clone(),
         generation: intent.proposed_generation,
         account: account.to_owned(),
@@ -431,6 +439,7 @@ pub(super) fn prepare_tokens(
 }
 
 pub(super) fn publish_tokens(tx: &Transaction<'_>, prepared: PreparedTokenMaterial) -> Result<()> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &prepared.attempt)?;
     tx.execute(
         "INSERT INTO oauth_private_tokens
          (reference, slot, generation, account, identity_digest, key_version, nonce, ciphertext)
@@ -470,6 +479,7 @@ fn load_bundle(
     account: &str,
     token_version: i64,
 ) -> Result<TokenBundle> {
+    super::restore::require_open(db, super::restore::Kind::Connect, &intent.attempt)?;
     let reference = token_reference(binding, token_version)?;
     let (digest, version, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db.query_row(
         "SELECT identity_digest,key_version,nonce,ciphertext FROM oauth_private_tokens
@@ -652,6 +662,7 @@ pub(super) fn prepare_replacement_tokens(
     );
     plaintext.fill(0);
     Ok(PreparedTokenMaterial {
+        attempt: intent.attempt.clone(),
         slot: intent.slot.clone(),
         generation: intent.proposed_generation,
         account: account.to_owned(),
@@ -667,6 +678,7 @@ pub(super) fn replace_tokens(
     prepared: PreparedTokenMaterial,
     base_reference: &str,
 ) -> Result<()> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &prepared.attempt)?;
     let changed = tx.execute(
         "UPDATE oauth_private_tokens SET reference=?1,identity_digest=?2,key_version=?3,nonce=?4,ciphertext=?5
          WHERE slot=?6 AND generation=?7 AND account=?8 AND reference=?9",
@@ -784,6 +796,7 @@ pub(super) fn publish_external_quarantine(
     tx: &Transaction<'_>,
     prepared: PreparedExternalQuarantine,
 ) -> Result<()> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &prepared.attempt)?;
     tx.execute(
         "INSERT INTO oauth_external_quarantine
          (attempt, slot, generation, account, scope_evidence, challenge, quarantined_at,
@@ -831,6 +844,7 @@ struct QuarantineRow {
 }
 
 fn quarantine_row(db: &Connection, attempt: &str) -> Result<Option<QuarantineRow>> {
+    super::restore::require_open(db, super::restore::Kind::Connect, attempt)?;
     Ok(db
         .query_row(
             "SELECT slot, generation, account, scope_evidence, challenge, quarantined_at,
