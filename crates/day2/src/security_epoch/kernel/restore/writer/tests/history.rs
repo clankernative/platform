@@ -82,7 +82,7 @@ enum FailurePoint {
     Event { index: usize },
 }
 
-fn source() -> Result<Digest> {
+pub(super) fn source() -> Result<Digest> {
     Digest::of(&(
         include_str!("../../writer.rs"),
         include_str!("../../completion.rs"),
