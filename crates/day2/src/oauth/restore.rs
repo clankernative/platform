@@ -770,13 +770,19 @@ pub(crate) struct AppliedCut<'scope, 'database, 'cut> {
 }
 
 impl AppliedCut<'_, '_, '_> {
-    pub(crate) fn cut(&self)->&Cut { self.cut }
+    pub(crate) fn cut(&self) -> &Cut {
+        self.cut
+    }
 
-    pub(crate) fn closed_count(&self)->usize { self.count }
+    pub(crate) fn closed_count(&self) -> usize {
+        self.count
+    }
 
-    pub(crate) fn require_connection(&self,connection:&Connection)->Result<()> {
-        ensure!(std::ptr::eq(connection,&**self.transaction) && !connection.is_autocommit(),
-            "restore_applied_cut_connection_changed");
+    pub(crate) fn require_connection(&self, connection: &Connection) -> Result<()> {
+        ensure!(
+            std::ptr::eq(connection, &**self.transaction) && !connection.is_autocommit(),
+            "restore_applied_cut_connection_changed"
+        );
         super::schema::require_admission(connection)
     }
 
@@ -787,21 +793,30 @@ impl AppliedCut<'_, '_, '_> {
         fence: &crate::security_epoch::restore_authority::PreparedRestoreFence,
         namespace: &day2_capabilities::credentials::Namespace,
         source_epoch: u64,
-    )->Result<crate::managed_credentials::store::restore::ResetSummary> {
-        let peers=fence.closed_credential_peers(self.transaction,self,namespace,source_epoch)?;
+    ) -> Result<crate::managed_credentials::store::restore::ResetSummary> {
+        let peers =
+            fence.closed_credential_peers(self.transaction, self, namespace, source_epoch)?;
         crate::managed_credentials::store::restore::stage_closed_reset(
-            self.transaction,namespace,source_epoch,&peers)
+            self.transaction,
+            namespace,
+            source_epoch,
+            &peers,
+        )
     }
 }
 
-pub(crate) fn apply_in<'scope,'database,'cut>(
+pub(crate) fn apply_in<'scope, 'database, 'cut>(
     tx: &'scope mut Transaction<'database>,
     before: Snapshot,
     cut: &'cut Cut,
     profile: &Profile,
-) -> Result<AppliedCut<'scope,'database,'cut>> {
-    let count=close_in(tx,before,cut,profile)?;
-    Ok(AppliedCut {cut,transaction:tx,count})
+) -> Result<AppliedCut<'scope, 'database, 'cut>> {
+    let count = close_in(tx, before, cut, profile)?;
+    Ok(AppliedCut {
+        cut,
+        transaction: tx,
+        count,
+    })
 }
 
 #[cfg(test)]

@@ -19,10 +19,10 @@ enum PeerAdmission<'proof, 'db> {
 }
 
 impl PeerAdmission<'_, '_> {
-    fn require(&self,tx:&Transaction<'_>,namespace:&Namespace,epoch:i64)->Result<()> {
+    fn require(&self, tx: &Transaction<'_>, namespace: &Namespace, epoch: i64) -> Result<()> {
         match self {
-            Self::Empty=>Ok(()),
-            Self::Closed(context)=>context.require(tx,namespace,u64::try_from(epoch)?),
+            Self::Empty => Ok(()),
+            Self::Closed(context) => context.require(tx, namespace, u64::try_from(epoch)?),
         }
     }
 }
@@ -48,7 +48,7 @@ pub(crate) fn stage_reset(
     namespace: &Namespace,
     source_epoch: u64,
 ) -> Result<ResetSummary> {
-    stage_with_peers(tx,namespace,source_epoch,PeerAdmission::Empty)
+    stage_with_peers(tx, namespace, source_epoch, PeerAdmission::Empty)
 }
 
 /// Complete-application denial profile only. Unlike the credential-only entry,
@@ -60,7 +60,7 @@ pub(crate) fn stage_closed_reset(
     source_epoch: u64,
     peers: &crate::security_epoch::restore_authority::ClosedCredentialPeers<'_>,
 ) -> Result<ResetSummary> {
-    stage_with_peers(tx,namespace,source_epoch,PeerAdmission::Closed(peers))
+    stage_with_peers(tx, namespace, source_epoch, PeerAdmission::Closed(peers))
 }
 
 fn stage_with_peers(
@@ -80,7 +80,9 @@ fn stage_with_peers(
     let selected = namespace_key(namespace)?;
     // This adapter owns the temporary hook only on an offline target. Nested
     // schema calls share the same cumulative debit rather than renewing it.
-    schema::admit(tx, |_| reset_in(tx, namespace, &selected, source_epoch,&peers))
+    schema::admit(tx, |_| {
+        reset_in(tx, namespace, &selected, source_epoch, &peers)
+    })
 }
 
 fn inspect_in(
@@ -90,7 +92,7 @@ fn inspect_in(
     epoch: i64,
     peers: &PeerAdmission<'_, '_>,
 ) -> Result<(Vec<String>, usize, i64)> {
-    peers.require(tx,namespace,epoch)?;
+    peers.require(tx, namespace, epoch)?;
     // Require a complete EXISTING unit. The installer below validates it; it
     // must never turn an absent/partial imported unit into current state.
     for table in CREDENTIAL_TABLES {
@@ -105,22 +107,22 @@ fn inspect_in(
     // The credential-only profile still refuses all peer history. The complete
     // profile has already proved both cuts on this same transaction; the actual
     // installer above still validates every retained peer row and relationship.
-    if matches!(peers,PeerAdmission::Empty) {
-      for table in CREDENTIAL_PEER_TABLES {
-        let present: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?1)",
-            [table],
-            |r| r.get(0),
-        )?;
-        if present {
-            let occupied: bool = tx.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM main.{table})"),
-                [],
+    if matches!(peers, PeerAdmission::Empty) {
+        for table in CREDENTIAL_PEER_TABLES {
+            let present: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?1)",
+                [table],
                 |r| r.get(0),
             )?;
-            ensure!(!occupied, "restore_reset_peer_history_unsupported");
+            if present {
+                let occupied: bool = tx.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM main.{table})"),
+                    [],
+                    |r| r.get(0),
+                )?;
+                ensure!(!occupied, "restore_reset_peer_history_unsupported");
+            }
         }
-      }
     }
     let mut query = tx.prepare(
         "SELECT id,namespace,security_epoch,state FROM day2_credential_lineages ORDER BY id",
@@ -174,7 +176,7 @@ pub(crate) fn inspect_source(
     let selected = namespace_key(namespace)?;
     let epoch = i64::try_from(source_epoch)?;
     schema::admit(tx, |_| {
-        inspect_in(tx, namespace,&selected, epoch,&PeerAdmission::Empty)?;
+        inspect_in(tx, namespace, &selected, epoch, &PeerAdmission::Empty)?;
         Ok(())
     })
 }
@@ -186,7 +188,7 @@ fn reset_in(
     epoch: i64,
     peers: &PeerAdmission<'_, '_>,
 ) -> Result<ResetSummary> {
-    let (active, lineages, versions) = inspect_in(tx, namespace,selected, epoch,peers)?;
+    let (active, lineages, versions) = inspect_in(tx, namespace, selected, epoch, peers)?;
     // No epoch, grant, selector, verifier, custody envelope, receipt or origin
     // is rewritten. Reuse the canonical active->revoked transition exactly.
     for lineage in &active {
@@ -198,7 +200,7 @@ fn reset_in(
     install_schema(tx)?;
     let unreset:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_credential_lineages WHERE state!='revoked') OR EXISTS(SELECT 1 FROM day2_credential_versions WHERE state!='revoked') OR EXISTS(SELECT 1 FROM day2_credential_deliveries WHERE state!='closed')",[],|r|r.get(0))?;
     ensure!(!unreset, "restore_reset_terminal_postcondition");
-    peers.require(tx,namespace,epoch)?;
+    peers.require(tx, namespace, epoch)?;
     Ok(ResetSummary {
         lineages,
         newly_revoked: active.len(),

@@ -21,27 +21,39 @@ struct Summary {
 }
 
 fn reset(db: &Connection, selected: &Selection<'_>) -> Result<Summary> {
-    ensure!(db.is_autocommit(),"complete_restore_requires_owned_transaction");
-    memory_shape(db,None)?;
-    ensure!(db.pragma_query_value(None,"foreign_keys",|row|row.get::<_,bool>(0))?
-        && db.pragma_query_value(None,"journal_mode",|row|row.get::<_,String>(0))?=="memory",
-        "complete_restore_memory_configuration_required");
+    ensure!(
+        db.is_autocommit(),
+        "complete_restore_requires_owned_transaction"
+    );
+    memory_shape(db, None)?;
+    ensure!(
+        db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))?
+            && db.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?
+                == "memory",
+        "complete_restore_memory_configuration_required"
+    );
     // A single cumulative admission covers every canonical validator and
     // revocation. No imported schema is initialized, upgraded or repaired.
-    crate::oauth::schema::admit(db,|db| {
+    crate::oauth::schema::admit(db, |db| {
         // The outer borrow deliberately owns the admission scope. SQLite
         // checks transaction exclusivity; this value owns rollback on error.
-        let mut tx=Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
-        let before=crate::oauth::restore::Snapshot::capture(&tx,selected.oauth_schema)?;
-        selected.fence.apply_in(&tx,selected.authority_schema)?;
-        let applied=crate::oauth::restore::apply_in(
-            &mut tx,before,selected.cut,selected.oauth_schema)?;
-        let credentials=applied.stage_closed_credentials(
-            selected.fence,selected.namespace,selected.source_epoch)?;
-        let closed_oauth_originals=applied.closed_count();
+        let mut tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        let before = crate::oauth::restore::Snapshot::capture(&tx, selected.oauth_schema)?;
+        selected.fence.apply_in(&tx, selected.authority_schema)?;
+        let applied =
+            crate::oauth::restore::apply_in(&mut tx, before, selected.cut, selected.oauth_schema)?;
+        let credentials = applied.stage_closed_credentials(
+            selected.fence,
+            selected.namespace,
+            selected.source_epoch,
+        )?;
+        let closed_oauth_originals = applied.closed_count();
         // End the actual transaction loan before its sole outer commit.
         drop(applied);
         tx.commit()?;
-        Ok(Summary {credentials,closed_oauth_originals})
+        Ok(Summary {
+            credentials,
+            closed_oauth_originals,
+        })
     })
 }

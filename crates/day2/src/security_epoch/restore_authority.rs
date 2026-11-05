@@ -58,10 +58,12 @@ impl PreparedRestoreFence {
     fn require_applied_in(&self, connection: &Connection) -> Result<()> {
         require_transaction(connection)?;
         crate::oauth::schema::require_admission(connection)?;
-        ensure!(authority_state::current(connection)?==self.disabled
-            && !self.disabled.document.enabled
-            && self.disabled.stamp.epoch!=self.previous.stamp.epoch,
-            "restore_disabled_authority_changed");
+        ensure!(
+            authority_state::current(connection)? == self.disabled
+                && !self.disabled.document.enabled
+                && self.disabled.stamp.epoch != self.previous.stamp.epoch,
+            "restore_disabled_authority_changed"
+        );
         Ok(())
     }
 
@@ -75,10 +77,14 @@ impl PreparedRestoreFence {
         source_epoch: u64,
     ) -> Result<ClosedCredentialPeers<'db>> {
         applied.require_connection(connection)?;
-        let context=ClosedCredentialPeers {
-            connection,fence:self,cut:applied.cut(),namespace:namespace.clone(),source_epoch,
+        let context = ClosedCredentialPeers {
+            connection,
+            fence: self,
+            cut: applied.cut(),
+            namespace: namespace.clone(),
+            source_epoch,
         };
-        context.require(connection,namespace,source_epoch)?;
+        context.require(connection, namespace, source_epoch)?;
         Ok(context)
     }
 
@@ -133,11 +139,15 @@ impl ClosedCredentialPeers<'_> {
         namespace: &day2_capabilities::credentials::Namespace,
         source_epoch: u64,
     ) -> Result<()> {
-        ensure!(std::ptr::eq(connection,self.connection)
-            && namespace==&self.namespace && source_epoch==self.source_epoch,
-            "restore_closed_peer_owner_changed");
+        ensure!(
+            std::ptr::eq(connection, self.connection)
+                && namespace == &self.namespace
+                && source_epoch == self.source_epoch,
+            "restore_closed_peer_owner_changed"
+        );
         self.fence.require_applied_in(connection)?;
-        self.cut.require_credential_binding(namespace,source_epoch)?;
+        self.cut
+            .require_credential_binding(namespace, source_epoch)?;
         self.cut.require_applied_in(connection)
     }
 }
