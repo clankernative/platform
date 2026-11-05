@@ -674,7 +674,7 @@ impl Snapshot {
 /// Atomic denial phase inside the private reset transaction. The caller must
 /// already own genuine exclusion and the unpublished target. No outer commit,
 /// external request, secret deletion, custody change or owner is produced.
-pub(crate) fn close_in(
+fn close_in(
     tx: &mut Transaction<'_>,
     before: Snapshot,
     cut: &Cut,
@@ -759,6 +759,49 @@ pub(crate) fn close_in(
     let count = before.identities.len();
     savepoint.commit()?;
     Ok(count)
+}
+
+/// Actual successful local denial result, not a native owner or copy/writer
+/// permission. Stored cut DATA alone cannot manufacture this value.
+pub(crate) struct AppliedCut<'scope, 'database, 'cut> {
+    cut: &'cut Cut,
+    transaction: &'scope Transaction<'database>,
+    count: usize,
+}
+
+impl AppliedCut<'_, '_, '_> {
+    pub(crate) fn cut(&self)->&Cut { self.cut }
+
+    pub(crate) fn closed_count(&self)->usize { self.count }
+
+    pub(crate) fn require_connection(&self,connection:&Connection)->Result<()> {
+        ensure!(std::ptr::eq(connection,&**self.transaction) && !connection.is_autocommit(),
+            "restore_applied_cut_connection_changed");
+        super::schema::require_admission(connection)
+    }
+
+    /// Concrete SQL revocation continuation only. The held transaction is not
+    /// exposed, and commit cannot occur while this actual cut loan is live.
+    pub(crate) fn stage_closed_credentials(
+        &self,
+        fence: &crate::security_epoch::restore_authority::PreparedRestoreFence,
+        namespace: &day2_capabilities::credentials::Namespace,
+        source_epoch: u64,
+    )->Result<crate::managed_credentials::store::restore::ResetSummary> {
+        let peers=fence.closed_credential_peers(self.transaction,self,namespace,source_epoch)?;
+        crate::managed_credentials::store::restore::stage_closed_reset(
+            self.transaction,namespace,source_epoch,&peers)
+    }
+}
+
+pub(crate) fn apply_in<'scope,'database,'cut>(
+    tx: &'scope mut Transaction<'database>,
+    before: Snapshot,
+    cut: &'cut Cut,
+    profile: &Profile,
+) -> Result<AppliedCut<'scope,'database,'cut>> {
+    let count=close_in(tx,before,cut,profile)?;
+    Ok(AppliedCut {cut,transaction:tx,count})
 }
 
 #[cfg(test)]
