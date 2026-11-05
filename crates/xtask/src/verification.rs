@@ -2407,6 +2407,11 @@ mod tests {
                 .contains("startsWith(matrix.shard, 'workspace-')")
         );
         assert!(
+            ci_step(&shards, "Restore this workspace shard's test executables").contains(
+                "day2-${{ matrix.shard == 'workspace-day2-runtime' && 'workspace-day2' || matrix.shard }}.tgz"
+            )
+        );
+        assert!(
             ci_step(&shards, "Download all required binary groups in parallel")
                 .contains("matrix.shard == 'parallel-runtime'")
         );

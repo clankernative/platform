@@ -1124,7 +1124,7 @@ jobs:
           path: /tmp/day2-verification
       - name: Restore this workspace shard's test executables
         if: ${{ startsWith(matrix.shard, 'workspace-') }}
-        run: tar -xzf /tmp/day2-verification/day2-${{ matrix.shard }}.tgz -C "$GITHUB_WORKSPACE"
+        run: tar -xzf /tmp/day2-verification/day2-${{ matrix.shard == 'workspace-day2-runtime' && 'workspace-day2' || matrix.shard }}.tgz -C "$GITHUB_WORKSPACE"
       - name: Download all required binary groups in parallel
         id: artifact_download_4
         timeout-minutes: 2
