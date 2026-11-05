@@ -1,7 +1,11 @@
 //! First prepare-for-restore transition. All inputs and outputs are DATA, not
 //! maintenance permission, a copy permit, a native owner or writer readiness.
 //! The epoch fence and both create-only receipts must commit atomically.
+pub(in crate::security_epoch) mod approval_use;
+pub(in crate::security_epoch) mod completion;
+
 use super::{EpochStore, Phase, Snapshot, Versioned, advance};
+use crate::security_epoch::restore_approval::{AdminIdentity, ApprovalRequest, TargetBinding};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{BindingRef, Digest, security_epoch::AuthorityScope};
 use serde::{Deserialize, Serialize};
@@ -61,6 +65,7 @@ pub(in crate::security_epoch) struct Backup {
     pub authority: Digest,
     pub source_incarnation: Digest,
     pub security_epoch: u64,
+    pub full_archive_digest: Digest,
     pub image: Digest,
     pub schema: Digest,
     pub artifact: Digest,
@@ -136,8 +141,7 @@ pub(in crate::security_epoch) struct Grant {
     pub revision: Digest,
     pub policy: Digest,
     pub clock_domain: Digest,
-    pub issued_at: i64,
-    pub expires_at: i64,
+    pub approval: ApprovalRequest,
     pub fence: Fence,
 }
 
@@ -147,6 +151,9 @@ pub(in crate::security_epoch) struct Grant {
 #[serde(deny_unknown_fields)]
 pub(in crate::security_epoch) struct Current {
     pub grant: Grant,
+    pub target: TargetBinding,
+    pub custody: BindingRef,
+    pub executor: AdminIdentity,
     pub enabled: bool,
     pub observed_at: i64,
     pub ready_until: i64,
@@ -161,6 +168,22 @@ fn authorize(
     at: i64,
     before: &Snapshot,
 ) -> Result<()> {
+    grant.approval.validate()?;
+    let approved = &grant.approval;
+    ensure!(
+        approved.target == current.target
+            && approved.executor == current.executor
+            && approved.custody == current.custody
+            && approved.full_archive_digest == intent.archive.full_archive_digest
+            && approved.target.scope == selected.scope
+            && approved.target.authority == selected.authority_key()?
+            && approved.target.selection == Digest::of(selected)?
+            && approved.target.incarnation == intent.target_incarnation
+            && approved.target.security_epoch == 2
+            && approved.target.artifact == intent.archive.artifact
+            && approved.target.schema == intent.archive.schema,
+        "restore_approval_binding_changed"
+    );
     ensure!(
         current.enabled
             && &current.grant == grant
@@ -189,15 +212,11 @@ fn authorize(
         "restore_incumbent_fence_or_source_changed"
     );
     ensure!(
-        grant.issued_at >= 0
-            && grant.issued_at <= current.observed_at
+        approved.approved_at >= 0
+            && approved.approved_at <= current.observed_at
             && current.observed_at <= at
             && at < current.ready_until
-            && current.ready_until <= grant.expires_at
-            && grant
-                .expires_at
-                .checked_sub(grant.issued_at)
-                .is_some_and(|span| (1..=300).contains(&span))
+            && current.ready_until <= approved.expires_at
             && current
                 .ready_until
                 .checked_sub(current.observed_at)
