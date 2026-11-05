@@ -2,7 +2,7 @@
 //! is deliberately UNFENCED: only the future actual outside-archive high-water
 //! commit can qualify its interval for approval. It creates no grant or signer.
 use crate::security_epoch::{
-    NativeAcquisition,
+    CurrentControllerStoragePhase, NativeAcquisition,
     native_enrollment::{EnrolledRoleStage, NativeRole, SameEnrolledOwner},
 };
 use anyhow::{Context, Result, ensure};
@@ -21,6 +21,14 @@ pub(super) struct UnfencedHostClock {
     tracker: Tracker,
 }
 
+/// Actual Controller observations require its retained physical/file/peer
+/// phase at capture AND every later use. The inner clock still shares that
+/// phase's real original; another phase or an App clock cannot substitute.
+/// This is not a ledger writer, qualified high-water or approval owner.
+pub(super) struct UnfencedControllerClock {
+    clock: UnfencedHostClock,
+}
+
 const _: () = {
     macro_rules! assert_not_impl {
         ($bound:path) => {{
@@ -30,6 +38,7 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <UnfencedHostClock as Ambiguous<_>>::check;
+            let _ = <UnfencedControllerClock as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);
@@ -58,6 +67,13 @@ impl UnfencedHostClock {
         scope: &AuthorityScope,
     ) -> Result<Self> {
         stage.check_for(scope, NativeRole::AppHost)?;
+        Self::capture_checked_current(stage)
+    }
+
+    // Only the two fixed native constructors in this module can enter here.
+    // Neither an arbitrary role selector nor a public bare-stage factory is
+    // introduced. SameEnrolledOwner and the actual original remain shared.
+    fn capture_checked_current(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
         let mut acquisition = stage.narrow_io_acquisition(5)?;
         let result = (|| {
             let same = stage.capture_same_owner()?;
@@ -109,6 +125,57 @@ impl UnfencedHostClock {
 
     pub(super) fn refuse(&mut self) {
         self.acquisition.refuse();
+    }
+}
+
+impl UnfencedControllerClock {
+    pub(super) fn capture(
+        phase: &mut CurrentControllerStoragePhase<'_, '_>,
+        scope: &AuthorityScope,
+    ) -> Result<Self> {
+        let captured = (|| -> Result<Self> {
+            let stage = phase.controller_stage()?;
+            stage.check_for(scope, NativeRole::EpochController)?;
+            let clock = UnfencedHostClock::capture_checked_current(stage)?;
+            Ok(Self { clock })
+        })();
+        // Always run the actual physical postcheck, including when sampling
+        // failed. Preserve the original sampling error when both refuse.
+        let checked = phase.check();
+        let result = (|| {
+            let mut value: Self = captured?;
+            if let Err(error) = checked {
+                value.clock.refuse();
+                return Err(error);
+            }
+            Ok(value)
+        })();
+        if result.is_err() {
+            phase.refuse();
+        }
+        result
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        phase: &mut CurrentControllerStoragePhase<'_, '_>,
+    ) -> Result<HostTimeData> {
+        let observed = (|| self.clock.observe(phase.controller_stage()?))();
+        let checked = phase.check();
+        let result = (|| {
+            let value = observed?;
+            checked?;
+            Ok(value)
+        })();
+        if result.is_err() {
+            self.refuse(phase);
+        }
+        result
+    }
+
+    pub(super) fn refuse(&mut self, phase: &mut CurrentControllerStoragePhase<'_, '_>) {
+        self.clock.refuse();
+        phase.refuse();
     }
 }
 

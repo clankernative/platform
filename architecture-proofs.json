@@ -67,6 +67,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f4d51c1c125dcf357b0e49ffe996d4cf4b8d1bd83534b00076e8bc76be2cc3d7",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
       "scope": "const",
       "fingerprint": "sha256:0c9b68ebb6eafc44c1610d2fd60011968daa08d673c327b4a3c4d759c530f28e",
@@ -4597,15 +4603,49 @@
     },
     {
       "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
+      "type_name": "UnfencedControllerClock",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn capture (phase : & mut CurrentControllerStoragePhase < '_ , '_ > , scope : & AuthorityScope) -> Result < Self >",
+        "pub (super) fn observe (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >",
+        "pub (super) fn refuse (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >)"
+      ],
+      "factories": [
+        {
+          "owner": "UnfencedControllerClock",
+          "signature": "pub (super) fn capture (phase : & mut CurrentControllerStoragePhase < '_ , '_ > , scope : & AuthorityScope) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "UnfencedControllerClock",
+          "signature": "pub (super) fn observe (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >"
+        },
+        {
+          "owner": "UnfencedControllerClock",
+          "signature": "pub (super) fn refuse (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
       "type_name": "UnfencedHostClock",
       "kind": "private_material",
       "consuming_methods": [],
       "methods": [
         "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >",
+        "fn capture_checked_current (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
         "pub (super) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < HostTimeData >",
         "pub (super) fn refuse (& mut self)"
       ],
       "factories": [
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "fn capture_checked_current (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        },
         {
           "owner": "UnfencedHostClock",
           "signature": "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >"
