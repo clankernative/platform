@@ -693,23 +693,34 @@ fn actual_native_factory_moves_the_typed_consumed_owner_and_preserves_original_c
             .unwrap();
         arm.matches("self . observe_native ()").count() == 2
             && arm.matches("source . current (self)").count() == 1
+            && arm.matches("self . observe (clock)").count() == 1
             && [
                 "let post = self . observe_native ()",
-                "let clock = result ?",
+                "result ?",
                 "post ?",
             ]
             .iter()
             .all(|marker| arm.matches(marker).count() == 1)
             && arm.find("self . observe_native ()") < arm.find("source . current (self)")
-            && arm.find("let post = self . observe_native ()") < arm.find("let clock = result ?")
-            && arm.find("let clock = result ?") < arm.find("post ?")
-            && !arm.contains("self . observe (clock)")
+            && arm.find("let post = self . observe_native ()") < arm.find("result ?")
+            && arm.find("result ?") < arm.find("post ?")
+            && arm.find("self . observe (clock)") < arm.find("let post = self . observe_native ()")
             && !arm.contains("clock . lower")
             && !arm.contains("clock . upper")
+    }
+    fn native_observer(source: &str) -> bool {
+        let m = method(source, "observe_native");
+        let b = m.block.to_token_stream().to_string();
+        ["native . check () ?", "observation . interval_data ()", "observation . observation_data ()",
+            "self . observe (Clock", "binding : self . binding . clone ()", "domain : domain . clone ()"]
+            .iter().all(|token| b.matches(token).count()==1)
+            && b.contains("domain == & self . domain && origin == self . issued_at && deadline == self . expires_at")
+            && b.contains("let (lower , upper) = observation . observation_data ()")
     }
     let source = include_str!("../restore_fencing.rs");
     assert!(factory(source));
     assert!(refresh(source));
+    assert!(native_observer(source));
     for (from, to) in [
         (
             "require_native_binding(selected, intent, &binding, expected)?;",
@@ -734,11 +745,10 @@ fn actual_native_factory_moves_the_typed_consumed_owner_and_preserves_original_c
         "let post = Ok::<(), anyhow::Error>(());",
         1
     )));
-    let from = "                Ok(())";
+    let from = ".and_then(|clock| self.observe(clock))";
     assert_eq!(source.matches(from).count(), 1);
-    assert!(!refresh(&source.replacen(
-        from,
-        "                self.observe(clock)?; Ok(())",
-        1
-    )));
+    assert!(!refresh(&source.replacen(from,".map(|_| ())",1)));
+    let from="ApprovalOrigin::Native(native) => native.check()?";
+    assert_eq!(source.matches(from).count(),1);
+    assert!(!native_observer(&source.replacen(from,"ApprovalOrigin::Native(_) => untrusted_data()",1)));
 }

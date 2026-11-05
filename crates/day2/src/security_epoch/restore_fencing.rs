@@ -196,17 +196,13 @@ impl<'source> Approval<'source> {
         match &self.origin {
             ApprovalOrigin::Native(_) => {
                 self.observe_native()?;
-                let result = source.current(self);
+                let result = source.current(self).and_then(|clock| self.observe(clock));
                 // Mandatory same producer postcheck even on a source failure.
                 let post = self.observe_native();
-                let clock = result?;
+                result?;
                 post?;
-                ensure!(
-                    clock.binding == self.binding && clock.domain == self.domain,
-                    "restore_native_source_clock_domain_changed"
-                );
-                // The source's scalar bounds cannot replace the actual typed
-                // producer observation or freshen the retained original.
+                // All prior source-clock checks stay mandatory. They can add
+                // refusal but cannot replace the final ACTUAL producer check.
                 Ok(())
             }
             #[cfg(test)]

@@ -26,7 +26,8 @@ in nanoseconds. Signed approval time plus exactly one hour stays inside the genu
 input and is never substituted for that short original. Every native refresh
 checks the actual consumed producer before and after the retained stop source;
 the mandatory postcheck runs on source error and preserves that primary error.
-Source-supplied scalar clock bounds cannot replace the producer observation.
+All prior source-clock binding, window and monotonic checks remain mandatory.
+Their bounds may add refusal but cannot replace the final producer observation.
 Changed domain/origin/deadline, rewind, expiry equality and refusal remain closed.
 
 The input's `NativeOrigin` is empty in production **and tests**. Complete stop and
