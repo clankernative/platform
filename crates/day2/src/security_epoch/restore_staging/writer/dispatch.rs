@@ -101,14 +101,20 @@ impl Flight {
     /// retain and check all native/approval owners at every effect boundary.
     pub(in crate::security_epoch) fn check(&self, expected: &Digest) -> Result<()> {
         let result = (|| {
-            ensure!(!self.state.refused.get() && &self.target == expected,
-                "restore_writer_flight_changed");
+            ensure!(
+                !self.state.refused.get() && &self.target == expected,
+                "restore_writer_flight_changed"
+            );
             let state = self.state.value.try_borrow()?;
-            ensure!(matches!(&*state, State::May { target } if target == expected),
-                "restore_writer_flight_not_pending");
+            ensure!(
+                matches!(&*state, State::May { target } if target == expected),
+                "restore_writer_flight_not_pending"
+            );
             Ok(())
         })();
-        if result.is_err() { self.state.refused.set(true); }
+        if result.is_err() {
+            self.state.refused.set(true);
+        }
         result
     }
 
@@ -185,7 +191,6 @@ mod tests {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod flight_tests {
