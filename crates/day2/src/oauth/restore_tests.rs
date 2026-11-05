@@ -166,6 +166,10 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
                 .is_err()
             );
             assert!(connect::begin(&mut db, &intent("pending"), 5).is_err());
+            assert!(connect::record_denial(&db,"pending",5).is_err());
+            for attempt in ["refresh_1","refresh_2"] {
+                assert!(store::mark_definitive_rejection(&mut db,attempt).is_err());
+            }
             for attempt in ["pending", "sent"] {
                 assert!(
                     connect::cancel(&mut db, attempt, |_| panic!(
@@ -838,6 +842,8 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     specs.push((connect,"quarantine_external_bound",None,"let intent=verified.intent();let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","&intent.attempt"));
     specs.push((connect,"finish_blocked",None,"identifier(attempt)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
     specs.push((outbound,"handle_callback_in",None,"","Connect","tx","ingress.attempt"));
+    specs.push((connect,"record_denial",None,"","Connect","db","attempt"));
+    specs.push((refresh,"definitive_rejection_in",None,"","Refresh","tx","attempt"));
     specs.push((
         exchange,
         "load_binding",
@@ -925,7 +931,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             id,
         ));
     }
-    assert_eq!(specs.len(), 36);
+    assert_eq!(specs.len(), 38);
     for (source, name, owner, prefix, kind, db, id) in specs {
         let root = if owner.is_some() {
             "crate::oauth::restore"
