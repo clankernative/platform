@@ -19,6 +19,23 @@ complete profile validates all existing peer rows through the current owning
 installer before retaining them. No imported schema is repaired or restamped;
 there is no callback cancellation-column fiction or old-format fallback.
 
+The SQLite unit schedules have an independent two-state oracle. They exercise
+transaction drop after a complete denial, an error caught before an outer
+commit, repeated reset, preserved uncertainty and debt, and two reopened DATA
+observations. Each of twelve bounded schedules runs twice. A failed setup,
+step or assertion retains both completed prefixes, the full seed/action input,
+independent expectations and selected owner/dependency source identity in a
+private create-only record of at most 32 KiB. It contains only typed synthetic
+booleans/counts, not token material, snapshots or error strings. CI retains it
+under `artifacts/credential-restore-application-histories/failure-*/failure.json`.
+Setting `DAY2_OFFLINE_RESTORE_REPLAY` to one such record adds its exact-source
+replay after the mandatory twelve schedules; it never replaces them.
+
+These unit schedules neither construct native owners nor qualify a loaded app
+artifact. Transaction drop and reopened copied DATA do not establish native
+process-loss, durability or power-loss behavior. Real browser/confirmation
+consumers after activation and physical writer qualification remain separate.
+
 This composition does not authorize restore or copying. The native accepting
 caller still needs the actual consumed approval/maintenance original, qualified
 clock, old-holder exclusion, full archive/artifact/model admission and retained

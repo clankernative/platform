@@ -5,6 +5,7 @@ use crate::{
 };
 use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
 use rusqlite::types::Value;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 struct Fixture {
@@ -405,7 +406,8 @@ fn first_restore_selection_refuses_noninitial_source_epochs() -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Action {
     Inspect,
     DropReset,
@@ -414,7 +416,8 @@ enum Action {
     Reopen,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Observation {
     enabled: bool,
     old_authority: bool,
@@ -483,14 +486,29 @@ fn expected(reset: bool) -> Observation {
     }
 }
 
-fn history(seed: u64, actions: &[Action]) -> Result<Vec<Observation>> {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HistoryFailure {
+    ReturnedError,
+    Panic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryRun {
+    step: Option<usize>,
+    actual: Vec<Observation>,
+    failure: Option<HistoryFailure>,
+}
+
+fn history(seed: u64, actions: &[Action], captured: &mut HistoryRun) -> Result<()> {
     effects::scope(simulation::World::new(seed), || {
         let fixture = Fixture::new()?;
         let material = rows(&fixture.db, "day2_credential_material")?;
         let receipts = rows(&fixture.db, "day2_credential_receipts")?;
         let mut reset_committed = false;
-        let mut trace = Vec::new();
-        for action in actions {
+        for (index, action) in actions.iter().enumerate() {
+            captured.step = Some(index);
             match action {
                 Action::Inspect => {}
                 Action::DropReset | Action::WrongEpoch => {
@@ -547,13 +565,134 @@ fn history(seed: u64, actions: &[Action]) -> Result<Vec<Observation>> {
                 }
             }
             let observed = observation(&fixture.db, &fixture.token)?;
+            captured.actual.push(observed.clone());
             assert_eq!(observed, expected(reset_committed));
             assert!(material == rows(&fixture.db, "day2_credential_material")?);
             assert!(receipts == rows(&fixture.db, "day2_credential_receipts")?);
-            trace.push(observed);
         }
-        Ok(trace)
+        Ok(())
     })
+}
+
+fn run_history(seed: u64, actions: &[Action]) -> HistoryRun {
+    let mut captured = HistoryRun { step: None, actual: Vec::new(), failure: None };
+    // Keep the completed prefix even when setup returns Err or an assertion
+    // panics. Never inspect, serialize or format the foreign error/payload.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| history(seed, actions, &mut captured))) {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => captured.failure = Some(HistoryFailure::ReturnedError),
+        Err(_) => captured.failure = Some(HistoryFailure::Panic),
+    }
+    captured
+}
+
+fn expected_sequence(actions: &[Action]) -> Vec<Observation> {
+    let mut committed = false;
+    actions.iter().map(|action| {
+        committed |= matches!(action, Action::Commit);
+        expected(committed)
+    }).collect()
+}
+
+fn implementation() -> Result<Digest> {
+    Digest::of(&("offline-restore-sql-histories-v1", std::env::consts::OS, std::env::consts::ARCH, [
+        include_str!("../application.rs"), include_str!("tests.rs"),
+        include_str!("../../restore_authority.rs"), include_str!("../../restore_cut.rs"),
+        include_str!("../../../oauth/restore.rs"), include_str!("../../../oauth/schema.rs"),
+        include_str!("../../../managed_credentials/restore.rs"),
+        include_str!("../../../managed_credentials/store.rs"),
+        include_str!("../../../managed_credentials/crypto.rs"),
+        include_str!("../../../store.rs"), include_str!("../../../authority_state.rs"),
+        include_str!("../../../budget.rs"), include_str!("../../../budget_reduction.rs"),
+        include_str!("../../../delegation_commands.rs"), include_str!("../../../web_security.rs"),
+        include_str!("../../../oauth/store.rs"), include_str!("../../../oauth/connect.rs"),
+        include_str!("../../../oauth/usage.rs"), include_str!("../../../oauth/inbound.rs"),
+        include_str!("../../kernel/restore.rs"), include_str!("../../../json.rs"),
+        include_str!("../../../../../day2-capabilities/src/credentials.rs"),
+        include_str!("../../../../../day2-capabilities/src/security_epoch.rs"),
+        include_str!("../../../../../../Cargo.lock"),
+    ]))
+}
+
+const MAX_HISTORY_BYTES: usize = 32768;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryBundle {
+    format: u8,
+    source: Digest,
+    seed: u64,
+    actions: Vec<Action>,
+    expected: Vec<Observation>,
+    first: HistoryRun,
+    second: HistoryRun,
+}
+
+fn successful(bundle: &HistoryBundle) -> bool {
+    bundle.first.failure.is_none() && bundle.second.failure.is_none()
+        && bundle.first.actual == bundle.expected && bundle.second.actual == bundle.expected
+        && bundle.first == bundle.second
+}
+
+fn save_history(bundle: &HistoryBundle) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let bytes = serde_json::to_vec(bundle)?;
+    ensure!(bytes.len() <= MAX_HISTORY_BYTES, "offline_restore_evidence_bound");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/credential-restore-application-histories");
+    std::fs::create_dir_all(&root)?;
+    let directory = tempfile::Builder::new().prefix("failure-").tempdir_in(root)?;
+    let path = directory.path().join("failure.json");
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    let _retained = directory.keep();
+    Ok(path)
+}
+
+fn check_history(seed: u64, actions: &[Action]) -> Result<()> {
+    ensure!(!actions.is_empty() && actions.len() <= 16, "offline_restore_action_bound");
+    let bundle = HistoryBundle { format: 1, source: implementation()?, seed, actions: actions.to_vec(), expected: expected_sequence(actions), first: run_history(seed, actions), second: run_history(seed, actions) };
+    if !successful(&bundle) {
+        let path = save_history(&bundle)?;
+        anyhow::bail!("offline restore history failed; seed {seed}; evidence: {}", path.display());
+    }
+    Ok(())
+}
+
+fn decode_history(bytes: &[u8]) -> Result<HistoryBundle> {
+    (|| -> Result<HistoryBundle> {
+        ensure!(bytes.len() <= MAX_HISTORY_BYTES, "bound");
+        let bundle: HistoryBundle = crate::json::decode(bytes)?;
+        ensure!(bundle.format == 1 && bundle.source == implementation()?, "source");
+        ensure!(!bundle.actions.is_empty() && bundle.actions.len() <= 16, "actions");
+        ensure!(bundle.expected == expected_sequence(&bundle.actions), "oracle");
+        for run in [&bundle.first, &bundle.second] {
+            match run.step {
+                None => ensure!(run.actual.is_empty() && run.failure.is_some(), "setup_prefix"),
+                Some(i) => ensure!(i < bundle.actions.len() && (run.actual.len() == i || run.actual.len() == i + 1), "step_prefix"),
+            }
+            if run.failure.is_none() {
+                ensure!(run.actual.len() == bundle.actions.len() && run.step == Some(bundle.actions.len()-1), "complete_prefix");
+            }
+        }
+        ensure!(!successful(&bundle), "not_counterexample");
+        Ok(bundle)
+    })().map_err(|_| anyhow::anyhow!("offline_restore_replay_refused"))
+}
+
+fn replay_history_file(path: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    ensure!(file.metadata()?.is_file(), "offline_restore_replay_not_regular");
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file).take(MAX_HISTORY_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    let bundle = decode_history(&bytes)?;
+    let first = run_history(bundle.seed, &bundle.actions);
+    let second = run_history(bundle.seed, &bundle.actions);
+    ensure!(first == bundle.first && second == bundle.second, "offline_restore_replay_prefix_changed");
+    ensure!(first.failure.is_none() && second.failure.is_none() && first.actual == bundle.expected && second.actual == bundle.expected && first == second, "offline_restore_counterexample_still_fails");
+    Ok(())
 }
 
 #[test]
@@ -578,7 +717,52 @@ fn generated_offline_reset_histories_replay_twice_with_independent_terminal_expe
             });
         }
         actions.extend([Action::Commit, Action::Reopen]);
-        assert_eq!(history(seed, &actions)?, history(seed, &actions)?);
+        check_history(seed, &actions)?;
     }
+    // An explicitly requested replay is additional; it never skips the twelve
+    // mandatory schedules. Records contain only bounded typed synthetic DATA.
+    if let Some(path) = std::env::var_os("DAY2_OFFLINE_RESTORE_REPLAY") {
+        replay_history_file(std::path::Path::new(&path))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn failed_history_bundle_preserves_both_prefixes_with_strict_private_data_only() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Synthetic recorder controls only. These records are not claimed to be
+    // observations of a failing reset, native owner or application artifact.
+    let actions = vec![Action::Inspect; 16];
+    let first = HistoryRun { step: Some(4), actual: vec![expected(false); 4], failure: Some(HistoryFailure::ReturnedError) };
+    let second = HistoryRun { step: Some(9), actual: vec![expected(false); 9], failure: Some(HistoryFailure::Panic) };
+    let mut bundle = HistoryBundle { format: 1, source: implementation()?, seed: 17, expected: expected_sequence(&actions), actions, first, second };
+    let path = save_history(&bundle)?;
+    assert_eq!(path.metadata()?.permissions().mode() & 0o777, 0o600);
+    assert_eq!(path.parent().unwrap().metadata()?.permissions().mode() & 0o777, 0o700);
+    let bytes = std::fs::read(&path)?;
+    let decoded = decode_history(&bytes)?;
+    assert_eq!(decoded.first, bundle.first);
+    assert_eq!(decoded.second, bundle.second);
+    assert!(bytes.len() <= MAX_HISTORY_BYTES);
+    let marker = "OFFLINE_RESTORE_FOREIGN_PRIVATE_VALUE";
+    let mut changed = serde_json::to_value(&bundle)?;
+    changed.as_object_mut().unwrap().insert(marker.into(), serde_json::json!(marker));
+    let refused = decode_history(&serde_json::to_vec(&changed)?).err().ok_or_else(|| anyhow::anyhow!("test_missing_replay_refusal"))?;
+    assert_eq!(refused.to_string(), "offline_restore_replay_refused");
+    let mut maximum = expected(false);
+    maximum.revoked_versions = i64::MAX;
+    maximum.open_deliveries = i64::MAX;
+    maximum.sessions = i64::MAX;
+    maximum.secrets = i64::MAX;
+    bundle.first.step = Some(15);
+    bundle.second.step = Some(15);
+    bundle.first.actual = vec![maximum.clone(); 16];
+    bundle.second.actual = vec![maximum; 16];
+    let largest = serde_json::to_vec(&bundle)?;
+    assert!(largest.len() <= MAX_HISTORY_BYTES);
+    assert!(decode_history(&largest).is_ok());
+    bundle.source = Digest::new(b"different-implementation");
+    assert!(decode_history(&serde_json::to_vec(&bundle)?).is_err());
+    assert!(decode_history(&vec![b' '; MAX_HISTORY_BYTES + 1]).is_err());
     Ok(())
 }
