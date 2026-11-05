@@ -776,7 +776,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
                 .collect();
             assert_eq!(positions.len(), 1);
             let check: syn::Stmt = syn::parse_str(
-                "super::restore::require_open(db,super::restore::Kind::UseBinding,claim_identity(&claims)?.as_str())?;",
+                "super::restore::require_open(db,super::restore::Kind::UseOriginal,claim_identity(&claims)?.as_str())?;",
             )?;
             assert_eq!(
                 block.stmts[positions[0] + 1].to_token_stream().to_string(),

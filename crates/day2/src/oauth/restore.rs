@@ -14,7 +14,7 @@ pub(crate) enum Kind {
     Refresh,
     Management,
     Use,
-    UseBinding,
+    UseOriginal,
     Fresh,
     Inbound,
 }
@@ -25,7 +25,7 @@ impl Kind {
             Self::Refresh => "refresh",
             Self::Management => "management",
             Self::Use => "use",
-            Self::UseBinding => "use_binding",
+            Self::UseOriginal => "use_original",
             Self::Fresh => "fresh",
             Self::Inbound => "inbound",
         }
@@ -55,7 +55,7 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
              AND length(binding) BETWEEN 1 AND 32768 AND json_valid(binding) AND json_type(binding)='object'
              AND length(inventory)=71 AND substr(inventory,1,7)='sha256:' AND substr(inventory,8) NOT GLOB '*[^0-9a-f]*'" },
           super::schema::Invariant { table: "oauth_restore_closed", predicate:
-            "kind IN ('connect','refresh','management','use','use_binding','fresh','inbound')
+            "kind IN ('connect','refresh','management','use','use_original','fresh','inbound')
              AND length(id) BETWEEN 1 AND 256 AND length(cut)=71
              AND EXISTS(SELECT 1 FROM oauth_restore_cuts c WHERE c.digest=cut)" }])
 }
@@ -529,8 +529,8 @@ impl Snapshot {
                         identities_set.insert((kind, id.into()));
                         if table == "oauth_use_handles" {
                             let identity =
-                                super::usage::restore_identity(row.get_ref(2)?.as_str()?)?;
-                            identities_set.insert((Kind::UseBinding, identity.as_str().into()));
+                                super::usage::restore_identity(row.get_ref(2)?.as_str()?,row.get_ref(1)?.as_str()?)?;
+                            identities_set.insert((Kind::UseOriginal, identity.as_str().into()));
                         }
                         ensure!(identities_set.len() <= 8192, "restore_identity_count_bound");
                     }
