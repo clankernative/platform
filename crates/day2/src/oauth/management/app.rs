@@ -2081,7 +2081,7 @@ mod tests {
                 [&old.id],
                 |row| row.get(0),
             )?;
-            assert_eq!(old_state, "exchange_uncertain");
+            assert_eq!(old_state, "exchange_may_have_been_sent");
             crate::oauth::restore::tests::apply_for_storage(&mut db, 96)?;
             drop(db);
             fixture.port.lose_token_reply.store(false, SeqCst);
