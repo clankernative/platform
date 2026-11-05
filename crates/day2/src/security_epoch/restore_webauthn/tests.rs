@@ -15,11 +15,8 @@ fn fixture() -> Fixture {
     // registry or approval factory; the unchanged verifier consumes signed bytes.
     let rng = SystemRandom::new();
     let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
-    let signer = EcdsaKeyPair::from_pkcs8(
-        &ECDSA_P256_SHA256_ASN1_SIGNING,
-        document.as_ref(),
-        &rng,
-    ).unwrap();
+    let signer =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, document.as_ref(), &rng).unwrap();
     let key = TrustedKey {
         record: KeyRecord {
             admin: Digest::new(b"exact admin email and subject"),
@@ -39,7 +36,11 @@ fn fixture() -> Fixture {
         nonce: [71; 32],
         enrollment: key.binding().unwrap(),
     };
-    Fixture { signer, key, challenge }
+    Fixture {
+        signer,
+        key,
+        challenge,
+    }
 }
 
 impl Fixture {
@@ -53,7 +54,9 @@ impl Fixture {
     }
 
     fn assertion(&self, counter: u32, flags: u8) -> Assertion {
-        let mut authenticator_data = digest(&SHA256, self.key.record.rp_id.as_bytes()).as_ref().to_vec();
+        let mut authenticator_data = digest(&SHA256, self.key.record.rp_id.as_bytes())
+            .as_ref()
+            .to_vec();
         authenticator_data.push(flags);
         authenticator_data.extend_from_slice(&counter.to_be_bytes());
         let mut assertion = Assertion {
@@ -70,12 +73,28 @@ impl Fixture {
     fn sign(&self, assertion: &mut Assertion) {
         // Construct the WebAuthn signed message independently of verify().
         let hash = digest(&SHA256, &assertion.client_data_json);
-        let signed: Vec<u8> = assertion.authenticator_data.iter().chain(hash.as_ref()).copied().collect();
-        assertion.signature = self.signer.sign(&SystemRandom::new(), &signed).unwrap().as_ref().to_vec();
+        let signed: Vec<u8> = assertion
+            .authenticator_data
+            .iter()
+            .chain(hash.as_ref())
+            .copied()
+            .collect();
+        assertion.signature = self
+            .signer
+            .sign(&SystemRandom::new(), &signed)
+            .unwrap()
+            .as_ref()
+            .to_vec();
     }
 
     fn verify(&self, assertion: &Assertion, counter: u32) -> Result<AssertionFacts> {
-        verify(&self.key, &self.challenge, &self.challenge.request, counter, assertion)
+        verify(
+            &self.key,
+            &self.challenge,
+            &self.challenge.request,
+            counter,
+            assertion,
+        )
     }
 }
 
@@ -83,21 +102,32 @@ impl Fixture {
 fn real_es256_assertions_require_presence_and_user_verification() {
     let f = fixture();
     for flags in [0x0d, 0x1d] {
-        assert_eq!(f.verify(&f.assertion(9, flags), 8).unwrap(), AssertionFacts {
-            counter: 9, backed_up: flags == 0x1d,
-        });
+        assert_eq!(
+            f.verify(&f.assertion(9, flags), 8).unwrap(),
+            AssertionFacts {
+                counter: 9,
+                backed_up: flags == 0x1d,
+            }
+        );
     }
     // Every counterexample has a valid signature, so missing UP/UV cannot hide
     // behind a failed cryptographic check.
     for flags in [0, 0x09, 0x0c, 0x0f, 0x2d, 0x4d, 0x8d, 0x15] {
-        assert!(f.verify(&f.assertion(9, flags), 8).is_err(), "flags {flags}");
+        assert!(
+            f.verify(&f.assertion(9, flags), 8).is_err(),
+            "flags {flags}"
+        );
     }
     let mut non_backup = fixture();
     non_backup.key.record.backup_eligible = false;
     non_backup.challenge.enrollment = non_backup.key.binding().unwrap();
     assert!(non_backup.verify(&non_backup.assertion(9, 0x05), 8).is_ok());
     for flags in [0x0d, 0x15, 0x1d] {
-        assert!(non_backup.verify(&non_backup.assertion(9, flags), 8).is_err());
+        assert!(
+            non_backup
+                .verify(&non_backup.assertion(9, flags), 8)
+                .is_err()
+        );
     }
 }
 
@@ -105,11 +135,20 @@ fn real_es256_assertions_require_presence_and_user_verification() {
 fn counterless_passkeys_work_but_positive_counters_cannot_reset_or_repeat() {
     let f = fixture();
     for (stored, received, allowed) in [
-        (0, 0, true), (0, 1, true), (1, 2, true), (u32::MAX - 1, u32::MAX, true),
-        (1, 0, false), (1, 1, false), (9, 8, false), (u32::MAX, u32::MAX, false),
+        (0, 0, true),
+        (0, 1, true),
+        (1, 2, true),
+        (u32::MAX - 1, u32::MAX, true),
+        (1, 0, false),
+        (1, 1, false),
+        (9, 8, false),
+        (u32::MAX, u32::MAX, false),
         (u32::MAX, 0, false),
     ] {
-        assert_eq!(f.verify(&f.assertion(received, 0x0d), stored).is_ok(), allowed);
+        assert_eq!(
+            f.verify(&f.assertion(received, 0x0d), stored).is_ok(),
+            allowed
+        );
     }
     // Repeated stateless verification is intentionally not a one-use permit.
     // The next store slice must consume this challenge durably, including 0/0.
@@ -125,13 +164,22 @@ fn client_type_challenge_origin_and_cross_origin_are_exact() {
     for (name, value) in [
         ("type", serde_json::json!("webauthn.create")),
         ("challenge", serde_json::json!("another-request")),
-        ("challenge", serde_json::json!(format!("{}=", f.challenge.encoded().unwrap()))),
+        (
+            "challenge",
+            serde_json::json!(format!("{}=", f.challenge.encoded().unwrap())),
+        ),
         ("origin", serde_json::json!("https://other.example.test")),
-        ("origin", serde_json::json!("https://restore.example.test:8443")),
+        (
+            "origin",
+            serde_json::json!("https://restore.example.test:8443"),
+        ),
         ("origin", serde_json::json!("https://restore.example.test/")),
         ("crossOrigin", serde_json::json!(true)),
         ("crossOrigin", serde_json::Value::Null),
-        ("topOrigin", serde_json::json!("https://restore.example.test")),
+        (
+            "topOrigin",
+            serde_json::json!("https://restore.example.test"),
+        ),
         ("tokenBinding", serde_json::json!({"status":"present"})),
     ] {
         let mut client = f.client();
@@ -153,7 +201,16 @@ fn client_type_challenge_origin_and_cross_origin_are_exact() {
 fn challenge_binds_the_request_nonce_and_complete_enrolled_key() {
     let f = fixture();
     let assertion = f.assertion(7, 0x0d);
-    assert!(verify(&f.key, &f.challenge, &Digest::new(b"other archive/target/epoch/executor"), 6, &assertion).is_err());
+    assert!(
+        verify(
+            &f.key,
+            &f.challenge,
+            &Digest::new(b"other archive/target/epoch/executor"),
+            6,
+            &assertion
+        )
+        .is_err()
+    );
     let mut changed = f.challenge.clone();
     changed.nonce[0] ^= 1;
     assert!(verify(&f.key, &changed, &changed.request, 6, &assertion).is_err());
@@ -175,8 +232,14 @@ fn challenge_binds_the_request_nonce_and_complete_enrolled_key() {
             9 => record.origin = "https://other.example.test".into(),
             _ => unreachable!(),
         }
-        let key = TrustedKey { record, source: KeySource::Fixture };
-        assert!(verify(&key, &f.challenge, &f.challenge.request, 6, &assertion).is_err(), "binding {slot}");
+        let key = TrustedKey {
+            record,
+            source: KeySource::Fixture,
+        };
+        assert!(
+            verify(&key, &f.challenge, &f.challenge.request, 6, &assertion).is_err(),
+            "binding {slot}"
+        );
     }
 }
 
@@ -225,10 +288,17 @@ fn signature_covers_original_client_json_and_all_authenticator_bytes() {
 fn malformed_and_oversized_inputs_fail_with_closed_errors() {
     let f = fixture();
     let baseline = f.assertion(2, 0x0d);
+    let full_client = serde_json::to_string(&f.client()).unwrap();
+    let mut duplicate = baseline.clone();
+    duplicate.client_data_json =
+        format!("{{\"\\u0074ype\":\"webauthn.get\",{}", &full_client[1..]).into_bytes();
+    f.sign(&mut duplicate);
+    assert!(f.verify(&duplicate, 1).is_err());
     for bytes in [
         br#"{"type":"webauthn.get","\u0074ype":"webauthn.get"}"#.to_vec(),
         br#"["webauthn.get","challenge","https://restore.example.test",false]"#.to_vec(),
-        vec![b' '; MAX_CLIENT_DATA + 1], b"private parser material \xff".to_vec(),
+        vec![b' '; MAX_CLIENT_DATA + 1],
+        b"private parser material \xff".to_vec(),
     ] {
         let mut changed = baseline.clone();
         changed.client_data_json = bytes;
@@ -254,14 +324,25 @@ fn malformed_and_oversized_inputs_fail_with_closed_errors() {
 fn registry_origin_and_key_shapes_are_closed() {
     let f = fixture();
     for origin in [
-        "http://restore.example.test", "https://user@restore.example.test",
-        "https://restore.example.test/path", "https://restore.example.test?query",
-        "https://restore.example.test#fragment", "https://127.0.0.1",
-        "https://RESTORE.example.test", "https://restore.example.test:443",
+        "http://restore.example.test",
+        "https://user@restore.example.test",
+        "https://restore.example.test/path",
+        "https://restore.example.test?query",
+        "https://restore.example.test#fragment",
+        "https://127.0.0.1",
+        "https://RESTORE.example.test",
+        "https://restore.example.test:443",
     ] {
         let mut record = f.key.record.clone();
         record.origin = origin.into();
-        assert!(TrustedKey { record, source: KeySource::Fixture }.validate().is_err());
+        assert!(
+            TrustedKey {
+                record,
+                source: KeySource::Fixture
+            }
+            .validate()
+            .is_err()
+        );
     }
     for slot in 0..5 {
         let mut record = f.key.record.clone();
@@ -273,22 +354,64 @@ fn registry_origin_and_key_shapes_are_closed() {
             4 => record.public_key[0] = 3,
             _ => unreachable!(),
         }
-        assert!(TrustedKey { record, source: KeySource::Fixture }.validate().is_err());
+        assert!(
+            TrustedKey {
+                record,
+                source: KeySource::Fixture
+            }
+            .validate()
+            .is_err()
+        );
     }
 }
 
 fn require_closed_source(source: &str) -> Result<()> {
     let file = syn::parse_file(source)?;
-    let trusted = file.items.iter().find_map(|item| match item {
-        syn::Item::Struct(item) if item.ident == "TrustedKey" => Some(item), _ => None,
-    }).unwrap();
-    ensure!(trusted.attrs.iter().all(|a| a.path().is_ident("doc")), "trusted input gained a derive");
-    ensure!(trusted.fields.iter().all(|f| matches!(f.vis, syn::Visibility::Inherited)), "trusted input gained public fields");
-    ensure!(trusted.fields.iter().any(|f| f.ident.as_ref().is_some_and(|id| id == "source") && matches!(&f.ty, syn::Type::Path(path) if path.path.is_ident("KeySource"))), "trusted input lost closed source");
-    let origin = file.items.iter().find_map(|item| match item {
-        syn::Item::Enum(item) if item.ident == "KeySource" => Some(item), _ => None,
-    }).unwrap();
-    ensure!(origin.variants.iter().all(|v| v.attrs.iter().any(|a| a.path().is_ident("cfg") && a.meta.require_list().is_ok_and(|list| list.tokens.to_string() == "test"))), "production trusted-key source added");
+    let trusted = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "TrustedKey" => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    ensure!(
+        trusted.attrs.iter().all(|a| a.path().is_ident("doc")),
+        "trusted input gained a derive"
+    );
+    ensure!(
+        trusted
+            .fields
+            .iter()
+            .all(|f| matches!(f.vis, syn::Visibility::Inherited)),
+        "trusted input gained public fields"
+    );
+    ensure!(
+        trusted
+            .fields
+            .iter()
+            .any(|f| f.ident.as_ref().is_some_and(|id| id == "source")
+                && matches!(&f.ty, syn::Type::Path(path) if path.path.is_ident("KeySource"))),
+        "trusted input lost closed source"
+    );
+    let origin = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "KeySource" => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    ensure!(
+        origin
+            .variants
+            .iter()
+            .all(|v| v.attrs.iter().any(|a| a.path().is_ident("cfg")
+                && a.meta
+                    .require_list()
+                    .is_ok_and(|list| list.tokens.to_string() == "test"))),
+        "production trusted-key source added"
+    );
     Ok(())
 }
 
@@ -300,7 +423,10 @@ fn production_cannot_construct_or_deserialize_the_trusted_key_input() {
         ("source: KeySource,", "source: (),"),
         ("record: KeyRecord,", "pub record: KeyRecord,"),
         ("enum KeySource {", "enum KeySource { Production,"),
-        ("pub(super) struct TrustedKey", "#[derive(Clone)] pub(super) struct TrustedKey"),
+        (
+            "pub(super) struct TrustedKey",
+            "#[derive(Clone)] pub(super) struct TrustedKey",
+        ),
     ] {
         assert_eq!(source.matches(from).count(), 1);
         assert!(require_closed_source(&source.replace(from, to)).is_err());
