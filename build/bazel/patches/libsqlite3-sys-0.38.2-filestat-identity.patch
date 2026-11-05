@@ -1,0 +1,43 @@
+--- a/sqlite3/sqlite3.c
++++ b/sqlite3/sqlite3.c
+@@ -44318,6 +44318,24 @@
+  static int unixFcntlExternalReader(unixFile*, int*);
+ #endif
+ #if defined(SQLITE_DEBUG) || defined(SQLITE_ENABLE_FILESTAT)
++/* Actual open-file identity DATA only. Never duplicate or close a descriptor:
++** closing another same-inode fd could release this process's POSIX locks.
++** On observation failure emit null, not a pathname-derived identity.
++*/
++static void unixDescribeFdIdentity(sqlite3_str *pStr, int fd){
++  struct stat st;
++  sqlite3_str_appendall(pStr, ",\"identity\":");
++  if( osFstat(fd, &st)!=0 || !S_ISREG(st.st_mode)
++   || sizeof(st.st_dev)>sizeof(sqlite3_uint64)
++   || sizeof(st.st_ino)>sizeof(sqlite3_uint64)
++  ){
++    sqlite3_str_appendall(pStr, "null");
++  }else{
++    sqlite3_str_appendf(pStr,
++        "{\"device\":%llu,\"inode\":%llu}",
++        (sqlite3_uint64)st.st_dev, (sqlite3_uint64)st.st_ino);
++  }
++}
+  static void unixDescribeShm(sqlite3_str*,unixShm*);
+ #endif
+ 
+@@ -44472,6 +44490,7 @@
+       static const char *azLock[] = { "SHARED", "RESERVED",
+                                       "PENDING", "EXCLUSIVE" };
+       sqlite3_str_appendf(pStr, "{\"h\":%d", pFile->h);
++      unixDescribeFdIdentity(pStr, pFile->h);
+       sqlite3_str_appendf(pStr, ",\"vfs\":\"%s\"", pFile->pVfs->zName);
+       if( pFile->eFileLock ){
+         sqlite3_str_appendf(pStr, ",\"eFileLock\":\"%s\"",
+@@ -44797,6 +44816,7 @@
+   unixShmNode *pNode = pShm->pShmNode;
+   char aLck[16];
+   sqlite3_str_appendf(pStr, "{\"h\":%d", pNode->hShm);
++  unixDescribeFdIdentity(pStr, pNode->hShm);
+   assert( unixMutexHeld() );
+   sqlite3_str_appendf(pStr, ",\"nRef\":%d", pNode->nRef);
+   sqlite3_str_appendf(pStr, ",\"id\":%d", pShm->id);
