@@ -662,7 +662,9 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
                     }
                     _ => return None,
                 };
-                if !binding.attrs.is_empty() || binding.subpat.is_some() {return None}
+                if !binding.attrs.is_empty() || binding.subpat.is_some() {
+                    return None;
+                }
                 let init = local.init.as_ref()?;
                 if init.diverge.is_some() {
                     return None;
@@ -874,7 +876,10 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         if kind == "Use" {
             let decoded: syn::Stmt =
                 syn::parse_str("let claims:Claims=crate::json::decode(encoded.as_bytes())?;")?;
-            ensure!(statement(&decoded).is_some(),"closed_decode_statement_shape");
+            ensure!(
+                statement(&decoded).is_some(),
+                "closed_decode_statement_shape"
+            );
             let positions: Vec<_> = block
                 .stmts
                 .iter()
@@ -886,7 +891,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             let check: syn::Stmt = syn::parse_str(
                 "super::restore::require_open(db,super::restore::Kind::UseOriginal,claim_identity(&claims)?.as_str())?;",
             )?;
-            ensure!(statement(&check).is_some(),"closed_original_guard_shape");
+            ensure!(statement(&check).is_some(), "closed_original_guard_shape");
             assert_eq!(statement(&block.stmts[positions[0] + 1]), statement(&check));
             let mut omitted = block.clone();
             omitted.stmts.remove(positions[0] + 1);
