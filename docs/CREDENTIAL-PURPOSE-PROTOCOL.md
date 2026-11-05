@@ -34,6 +34,19 @@ compatibility codec, schema conversion or alternate path is supplied. Historical
 confirmation DATA is unchanged and remains unable to construct authentication.
 
 This is the protocol prerequisite, not a credential authentication producer.
+Pending navigation creation and installation-registry lookup now use the
+existing runtime-owned SQL writer. Current authority, exact Pending identity,
+FIFO admission, commit, connection close and final owner checks finish before
+a navigation URL or resolved Runtime/Pending is returned. Lookup remains a
+writer because binding the verified human's subject can mutate durable state.
+An owner failure after commit withholds the result; it does not imply rollback
+or permit a new clock, replacement human original or automatic retry.
+
+The real-SQLite controlled-owner cases cover unchanged navigation idempotency,
+postcommit owner loss for both creation and lookup, permanent refusal and
+missing-native-supplier refusal. Their simulated owner is not native admission
+or a fresh-human proof. The existing producer gate remains closed below.
+
 The existing native producer and App manager still accept only OAuth connect
 and disconnect. All three credential intents continue to refuse before instance
 or SQL acquisition there. Reveal and acknowledgement do not enter this protocol.

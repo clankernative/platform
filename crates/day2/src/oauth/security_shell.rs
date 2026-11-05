@@ -4391,6 +4391,300 @@ mod tests {
             0
         );
         assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+        credential_navigation_owned_sql_preserves_exact_idempotency_and_pending_lookup()?;
+        credential_navigation_postcommit_owner_loss_withholds_url_and_latches_refusal()?;
+        credential_pending_lookup_postcommit_owner_loss_withholds_runtime_and_pending()?;
+        credential_navigation_and_lookup_metadata_cannot_supply_a_native_sql_owner()?;
+        Ok(())
+    }
+
+    /// Controlled owner checks observe committed state through a separate real
+    /// SQLite connection. They cannot see the unit's uncommitted writes.
+    struct NavigationSqlOwner {
+        clock: Arc<super::super::simulation::World>,
+        database: PathBuf,
+        refuse_when_committed: Option<&'static str>,
+        enabled: AtomicBool,
+        checks: AtomicUsize,
+    }
+
+    impl effects::Hooks for NavigationSqlOwner {
+        fn domain(&self) -> u64 {
+            effects::Hooks::domain(self.clock.as_ref())
+        }
+
+        fn wall_time(&self) -> Result<i64> {
+            effects::Hooks::wall_time(self.clock.as_ref())
+        }
+
+        fn monotonic(&self) -> Duration {
+            effects::Hooks::monotonic(self.clock.as_ref())
+        }
+
+        fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+            effects::Hooks::fill(self.clock.as_ref(), bytes)
+        }
+
+        fn send(&self, _: reqwest::blocking::Request) -> Result<effects::Response> {
+            anyhow::bail!("navigation owner fixture forbids HTTP")
+        }
+
+        fn provider_observation(&self, _: shell_oidc::ProviderObservationData) -> Result<()> {
+            anyhow::bail!("navigation owner fixture forbids provider observations")
+        }
+
+        fn simulate_runtime_owner(&self) -> bool {
+            true
+        }
+
+        fn native_check(
+            &self,
+            role: day2_capabilities::security_epoch::bootstrap::NativeRole,
+            _: Option<&day2_capabilities::security_epoch::AuthorityScope>,
+        ) -> Result<()> {
+            ensure!(
+                role == day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
+                "navigation requires App owner"
+            );
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            if self.enabled.load(Ordering::SeqCst)
+                && let Some(query) = self.refuse_when_committed
+            {
+                let db = rusqlite::Connection::open(&self.database)?;
+                let committed: bool = db.query_row(query, [], |row| row.get(0))?;
+                ensure!(!committed, "navigation owner lost after commit");
+            }
+            Ok(())
+        }
+    }
+
+    fn navigation_owner(
+        world: &BrowserWorld,
+        query: Option<&'static str>,
+    ) -> Arc<NavigationSqlOwner> {
+        Arc::new(NavigationSqlOwner {
+            clock: super::super::simulation::World::new(9173),
+            database: world.runtime.db().to_owned(),
+            refuse_when_committed: query,
+            enabled: AtomicBool::new(true),
+            checks: AtomicUsize::new(0),
+        })
+    }
+
+    fn with_navigation_owner<T>(
+        world: &BrowserWorld,
+        owner: Arc<NavigationSqlOwner>,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let scope = day2_capabilities::security_epoch::AuthorityScope {
+            installation: world.instance.installation.clone().try_into()?,
+            environment: world.instance.environment.clone().try_into()?,
+            app: world.runtime.app().to_owned().try_into()?,
+        };
+        effects::scope(owner, || {
+            crate::oauth::native_management::fixtures::select_app_scope(&scope)?;
+            operation()
+        })
+    }
+
+    fn navigation_registry(world: &BrowserWorld) -> Result<credentials::Registry> {
+        credentials::Registry::new(
+            &world.instance,
+            vec![world.runtime.clone()],
+            world.authority.clone(),
+        )
+    }
+
+    fn navigation_identity() -> iap::Verified {
+        iap::Verified {
+            email: "alice@example.com".into(),
+            subject: "accounts.google.com:google-alice".into(),
+        }
+    }
+
+    fn credential_navigation_owned_sql_preserves_exact_idempotency_and_pending_lookup() -> Result<()>
+    {
+        let world = browser_world(10)?;
+        let owner = navigation_owner(&world, None);
+        let registry = navigation_registry(&world)?;
+        with_navigation_owner(&world, owner.clone(), || {
+            let input = serde_json::json!({"label":"Owned navigation"});
+            let first = credentials::start(
+                &world.runtime,
+                "credential_metadata.create_client",
+                "alice@example.com",
+                "owned-navigation",
+                &input,
+                Some("keys"),
+                world.now - 1,
+            )?;
+            let second = credentials::start(
+                &world.runtime,
+                "credential_metadata.create_client",
+                "alice@example.com",
+                "owned-navigation",
+                &input,
+                Some("keys"),
+                world.now - 1,
+            )?;
+            assert_eq!(first, second);
+            let url = url::Url::parse(&first)?;
+            let attempt = url
+                .path()
+                .strip_prefix(credentials::PREFIX)
+                .context("navigation path")?;
+            let (_, pending) = registry
+                .resolve(attempt, &navigation_identity(), world.now)?
+                .context("owned pending missing")?;
+            assert_eq!(pending.invocation, "owned-navigation");
+            assert_eq!(pending.input, input);
+            assert_eq!(pending.created_at, world.now - 1);
+            assert_eq!(pending.expires_at, world.now + 299);
+            assert!(owner.checks.load(Ordering::SeqCst) > 0);
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    fn credential_navigation_postcommit_owner_loss_withholds_url_and_latches_refusal() -> Result<()>
+    {
+        let world = browser_world(10)?;
+        let owner = navigation_owner(
+            &world,
+            Some(
+                "SELECT EXISTS(SELECT 1 FROM day2_credential_browser WHERE invocation='owned-navigation')",
+            ),
+        );
+        with_navigation_owner(&world, owner.clone(), || {
+            let input = serde_json::json!({"label":"Owned navigation"});
+            let result = credentials::start(
+                &world.runtime,
+                "credential_metadata.create_client",
+                "alice@example.com",
+                "owned-navigation",
+                &input,
+                None,
+                world.now - 1,
+            );
+            assert!(
+                result.is_err(),
+                "postcommit refusal must withhold navigation"
+            );
+            let db = open(world.runtime.db())?;
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_credential_browser", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                1
+            );
+            owner.enabled.store(false, Ordering::SeqCst);
+            assert!(
+                credentials::start(
+                    &world.runtime,
+                    "credential_metadata.create_client",
+                    "alice@example.com",
+                    "later-navigation",
+                    &input,
+                    None,
+                    world.now
+                )
+                .is_err()
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_credential_browser", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                1
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    fn credential_pending_lookup_postcommit_owner_loss_withholds_runtime_and_pending() -> Result<()>
+    {
+        let world = browser_world(10)?;
+        let location = credentials::start(
+            &world.runtime,
+            "credential_metadata.create_client",
+            "alice@example.com",
+            "owned-lookup",
+            &serde_json::json!({"label":"Owned lookup"}),
+            None,
+            world.now - 1,
+        )?;
+        let url = url::Url::parse(&location)?;
+        let attempt = url
+            .path()
+            .strip_prefix(credentials::PREFIX)
+            .context("navigation path")?;
+        let registry = navigation_registry(&world)?;
+        let db = open(world.runtime.db())?;
+        db.execute(
+            "DELETE FROM day2_principals WHERE email='alice@example.com'",
+            [],
+        )?;
+        let owner = navigation_owner(
+            &world,
+            Some(
+                "SELECT EXISTS(SELECT 1 FROM day2_principals WHERE email='alice@example.com' AND subject='accounts.google.com:google-alice')",
+            ),
+        );
+        with_navigation_owner(&world, owner.clone(), || {
+            assert!(
+                registry
+                    .resolve(attempt, &navigation_identity(), world.now)
+                    .is_err(),
+                "postcommit refusal must withhold Pending and Runtime"
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM day2_principals WHERE email='alice@example.com'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            owner.enabled.store(false, Ordering::SeqCst);
+            assert!(
+                registry
+                    .resolve(attempt, &navigation_identity(), world.now)
+                    .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    fn credential_navigation_and_lookup_metadata_cannot_supply_a_native_sql_owner() -> Result<()> {
+        let world = browser_world(10)?;
+        let native = crate::store::Runtime::from_artifact_for_tests(
+            world.runtime.instance_path().to_owned(),
+            world.runtime.app().into(),
+            PathBuf::from("/state/day2-native/day2-initial.sqlite"),
+            world.runtime.artifact().clone(),
+        )?
+        .with_credential_authority(world.authority.clone());
+        let error = credentials::start(
+            &native,
+            "credential_metadata.create_client",
+            "alice@example.com",
+            "unowned-navigation",
+            &serde_json::json!({"label":"Unowned"}),
+            None,
+            world.now,
+        )
+        .err()
+        .context("native navigation unexpectedly admitted")?;
+        assert_eq!(error.to_string(), "native runtime executor missing");
+        let registry =
+            credentials::Registry::new(&world.instance, vec![native], world.authority.clone())?;
+        let error = registry
+            .resolve("credential-unowned", &navigation_identity(), world.now)
+            .err()
+            .context("native lookup unexpectedly admitted")?;
+        assert_eq!(error.to_string(), "native runtime executor missing");
+        assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
         Ok(())
     }
 

@@ -153,77 +153,77 @@ pub(crate) fn start(
             "credential return requires an admitted static page"
         );
     }
-    let mut db = open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut db)?;
-    tx.execute(
-        "DELETE FROM day2_credential_browser WHERE expires_at<=?1",
-        [now],
-    )?;
-    let active = authority_state::authorize_in(&tx, runtime, operation, actor)?;
-    let selected = active
-        .document
-        .credentials
-        .get(family)
-        .context("credential family inactive")?;
-    let binding = Digest::of(&selected.binding)?;
-    let rotation = lifecycle::rotation_preview(&tx, declared, selected, actor, &intent)?;
-    let previous: Option<String> = tx
-        .query_row(
-            "SELECT intent FROM day2_credential_browser WHERE invocation=?1",
-            [invocation],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let pending = if let Some(raw) = previous {
-        let previous: Pending = crate::json::decode(raw.as_bytes())?;
-        ensure!(
-            previous.actor == actor
-                && previous.operation == operation
-                && previous.input == *input
-                && previous.product_return.as_deref() == product_return
-                && previous.artifact == runtime.artifact().id()
-                && previous.authority == active.stamp
-                && previous.binding == binding
-                && previous.rotation == rotation
-                && now < previous.expires_at,
-            "credential intent changed or expired; use a new invocation"
-        );
-        previous
-    } else {
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM (SELECT invocation FROM day2_credential_browser LIMIT 10001)",
-            [],
-            |row| row.get(0),
-        )?;
-        ensure!(count < 10_000, "credential navigation capacity reached");
-        let pending = Pending {
-            attempt: format!("credential-{}", super::effects::navigation_id()?),
-            invocation: invocation.into(),
-            operation: operation.into(),
-            actor: actor.into(),
-            input: input.clone(),
-            family: family.into(),
-            intent,
-            rotation,
-            artifact: runtime.artifact().id().into(),
-            authority: active.stamp,
-            binding,
-            created_at: now,
-            expires_at: now.checked_add(300).context("credential time overflow")?,
-            product_return: product_return.map(str::to_owned),
-        };
+    let pending = runtime.sql_write(|tx| {
         tx.execute(
-            "INSERT INTO day2_credential_browser VALUES (?1,?2,?3,?4)",
-            params![
-                invocation,
-                pending.attempt,
-                serde_json::to_string(&pending)?,
-                pending.expires_at
-            ],
+            "DELETE FROM day2_credential_browser WHERE expires_at<=?1",
+            [now],
         )?;
-        pending
-    };
-    tx.commit()?;
+        let active = authority_state::authorize_in(tx, runtime, operation, actor)?;
+        let selected = active
+            .document
+            .credentials
+            .get(family)
+            .context("credential family inactive")?;
+        let binding = Digest::of(&selected.binding)?;
+        let rotation = lifecycle::rotation_preview(tx, declared, selected, actor, &intent)?;
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT intent FROM day2_credential_browser WHERE invocation=?1",
+                [invocation],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let pending = if let Some(raw) = previous {
+            let previous: Pending = crate::json::decode(raw.as_bytes())?;
+            ensure!(
+                previous.actor == actor
+                    && previous.operation == operation
+                    && previous.input == *input
+                    && previous.product_return.as_deref() == product_return
+                    && previous.artifact == runtime.artifact().id()
+                    && previous.authority == active.stamp
+                    && previous.binding == binding
+                    && previous.rotation == rotation
+                    && now < previous.expires_at,
+                "credential intent changed or expired; use a new invocation"
+            );
+            previous
+        } else {
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM (SELECT invocation FROM day2_credential_browser LIMIT 10001)",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(count < 10_000, "credential navigation capacity reached");
+            let pending = Pending {
+                attempt: format!("credential-{}", super::effects::navigation_id()?),
+                invocation: invocation.into(),
+                operation: operation.into(),
+                actor: actor.into(),
+                input: input.clone(),
+                family: family.into(),
+                intent,
+                rotation,
+                artifact: runtime.artifact().id().into(),
+                authority: active.stamp,
+                binding,
+                created_at: now,
+                expires_at: now.checked_add(300).context("credential time overflow")?,
+                product_return: product_return.map(str::to_owned),
+            };
+            tx.execute(
+                "INSERT INTO day2_credential_browser VALUES (?1,?2,?3,?4)",
+                params![
+                    invocation,
+                    pending.attempt,
+                    serde_json::to_string(&pending)?,
+                    pending.expires_at
+                ],
+            )?;
+            pending
+        };
+        Ok(pending)
+    })?;
     Ok(format!("{}{}", edge.origin, pending.path()))
 }
 
@@ -288,14 +288,19 @@ impl Registry {
     ) -> Result<Option<(Runtime, Pending)>> {
         let mut found = None;
         for runtime in self.runtimes.values() {
-            let mut db = open(runtime.db())?;
-            let tx = crate::write_queue::immediate(&mut db)?;
-            if let Some(pending) = load(&tx, attempt)? {
-                ensure!(found.is_none(), "ambiguous credential attempt");
-                require_current_pending(&tx, runtime, &pending, identity, &self.origin, now)?;
+            let pending = runtime.sql_write(|tx| {
+                let pending = load(tx, attempt)?;
+                if let Some(pending) = &pending {
+                    ensure!(found.is_none(), "ambiguous credential attempt");
+                    require_current_pending(tx, runtime, pending, identity, &self.origin, now)?;
+                }
+                Ok(pending)
+            })?;
+            // Publish only after the owned unit commits, closes and passes
+            // its final owner checks. A callback result is not settlement.
+            if let Some(pending) = pending {
                 found = Some((runtime.clone(), pending));
             }
-            tx.commit()?;
         }
         Ok(found)
     }
