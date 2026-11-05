@@ -2,16 +2,24 @@
 
 The standalone Rust CLI uses the existing Google IAP human identity channel.
 It needs company-owned public metadata before starting desktop OAuth. A company
-may opt in by selecting `identity.cli_desktop_client_id` in its canonical
-instance document. This is a bounded Google **Desktop app** client identifier,
-not a client secret, identity proof, app credential or grant of authority.
+may opt in by selecting `identity.cli_desktop_client` in its canonical
+instance document. This complete Google **Desktop app** registration contains
+`client_id` and `client_secret`. Google requires the latter during exchange and
+refresh even with PKCE, while treating Desktop apps as public clients that
+cannot keep registration secrets confidential. The company must explicitly
+approve publishing this pair. It proves neither identity nor app authority.
+Never supply a confidential Web application secret, service-account key or
+user token. See [Google's Desktop OAuth contract](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 For an opted-in edge app, the native host answers only anonymous
 `GET /.well-known/day2-cli.json`, with no query or body. The response contains
 exactly `schema_version: 1`, that app's `instance_origin`, `installation`,
-`environment` and `identity` with `scheme`, `desktop_client_id`, `hosted_domain`.
+`environment` and `identity` with `scheme`, `desktop_client`, `hosted_domain`.
+The registration contains exactly its bounded `client_id` and `client_secret`;
+partial pairs and unknown fields fail admission. The registration value is
+16–256 ASCII letters, digits, hyphens or underscores.
 It contains no backend audience, readers, writers, resource catalog, provider
-connections, secrets or artifact paths. It creates no session, sets no cookie,
+connections, user tokens, confidential secrets or artifact paths. It creates no session, sets no cookie,
 disables caching and uses the normal exact Host and method-override guards.
 HEAD and write methods are refused. Other paths keep their ordinary admission.
 
@@ -24,8 +32,8 @@ or another application operation catalog.
 
 ## GKE composition
 
-Set `cli_desktop_client_id` on the selected `app-edge` stack **after** resolving
-its ordinary human IAP backend. With the default empty value, no CLI resources
+Set `cli_desktop_client` to the complete object on the selected `app-edge` stack **after** resolving
+its ordinary human IAP backend. With the default null value, no CLI resources
 or extra contract key are created. Opting in:
 
 - Selects the one client in backend-scoped `google_iap_settings.cli_login`.
@@ -38,8 +46,8 @@ or extra contract key are created. Opting in:
   the exact discovery path to it. The default backend and all other human
   routes retain IAP. Runtime admission independently refuses those routes
   without signed assertions, including requests reaching the pod directly.
-- Publishes `CLI_DESKTOP_CLIENT_ID` in the platform contract. `day2-app` takes
-  this one selection into `identity.cli_desktop_client_id`; it has no separate
+- Publishes the pair as JSON in `CLI_DESKTOP_CLIENT` in the platform contract. `day2-app` takes
+  this one selection into `identity.cli_desktop_client`; it has no separate
   workload override or company-specific artifact bytes.
 
 The client registration and consent audience belong to the company. Existing

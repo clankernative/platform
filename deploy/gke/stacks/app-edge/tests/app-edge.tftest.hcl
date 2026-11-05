@@ -653,7 +653,7 @@ run "cli_login_is_absent_by_default" {
   assert {
     condition = (
       length(kubernetes_service_v1.cli_discovery) == 0 && length(kubernetes_manifest.cli_discovery) == 0 &&
-      length(google_iap_settings.cli_login) == 0 && !contains(keys(kubernetes_config_map_v1.platform_contract.data), "CLI_DESKTOP_CLIENT_ID")
+      length(google_iap_settings.cli_login) == 0 && !contains(keys(kubernetes_config_map_v1.platform_contract.data), "CLI_DESKTOP_CLIENT")
     )
     error_message = "Ordinary apps must not publish CLI metadata or acquire a programmatic OAuth allowlist."
   }
@@ -661,7 +661,9 @@ run "cli_login_is_absent_by_default" {
 
 run "cli_login_keeps_the_human_backend_and_bootstrap_path_separate" {
   command = plan
-  variables { cli_desktop_client_id = "123-desktop.apps.googleusercontent.com" }
+  variables {
+    cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "synthetic-desktop-registration-value" }
+  }
   override_data {
     target = data.google_compute_backend_service.app
     values = {
@@ -683,8 +685,8 @@ run "cli_login_keeps_the_human_backend_and_bootstrap_path_separate" {
   assert {
     condition = (
       google_iap_settings.cli_login[0].name == "projects/123456789012/iap_web/compute/services/5486495053471409653" &&
-      toset(google_iap_settings.cli_login[0].access_settings[0].oauth_settings[0].programmatic_clients) == toset([var.cli_desktop_client_id]) &&
-      kubernetes_config_map_v1.platform_contract.data["CLI_DESKTOP_CLIENT_ID"] == var.cli_desktop_client_id &&
+      toset(google_iap_settings.cli_login[0].access_settings[0].oauth_settings[0].programmatic_clients) == toset([var.cli_desktop_client.client_id]) &&
+      jsondecode(kubernetes_config_map_v1.platform_contract.data["CLI_DESKTOP_CLIENT"]) == var.cli_desktop_client &&
       toset(google_iap_web_backend_service_iam_binding.app_access[0].members) == toset(var.iap_members)
     )
     error_message = "The exact company desktop client must be selected on this human backend and in runtime metadata, without changing human IAM membership."
@@ -695,14 +697,16 @@ run "cli_login_requires_a_resolved_human_backend" {
   command = plan
   variables {
     backend_service_name  = ""
-    cli_desktop_client_id = "123-desktop.apps.googleusercontent.com"
+    cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "synthetic-desktop-registration-value" }
   }
   expect_failures = [kubernetes_config_map_v1.platform_contract]
 }
 
 run "cli_login_refuses_arbitrary_client_destinations" {
   command = plan
-  variables { cli_desktop_client_id = "https://evil.example/client" }
+  variables {
+    cli_desktop_client = { client_id = "https://evil.example/client", client_secret = "synthetic-desktop-registration-value" }
+  }
   override_data {
     target = data.google_compute_backend_service.app
     values = {
@@ -711,5 +715,14 @@ run "cli_login_refuses_arbitrary_client_destinations" {
       iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
     }
   }
-  expect_failures = [var.cli_desktop_client_id]
+  expect_failures = [var.cli_desktop_client]
+}
+
+run "cli_login_refuses_malformed_registration_values" {
+  command = plan
+  variables {
+    backend_service_name = ""
+    cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "short" }
+  }
+  expect_failures = [var.cli_desktop_client]
 }

@@ -1406,7 +1406,7 @@ pub struct IdentityProvider {
     /// Opt-in public CLI bootstrap registration. IAP's programmatic allowlist
     /// and the app's current authority remain separate admission requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_desktop_client_id: Option<day2_capabilities::cli_login::DesktopClientId>,
+    pub cli_desktop_client: Option<day2_capabilities::cli_login::DesktopClient>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

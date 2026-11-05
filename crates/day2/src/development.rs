@@ -2960,7 +2960,7 @@ fn create_verification_for_with_imports(
         instance.identity = Some(crate::artifact::IdentityProvider {
             scheme: crate::artifact::IdentityScheme::GoogleIap,
             hosted_domain: "example.com".into(),
-            cli_desktop_client_id: None,
+            cli_desktop_client: None,
         });
         instance.security_shell = Some(crate::artifact::Edge {
             origin: "https://security.example.com".into(),
@@ -2991,7 +2991,7 @@ pub(crate) fn verification_instance_data(
         instance.identity = Some(crate::artifact::IdentityProvider {
             scheme: crate::artifact::IdentityScheme::GoogleIap,
             hosted_domain: "example.com".into(),
-            cli_desktop_client_id: None,
+            cli_desktop_client: None,
         });
         instance.security_shell = Some(crate::artifact::Edge {
             origin: "https://security.example.com".into(),

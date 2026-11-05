@@ -241,6 +241,11 @@ fn issued(response: &Response) -> Option<(String, String)> {
 
 const CLI_DISCOVERY: &str = "/.well-known/day2-cli.json";
 const CLI_CLIENT: &str = "123-desktop.apps.googleusercontent.com";
+const CLI_REGISTRATION: &str = "synthetic-desktop-registration-value";
+
+fn desktop_client() -> Value {
+    json!({"client_id": CLI_CLIENT, "client_secret": CLI_REGISTRATION})
+}
 
 #[test]
 fn cli_bootstrap_requires_instance_edge_metadata_only_when_selected() -> Result<()> {
@@ -263,7 +268,7 @@ fn cli_bootstrap_requires_instance_edge_metadata_only_when_selected() -> Result<
         if !identity {
             document.as_object_mut().unwrap().remove("identity");
         } else if selected {
-            document["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+            document["identity"]["cli_desktop_client"] = desktop_client();
         }
         fs::write(&path, serde_json::to_vec(&document)?)?;
         let runtime = Runtime::load(&path, "go")?;
@@ -298,7 +303,7 @@ fn cli_bootstrap_exposes_only_opted_in_instance_metadata() -> Result<()> {
     );
     let server = Server::start_with(|artifact| {
         let mut value = instance(artifact);
-        value["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+        value["identity"]["cli_desktop_client"] = desktop_client();
         value
     })?;
     let response = server.get(CLI_DISCOVERY).send()?;
@@ -314,7 +319,7 @@ fn cli_bootstrap_exposes_only_opted_in_instance_metadata() -> Result<()> {
             "instance_origin":ORIGIN,
             "installation":"edgeco",
             "environment":"test",
-            "identity":{"scheme":"google_iap","desktop_client_id":CLI_CLIENT,"hosted_domain":"exampleco.test"}
+            "identity":{"scheme":"google_iap","desktop_client":desktop_client(),"hosted_domain":"exampleco.test"}
         })
     );
     for method in [
@@ -396,16 +401,20 @@ fn cli_bootstrap_exposes_only_opted_in_instance_metadata() -> Result<()> {
 fn cli_bootstrap_refuses_live_metadata_replacement() -> Result<()> {
     let server = Server::start_with(|artifact| {
         let mut value = instance(artifact);
-        value["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+        value["identity"]["cli_desktop_client"] = desktop_client();
         value
     })?;
     let original = fs::read(server.runtime.instance_path())?;
     for (pointer, replacement) in [
         (
-            "/identity/cli_desktop_client_id",
+            "/identity/cli_desktop_client/client_id",
             json!("456-other.apps.googleusercontent.com"),
         ),
-        ("/identity/cli_desktop_client_id", Value::Null),
+        (
+            "/identity/cli_desktop_client/client_secret",
+            json!("synthetic-replaced-registration-value"),
+        ),
+        ("/identity/cli_desktop_client", Value::Null),
         ("/identity/hosted_domain", json!("other.test")),
         (
             "/apps/go/edge/origin",
@@ -439,14 +448,18 @@ fn cli_bootstrap_instance_metadata_is_closed_and_validated() -> Result<()> {
         json!("https://evil.test"),
         json!(""),
         json!("123.apps.googleusercontent.com/path"),
-        json!({"client_secret":"never accepted"}),
+        json!({"client_secret":CLI_REGISTRATION}),
+        json!({"client_id":CLI_CLIENT}),
+        json!({"client_id":CLI_CLIENT,"client_secret":"short"}),
+        json!({"client_id":CLI_CLIENT,"client_secret":"x".repeat(257)}),
+        json!({"client_id":CLI_CLIENT,"client_secret":CLI_REGISTRATION,"refresh_token":"synthetic-user-credential"}),
     ] {
         let mut value = instance("/artifact");
-        value["identity"]["cli_desktop_client_id"] = client;
+        value["identity"]["cli_desktop_client"] = client;
         assert!(Instance::from_bytes(&serde_json::to_vec(&value)?).is_err());
     }
     let mut value = instance("/artifact");
-    value["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+    value["identity"]["cli_desktop_client"] = desktop_client();
     value["identity"]["client_secret"] = json!("never accepted");
     assert!(Instance::from_bytes(&serde_json::to_vec(&value)?).is_err());
     Ok(())

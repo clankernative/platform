@@ -28,7 +28,7 @@ struct Document {
 #[derive(Clone, PartialEq, Eq, Serialize)]
 struct Identity {
     scheme: crate::artifact::IdentityScheme,
-    desktop_client_id: day2_capabilities::cli_login::DesktopClientId,
+    desktop_client: day2_capabilities::cli_login::DesktopClient,
     hosted_domain: String,
 }
 
@@ -38,7 +38,7 @@ impl Discovery {
         let Some(client) = instance
             .identity
             .as_ref()
-            .and_then(|identity| identity.cli_desktop_client_id.as_ref())
+            .and_then(|identity| identity.cli_desktop_client.as_ref())
         else {
             return Ok(None);
         };
@@ -58,7 +58,7 @@ impl Discovery {
                 environment: instance.environment.clone(),
                 identity: Identity {
                     scheme: identity.scheme,
-                    desktop_client_id: client.clone(),
+                    desktop_client: client.clone(),
                     hosted_domain: identity.hosted_domain.clone(),
                 },
             },

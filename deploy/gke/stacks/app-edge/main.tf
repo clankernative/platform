@@ -765,7 +765,7 @@ resource "kubernetes_ingress_v1" "app" {
           }
         }
         dynamic "path" {
-          for_each = var.cli_desktop_client_id == "" ? [] : [true]
+          for_each = var.cli_desktop_client == null ? [] : [true]
           content {
             path      = "/.well-known/day2-cli.json"
             path_type = "Exact"
@@ -848,15 +848,15 @@ resource "kubernetes_config_map_v1" "platform_contract" {
     labels    = local.platform_labels
   }
 
-  data = merge(local.contract_data, local.app_call_contract, local.oauth_runtime_contract, var.cli_desktop_client_id == "" ? {} : {
-    CLI_DESKTOP_CLIENT_ID = var.cli_desktop_client_id
+  data = merge(local.contract_data, local.app_call_contract, local.oauth_runtime_contract, var.cli_desktop_client == null ? {} : {
+    CLI_DESKTOP_CLIENT = jsonencode(var.cli_desktop_client)
   })
 
   depends_on = [google_iap_web_backend_service_iam_binding.app_access, google_service_account_iam_member.app_call_workload, google_project_iam_member.oauth_edge_reads, google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients, google_iap_settings.cli_login]
 
   lifecycle {
     precondition {
-      condition     = var.cli_desktop_client_id == "" || local.backend_service_resolved
+      condition     = var.cli_desktop_client == null || local.backend_service_resolved
       error_message = "CLI login requires the resolved human IAP backend; bootstrap the ordinary edge before selecting a desktop client."
     }
 
