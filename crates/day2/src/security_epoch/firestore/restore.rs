@@ -101,11 +101,9 @@ impl Names {
     /// decoding so a rejected document can still be rolled back by its sender.
     pub(in crate::security_epoch) fn transaction(self, bytes: &[u8]) -> Result<Transaction> {
         let mut entries = entries(bytes)?;
-        let token = entries
-            .first_mut()
-            .context("restore_provider_stream_empty")?
-            .transaction
-            .take()
+        let first = entries.first_mut().context("restore_provider_stream_empty")?
+            .as_object_mut().context("restore_provider_entry_object")?;
+        let token = first.remove("transaction").and_then(|value| value.as_str().map(str::to_owned))
             .context("restore_provider_transaction_missing")?;
         let decoded = STANDARD
             .decode(&token)
@@ -114,11 +112,7 @@ impl Names {
             !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
             "restore_provider_transaction_encoding"
         );
-        if entries[0].found.is_none() && entries[0].missing.is_none() {
-            ensure!(
-                entries[0].read_time.is_none(),
-                "restore_provider_header_fields"
-            );
+        if first.is_empty() {
             entries.remove(0);
         }
         Ok(Transaction {
@@ -133,14 +127,17 @@ impl Names {
         self.decode(entries(bytes)?)
     }
 
-    fn decode(&self, entries: Vec<RawEntry>) -> Result<Observed> {
+    fn decode(&self, entries: Vec<Value>) -> Result<Observed> {
         let expected = self.documents();
         let mut seen = BTreeSet::new();
         let mut previous = None;
         let mut first = None;
         let mut initial = Vec::new();
         let (mut advance, mut reservation, mut grant) = (None, None, None);
-        for entry in entries {
+        for value in entries {
+            ensure!(value.is_object(), "restore_provider_entry_object");
+            let entry: RawEntry = serde_json::from_value(value)
+                .map_err(|_| anyhow::anyhow!("restore_provider_reply_encoding"))?;
             ensure!(
                 entry.transaction.is_none(),
                 "restore_provider_duplicate_transaction"
@@ -216,7 +213,7 @@ impl Names {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawEntry {
     transaction: Option<String>,
@@ -225,7 +222,7 @@ struct RawEntry {
     missing: Option<String>,
 }
 
-fn entries(bytes: &[u8]) -> Result<Vec<RawEntry>> {
+fn entries(bytes: &[u8]) -> Result<Vec<Value>> {
     ensure!(
         bytes.len() <= super::MAX_BYTES,
         "restore_provider_reply_bound"
@@ -236,14 +233,7 @@ fn entries(bytes: &[u8]) -> Result<Vec<RawEntry>> {
         !values.is_empty() && values.len() <= 8,
         "restore_provider_stream_bound"
     );
-    values
-        .into_iter()
-        .map(|value| {
-            ensure!(value.is_object(), "restore_provider_entry_object");
-            serde_json::from_value(value)
-                .map_err(|_| anyhow::anyhow!("restore_provider_reply_encoding"))
-        })
-        .collect()
+    Ok(values)
 }
 
 fn field_shapes(value: &Value, depth: usize) -> Result<()> {
@@ -401,7 +391,7 @@ pub(in crate::security_epoch) fn commit_reply(bytes: &[u8]) -> Result<CommitReco
 pub(in crate::security_epoch) struct Transaction {
     names: Names,
     token: String,
-    entries: Vec<RawEntry>,
+    entries: Vec<Value>,
     local: PhantomData<Rc<()>>,
 }
 

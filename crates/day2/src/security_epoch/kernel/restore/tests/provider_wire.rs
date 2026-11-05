@@ -158,7 +158,7 @@ fn semantic_rejection_keeps_the_canonical_transaction_available_only_for_cleanup
     let (selection, before) = initial();
     let (_, plan) = approval_use::plan(&selection, &before, 42)?;
     let original = initial_reply(&selection, &plan)?;
-    for cut in 0..10 {
+    for cut in 0..13 {
         let mut reply = original.clone();
         match cut {
             0 => {
@@ -178,7 +178,10 @@ fn semantic_rejection_keeps_the_canonical_transaction_available_only_for_cleanup
             6 => reply[2]["readTime"] = json!("2026-11-03T00:00:01Z"),
             7 => reply[1]["found"]["unexpected"] = json!(true),
             8 => reply[1]["found"]["fields"] = json!([]),
-            _ => reply[1]["found"]["fields"]["phase"]["mapValue"] = json!([]),
+            9 => reply[1]["found"]["fields"]["phase"]["mapValue"] = json!([]),
+            10 => reply[0]["readTime"] = json!(READ),
+            11 => reply[2]["unexpected"] = json!(true),
+            _ => reply[2] = json!([null,null,null,null]),
         }
         // A ninth entry is rejected before any header can be trusted.
         if reply.len() > 8 {
