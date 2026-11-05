@@ -214,6 +214,18 @@ fn online_backup_restores_wal_data_into_a_new_instance_and_rejects_tampering() -
     let snapshot = scratch.path().join("backup");
     let manifest = backup::take(runtime.instance_path(), "app", &snapshot)?;
     assert_eq!(manifest.scope, runtime.scope());
+    let inspected = serde_json::to_value(backup::inspect(&snapshot)?)?;
+    assert_eq!(
+        inspected,
+        serde_json::json!({
+            "kind":"restore_archive_inspection_v1",
+            "archive":manifest.security_restore_digest()?,
+            "scope":manifest.scope,
+            "app":manifest.app,
+            "artifact":manifest.artifact,
+            "database":manifest.database
+        })
+    );
     assert!(
         manifest
             .provider_databases
@@ -278,6 +290,7 @@ fn online_backup_restores_wal_data_into_a_new_instance_and_rejects_tampering() -
     assert_eq!(runtime.inspect()?, before);
     assert!(backup::restore(&snapshot, runtime.instance_path().parent().unwrap()).is_err());
     fs::write(snapshot.join("app.sqlite"), b"tampered")?;
+    assert!(backup::inspect(&snapshot).is_err());
     assert!(backup::restore(&snapshot, &scratch.path().join("bad")).is_err());
     assert!(!scratch.path().join("bad").exists());
     Ok(())
