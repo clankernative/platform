@@ -1167,7 +1167,9 @@ a real credential has been enrolled.
 query's complete ordinary authority, including complete-row requirements. It does
 not invoke the query or advance the business revision. Its `cache_token` binds the
 installation/environment/app scope, artifact, actor, operation, authority epoch and
-revision, and durable business-data revision. Commands, unknown operations, duplicate
+revision, durable business-data revision, and the current availability of each bound
+resource lease. Crossing a resource grant expiry changes the token without requiring
+a policy or model write. Commands, unknown operations, duplicate
 or extra fields and malformed query encodings are refused. Responses remain `no-store`.
 The token is a state/permission comparison, never an operation result or credential.
 `server_time_ms` lets clients check externally bounded expiry without trusting their

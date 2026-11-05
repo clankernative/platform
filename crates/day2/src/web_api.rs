@@ -34,6 +34,7 @@ pub(crate) fn query_cache_token(
     catalog: &Catalog,
     actor: &str,
     operation: &str,
+    now_ms: i64,
 ) -> Result<String> {
     ensure!(
         catalog.endpoints.contains_key(operation),
@@ -46,6 +47,18 @@ pub(crate) fn query_cache_token(
     runtime.sql_read(|db| {
         let active = crate::authority_state::authorize_in(db, runtime, operation, actor)?;
         let revision = crate::live::revision(db)?;
+        // Resource leases can expire without any policy or model write. Bind
+        // their current availability, rather than the changing wall-clock value.
+        let resources = resource_cache_state(
+            active
+                .document
+                .resources
+                .operations
+                .get(operation)
+                .into_iter()
+                .flat_map(|bindings| bindings.values().map(|grant| grant.expires_at_ms)),
+            now_ms,
+        );
         Ok(crate::digest(&serde_json::to_vec(&(
             "browser-query-cache-v1",
             runtime.scope(),
@@ -54,8 +67,45 @@ pub(crate) fn query_cache_token(
             operation,
             &active.stamp,
             revision,
+            resources,
         ))?))
     })
+}
+
+fn resource_cache_state(deadlines: impl Iterator<Item = Option<i64>>, now_ms: i64) -> Vec<bool> {
+    deadlines
+        .map(|deadline| deadline.is_none_or(|at| now_ms < at))
+        .collect()
+}
+
+#[cfg(test)]
+mod cache_expiry_tests {
+    use super::*;
+    #[test]
+    fn timed_resource_grants_change_cache_bindings_at_exclusive_expiry_without_a_write() {
+        let binding = |at| {
+            crate::digest(
+                &serde_json::to_vec(&resource_cache_state(
+                    [None, Some(1000), Some(2000)].into_iter(),
+                    at,
+                ))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            binding(0),
+            binding(999),
+            "time alone must not bust a live cache"
+        );
+        assert_ne!(
+            binding(999),
+            binding(1000),
+            "an expired resource lease must invalidate restoration"
+        );
+        assert_eq!(binding(1000), binding(1999));
+        assert_ne!(binding(1999), binding(2000));
+        assert_eq!(resource_cache_state([None].into_iter(), i64::MAX), [true]);
+    }
 }
 
 pub(crate) fn is_json(path: &str) -> bool {

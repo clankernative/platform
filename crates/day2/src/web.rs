@@ -1347,15 +1347,16 @@ impl Host {
                         "actor":session.actor,"csrf_token":security::csrf(&self.secret, session)?
                     });
                     if let Some(operation) = operation {
+                        let now_ms = i64::try_from(self.clock.wall_time()?.as_millis())?;
                         value["cache_token"] = crate::web_api::query_cache_token(
                             &self.runtime,
                             &self.api,
                             &session.actor,
                             &operation,
+                            now_ms,
                         )?
                         .into();
-                        value["server_time_ms"] =
-                            i64::try_from(self.clock.wall_time()?.as_millis())?.into();
+                        value["server_time_ms"] = now_ms.into();
                     }
                     return Ok(crate::web_api::json_response(StatusCode::OK, value));
                 }
@@ -2207,11 +2208,21 @@ impl Host {
         if !requested {
             return render();
         }
-        let before =
-            crate::web_api::query_cache_token(&self.runtime, &self.api, &session.actor, operation)?;
+        let before = crate::web_api::query_cache_token(
+            &self.runtime,
+            &self.api,
+            &session.actor,
+            operation,
+            i64::try_from(self.clock.wall_time()?.as_millis())?,
+        )?;
         let mut response = render()?;
-        let after =
-            crate::web_api::query_cache_token(&self.runtime, &self.api, &session.actor, operation)?;
+        let after = crate::web_api::query_cache_token(
+            &self.runtime,
+            &self.api,
+            &session.actor,
+            operation,
+            i64::try_from(self.clock.wall_time()?.as_millis())?,
+        )?;
         if response.status() == StatusCode::OK && before == after {
             response
                 .headers_mut()
