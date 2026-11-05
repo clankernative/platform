@@ -73,27 +73,50 @@ fn failure(
             let signal = None;
             ("exit_or_signal", status.code(), signal, None)
         }
-        Err(crate::CommandStatusError::Spawn(error)) => ("spawn_error", None, None, error.raw_os_error()),
-        Err(crate::CommandStatusError::Wait(error)) => ("wait_error_closure_unknown", None, None, error.raw_os_error()),
+        Err(crate::CommandStatusError::Spawn(error)) => {
+            ("spawn_error", None, None, error.raw_os_error())
+        }
+        Err(crate::CommandStatusError::Wait(error)) => (
+            "wait_error_closure_unknown",
+            None,
+            None,
+            error.raw_os_error(),
+        ),
         Err(crate::CommandStatusError::Timeout) => ("timeout", None, None, None),
     };
-    let runnable: BTreeSet<_> = inventory.selected.iter()
-        .filter(|name| !inventory.ignored.contains(name)).map(String::as_str).collect();
+    let runnable: BTreeSet<_> = inventory
+        .selected
+        .iter()
+        .filter(|name| !inventory.ignored.contains(name))
+        .map(String::as_str)
+        .collect();
     let mut failed = BTreeSet::new();
     let mut last = None;
     if let Ok(output) = capture {
         for line in output.lines() {
-            if let Some((name, tail)) = line.strip_prefix("test ").and_then(|line| line.split_once(" ..."))
-                && runnable.contains(name) {
+            if let Some((name, tail)) = line
+                .strip_prefix("test ")
+                .and_then(|line| line.split_once(" ..."))
+                && runnable.contains(name)
+            {
                 last = Some(name.to_owned());
-                if tail.trim_start().starts_with("FAILED") { failed.insert(name.to_owned()); }
+                if tail.trim_start().starts_with("FAILED") {
+                    failed.insert(name.to_owned());
+                }
             }
         }
     }
     Failure {
-        category, exit_code, signal, os_error, capture_available: capture.is_ok(),
-        failed_case_count: failed.len(), failed_cases: failed.iter().take(16).cloned().collect(),
-        names_truncated: failed.len() > 16, last_observed_case: last, cause_attribution: false,
+        category,
+        exit_code,
+        signal,
+        os_error,
+        capture_available: capture.is_ok(),
+        failed_case_count: failed.len(),
+        failed_cases: failed.iter().take(16).cloned().collect(),
+        names_truncated: failed.len() > 16,
+        last_observed_case: last,
+        cause_attribution: false,
     }
 }
 
@@ -102,15 +125,23 @@ fn require_success(
     capture: &Result<String>,
     inventory: &Inventory,
 ) -> Result<()> {
-    if status.as_ref().is_ok_and(ExitStatus::success) { return Ok(()); }
+    if status.as_ref().is_ok_and(ExitStatus::success) {
+        return Ok(());
+    }
     if let Ok(record) = serde_json::to_string(&failure(&status, capture, inventory)) {
         eprintln!("Day2 child failure: {record}");
     }
     match status {
         Ok(status) => anyhow::bail!("day2 case campaign failed: {status}"),
-        Err(crate::CommandStatusError::Spawn(_)) => anyhow::bail!("day2 case campaign could not spawn"),
-        Err(crate::CommandStatusError::Wait(_)) => anyhow::bail!("day2 case campaign wait failed; closure unknown"),
-        Err(crate::CommandStatusError::Timeout) => anyhow::bail!("day2 case campaign exceeded its original budget"),
+        Err(crate::CommandStatusError::Spawn(_)) => {
+            anyhow::bail!("day2 case campaign could not spawn")
+        }
+        Err(crate::CommandStatusError::Wait(_)) => {
+            anyhow::bail!("day2 case campaign wait failed; closure unknown")
+        }
+        Err(crate::CommandStatusError::Timeout) => {
+            anyhow::bail!("day2 case campaign exceeded its original budget")
+        }
     }
 }
 
@@ -393,7 +424,10 @@ pub(super) fn run(
     let status = crate::command_status_with_budget(root, &mut command, budget);
     let output: &fs::File = file.as_file();
     let capture = (|| -> Result<String> {
-        ensure!(output.metadata()?.len() <= 16 * 1024 * 1024, "day2 outcome byte bound");
+        ensure!(
+            output.metadata()?.len() <= 16 * 1024 * 1024,
+            "day2 outcome byte bound"
+        );
         Ok(fs::read_to_string(file.path())?)
     })();
     require_success(status, &capture, inventory)?;
@@ -595,8 +629,10 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let file = tempfile::NamedTempFile::new_in(directory.path())?;
         let mut command = Command::new(std::env::current_exe()?);
-        command.args([fixture, "--exact", "--ignored", "--test-threads=1"])
-            .stdout(Stdio::from(file.reopen()?)).stderr(Stdio::null());
+        command
+            .args([fixture, "--exact", "--ignored", "--test-threads=1"])
+            .stdout(Stdio::from(file.reopen()?))
+            .stderr(Stdio::null());
         let status = crate::command_status_with_budget(directory.path(), &mut command, budget);
         let capture = fs::read_to_string(file.path()).map_err(anyhow::Error::from);
         let inventory = super::inventory(false, &[fixture.to_owned()], Vec::new(), RUNTIME)?;
@@ -605,7 +641,9 @@ mod tests {
 
     #[test]
     #[ignore = "fixture exercised only by the child-status diagnostic controls"]
-    fn failure_fixture() { panic!("synthetic child failure"); }
+    fn failure_fixture() {
+        panic!("synthetic child failure");
+    }
 
     #[test]
     #[ignore = "fixture exercised only by the bounded timeout diagnostic control"]
@@ -614,7 +652,9 @@ mod tests {
         // Bypass libtest's thread-local capture so even a killed fixture leaves
         // only this fixed, selected case marker in the owned stdout capture.
         let mut output = std::io::stdout();
-        output.write_all(b"test verification::shards::cases::tests::timeout_fixture ... started\n").unwrap();
+        output
+            .write_all(b"test verification::shards::cases::tests::timeout_fixture ... started\n")
+            .unwrap();
         output.flush().unwrap();
         std::thread::sleep(Duration::from_secs(30));
     }
@@ -625,7 +665,10 @@ mod tests {
         let (status, capture, inventory) = probe(name, Duration::from_secs(10))?;
         assert!(status.as_ref().is_ok_and(|status| !status.success()));
         let report = failure(&status, &capture, &inventory);
-        assert_eq!(report.exit_code, status.as_ref().ok().and_then(ExitStatus::code));
+        assert_eq!(
+            report.exit_code,
+            status.as_ref().ok().and_then(ExitStatus::code)
+        );
         assert_eq!(report.failed_cases, vec![name]);
         assert_eq!(report.last_observed_case.as_deref(), Some(name));
         assert!(!report.cause_attribution);
@@ -636,7 +679,8 @@ mod tests {
     }
 
     #[test]
-    fn real_timeout_retains_last_case_and_capture_errors_cannot_replace_the_primary_failure() -> Result<()> {
+    fn real_timeout_retains_last_case_and_capture_errors_cannot_replace_the_primary_failure()
+    -> Result<()> {
         let name = "verification::shards::cases::tests::timeout_fixture";
         let (status, capture, inventory) = probe(name, Duration::from_secs(2))?;
         assert!(matches!(&status, Err(crate::CommandStatusError::Timeout)));
@@ -644,21 +688,41 @@ mod tests {
         assert_eq!(report.category, "timeout");
         assert_eq!(report.last_observed_case.as_deref(), Some(name));
         assert!(report.exit_code.is_none() && report.signal.is_none());
-        assert!(require_success(status, &capture, &inventory).unwrap_err().to_string().contains("original budget"));
+        assert!(
+            require_success(status, &capture, &inventory)
+                .unwrap_err()
+                .to_string()
+                .contains("original budget")
+        );
         let missing: Result<String> = Err(anyhow::anyhow!("synthetic capture unavailable"));
-        let primary = require_success(Err(crate::CommandStatusError::Timeout), &missing, &inventory).unwrap_err();
+        let primary = require_success(
+            Err(crate::CommandStatusError::Timeout),
+            &missing,
+            &inventory,
+        )
+        .unwrap_err();
         assert!(primary.to_string().contains("original budget"));
         assert!(!primary.to_string().contains("capture unavailable"));
         Ok(())
     }
 
     #[test]
-    fn failure_diagnostics_are_allowlisted_bounded_and_explicit_about_omitted_names() -> Result<()> {
-        let listed: Vec<_> = (0..20).map(|index| format!("fixture::case_{index}")).collect();
+    fn failure_diagnostics_are_allowlisted_bounded_and_explicit_about_omitted_names() -> Result<()>
+    {
+        let listed: Vec<_> = (0..20)
+            .map(|index| format!("fixture::case_{index}"))
+            .collect();
         let inventory = super::inventory(false, &listed, Vec::new(), RUNTIME)?;
-        let output = listed.iter().map(|name| format!("test {name} ... FAILED opaque provider detail\n")).collect::<String>()
+        let output = listed
+            .iter()
+            .map(|name| format!("test {name} ... FAILED opaque provider detail\n"))
+            .collect::<String>()
             + "test unknown::case ... FAILED\n";
-        let report = failure(&Err(crate::CommandStatusError::Timeout), &Ok(output), &inventory);
+        let report = failure(
+            &Err(crate::CommandStatusError::Timeout),
+            &Ok(output),
+            &inventory,
+        );
         assert_eq!(report.failed_case_count, 20);
         assert_eq!(report.failed_cases.len(), 16);
         assert!(report.names_truncated);
