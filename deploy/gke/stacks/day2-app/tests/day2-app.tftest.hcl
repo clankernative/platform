@@ -1622,8 +1622,8 @@ run "cli_bootstrap_registration_comes_from_the_edge_contract" {
   }
   assert {
     condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).identity == {
-      scheme                = "google_iap"
-      hosted_domain         = "example.com"
+      scheme             = "google_iap"
+      hosted_domain      = "example.com"
       cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "synthetic-desktop-registration-value" }
     }
     error_message = "The runtime must publish the edge-selected registration with the existing instance identity, without a second client selection."

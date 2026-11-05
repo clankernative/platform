@@ -696,8 +696,8 @@ run "cli_login_keeps_the_human_backend_and_bootstrap_path_separate" {
 run "cli_login_requires_a_resolved_human_backend" {
   command = plan
   variables {
-    backend_service_name  = ""
-    cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "synthetic-desktop-registration-value" }
+    backend_service_name = ""
+    cli_desktop_client   = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "synthetic-desktop-registration-value" }
   }
   expect_failures = [kubernetes_config_map_v1.platform_contract]
 }
@@ -722,7 +722,7 @@ run "cli_login_refuses_malformed_registration_values" {
   command = plan
   variables {
     backend_service_name = ""
-    cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "short" }
+    cli_desktop_client   = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "short" }
   }
   expect_failures = [var.cli_desktop_client]
 }
