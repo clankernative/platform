@@ -143,6 +143,22 @@ pub(crate) fn admit<T>(
     )
 }
 
+/// One owned offline-memory transaction, entered before admission begins.
+/// Refuse an existing scope rather than replacing its hook or renewing its
+/// cumulative budget. This is not a Runtime/native callback owner factory.
+pub(crate) fn admit_memory_transaction<'database,T>(
+    tx:&rusqlite::Transaction<'database>,
+    operation:impl FnOnce(&rusqlite::Transaction<'database>)->Result<T>,
+)->Result<T> {
+    ensure!(!tx.is_autocommit() && tx.path().is_none_or(str::is_empty),
+        "restore_owned_memory_transaction_required");
+    ensure!(ADMISSION.with(|active|active.borrow().is_none()),
+        "restore_outer_admission_already_active");
+    ensure!(tx.pragma_query_value(None,"temp_store",|row|row.get::<_,i64>(0))?==2,
+        "restore_memory_temp_required");
+    admit(tx,|_|operation(tx))
+}
+
 pub(crate) fn admit_with_runtime_hook<T>(
     db: &Connection,
     admission: impl FnOnce(&Connection) -> Result<T>,
@@ -555,6 +571,50 @@ fn normalize_sql(sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owned_memory_transaction_rejects_nested_and_foreign_scope_without_budget_renewal()->Result<()> {
+        let mut a=Connection::open_in_memory()?;
+        let mut b=Connection::open_in_memory()?;
+        for db in [&a,&b] {db.pragma_update(None,"foreign_keys",true)?;db.pragma_update(None,"temp_store","MEMORY")?;db.execute_batch("CREATE TABLE evidence(value INTEGER)")?;}
+        let tx=a.transaction()?;
+        let foreign=b.transaction()?;
+        admit_memory_transaction(&tx,|tx| {
+            require_admission(tx)?;
+            assert!(admit_memory_transaction(tx,|_|Ok(())).is_err());
+            assert!(admit_memory_transaction(&foreign,|_|Ok(())).is_err());
+            require_admission(tx)?;
+            assert!(require_admission(&foreign).is_err());
+            tx.execute("INSERT INTO evidence VALUES(1)",[])?;
+            Ok(())
+        })?;
+        tx.commit()?;foreign.rollback()?;
+        assert_eq!(a.query_row("SELECT count(*) FROM evidence",[],|r|r.get::<_,i64>(0))?,1);
+        assert_eq!(b.query_row("SELECT count(*) FROM evidence",[],|r|r.get::<_,i64>(0))?,0);
+        Ok(())
+    }
+
+    #[test]
+    fn owned_memory_transaction_latches_exhaustion_and_rolls_back_before_caller_commit()->Result<()> {
+        let mut db=Connection::open_in_memory()?;
+        db.pragma_update(None,"foreign_keys",true)?;
+        db.pragma_update(None,"temp_store","MEMORY")?;
+        db.execute_batch("CREATE TABLE evidence(value INTEGER)")?;
+        let tx=db.transaction()?;
+        assert!(admit_memory_transaction(&tx,|tx| {
+            tx.execute("INSERT INTO evidence VALUES(1)",[])?;
+            assert!(admission_step(usize::MAX));
+            assert!(admit_memory_transaction(tx,|_|Ok(())).is_err());
+            assert!(require_admission(tx).is_err());
+            Ok(())
+        }).is_err());
+        tx.commit()?;
+        assert_eq!(db.query_row("SELECT count(*) FROM evidence",[],|r|r.get::<_,i64>(0))?,0);
+        let tx=db.transaction()?;
+        admit_memory_transaction(&tx,|tx| {require_admission(tx)?;Ok(())})?;
+        tx.rollback()?;
+        Ok(())
+    }
+
     use super::*;
 
     const SCAN: &str = "WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<500) SELECT sum(n) FROM work";

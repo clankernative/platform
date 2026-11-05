@@ -433,6 +433,7 @@
     "crates/day2/src/security_epoch/restore_fencing/tests.rs",
     "crates/day2/src/security_epoch/restore_staging.rs",
     "crates/day2/src/security_epoch/restore_staging/application.rs",
+    "crates/day2/src/security_epoch/restore_staging/application/tests.rs",
     "crates/day2/src/security_epoch/restore_staging/tests.rs",
     "crates/day2/src/security_epoch/restore_staging/writer.rs",
     "crates/day2/src/security_epoch/restore_staging/writer/tests.rs",

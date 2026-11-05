@@ -680,6 +680,18 @@ fn close_in(
     cut: &Cut,
     profile: &Profile,
 ) -> Result<usize> {
+    let savepoint=tx.savepoint()?;
+    let count=close_rows(&savepoint,before,cut,profile)?;
+    savepoint.commit()?;
+    Ok(count)
+}
+
+fn close_rows(
+    tx: &Connection,
+    before: Snapshot,
+    cut: &Cut,
+    profile: &Profile,
+) -> Result<usize> {
     cut.check_storage_metadata(tx)?;
     ensure!(
         tx.pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))?,
@@ -697,14 +709,13 @@ fn close_in(
             && fresh.tables == before.tables,
         "restore_snapshot_changed"
     );
-    let savepoint = tx.savepoint()?;
-    let occupied: bool = savepoint.query_row(
+    let occupied: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.oauth_restore_cuts)",
         [],
         |r| r.get(0),
     )?;
     ensure!(!occupied, "restore_cut_already_present");
-    savepoint.execute(
+    tx.execute(
         "INSERT INTO main.oauth_restore_cuts(digest,binding,inventory) VALUES(?1,?2,?3)",
         params![
             cut.digest().as_str(),
@@ -713,13 +724,13 @@ fn close_in(
         ],
     )?;
     for (kind, id) in &before.identities {
-        savepoint.execute(
+        tx.execute(
             "INSERT INTO main.oauth_restore_closed(kind,id,cut) VALUES(?1,?2,?3)",
             params![kind.text(), id, cut.digest().as_str()],
         )?;
     }
     for (slot, generation) in &before.generations {
-        savepoint.execute(
+        tx.execute(
             "INSERT INTO main.oauth_restore_slot_floors(slot,generation,cut) VALUES(?1,?2,?3)",
             params![slot, generation, cut.digest().as_str()],
         )?;
@@ -727,37 +738,36 @@ fn close_in(
     if before.tables.contains("oauth_management_dispatch_slots") {
         // This barrier is released only by the actual restore cut, never by an
         // ordinary retry. Both exact old originals remain permanently closed.
-        let unsupported:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_management_dispatch_slots d
+        let unsupported:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_management_dispatch_slots d
             WHERE NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='management' AND c.id=d.attempt AND c.cut=?1)
                OR NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='connect' AND c.id=d.attempt AND c.cut=?1)
                OR NOT EXISTS(SELECT 1 FROM main.oauth_connect_attempts a WHERE a.attempt=d.attempt AND a.slot=d.slot))",
             [cut.digest().as_str()],|row|row.get(0))?;
         ensure!(!unsupported, "restore_dispatch_claim_not_closed");
-        savepoint.execute(
+        tx.execute(
             "DELETE FROM main.oauth_management_dispatch_slots WHERE attempt IN
             (SELECT id FROM main.oauth_restore_closed WHERE kind='management' AND cut=?1)",
             [cut.digest().as_str()],
         )?;
     }
     if before.tables.contains("oauth_connection_slots") {
-        let exhausted:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_connection_slots WHERE security_epoch=9223372036854775807)",[],|r|r.get(0))?;
+        let exhausted:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_connection_slots WHERE security_epoch=9223372036854775807)",[],|r|r.get(0))?;
         ensure!(!exhausted, "restore_local_epoch_exhausted");
-        savepoint.execute("UPDATE main.oauth_connection_slots SET status='reauth_required',security_epoch=security_epoch+1",[])?;
+        tx.execute("UPDATE main.oauth_connection_slots SET status='reauth_required',security_epoch=security_epoch+1",[])?;
     }
     if before.tables.contains("oauth_inbound_grants") {
-        let exhausted:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_inbound_grants WHERE epoch=9223372036854775807)",[],|r|r.get(0))?;
+        let exhausted:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_inbound_grants WHERE epoch=9223372036854775807)",[],|r|r.get(0))?;
         ensure!(!exhausted, "restore_inbound_epoch_exhausted");
-        savepoint.execute("UPDATE main.oauth_inbound_grants SET status='revoked',epoch=epoch+1 WHERE status='active'",[])?;
-        savepoint.execute(
+        tx.execute("UPDATE main.oauth_inbound_grants SET status='revoked',epoch=epoch+1 WHERE status='active'",[])?;
+        tx.execute(
             "UPDATE main.oauth_inbound_refresh SET state='revoked' WHERE state='active'",
             [],
         )?;
     }
     if before.tables.contains("native_fresh_owners") {
-        savepoint.execute("UPDATE main.native_fresh_owners SET stage='refused' WHERE stage IN ('allocated','offered')",[])?;
+        tx.execute("UPDATE main.native_fresh_owners SET stage='refused' WHERE stage IN ('allocated','offered')",[])?;
     }
     let count = before.identities.len();
-    savepoint.commit()?;
     Ok(count)
 }
 
@@ -805,17 +815,47 @@ impl AppliedCut<'_, '_, '_> {
     }
 }
 
-pub(crate) fn apply_in<'scope, 'database, 'cut>(
-    tx: &'scope mut Transaction<'database>,
+fn apply_in<'scope, 'database, 'cut>(
+    tx: &'scope Transaction<'database>,
     before: Snapshot,
     cut: &'cut Cut,
     profile: &Profile,
 ) -> Result<AppliedCut<'scope, 'database, 'cut>> {
-    let count = close_in(tx, before, cut, profile)?;
+    super::schema::require_admission(tx)?;
+    let count = close_rows(tx, before, cut, profile)?;
     Ok(AppliedCut {
         cut,
         transaction: tx,
         count,
+    })
+}
+
+
+/// Counts only; this is not image admission, maintenance or writer authority.
+pub(crate) struct ApplicationResetSummary {
+    pub(crate) credentials: crate::managed_credentials::store::restore::ResetSummary,
+    pub(crate) closed_oauth_originals: usize,
+}
+
+/// One rollback-owning admission inside the caller's existing memory-only
+/// transaction. The applied-cut loan cannot escape this concrete continuation.
+pub(crate) fn reset_application_in(
+    tx: &Transaction<'_>,
+    fence: &crate::security_epoch::restore_authority::PreparedRestoreFence,
+    authority_schema: &crate::security_epoch::restore_authority::RestoreFenceSchema,
+    oauth_schema: &Profile,
+    cut: &Cut,
+    namespace: &day2_capabilities::credentials::Namespace,
+    source_epoch: u64,
+) -> Result<ApplicationResetSummary> {
+    super::schema::admit_memory_transaction(tx,|tx| {
+        let before=Snapshot::capture(tx,oauth_schema)?;
+        fence.apply_in(tx,authority_schema)?;
+        let applied=apply_in(tx,before,cut,oauth_schema)?;
+        let credentials=applied.stage_closed_credentials(fence,namespace,source_epoch)?;
+        Ok(ApplicationResetSummary {
+            credentials,closed_oauth_originals:applied.closed_count(),
+        })
     })
 }
 

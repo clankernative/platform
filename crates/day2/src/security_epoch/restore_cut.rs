@@ -185,6 +185,17 @@ pub(crate) fn fixture_for_storage(
     scope: &str,
     schema: Digest,
 ) -> Result<Cut> {
+    fixture_for_storage_epoch(inventory,seed,scope,schema,1)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_for_storage_epoch(
+    inventory: Digest,
+    seed: u64,
+    scope: &str,
+    schema: Digest,
+    source_epoch: u64,
+) -> Result<Cut> {
     use super::kernel::restore::{Backup, ExactKey};
     let mut selected = super::tests::selection();
     let parts: Vec<_> = scope.split('/').collect();
@@ -208,7 +219,7 @@ pub(crate) fn fixture_for_storage(
             scope: selected.scope.clone(),
             authority: selected.authority_key()?,
             source_incarnation: Digest::new(b"old-db"),
-            security_epoch: 1,
+            security_epoch: source_epoch,
             image: Digest::new(b"archive-sqlite"),
             schema,
             artifact: Digest::new(b"artifact"),

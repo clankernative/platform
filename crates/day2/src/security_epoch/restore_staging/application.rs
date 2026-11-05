@@ -15,10 +15,7 @@ struct Selection<'a> {
     cut: &'a restore_cut::Cut,
 }
 
-struct Summary {
-    credentials: ResetSummary,
-    closed_oauth_originals: usize,
-}
+type Summary = crate::oauth::restore::ApplicationResetSummary;
 
 fn reset(db: &Connection, selected: &Selection<'_>) -> Result<Summary> {
     ensure!(
@@ -32,28 +29,16 @@ fn reset(db: &Connection, selected: &Selection<'_>) -> Result<Summary> {
                 == "memory",
         "complete_restore_memory_configuration_required"
     );
-    // A single cumulative admission covers every canonical validator and
-    // revocation. No imported schema is initialized, upgraded or repaired.
-    crate::oauth::schema::admit(db, |db| {
-        // The outer borrow deliberately owns the admission scope. SQLite
-        // checks transaction exclusivity; this value owns rollback on error.
-        let mut tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
-        let before = crate::oauth::restore::Snapshot::capture(&tx, selected.oauth_schema)?;
-        selected.fence.apply_in(&tx, selected.authority_schema)?;
-        let applied =
-            crate::oauth::restore::apply_in(&mut tx, before, selected.cut, selected.oauth_schema)?;
-        let credentials = applied.stage_closed_credentials(
-            selected.fence,
-            selected.namespace,
-            selected.source_epoch,
-        )?;
-        let closed_oauth_originals = applied.closed_count();
-        // End the actual transaction loan before its sole outer commit.
-        drop(applied);
-        tx.commit()?;
-        Ok(Summary {
-            credentials,
-            closed_oauth_originals,
-        })
-    })
+    // Begin outside admission: its SAVEPOINT belongs inside this outer TX.
+    // The called concrete operation owns one cumulative rollback scope and
+    // cannot return an applied-cut loan or a raw connection.
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let summary = crate::oauth::restore::reset_application_in(
+        &tx,selected.fence,selected.authority_schema,selected.oauth_schema,
+        selected.cut,selected.namespace,selected.source_epoch)?;
+    tx.commit()?;
+    Ok(summary)
 }
+
+#[cfg(test)]
+mod tests;
