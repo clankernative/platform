@@ -437,14 +437,17 @@ fn claim_identity(claims: &Claims) -> Result<Digest> {
     Digest::of(&("day2-restore-closed-use-original-v1", &claims.invocation))
 }
 
-pub(super) fn restore_identity(encoded: &str, invocation:&str) -> Result<Digest> {
+pub(super) fn restore_identity(encoded: &str, invocation: &str) -> Result<Digest> {
     ensure!(encoded.len() <= 8192, "connection use byte budget");
     let object: Value = crate::json::decode(encoded.as_bytes())
         .map_err(|_| anyhow::anyhow!("restored_connection_use_encoding"))?;
     ensure!(object.is_object(), "connection use object required");
     let claims: Claims = serde_json::from_value(object)
         .map_err(|_| anyhow::anyhow!("restored_connection_use_shape"))?;
-    ensure!(claims.invocation==invocation,"restored_connection_use_original_changed");
+    ensure!(
+        claims.invocation == invocation,
+        "restored_connection_use_original_changed"
+    );
     claim_identity(&claims)
 }
 
@@ -1207,12 +1210,19 @@ mod tests {
                 "INSERT INTO oauth_use_handles VALUES(?1,'invocation_1',?2)",
                 params![copied, old],
             )?;
-            let mut aliases=vec![copied.clone()];
-            for (index,change_selection) in [false,true].into_iter().enumerate() {
-                let mut retimed=fixture.claims.clone();retimed.issued_at=99;retimed.expires_at=159;
-                if change_selection {retimed.selection=Digest::new(b"different mutable selection DATA");}
-                let reference=format!("cu1_{}",if index==0 {"r"} else {"s"}.repeat(43));
-                db.execute("INSERT INTO oauth_use_handles VALUES(?1,'invocation_1',?2)",params![reference,serde_json::to_string_pretty(&retimed)?])?;
+            let mut aliases = vec![copied.clone()];
+            for (index, change_selection) in [false, true].into_iter().enumerate() {
+                let mut retimed = fixture.claims.clone();
+                retimed.issued_at = 99;
+                retimed.expires_at = 159;
+                if change_selection {
+                    retimed.selection = Digest::new(b"different mutable selection DATA");
+                }
+                let reference = format!("cu1_{}", if index == 0 { "r" } else { "s" }.repeat(43));
+                db.execute(
+                    "INSERT INTO oauth_use_handles VALUES(?1,'invocation_1',?2)",
+                    params![reference, serde_json::to_string_pretty(&retimed)?],
+                )?;
                 aliases.push(reference);
             }
             for _ in 0..2 {
@@ -1251,13 +1261,30 @@ mod tests {
                         .is_err()
                     );
                     for reference in &aliases {
-                        assert!(load(&db,&fixture.runtime,&fixture.request,"calendar",reference,100).is_err());
-                        let mut observation=fixture.observation(read);
+                        assert!(
+                            load(
+                                &db,
+                                &fixture.runtime,
+                                &fixture.request,
+                                "calendar",
+                                reference,
+                                100
+                            )
+                            .is_err()
+                        );
+                        let mut observation = fixture.observation(read);
                         if read {
-                            let mut input:Value=crate::json::decode(observation.instruction.data.as_bytes())?;
-                            input["reference"]=json!(reference);observation.instruction.data=serde_json::to_string(&input)?;
-                        } else {observation.result=json!({"Available":reference}).to_string();}
-                        assert!(validate_cached(&db,&fixture.runtime,&fixture.request,&observation).is_err());
+                            let mut input: Value =
+                                crate::json::decode(observation.instruction.data.as_bytes())?;
+                            input["reference"] = json!(reference);
+                            observation.instruction.data = serde_json::to_string(&input)?;
+                        } else {
+                            observation.result = json!({"Available":reference}).to_string();
+                        }
+                        assert!(
+                            validate_cached(&db, &fixture.runtime, &fixture.request, &observation)
+                                .is_err()
+                        );
                     }
                 }
                 assert_eq!(

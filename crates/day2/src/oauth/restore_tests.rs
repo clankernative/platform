@@ -368,7 +368,9 @@ fn missing_partial_shadow_and_unknown_units_refuse_before_any_cut() -> Result<()
             2 => db.execute_batch("DROP TABLE oauth_use_handles")?,
             3 => db.execute_batch("CREATE TEMP TABLE day2_meta(key TEXT,value TEXT)")?,
             4 => db.execute_batch("ATTACH ':memory:' AS foreign_state")?,
-            _ => {db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization')",["invalid\noriginal"])?;}
+            _ => {
+                db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization')",["invalid\noriginal"])?;
+            }
         }
         let tx = db.transaction()?;
         assert!(Snapshot::capture(&tx, &profile).is_err());

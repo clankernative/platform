@@ -60,9 +60,14 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
              AND EXISTS(SELECT 1 FROM oauth_restore_cuts c WHERE c.digest=cut)" }])
 }
 
-fn validate_id(id:&str)->Result<()> {
-    ensure!((1..=256).contains(&id.len()) && id.bytes().all(|byte|
-        byte.is_ascii_alphanumeric() || b"._-:/".contains(&byte)),"restore_continuation_identity_bound");
+fn validate_id(id: &str) -> Result<()> {
+    ensure!(
+        (1..=256).contains(&id.len())
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-:/".contains(&byte)),
+        "restore_continuation_identity_bound"
+    );
     Ok(())
 }
 
@@ -528,8 +533,10 @@ impl Snapshot {
                         validate_id(id)?;
                         identities_set.insert((kind, id.into()));
                         if table == "oauth_use_handles" {
-                            let identity =
-                                super::usage::restore_identity(row.get_ref(2)?.as_str()?,row.get_ref(1)?.as_str()?)?;
+                            let identity = super::usage::restore_identity(
+                                row.get_ref(2)?.as_str()?,
+                                row.get_ref(1)?.as_str()?,
+                            )?;
                             identities_set.insert((Kind::UseOriginal, identity.as_str().into()));
                         }
                         ensure!(identities_set.len() <= 8192, "restore_identity_count_bound");
