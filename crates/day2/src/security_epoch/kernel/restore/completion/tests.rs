@@ -1077,10 +1077,7 @@ fn replay(bytes: &[u8]) -> Result<bool> {
     }
     Ok(equal)
 }
-fn private_replay_directory(
-    base: &std::path::Path,
-    prefix: &str,
-) -> Result<tempfile::TempDir> {
+fn private_replay_directory(base: &std::path::Path, prefix: &str) -> Result<tempfile::TempDir> {
     use std::os::unix::fs::PermissionsExt;
     Ok(tempfile::Builder::new()
         .prefix(prefix)
