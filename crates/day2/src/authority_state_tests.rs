@@ -653,11 +653,11 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
         tx.commit()?;
     }
     let before = {
-            let snapshot = db.transaction()?;
-            let value = crate::budget::inspect_in(&snapshot)?;
-            snapshot.commit()?;
-            value
-        };
+        let snapshot = db.transaction()?;
+        let value = crate::budget::inspect_in(&snapshot)?;
+        snapshot.commit()?;
+        value
+    };
     assert_eq!(before.known_usage.calls, 2);
     assert_eq!(before.unknown_usage.len(), 1);
     assert!(
