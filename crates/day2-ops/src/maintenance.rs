@@ -200,18 +200,7 @@ pub struct Target {
     pub app_image: String,
     pub artifact_id: String,
     /// App-owned canary operations, required only by the rolling release lane.
-    pub probe: Option<RolloutProbe>,
-}
-
-#[derive(Clone, Debug, serde::Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RolloutProbe {
-    pub actor: String,
-    pub command: String,
-    pub input: Value,
-    pub query: String,
-    pub query_input: Value,
-    pub expected: Value,
+    pub probe: Option<day2::rollout::ProbeDefinition>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -2257,6 +2246,20 @@ impl Session {
         Ok(serde_json::from_str(raw.trim())?)
     }
 
+    fn require_target_instance(&self, state: &Value) -> Result<()> {
+        ensure!(
+            state["target_instance_digest"]
+                == day2::digest(
+                    self.target_instance
+                        .as_ref()
+                        .context("target instance")?
+                        .as_bytes()
+                ),
+            "rollout_target_instance_changed"
+        );
+        Ok(())
+    }
+
     pub fn rollout_resume(&mut self) -> Result<Value> {
         ensure!(
             self.operation == Operation::Rollout && self.state.pod,
@@ -2267,6 +2270,7 @@ impl Session {
             return Ok(json!({"resuming":false}));
         }
         let target = self.request.target.as_ref().context("target")?;
+        self.require_target_instance(&state)?;
         ensure!(
             state["source_image"] == self.request.app_image
                 && state["target_image"] == target.app_image
@@ -2354,6 +2358,9 @@ impl Session {
                 || matches!(state["phase"].as_str(), Some("complete" | "aborted")),
             "another_rollout_is_running"
         );
+        if state["id"] == id {
+            self.require_target_instance(&state)?;
+        }
         match step {
             "prepare" => {
                 if state["id"] != id {
@@ -2683,21 +2690,38 @@ impl Session {
                 let path = self.work.path().join("release-probe.json");
                 fs::write(&path, serde_json::to_vec(&probe)?)?;
                 self.copy_in(&path, "/srv/day2/release-probe.json")?;
-                let raw = self.exec(
+                self.exec(
                     &[
                         DAY2,
-                        "release-probe",
-                        TARGET,
+                        "rollout-probe",
+                        CURRENT,
                         &app,
                         "/srv/day2/release-probe.json",
                         &id,
+                        &operator,
                     ],
-                    Duration::from_secs(600),
+                    Duration::from_secs(60),
                 )?;
-                self.record(
-                    "candidate-read-write-verified",
-                    serde_json::from_str(raw.trim())?,
-                )?;
+                let started = Instant::now();
+                loop {
+                    let observed = self.rollout_state()?;
+                    ensure!(observed["id"] == id, "release_probe_changed");
+                    match observed["probe"]["status"].as_str() {
+                        Some("verified") => {
+                            self.record(
+                                "candidate-read-write-verified",
+                                json!({"release":id,"artifact":observed["target"]}),
+                            )?;
+                            break;
+                        }
+                        Some("failed") => bail!("candidate_release_probe_failed"),
+                        _ => ensure!(
+                            started.elapsed() < Duration::from_secs(300),
+                            "candidate_release_probe_timeout"
+                        ),
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
                 self.state.probe_verified = true;
                 Ok(json!({"probe_verified":true}))
             }

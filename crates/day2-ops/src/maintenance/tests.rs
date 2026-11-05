@@ -127,6 +127,7 @@ impl Prompt for FakePrompt {
 struct FakeCluster {
     calls: Rc<RefCell<Vec<Vec<String>>>>,
     pod_root: PathBuf,
+    release: Rc<RefCell<Value>>,
     running_image: String,
     instance: String,
     other_sessions: String,
@@ -315,6 +316,11 @@ impl Cluster for FakeCluster {
                 fs::rename(self.pod_path(from), self.pod_path(to))?;
                 String::new()
             }
+            ["exec", _, "--", DAY2, "rollout-inspect", CURRENT, _] => self.release.borrow().to_string(),
+            ["exec", _, "--", DAY2, "rollout-probe", CURRENT, _, _, _, _] => {
+                self.release.borrow_mut()["probe"] = json!({"status":"verified"});
+                json!({"requested":true}).to_string()
+            }
             ["exec", _, "--", DAY2, "admit", instance, app] => self.admit(instance, app)?,
             ["exec", pod, "--", "find", STATE, "-maxdepth", "1", "-type", "f", "-exec", "stat", "-c", "%s %n", "{}", "+"] => {
                 assert!(pod.ends_with("-measure"), "measured from the probe");
@@ -345,6 +351,7 @@ struct Harness {
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
     asked: Rc<RefCell<usize>>,
     applied: Rc<RefCell<Vec<String>>>,
+    release: Rc<RefCell<Value>>,
     running: Image,
     target: Image,
 }
@@ -357,6 +364,7 @@ impl Harness {
             annotations: Rc::default(),
             asked: Rc::default(),
             applied: Rc::default(),
+            release: Rc::default(),
             running: image(b"old worker", None),
             target: image(b"new worker", None),
         }
@@ -399,6 +407,7 @@ impl Harness {
         let mut cluster = FakeCluster {
             calls: self.calls.clone(),
             pod_root: self.directory.path().join("pod"),
+            release: self.release.clone(),
             running_image: self.running.reference.clone(),
             instance: Self::instance(&self.running.artifact_id),
             other_sessions: String::new(),
@@ -1539,5 +1548,70 @@ fn rolling_preflight_refuses_another_claim_and_a_serving_helper() -> Result<()> 
                 .any(|arg| matches!(arg.as_str(), "scale" | "patch" | "apply"))
         }));
     }
+    Ok(())
+}
+
+#[test]
+fn resumed_release_requires_exact_target_instance_bytes_before_any_step() -> Result<()> {
+    let harness = Harness::new();
+    let request = harness.request(Operation::Rollout);
+    let request_bytes = fs::read(&request)?;
+    let target = harness.directory.path().join("target-instance.json");
+    let original = fs::read(&target)?;
+    let release = json!({"id":"release-1", "source_image":harness.running.reference,
+        "target_image":harness.target.reference,"target":format!("sha256:{}",harness.target.artifact_id),
+        "target_instance_digest":day2::digest(&original),"phase":"prepared",
+        "placement":{"controller_uid":"controller-uid","pvc_uid":"pvc-uid","node":"node-a","request_digest":day2::digest(&request_bytes)}});
+    *harness.release.borrow_mut() = release;
+    // The same request and exact target bytes can resume.
+    let mut session = Session::open("rollout", &request, harness.tools(|_| {}, true))?;
+    session.state.pod = true;
+    assert_eq!(session.rollout_resume()?["resuming"], true);
+    let journal = session.journal.clone();
+    drop(session);
+    fs::remove_file(journal)?;
+    let mut changed: Value = serde_json::from_slice(&original)?;
+    changed["apps"]["example_app"]["readers"] = json!(["unreviewed-reader"]);
+    fs::write(&target, serde_json::to_vec(&changed)?)?;
+    assert_eq!(fs::read(&request)?, request_bytes);
+    let mut session = Session::open("rollout", &request, harness.tools(|_| {}, true))?;
+    session.state.pod = true;
+    assert!(
+        format!("{:#}", session.rollout_resume().unwrap_err())
+            .contains("rollout_target_instance_changed")
+    );
+    // Even a caller that bypasses the recipe's resume step cannot deploy it.
+    session.state.resumed = true;
+    for step in ["prepare", "deploy"] {
+        assert!(
+            format!("{:#}", session.rollout(step).unwrap_err())
+                .contains("rollout_target_instance_changed")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn release_probe_only_publishes_then_observes_the_candidate_result() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
+    session.state.pod = true;
+    session.state.resumed = true;
+    session.state.candidate_observed = true;
+    *harness.release.borrow_mut() = json!({"id":"release-1","phase":"serving",
+        "target":format!("sha256:{}",harness.target.artifact_id),
+        "target_instance_digest":day2::digest(session.target_instance.as_ref().unwrap().as_bytes())});
+    session.rollout("probe")?;
+    assert!(session.state.probe_verified);
+    let calls = harness.calls.borrow();
+    assert!(
+        calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "rollout-probe"))
+    );
+    assert!(!calls.iter().any(|args| {
+        args.iter()
+            .any(|arg| arg == "release-probe" || arg == "invoke")
+    }));
     Ok(())
 }

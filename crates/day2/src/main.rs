@@ -150,61 +150,14 @@ fn main() -> Result<()> {
                 Fault::None,
             )?)?
         }
-        ["release-probe", instance, app, probe_file, id] => {
-            let runtime = Runtime::load(Path::new(instance), app)?;
-            let probe: serde_json::Value = day2::json::decode(&fs::read(probe_file)?)?;
-            let actor = probe["actor"].as_str().context("probe actor")?;
-            let command = probe["command"].as_str().context("probe command")?;
-            let query = probe["query"].as_str().context("probe query")?;
-            anyhow::ensure!(
-                runtime.artifact().operation(command)?.kind == "command"
-                    && runtime.artifact().operation(query)?.kind == "query",
-                "release_probe_operations"
-            );
-            let contracts = runtime
-                .artifact()
-                .contract()
-                .app_contract
-                .as_ref()
-                .context("release_probe_contract")?;
-            anyhow::ensure!(
-                [command, query]
-                    .iter()
-                    .all(|name| contracts
-                        .operations
-                        .get(*name)
-                        .is_some_and(|operation| operation.execution.effects.iter().all(
-                            |effect| matches!(
-                                effect.kind.as_str(),
-                                "create" | "update" | "update_created" | "soft_delete"
-                            )
-                        ) && operation.observations.is_empty()
-                            && !operation.credential_access.enabled)),
-                "release_probe_must_have_no_external_effects"
-            );
-            let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
-            let write = runtime.invoke(
-                command,
-                actor,
-                &format!("{id}_write"),
-                &probe["input"],
-                now,
-                Fault::None,
+        ["rollout-probe", instance, app, probe_file, id, operator] => {
+            day2::rollout::request_probe(
+                &Runtime::load(Path::new(instance), app)?,
+                id,
+                day2::json::decode(&fs::read(probe_file)?)?,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
             )?;
-            anyhow::ensure!(write.status == "success", "release_probe_write_failed");
-            let read = runtime.invoke(
-                query,
-                actor,
-                &format!("{id}_read"),
-                &probe["query_input"],
-                now,
-                Fault::None,
-            )?;
-            anyhow::ensure!(
-                read.status == "success" && read.result == probe["expected"],
-                "release_probe_readback_failed"
-            );
-            serde_json::json!({"verified":true,"artifact":runtime.artifact().id()})
+            serde_json::json!({"requested":true})
         }
         ["import", instance, app, operation, operator, source] => {
             let runtime = Runtime::load(Path::new(instance), app)?;

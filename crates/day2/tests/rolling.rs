@@ -26,7 +26,10 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
 }
 
 fn fixture() -> Result<(World, PathBuf, LocalOperator)> {
-    let mut world = World::new()?;
+    fixture_with_world(World::new()?)
+}
+
+fn fixture_with_world(mut world: World) -> Result<(World, PathBuf, LocalOperator)> {
     let mut instance: Value = serde_json::from_slice(&fs::read(world.runtime.instance_path())?)?;
     instance["control"] = json!({"version":1,"state_directory":world.directory.path().join("control"),"operators":["operator"],"sources":{},"apps":{}});
     instance["apps"]["reports"]["runtime"] = json!({"kind":"linux_sqlite_rwo_v1","resources":{
@@ -157,7 +160,7 @@ fn failed_candidate_does_not_revoke_incumbent_and_release_ids_cannot_be_reused()
 }
 
 #[test]
-fn policy_revocation_invalidates_overlap_without_regranting_candidate_authority() -> Result<()> {
+fn policy_revocation_preserves_overlap_without_regranting_business_authority() -> Result<()> {
     let (world, candidate, operator) = fixture()?;
     prepare(&world, &candidate, &operator)?;
     rollout::transition(
@@ -188,15 +191,32 @@ fn policy_revocation_invalidates_overlap_without_regranting_candidate_authority(
             )
             .is_err()
     );
+    replacement.initialize()?;
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Serving,
+        Phase::Draining,
+        &operator,
+    )?;
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Draining,
+        Phase::Complete,
+        &operator,
+    )?;
     assert!(
-        rollout::transition(
-            &world.runtime,
-            "release-one",
-            Phase::Serving,
-            Phase::Draining,
-            &operator
-        )
-        .is_err()
+        replacement
+            .invoke(
+                "reports.submit",
+                "alice",
+                "still-revoked",
+                &json!({"title":"x","text":"y"}),
+                101,
+                Fault::None
+            )
+            .is_err()
     );
     Ok(())
 }
@@ -612,4 +632,363 @@ fn offline_activation_uses_target_configuration_and_requires_exclusive_ownership
     assert!(active.document.readers.contains("target-reader"));
     assert!(rollout::inspect(&replacement)?.is_none());
     Ok(())
+}
+
+#[test]
+fn policy_revision_during_draining_keeps_target_serving_and_fences_old_work() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    let replacement = Runtime::load(&candidate, "reports")?;
+    world.submit("before-policy-revision", Fault::None)?;
+    invocations::drain(&world.runtime, 64)?;
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Serving,
+        Phase::Draining,
+        &operator,
+    )?;
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.submit")
+            .unwrap()
+            .actors
+            .remove("bob");
+    })?;
+    replacement.initialize()?;
+    let server = Server::start(replacement.clone())?;
+    let response = reqwest::blocking::get(format!("{}/health/ready", server.origin))?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        replacement
+            .invoke(
+                "reports.submit",
+                "alice",
+                "after-policy-revision",
+                &json!({"title":"x","text":"y"}),
+                101,
+                Fault::None
+            )?
+            .status,
+        "success"
+    );
+    assert!(
+        replacement
+            .invoke(
+                "reports.submit",
+                "bob",
+                "bob-revoked",
+                &json!({"title":"x","text":"y"}),
+                101,
+                Fault::None
+            )
+            .is_err()
+    );
+    assert!(invocations::status(&replacement, "before-policy-revision", "alice").is_err());
+    invocations::drain(&replacement, 64)?;
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Draining,
+        Phase::Complete,
+        &operator,
+    )?;
+    replacement.initialize()?;
+    Ok(())
+}
+
+fn stock_fixture() -> Result<(World, PathBuf, LocalOperator)> {
+    let artifact = std::env::var_os("DAY2_TEST_STOCK_LEDGER_ARTIFACT")
+        .context("build stock-ledger fixture")?;
+    let directory = tempfile::tempdir()?;
+    let model = json!({"read":true,"create":true,"rows":{"kind":"owner_or_admin","field":"owner"}});
+    let path = directory.path().join("instance.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"installation":"rollout_probe","environment":"test","apps":{"reports":{
+                "artifact":PathBuf::from(artifact),"readers":["alice"],"writers":["alice"],
+                "authority":{"version":1,"admins":["operator"],"operations":{
+                    "stock_ledger.reserve":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{"reservations":model}},
+                    "stock_ledger.available":{"actors":["alice"],"mode":{"kind":"read"},"models":{"reservations":{"read":true,"rows":{"kind":"owner_or_admin","field":"owner"}}}}
+                }}
+            }}}),
+        )?,
+    )?;
+    let runtime = Runtime::load(&path, "reports")?;
+    runtime.initialize()?;
+    fixture_with_world(World { directory, runtime })
+}
+
+#[test]
+fn canary_runs_in_the_pinned_candidate_host_and_retries_do_not_repeat_writes() -> Result<()> {
+    use rollout::{ProbeDefinition, ProbeStatus};
+    let (world, candidate, operator) = stock_fixture()?;
+    #[cfg(target_os = "macos")]
+    {
+        let supervisor = day2::digest(&fs::read(std::env::current_exe()?)?);
+        for path in [world.runtime.instance_path(), candidate.as_path()] {
+            let mut value: Value = serde_json::from_slice(&fs::read(path)?)?;
+            let artifact = day2::artifact::Instance::load(path)?.apps["reports"]
+                .artifact
+                .clone();
+            let loaded = day2::artifact::LoadedArtifact::load(Path::new(&artifact))?;
+            value["apps"]["reports"]["security"] =
+                serde_json::to_value(day2::security_admission::Requirements {
+                    version: 1,
+                    artifact: loaded.id().into(),
+                    platform_inventory: day2::security_admission::platform_inventory_digest(
+                        &loaded,
+                    )?,
+                    roc_version: loaded.contract().roc_version.clone(),
+                    containment: day2::security_admission::Containment::MacosSandboxV1 {
+                        supervisor: supervisor.clone(),
+                    },
+                })?;
+            fs::write(path, serde_json::to_vec(&value)?)?;
+        }
+        let active =
+            day2::authority_state::current(&rusqlite::Connection::open(world.runtime.db())?)?;
+        day2::authority_state::apply_desired(
+            &world.runtime,
+            &operator,
+            "pin-supervisor",
+            Some(active.stamp),
+        )?;
+    }
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    let definition = ProbeDefinition {
+        actor: "alice".into(),
+        command: "stock_ledger.reserve".into(),
+        input: json!({"quantity":1}),
+        query: "stock_ledger.available".into(),
+        query_input: json!({}),
+        expected: json!({"available":99,"reserved":1,"count":1}),
+    };
+    assert!(
+        rollout::request_probe(
+            &world.runtime,
+            "release-one",
+            definition.clone(),
+            &LocalOperator::assert_local("outsider")?
+        )
+        .is_err()
+    );
+    assert!(rollout::inspect(&world.runtime)?.unwrap().probe.is_none());
+    // Tooling can publish the operator request even though its executable is
+    // not the pinned app supervisor. It must never invoke the app itself.
+    let probe_file = world.directory.path().join("probe.json");
+    fs::write(&probe_file, serde_json::to_vec(&definition)?)?;
+    let output = crate::support::compiler::output(
+        std::process::Command::new(env!("CARGO_BIN_EXE_day2")).args([
+            "rollout-probe",
+            world.runtime.instance_path().to_str().unwrap(),
+            "reports",
+            probe_file.to_str().unwrap(),
+            "release-one",
+            "operator",
+        ]),
+        std::time::Duration::from_secs(30),
+    )?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let denied = crate::support::compiler::output(
+            std::process::Command::new(env!("CARGO_BIN_EXE_day2")).args([
+                "invoke",
+                candidate.to_str().unwrap(),
+                "reports",
+                "stock_ledger.available",
+                "alice",
+                "wrong-supervisor",
+                "{}",
+            ]),
+            std::time::Duration::from_secs(30),
+        )?;
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("security_runtime_mismatch"));
+    }
+    let _incumbent = Server::start(world.runtime.clone())?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(
+        rollout::inspect(&world.runtime)?
+            .unwrap()
+            .probe
+            .unwrap()
+            .status,
+        ProbeStatus::Pending
+    );
+    let replacement = Runtime::load(&candidate, "reports")?;
+    let candidate_server = Server::start(replacement.clone())?;
+    assert_eq!(await_probe(&replacement)?, ProbeStatus::Verified);
+    drop(candidate_server);
+    rollout::request_probe(&world.runtime, "release-one", definition.clone(), &operator)?;
+    let count: i64 = rusqlite::Connection::open(replacement.db())?.query_row(
+        "SELECT count(*) FROM reservations",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count, 1);
+    let mut changed = definition;
+    changed.input = json!({"quantity":2});
+    assert!(rollout::request_probe(&world.runtime, "release-one", changed, &operator).is_err());
+    #[cfg(target_os = "macos")]
+    {
+        let mut value: Value = serde_json::from_slice(&fs::read(world.runtime.instance_path())?)?;
+        value["apps"]["reports"]["security"]["containment"]["supervisor"] =
+            json!(day2::digest(b"a different supervisor"));
+        fs::write(world.runtime.instance_path(), serde_json::to_vec(&value)?)?;
+        let active =
+            day2::authority_state::current(&rusqlite::Connection::open(world.runtime.db())?)?;
+        day2::authority_state::apply_desired(
+            &world.runtime,
+            &operator,
+            "replace-supervisor-pin",
+            Some(active.stamp),
+        )?;
+        let error = replacement
+            .invoke(
+                "stock_ledger.available",
+                "alice",
+                "new-pin-denied",
+                &json!({}),
+                103,
+                Fault::None,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("security_runtime_mismatch"));
+    }
+    Ok(())
+}
+
+#[test]
+fn failed_candidate_canaries_preserve_the_incumbent_and_current_authority() -> Result<()> {
+    use rollout::{ProbeDefinition, ProbeStatus};
+    for actor in ["alice", "bob"] {
+        let (world, candidate, operator) = stock_fixture()?;
+        prepare(&world, &candidate, &operator)?;
+        rollout::transition(
+            &world.runtime,
+            "release-one",
+            Phase::Prepared,
+            Phase::Serving,
+            &operator,
+        )?;
+        let definition = ProbeDefinition {
+            actor: actor.into(),
+            command: "stock_ledger.reserve".into(),
+            input: json!({"quantity":1}),
+            query: "stock_ledger.available".into(),
+            query_input: json!({}),
+            expected: json!({"available":123,"reserved":1,"count":1}),
+        };
+        rollout::request_probe(&world.runtime, "release-one", definition, &operator)?;
+        let replacement = Runtime::load(&candidate, "reports")?;
+        let _server = Server::start(replacement.clone())?;
+        assert_eq!(await_probe(&replacement)?, ProbeStatus::Failed);
+        let same = rollout::inspect(&replacement)?
+            .unwrap()
+            .probe
+            .unwrap()
+            .definition;
+        rollout::request_probe(&world.runtime, "release-one", same, &operator)?;
+        assert_eq!(await_probe(&replacement)?, ProbeStatus::Failed);
+        world.runtime.initialize()?;
+        assert_eq!(
+            world
+                .runtime
+                .invoke(
+                    "stock_ledger.reserve",
+                    "alice",
+                    "incumbent-still-allowed",
+                    &json!({"quantity":1}),
+                    102,
+                    Fault::None
+                )?
+                .status,
+            "success"
+        );
+        let count: i64 = rusqlite::Connection::open(world.runtime.db())?.query_row(
+            "SELECT count(*) FROM reservations WHERE owner='bob'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn candidate_probe_refuses_child_commands_before_the_write() -> Result<()> {
+    use rollout::{ProbeDefinition, ProbeStatus};
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    rollout::request_probe(
+        &world.runtime,
+        "release-one",
+        ProbeDefinition {
+            actor: "alice".into(),
+            command: "reports.submit".into(),
+            input: json!({"title":"x","text":"y"}),
+            query: "reports.list".into(),
+            query_input: json!({"after":"","limit":10}),
+            expected: json!({}),
+        },
+        &operator,
+    )?;
+    let replacement = Runtime::load(&candidate, "reports")?;
+    let _server = Server::start(replacement.clone())?;
+    assert_eq!(await_probe(&replacement)?, ProbeStatus::Failed);
+    let count: i64 = rusqlite::Connection::open(world.runtime.db())?.query_row(
+        "SELECT count(*) FROM reports",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+fn await_probe(runtime: &Runtime) -> Result<rollout::ProbeStatus> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let status = rollout::inspect(runtime)?
+            .context("prepared release")?
+            .probe
+            .context("requested probe")?
+            .status;
+        if status != rollout::ProbeStatus::Pending {
+            return Ok(status);
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "candidate probe did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }

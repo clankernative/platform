@@ -1269,7 +1269,7 @@ fn apply_transition_in(
         previous.as_ref().map(|active| &active.stamp) == change.expected.as_ref(),
         Failure::AuthorityPolicyChanged
     );
-    if let Some(previous) = previous {
+    if let Some(previous) = &previous {
         ensure!(
             previous.artifact_id == source.0 && Path::new(&previous.artifact_path) == source.1,
             Failure::ArtifactBindingChanged
@@ -1283,7 +1283,7 @@ fn apply_transition_in(
     }
     next.document = change.document.clone();
     store(connection, &next, &operator.name, "activate")?;
-    crate::rollout::invalidate(connection)?;
+    crate::rollout::authority_changed(connection, previous.as_ref(), &next)?;
     let receipt = AuthorityReceipt {
         stamp: next.stamp.clone(),
     };

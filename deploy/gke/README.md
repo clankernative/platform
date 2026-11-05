@@ -625,7 +625,9 @@ These operations and the exact expected result belong to the application. Use
 an authorized actor and dedicated canary data; the command's write persists.
 The host refuses external writes, observations, child commands or credential
 access in the probe. Its command and query have separate stable idempotency IDs.
-The tooling image must be from the reviewed target platform build.
+The tooling image must be from the reviewed target platform build. Tooling queues
+the immutable canary request; the running candidate executes it in its host pump
+and records the result. The probe therefore retains the serving supervisor pin.
 
 The compatibility gate requires identical schema, operation/page/routing
 contracts, runtime/platform sources, resources, authority and instance bindings.
@@ -640,16 +642,18 @@ image afterwards. For a release-managed RWO Deployment, set `release_managed = f
 for the apply that installs the stamped image, then re-enable it once the target
 is ready. Model retirement is refused during copy rehearsal by this
 profile's schema verifier; it needs a separately reviewed preservation procedure.
-Policy changes continue through explicit authority operations.
+Policy changes continue through explicit authority operations. A policy revision
+preserves the admitted artifact pair through draining and immediately fences old
+business work; the remaining target continues serving the current grants.
 
 The rolling helper is pinned to the observed node and excluded from all Service
 selectors. The durable release binds the exact images/artifacts, authority stamp,
-controller UID, PVC UID, node and request digest. Immutable ConfigMaps plus
-Kubernetes UID/resource-version tests prevent a retry from changing another
+controller UID, PVC UID, node, request digest and exact target instance bytes.
+Immutable ConfigMaps plus Kubernetes UID/resource-version tests prevent a retry from changing another
 release. Re-run the identical request to recover after a lost response or operator
 process exit; prepared, promoted and completed releases reconcile idempotently.
-An edit to that request requires a new release. The candidate's private health
-check admits its store while public readiness stays false. A successful app
+An edit to that request or its referenced target instance requires a new release.
+The candidate's private health check admits its store while public readiness stays false. A successful app
 probe promotes readiness; the source remains admitted until its pod has drained
 and actually terminated. No force deletion, automatic rollback or snapshot
 replacement occurs on failure. Investigate a failed candidate and resume the

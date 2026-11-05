@@ -49,10 +49,38 @@ pub struct Release {
     pub target: String,
     pub source_image: String,
     pub target_image: String,
+    pub target_instance_digest: String,
+    pub probe: Option<Probe>,
     pub authority: AuthorityStamp,
     pub target_security: Option<crate::security_admission::Requirements>,
     pub placement: Option<Placement>,
     pub phase: Phase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeDefinition {
+    pub actor: String,
+    pub command: String,
+    pub input: serde_json::Value,
+    pub query: String,
+    pub query_input: serde_json::Value,
+    pub expected: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeStatus {
+    Pending,
+    Verified,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Probe {
+    pub definition: ProbeDefinition,
+    pub status: ProbeStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +203,164 @@ pub(crate) fn invalidate(connection: &Connection) -> Result<()> {
         connection.execute("DELETE FROM day2_rollout", [])?;
         connection.execute("UPDATE day2_rollout_artifacts SET retired_ms=?1 WHERE id != (SELECT artifact_id FROM day2_authority WHERE singleton=1)", [now_ms()?])?;
     }
+    Ok(())
+}
+
+/// Policy revisions fence business work without withdrawing an executable that
+/// Kubernetes may already have made the only serving replica. Binding changes
+/// and restore still discard the pair through the exclusive activation path.
+pub(crate) fn authority_changed(
+    connection: &Connection,
+    previous: Option<&authority_state::ActiveAuthority>,
+    next: &authority_state::ActiveAuthority,
+) -> Result<()> {
+    let Some(mut release) = state(connection)? else {
+        return Ok(());
+    };
+    let preserves_binding = previous.is_some_and(|previous| {
+        previous.stamp == release.authority
+            && previous.stamp.epoch == next.stamp.epoch
+            && previous.artifact_id == next.artifact_id
+            && previous.artifact_path == next.artifact_path
+    });
+    if !preserves_binding {
+        return invalidate(connection);
+    }
+    release.authority = next.stamp.clone();
+    release.target_security = next.document.security.clone().map(|mut requirements| {
+        requirements.artifact = release.target.clone();
+        requirements
+    });
+    write(connection, &release)
+}
+
+/// Queue an immutable canary for the running candidate. Tooling only publishes
+/// and observes this request; app execution keeps the serving supervisor pin.
+pub fn request_probe(
+    runtime: &Runtime,
+    id: &str,
+    definition: ProbeDefinition,
+    operator_identity: &LocalOperator,
+) -> Result<()> {
+    operator(runtime, operator_identity)?;
+    ensure!(
+        serde_json::to_vec(&definition)?.len() <= 65_536,
+        "release_probe_byte_budget"
+    );
+    runtime.sql_write(|db| {
+        runtime.check_binding(db)?;
+        let mut release = state(db)?.context("rollout_not_prepared")?;
+        ensure!(
+            release.id == id && release.scope == runtime.scope() && release.phase == Phase::Serving,
+            "release_probe_phase"
+        );
+        if let Some(previous) = &mut release.probe {
+            ensure!(previous.definition == definition, "release_probe_conflict");
+            if previous.status == ProbeStatus::Failed {
+                // Explicit retry keeps both invocation IDs, so a committed
+                // write cannot be repeated after a lost response or read error.
+                previous.status = ProbeStatus::Pending;
+                write(db, &release)?;
+            }
+            return Ok(());
+        }
+        release.probe = Some(Probe {
+            definition,
+            status: ProbeStatus::Pending,
+        });
+        write(db, &release)
+    })
+}
+
+/// Only the candidate host pump calls this. The incumbent never runs candidate
+/// code as proof, and no public HTTP endpoint gains operator authority.
+pub(crate) fn run_probe(runtime: &Runtime) -> Result<()> {
+    if !runtime.rolling() {
+        return Ok(());
+    }
+    let Some(release) = inspect(runtime)? else {
+        return Ok(());
+    };
+    let Some(probe) = &release.probe else {
+        return Ok(());
+    };
+    if release.target != runtime.artifact().id()
+        || release.phase != Phase::Serving
+        || probe.status != ProbeStatus::Pending
+    {
+        return Ok(());
+    }
+    let result = execute_probe(runtime, &release.id, &probe.definition);
+    runtime.sql_write(|db| {
+        let mut current = state(db)?.context("rollout_not_prepared")?;
+        ensure!(
+            current.id == release.id
+                && current.target == release.target
+                && current.phase == Phase::Serving
+                && current.probe == release.probe,
+            "release_probe_changed"
+        );
+        current
+            .probe
+            .as_mut()
+            .context("release_probe_missing")?
+            .status = if result.is_ok() {
+            ProbeStatus::Verified
+        } else {
+            ProbeStatus::Failed
+        };
+        write(db, &current)
+    })?;
+    result
+}
+
+fn execute_probe(runtime: &Runtime, id: &str, probe: &ProbeDefinition) -> Result<()> {
+    ensure!(
+        runtime.artifact().operation(&probe.command)?.kind == "command"
+            && runtime.artifact().operation(&probe.query)?.kind == "query",
+        "release_probe_operations"
+    );
+    let contracts = runtime
+        .artifact()
+        .contract()
+        .app_contract
+        .as_ref()
+        .context("release_probe_contract")?;
+    ensure!(
+        [&probe.command, &probe.query].iter().all(|name| contracts
+            .operations
+            .get(*name)
+            .is_some_and(
+                |operation| operation.execution.effects.iter().all(|effect| matches!(
+                    effect.kind.as_str(),
+                    "create" | "update" | "update_created" | "soft_delete"
+                )) && operation.observations.is_empty()
+                    && !operation.credential_access.enabled
+            )),
+        "release_probe_must_have_no_external_effects"
+    );
+    let now = now_ms()? / 1000;
+    let write = runtime.invoke(
+        &probe.command,
+        &probe.actor,
+        &format!("{id}_write"),
+        &probe.input,
+        now,
+        crate::store::Fault::None,
+    )?;
+    ensure!(write.status == "success", "release_probe_write_failed");
+    let read = runtime.invoke(
+        &probe.query,
+        &probe.actor,
+        &format!("{id}_read"),
+        &probe.query_input,
+        now,
+        crate::store::Fault::None,
+    )?;
+    ensure!(
+        read.status == "success" && read.result == probe.expected,
+        "release_probe_readback_failed"
+    );
     Ok(())
 }
 
@@ -534,7 +720,13 @@ pub fn prepare(
     );
     image(source_image)?;
     image(target_image)?;
-    let instance = Instance::load(candidate_instance)?;
+    let mut instance_bytes = Vec::new();
+    File::open(candidate_instance)?
+        .take(1_048_577)
+        .read_to_end(&mut instance_bytes)?;
+    ensure!(instance_bytes.len() <= 1_048_576, "instance byte budget");
+    let target_instance_digest = crate::digest(&instance_bytes);
+    let instance = Instance::from_bytes(&instance_bytes)?;
     ensure!(
         instance.scope(runtime.app())? == runtime.scope(),
         "rollout_scope_changed"
@@ -610,12 +802,13 @@ pub fn prepare(
         ensure!(active.artifact_id == runtime.artifact().id() && normalized == active.document, "rollout_authority_changed");
         let release = Release { id: id.into(), scope: runtime.scope().into(), source: active.artifact_id,
             target: target.id().into(), source_image: source_image.into(), target_image: target_image.into(),
-            authority: active.stamp, target_security: desired.security.clone(), placement: None, phase: Phase::Prepared };
+            target_instance_digest, probe: None, authority: active.stamp, target_security: desired.security.clone(), placement: None, phase: Phase::Prepared };
         if let Some(previous) = state(tx)? {
             if previous.id == id {
                 let mut retried = release.clone();
                 retried.phase = previous.phase.clone();
                 retried.placement = previous.placement.clone();
+                retried.probe = previous.probe.clone();
                 ensure!(previous == retried, "rollout_id_conflict");
                 return Ok(previous);
             }
