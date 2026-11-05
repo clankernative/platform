@@ -1,8 +1,10 @@
 //! Real SQLite/crypto adapters and an independent expected denial cut. These
 //! fixtures never construct a native owner, passkey approval or writer.
-use super::*;
+use super::{Kind, Profile, Snapshot, close_in, install, require_no_history, require_open};
 use crate::oauth::{connect, custody, exchange, inbound, profiles, store};
-use rusqlite::TransactionBehavior;
+use anyhow::{Result, ensure};
+use day2_capabilities::Digest;
+use rusqlite::{Connection, TransactionBehavior, params};
 use std::path::Path;
 
 pub(in crate::oauth) fn database(path: &Path) -> Result<Connection> {
