@@ -177,6 +177,7 @@ mod tests {
             expected_generation: None,
             expected_epoch: 1,
             proposed_generation: 1,
+            generation_floor: 0,
             owner: "human_1".into(),
             profile: profile.id.as_str().into(),
             registration: "registration_v1".into(),

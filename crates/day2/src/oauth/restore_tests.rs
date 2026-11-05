@@ -31,6 +31,7 @@ fn intent(id: &str) -> connect::ConnectIntent {
         expected_generation: None,
         expected_epoch: 1,
         proposed_generation: 1,
+        generation_floor: 0,
         owner: "human_1".into(),
         profile: "google_calendar_v1".into(),
         registration: "registration_1".into(),
@@ -415,7 +416,7 @@ fn changed_row_or_identity_inventory_refuses_without_repair() -> Result<()> {
                 )?;
             }
             _ => {
-                tx.execute("INSERT INTO main.oauth_connect_attempts SELECT 'new_identity',slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,code_ref,account,scope_evidence FROM main.oauth_connect_attempts WHERE attempt='pending'",[])?;
+                tx.execute("INSERT INTO main.oauth_connect_attempts SELECT 'new_identity',slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,code_ref,account,scope_evidence,generation_floor FROM main.oauth_connect_attempts WHERE attempt='pending'",[])?;
             }
         }
         assert!(close_in(&mut tx, before, &cut, &profile).is_err());
@@ -494,7 +495,7 @@ fn missing_partial_shadow_and_unknown_units_refuse_before_any_cut() -> Result<()
             3 => db.execute_batch("CREATE TEMP TABLE day2_meta(key TEXT,value TEXT)")?,
             4 => db.execute_batch("ATTACH ':memory:' AS foreign_state")?,
             _ => {
-                db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization')",["invalid\noriginal"])?;
+                db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,generation_floor) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization',0)",["invalid\noriginal"])?;
             }
         }
         let tx = db.transaction()?;

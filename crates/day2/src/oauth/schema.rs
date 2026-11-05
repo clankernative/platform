@@ -891,7 +891,7 @@ mod tests {
         super::super::connect::install_schema(&db)?;
         db.execute_batch("INSERT INTO oauth_connection_slots VALUES('slot',1,1,1,'profile','account','affinity','active');
             INSERT INTO oauth_refresh_attempts VALUES('attempt','slot',1,1,1,'profile','account','affinity','ready',NULL,NULL);
-            INSERT INTO oauth_connect_attempts VALUES('connect','slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization',NULL,NULL,NULL)")?;
+            INSERT INTO oauth_connect_attempts VALUES('connect','slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization',NULL,NULL,NULL,0)")?;
         Ok(db)
     }
 
