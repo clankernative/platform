@@ -1036,7 +1036,10 @@ mod tests {
             let changed: Manifest = serde_json::from_value(changed)?;
             let projection =
                 serde_json::to_value(RestoreArchiveInspection::from_verified(&changed)?)?;
-            assert_ne!(projection["manifest_commitment"], record["manifest_commitment"], "{pointer}");
+            assert_ne!(
+                projection["manifest_commitment"], record["manifest_commitment"],
+                "{pointer}"
+            );
             assert_eq!(projection["scope"], record["scope"]);
             assert_eq!(projection["artifact"], record["artifact"]);
             assert_eq!(projection["database"], record["database"]);
