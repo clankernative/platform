@@ -549,6 +549,7 @@ impl Manager {
                 expected_generation,
                 expected_epoch,
                 proposed_generation,
+                generation_floor: view.generation_floor,
                 owner: view.human.clone(),
                 profile: selection.permission.profile.id.as_str().into(),
                 registration: Digest::of(&selection.instance.registration.registration)?
@@ -651,10 +652,10 @@ impl Manager {
     )> {
         let (intent, callback): (_, String) = db.query_row(
             "SELECT a.slot,a.expected_generation,a.expected_epoch,a.proposed_generation,a.owner,a.profile,
-             a.registration,a.callback,a.consent,a.expires_at,b.binding FROM oauth_connect_attempts a
+             a.registration,a.callback,a.consent,a.expires_at,b.binding,a.generation_floor FROM oauth_connect_attempts a
              JOIN oauth_callback_bindings b ON b.attempt=a.attempt WHERE a.attempt=?1", [id], |row| {
                 Ok((crate::oauth::connect::ConnectIntent { attempt: id.into(), slot: row.get(0)?, expected_generation: row.get(1)?,
-                    expected_epoch: row.get(2)?, proposed_generation: row.get(3)?, owner: row.get(4)?, profile: row.get(5)?,
+                    expected_epoch: row.get(2)?, proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?, owner: row.get(4)?, profile: row.get(5)?,
                     registration: row.get(6)?, callback: row.get(7)?, consent: row.get(8)?, expires_at: row.get(9)? }, row.get(10)?))
             })?;
         Ok((intent, crate::json::decode(callback.as_bytes())?))
@@ -1083,7 +1084,8 @@ fn require_connect_intent(
             && intent.expires_at == view.expires_at
             && intent.expected_generation == expected_generation
             && intent.expected_epoch == expected_epoch
-            && intent.proposed_generation == proposed_generation,
+            && intent.proposed_generation == proposed_generation
+            && intent.generation_floor == view.generation_floor,
         "OAuth consumer original intent or slot/version changed"
     );
     Ok(())

@@ -20,6 +20,7 @@ pub struct ConnectIntent {
     pub expected_generation: Option<i64>,
     pub expected_epoch: i64,
     pub proposed_generation: i64,
+    pub generation_floor: i64,
     pub owner: String,
     pub profile: String,
     pub registration: String,
@@ -197,16 +198,18 @@ fn install_schema_in(db: &Connection) -> Result<()> {
             code_ref TEXT,
             account TEXT,
             scope_evidence TEXT,
+            generation_floor INTEGER NOT NULL CHECK(generation_floor>=0 AND generation_floor<9223372036854775807),
             CHECK((state IN ('exchange_ready', 'exchange_may_have_been_sent',
                   'exchange_uncertain')) = (code_ref IS NOT NULL)),
             CHECK((state IN ('awaiting_account_approval', 'activated')) = (account IS NOT NULL)),
             CHECK((state IN ('awaiting_account_approval', 'activated')) = (scope_evidence IS NOT NULL))
         );";
-    super::schema::install_current(db, "oauth_connect_schema_version", 2, ddl, &[
+    super::schema::install_current(db, "oauth_connect_schema_version", 3, ddl, &[
         super::schema::Invariant { table: "oauth_connect_attempts", predicate:
             "expected_epoch > 0 AND proposed_generation > 0 AND
-             ((expected_generation IS NULL AND proposed_generation = 1) OR
-              (expected_generation > 0 AND proposed_generation = expected_generation + 1)) AND
+             generation_floor>=0 AND generation_floor<9223372036854775807 AND
+             (expected_generation IS NULL OR (expected_generation>0 AND expected_generation<9223372036854775807)) AND
+             proposed_generation=max(COALESCE(expected_generation,0),generation_floor)+1 AND
              length(attempt) > 0 AND length(slot) > 0 AND length(owner) > 0 AND length(profile) > 0 AND
              length(registration) > 0 AND length(callback) > 0 AND length(consent) > 0 AND
              state IN ('awaiting_provider_authorization', 'exchange_ready', 'exchange_may_have_been_sent',
@@ -365,9 +368,9 @@ fn begin_in(
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO oauth_connect_attempts
          (attempt, slot, expected_generation, expected_epoch, proposed_generation,
-          owner, profile, registration, callback, consent, expires_at, state)
+          owner, profile, registration, callback, consent, expires_at, state, generation_floor)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                 'awaiting_provider_authorization')",
+                 'awaiting_provider_authorization',?12)",
         params![
             intent.attempt,
             intent.slot,
@@ -379,7 +382,8 @@ fn begin_in(
             intent.registration,
             intent.callback,
             intent.consent,
-            intent.expires_at
+            intent.expires_at,
+            intent.generation_floor
         ],
     )?;
     if inserted == 1
@@ -448,8 +452,7 @@ pub(super) fn authorize_and_commit_exchange(
     let row: Option<(ConnectIntent, String)> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
-                profile, registration, callback, consent, expires_at, code_ref
-             FROM oauth_connect_attempts
+                profile, registration, callback, consent, expires_at, code_ref,generation_floor FROM oauth_connect_attempts
          WHERE attempt = ?1 AND state = 'exchange_ready' AND expires_at > ?2",
             params![attempt, now],
             |row| {
@@ -459,7 +462,7 @@ pub(super) fn authorize_and_commit_exchange(
                         slot: row.get(0)?,
                         expected_generation: row.get(1)?,
                         expected_epoch: row.get(2)?,
-                        proposed_generation: row.get(3)?,
+                        proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
                         owner: row.get(4)?,
                         profile: row.get(5)?,
                         registration: row.get(6)?,
@@ -622,8 +625,7 @@ pub(super) fn quarantine_external_bound(
     let stored: Option<(ConnectIntent, String)> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
-                profile, registration, callback, consent, expires_at, state
-         FROM oauth_connect_attempts WHERE attempt = ?1",
+                profile, registration, callback, consent, expires_at, state,generation_floor FROM oauth_connect_attempts WHERE attempt = ?1",
             [&intent.attempt],
             |row| {
                 Ok((
@@ -632,7 +634,7 @@ pub(super) fn quarantine_external_bound(
                         slot: row.get(0)?,
                         expected_generation: row.get(1)?,
                         expected_epoch: row.get(2)?,
-                        proposed_generation: row.get(3)?,
+                        proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
                         owner: row.get(4)?,
                         profile: row.get(5)?,
                         registration: row.get(6)?,
@@ -745,8 +747,7 @@ pub(super) fn activate_mapped_in(
     let intent: Option<ConnectIntent> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
-                profile, registration, callback, consent, expires_at
-         FROM oauth_connect_attempts WHERE attempt = ?1",
+                profile, registration, callback, consent, expires_at,generation_floor FROM oauth_connect_attempts WHERE attempt = ?1",
             [verified.attempt()],
             |row| {
                 Ok(ConnectIntent {
@@ -754,7 +755,7 @@ pub(super) fn activate_mapped_in(
                     slot: row.get(0)?,
                     expected_generation: row.get(1)?,
                     expected_epoch: row.get(2)?,
-                    proposed_generation: row.get(3)?,
+                    proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
                     owner: row.get(4)?,
                     profile: row.get(5)?,
                     registration: row.get(6)?,
@@ -867,8 +868,7 @@ fn activate_in(
     let row: Option<(ConnectIntent, String, Option<String>, Option<String>)> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
-                profile, registration, callback, consent, expires_at, state, account, scope_evidence
-         FROM oauth_connect_attempts WHERE attempt = ?1",
+                profile, registration, callback, consent, expires_at, state, account, scope_evidence,generation_floor FROM oauth_connect_attempts WHERE attempt = ?1",
             [attempt],
             |row| {
                 Ok((
@@ -877,7 +877,7 @@ fn activate_in(
                         slot: row.get(0)?,
                         expected_generation: row.get(1)?,
                         expected_epoch: row.get(2)?,
-                        proposed_generation: row.get(3)?,
+                        proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
                         owner: row.get(4)?,
                         profile: row.get(5)?,
                         registration: row.get(6)?,
@@ -1029,8 +1029,7 @@ pub(super) fn pending_approval(
             "SELECT a.slot, a.expected_generation, a.expected_epoch,
                     a.proposed_generation, a.owner, a.profile,
                     a.registration, a.callback, a.consent, a.expires_at,
-                    b.binding
-             FROM oauth_connect_attempts AS a
+                    b.binding,a.generation_floor FROM oauth_connect_attempts AS a
              LEFT JOIN oauth_callback_bindings AS b ON b.attempt = a.attempt
              WHERE a.attempt = ?1 AND a.state = 'awaiting_account_approval'
                    AND a.expires_at > ?2",
@@ -1042,7 +1041,7 @@ pub(super) fn pending_approval(
                         slot: row.get(0)?,
                         expected_generation: row.get(1)?,
                         expected_epoch: row.get(2)?,
-                        proposed_generation: row.get(3)?,
+                        proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
                         owner: row.get(4)?,
                         profile: row.get(5)?,
                         registration: row.get(6)?,
@@ -1078,6 +1077,7 @@ pub(super) fn slot_matches(tx: &Transaction<'_>, intent: &ConnectIntent) -> Resu
     let floor=super::restore::generation_floor(tx,&intent.slot)?;
     let next=super::restore::next_generation(row.as_ref().map(|entry|entry.0),floor.unwrap_or(0))?;
     let restored=floor.is_some();
+    if intent.generation_floor!=floor.unwrap_or(0) {return Ok(false)}
     Ok(match (row, intent.expected_generation) {
         (None, None) => intent.expected_epoch == 1 && intent.proposed_generation == next,
         (Some((generation, epoch, status)), Some(expected)) => {
@@ -1112,6 +1112,7 @@ fn validate(intent: &ConnectIntent) -> Result<()> {
     );
     ensure!(
         intent.expected_epoch > 0
+            && intent.generation_floor>=0 && intent.generation_floor<i64::MAX
             && intent.proposed_generation > 0
             && intent
                 .expected_generation
@@ -1146,6 +1147,7 @@ mod tests {
             expected_generation: None,
             expected_epoch: 1,
             proposed_generation: 1,
+            generation_floor: 0,
             owner: "human_1".into(),
             profile: "google_calendar_v1".into(),
             registration: "google_registration_v1".into(),

@@ -411,8 +411,7 @@ fn authorize_in(
             "SELECT a.slot, a.expected_generation, a.expected_epoch,
                     a.proposed_generation, a.owner, a.profile, a.registration,
                     a.callback, a.consent, a.expires_at, a.code_ref,
-                    c.binding, e.binding
-             FROM oauth_connect_attempts a
+                    c.binding, e.binding,a.generation_floor FROM oauth_connect_attempts a
              JOIN oauth_callback_bindings c ON c.attempt = a.attempt
              JOIN oauth_exchange_bindings e ON e.attempt = a.attempt
              WHERE a.attempt = ?1 AND a.state = 'exchange_ready' AND a.expires_at > ?2",
@@ -424,7 +423,7 @@ fn authorize_in(
                         slot: row.get(0)?,
                         expected_generation: row.get(1)?,
                         expected_epoch: row.get(2)?,
-                        proposed_generation: row.get(3)?,
+                        proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
                         owner: row.get(4)?,
                         profile: row.get(5)?,
                         registration: row.get(6)?,
