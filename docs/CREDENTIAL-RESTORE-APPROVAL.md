@@ -6,6 +6,11 @@ verification. The signed approval must bind the exact archive, target, epoch
 and executor. The executor is an authenticated current instance admin running
 the operator command; the approver and executor may be the same person.
 
+The approved first-passkey trust root is the reviewed instance-config registry:
+credential ID, COSE/ES256 public key and its binding to a current `policy.admins`
+identity. Keys change through reviewed configuration, never IAP or web
+self-enrollment. Removing a registry key makes it unusable for new approvals.
+
 Each grant is single use and valid for exactly one hour from approval. It cannot
 be renewed by a fresh observation, consumption, recovery or a repaired clock.
 Expiry or consumption requires a new approval. This hour does not extend the
@@ -37,7 +42,7 @@ In particular, a decoded executor pair cannot replace the actual verified owner.
 
 ## Remaining producer and consumer work
 
-The WebAuthn verifier, trusted enrolled-passkey registry, first-enrollment policy,
+The WebAuthn verifier and the approved reviewed-registry adapter,
 server challenge ceremony and exact-purpose signing producer are not implemented
 by this request contract. Google signed authentication timing and ordinary IAP
 identity do not prove that a passkey was used. `LocalOperator::assert_local`
