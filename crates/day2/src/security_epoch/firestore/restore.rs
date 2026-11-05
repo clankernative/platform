@@ -5,13 +5,13 @@ use super::{Entry, Names as InitialNames, decode_snapshot, encode_fields};
 use crate::security_epoch::{
     journal::snapshot_digest,
     kernel::{
-        EpochStore, Snapshot, UpdateTime, Versioned, advance,
+        Snapshot, UpdateTime, Versioned, advance,
         restore::{self, approval_use},
     },
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use day2_capabilities::Digest;
+use day2_capabilities::{Digest, security_epoch::EpochStore};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, marker::PhantomData, rc::Rc};
