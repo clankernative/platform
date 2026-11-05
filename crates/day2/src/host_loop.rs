@@ -170,6 +170,7 @@ impl Work for NativeWork {
         let result =
             crate::oauth::native_management::with_runtime_operation(&self.runtime, || match pump {
                 Pump::Commands => {
+                    crate::rollout::run_probe(&self.runtime)?;
                     crate::invocations::drain(&self.runtime, COMMAND_BUDGET).map(|_| ())
                 }
                 Pump::Schedules => (|| -> Result<()> {

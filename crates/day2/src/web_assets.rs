@@ -163,6 +163,81 @@ impl Appearance {
             return platform(path, headers);
         }
         if path.starts_with("/assets/app/") || path.starts_with("/assets/ui/") {
+            let pieces: Vec<_> = path.split('/').collect();
+            if pieces.len() >= 6 && pieces[3] == self.scope && pieces[4] != self.artifact {
+                let id = format!("sha256:{}", pieces[4]);
+                ensure!(
+                    runtime.sql_read(|db| crate::rollout::compatible_ticket(db, runtime, &id))?,
+                    crate::error::Failure::Forbidden
+                );
+                // Authenticate against CURRENT authority before accessing any
+                // retained bytes, including conditional/ETag requests.
+                let session = session.context(crate::error::Failure::SignInRequired)?;
+                runtime.sql_read(|db| {
+                    ensure!(
+                        runtime.artifact().contract().pages.iter().any(|page| {
+                            crate::authority_state::authorize_in(
+                                db,
+                                runtime,
+                                &page.operation,
+                                &session.actor,
+                            )
+                            .is_ok()
+                        }),
+                        crate::error::Failure::Forbidden
+                    );
+                    Ok(())
+                })?;
+                let artifact = match crate::rollout::retained(runtime, &id) {
+                    Ok(artifact) => artifact,
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<rusqlite::Error>(),
+                            Some(rusqlite::Error::QueryReturnedNoRows)
+                        ) =>
+                    {
+                        let mut response = (StatusCode::GONE, "Resource expired; reload the page.")
+                            .into_response();
+                        response
+                            .headers_mut()
+                            .insert(header::CACHE_CONTROL, "private, no-store".parse()?);
+                        return Ok(response);
+                    }
+                    Err(error) => return Err(error),
+                };
+                if pieces[2] == "ui" {
+                    let key = pieces[5..].join("/");
+                    let resource = artifact
+                        .contract()
+                        .web_resources
+                        .get(&key)
+                        .context("unregistered_ui_resource")?;
+                    return bytes(
+                        &resource.media_type,
+                        crate::web_resources::read_blob(artifact.directory(), resource)?,
+                        CachePolicy::PrivateRevalidate,
+                        headers,
+                    );
+                }
+                ensure!(pieces.len() == 7, "unregistered_app_asset");
+                let asset = artifact
+                    .contract()
+                    .assets
+                    .get(pieces[5])
+                    .context("unregistered_app_asset")?;
+                ensure!(
+                    pieces[6] == format!("{}.png", assets::hash_part(&asset.digest)?),
+                    "unregistered_app_asset"
+                );
+                return blob(
+                    artifact.directory(),
+                    asset,
+                    CachePolicy::PrivateRevalidate,
+                    headers,
+                );
+            }
+        }
+        if path.starts_with("/assets/app/") || path.starts_with("/assets/ui/") {
             let session = session.context(crate::error::Failure::SignInRequired)?;
             ensure!(
                 runtime

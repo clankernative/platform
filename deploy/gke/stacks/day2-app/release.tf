@@ -13,7 +13,7 @@ variable "release_managed" {
 # StatefulSet yet) reads empty instead of failing.
 data "kubernetes_resources" "workload" {
   api_version    = "apps/v1"
-  kind           = "StatefulSet"
+  kind           = var.rolling_deploys ? "Deployment" : "StatefulSet"
   namespace      = var.namespace
   field_selector = "metadata.name=${local.workload_name}"
 }
@@ -48,7 +48,7 @@ locals {
   # live image and be inert.
   release_annotations = var.release_managed ? merge({ "day2.dev/release-managed" = "true" }, {
     for key, value in try(local.released.metadata.annotations, {}) : key => value
-    if contains(["day2.dev/release-effect", "day2.dev/release-id", "day2.dev/activated-image"], key)
+    if contains(["day2.dev/release-effect", "day2.dev/release-id", "day2.dev/activated-image", "day2.dev/rollout"], key)
   }) : {}
   release_template_annotations = var.release_managed ? {
     for key, value in local.released.spec.template.metadata.annotations : key => value
@@ -104,13 +104,13 @@ resource "terraform_data" "release_admission" {
     # day2-serve, whose store admission and upgrades only `maintain activate`
     # rehearses before it starts on the store.
     precondition {
-      condition     = local.native_enabled || var.release_managed || local.activation_pending || local.live == null || local.live_image == var.image
+      condition     = var.rolling_deploys || local.native_enabled || var.release_managed || local.activation_pending || local.live == null || local.live_image == var.image
       error_message = "${var.app_id}: ${local.workload_name} runs ${coalesce(local.live_image, "-")}, not ${var.image}. Run `day2 platform maintain activate` with ${var.image} as the target first; it opens a copy of the store with that build before the app's database moves to it."
     }
 
     precondition {
       condition = !var.release_managed || try(
-        var.app_calls != null && var.oauth_instance_json == null &&
+        (var.rolling_deploys || var.app_calls != null) && var.oauth_instance_json == null &&
         local.released.metadata.name == local.workload_name && local.released.metadata.namespace == var.namespace &&
         local.released.spec.template.metadata.annotations["day2.dev/installation"] == var.installation &&
         local.released.spec.template.metadata.annotations["day2.dev/environment"] == var.environment &&

@@ -14,8 +14,8 @@ output "instance_sha256" {
 }
 
 output "workload" {
-  description = "The day2 StatefulSet."
-  value       = "${var.namespace}/${kubernetes_stateful_set_v1.day2.metadata[0].name}"
+  description = "The day2 workload (Deployment in rolling mode, StatefulSet otherwise)."
+  value       = "${var.namespace}/${local.workload_name}"
 }
 
 output "backup_cron_job" {

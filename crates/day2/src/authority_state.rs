@@ -740,10 +740,12 @@ pub(crate) fn authorize_in(
     require_transaction(connection)?;
     scope_matches(connection, runtime)?;
     runtime.check_binding(connection)?;
-    let active = current(connection)?;
+    let active = crate::rollout::authority_for(runtime, connection)?;
     ensure!(
-        active.artifact_id == runtime.artifact().id()
-            && Path::new(&active.artifact_path) == runtime.artifact().directory(),
+        (active.artifact_id == runtime.artifact().id()
+            && Path::new(&active.artifact_path) == runtime.artifact().directory())
+            || ((active.artifact_id != runtime.artifact().id() || runtime.artifact().retained())
+                && crate::rollout::admitted(connection, runtime.artifact().id(), runtime.scope())?),
         Failure::ArtifactBindingChanged
     );
     // Domain entries were validated against the hosted domain the document
@@ -1267,7 +1269,7 @@ fn apply_transition_in(
         previous.as_ref().map(|active| &active.stamp) == change.expected.as_ref(),
         Failure::AuthorityPolicyChanged
     );
-    if let Some(previous) = previous {
+    if let Some(previous) = &previous {
         ensure!(
             previous.artifact_id == source.0 && Path::new(&previous.artifact_path) == source.1,
             Failure::ArtifactBindingChanged
@@ -1281,6 +1283,7 @@ fn apply_transition_in(
     }
     next.document = change.document.clone();
     store(connection, &next, &operator.name, "activate")?;
+    crate::rollout::authority_changed(connection, previous.as_ref(), &next)?;
     let receipt = AuthorityReceipt {
         stamp: next.stamp.clone(),
     };
@@ -1333,7 +1336,8 @@ fn fence_restored_in(
         .context("authority_revision_exhausted")?;
     active.document.enabled = false;
     active.artifact_path = relocated.to_string_lossy().into_owned();
-    store(connection, &active, "platform-restore", "restore-fence")
+    store(connection, &active, "platform-restore", "restore-fence")?;
+    crate::rollout::invalidate(connection)
 }
 
 #[cfg(test)]

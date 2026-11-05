@@ -3,7 +3,8 @@
 # operations (inspect, backup, authority apply/activate, migrations, import)
 # against the stopped app. Rendered and run by `day2 platform maintain`
 # (ops/Maintain.roc, crates/day2-ops/src/maintenance.rs), which stops the app's
-# StatefulSet first: never run it next to a serving pod.
+# workload first for offline maintenance. Compatible rolling releases pin this
+# helper to the incumbent node and keep it outside every Service selector.
 #
 # Placeholders (the renderer refuses an unknown or unfilled one):
 #   DAY2_MAINT_NAMESPACE      app namespace (app-<id>)

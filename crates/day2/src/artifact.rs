@@ -415,6 +415,7 @@ pub struct LoadedArtifact {
     directory: PathBuf,
     contract: Artifact,
     executable: Arc<Mutex<Option<PrivateWorker>>>,
+    retained: Option<Arc<tempfile::TempDir>>,
 }
 
 /// The admitted worker bytes, the private copy executed from them, and the
@@ -516,10 +517,18 @@ fn decode_persisted_contract(mut value: serde_json::Value) -> Result<Artifact> {
     Ok(serde_json::from_value(value)?)
 }
 
-#[cfg(test)]
 impl LoadedArtifact {
+    pub(crate) fn retain(&mut self, directory: Arc<tempfile::TempDir>) {
+        self.retained = Some(directory);
+    }
+
+    pub(crate) fn retained(&self) -> bool {
+        self.retained.is_some()
+    }
+
     /// Host-boundary unit tests supply a contract without launching a compiler.
     /// This constructor is absent from production and is not artifact admission.
+    #[cfg(test)]
     pub(crate) fn from_contract_for_tests(
         id: String,
         directory: PathBuf,
@@ -530,6 +539,7 @@ impl LoadedArtifact {
             directory,
             contract,
             executable: Arc::default(),
+            retained: None,
         }
     }
 }
@@ -968,6 +978,7 @@ impl LoadedArtifact {
             directory,
             contract,
             executable: Arc::default(),
+            retained: None,
         };
         if loaded.contract.format == CURRENT_FORMAT {
             let executable = loaded.materialize_worker()?;
@@ -2970,6 +2981,7 @@ mod output_contract_tests {
             id: "fixture".into(),
             directory: PathBuf::new(),
             executable: Arc::default(),
+            retained: None,
             contract: serde_json::from_value(json!({
                 "format":6,"verification_limits":VerificationLimits::QUALIFIED,"roc_version":"fixture","worker_digest":"fixture",
                 "schema_digest":"fixture","schema":{"models":{},"inputs":{},"foreign_keys":[]},

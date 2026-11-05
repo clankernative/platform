@@ -314,6 +314,7 @@ pub fn activate(runtime: &Runtime, target: &LoadedArtifact) -> Result<()> {
         &crate::authority_state::LocalOperator::assert_local("local-platform-operator")?,
         &expected,
         &request_id,
+        runtime.instance_path(),
     )?;
     Ok(())
 }
@@ -326,9 +327,10 @@ pub fn activate_checked(
     operator: &crate::authority_state::LocalOperator,
     expected: &crate::authority_state::AuthorityStamp,
     request_id: &str,
+    desired_instance: &std::path::Path,
 ) -> Result<crate::authority_state::AuthorityReceipt> {
     target.require_current_api()?;
-    let instance = crate::artifact::Instance::load(runtime.instance_path())?;
+    let instance = crate::artifact::Instance::load(desired_instance)?;
     ensure!(
         instance.scope(runtime.app())? == runtime.scope(),
         crate::error::Failure::InstallationChanged
