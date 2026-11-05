@@ -278,7 +278,7 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
             Some("sha256:2c6539f7ec2d028644b1961758bec38801d2c8b3b9417aa80f28ac7c023b2c9a")
         }
         "crates/day2/src/oauth/schema.rs" => {
-            Some("sha256:c2523c6e4f0a6b4e6a539cfee86891f08ab655f5cb1191df4b9b29671dd5133f")
+            Some("sha256:60caa5dc642b4bfc1bbee3c71383bf4e27e8daa2e7c92ba24b9ba9a4eeb4e902")
         }
         // Closed control construction only, not the large accounting module.
         "crates/day2/src/budget/atomic_control.rs" => {
