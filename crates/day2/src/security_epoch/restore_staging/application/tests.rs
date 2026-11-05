@@ -705,6 +705,14 @@ fn write_history_file(path: &std::path::Path, bundle: &HistoryBundle) -> Result<
     Ok(())
 }
 
+fn private_history_directory(root: &std::path::Path) -> Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(tempfile::Builder::new()
+        .prefix("failure-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(root)?)
+}
+
 fn save_history(bundle: &HistoryBundle) -> Result<std::path::PathBuf> {
     ensure!(
         bundle.recording == RecordingCut::Ordinary,
@@ -713,9 +721,7 @@ fn save_history(bundle: &HistoryBundle) -> Result<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../artifacts/credential-restore-application-histories");
     std::fs::create_dir_all(&root)?;
-    let directory = tempfile::Builder::new()
-        .prefix("failure-")
-        .tempdir_in(root)?;
+    let directory = private_history_directory(&root)?;
     let path = directory.path().join("failure.json");
     write_history_file(&path, bundle)?;
     let _retained = directory.keep();
@@ -879,7 +885,8 @@ fn failed_history_bundle_preserves_both_prefixes_with_strict_private_data_only()
         first,
         second,
     };
-    let directory = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let directory = private_history_directory(root.path())?;
     let path = directory.path().join("recorder-control.json");
     write_history_file(&path, &bundle)?;
     assert_eq!(path.metadata()?.permissions().mode() & 0o777, 0o600);
