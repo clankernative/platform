@@ -38,14 +38,8 @@ fn current(tx: &Transaction<'_>, key: &TrustedKey) -> Result<(i64, u32)> {
     key.validate()?;
     // PRAGMAs refuse non-durable storage; they do not attest its actual FD,
     // filesystem/profile or outside-restore placement. The native owner must.
-    let mode: String =
-        tx.pragma_query_value(Some(rusqlite::DatabaseName::Main), "journal_mode", |row| {
-            row.get(0)
-        })?;
-    let synchronous: i64 =
-        tx.pragma_query_value(Some(rusqlite::DatabaseName::Main), "synchronous", |row| {
-            row.get(0)
-        })?;
+    let mode: String = tx.query_row("PRAGMA main.journal_mode", [], |row| row.get(0))?;
+    let synchronous: i64 = tx.query_row("PRAGMA main.synchronous", [], |row| row.get(0))?;
     ensure!(
         matches!(mode.as_str(), "delete" | "truncate" | "persist" | "wal")
             && matches!(synchronous, 2 | 3),

@@ -292,16 +292,18 @@ fn two_valid_counterless_assertions_racing_one_challenge_have_one_winner() {
     let start = std::sync::Arc::new(std::sync::Barrier::new(2));
     let mut workers = Vec::new();
     for _ in 0..2 {
-        let key = TrustedKey {
-            record: f.key.record.clone(),
-            source: super::super::KeySource::Fixture,
-        };
+        // Transfer synthetic record DATA only; the real trusted-key owner is !Send.
+        let record = f.key.record.clone();
         let request = f.challenge.request.clone();
         let assertion = f.assertion(0, 0x0d);
         let id = id.clone();
         let path = path.clone();
         let start = start.clone();
         workers.push(std::thread::spawn(move || {
+            let key = TrustedKey {
+                record,
+                source: super::super::KeySource::Fixture,
+            };
             let mut db = Connection::open(path).unwrap();
             db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
             start.wait();
