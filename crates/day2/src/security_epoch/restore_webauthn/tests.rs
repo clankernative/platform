@@ -4,13 +4,13 @@ use ring::{
     signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair as _},
 };
 
-struct Fixture {
-    signer: EcdsaKeyPair,
-    key: TrustedKey,
-    challenge: Challenge,
+pub(super) struct Fixture {
+    pub(super) signer: EcdsaKeyPair,
+    pub(super) key: TrustedKey,
+    pub(super) challenge: Challenge,
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     // Owned synthetic authenticator INPUT. No test scalar enters a production
     // registry or approval factory; the unchanged verifier consumes signed bytes.
     let rng = SystemRandom::new();
@@ -53,7 +53,7 @@ impl Fixture {
         })
     }
 
-    fn assertion(&self, counter: u32, flags: u8) -> Assertion {
+    pub(super) fn assertion(&self, counter: u32, flags: u8) -> Assertion {
         let mut authenticator_data = digest(&SHA256, self.key.record.rp_id.as_bytes())
             .as_ref()
             .to_vec();
