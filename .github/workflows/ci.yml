@@ -1780,6 +1780,7 @@ jobs:
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
+      - run: tofu fmt -check -recursive deploy/gke/stacks
       - name: Create the job-local provider cache directory
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
@@ -1787,7 +1788,6 @@ jobs:
         with:
           path: ${{ env.TF_PLUGIN_CACHE_DIR }}
           key: day2-tofu-providers-v1-${{ runner.os }}-${{ runner.arch }}-1.11.5-${{ hashFiles(format('deploy/gke/stacks/{0}/.terraform.lock.hcl', matrix.stack)) }}
-      - run: tofu fmt -check -recursive deploy/gke/stacks
       - run: tofu -chdir=deploy/gke/stacks/${{ matrix.stack }} init -backend=false -lockfile=readonly
       - run: tofu -chdir=deploy/gke/stacks/${{ matrix.stack }} validate
       - run: tofu -chdir=deploy/gke/stacks/${{ matrix.stack }} test
@@ -1809,6 +1809,7 @@ jobs:
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
+      - run: tofu fmt -check -recursive deploy/integrations
       - name: Create the job-local provider cache directory
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
@@ -1816,7 +1817,6 @@ jobs:
         with:
           path: ${{ env.TF_PLUGIN_CACHE_DIR }}
           key: day2-tofu-providers-v1-${{ runner.os }}-${{ runner.arch }}-1.11.5-${{ hashFiles('deploy/integrations/gitea-instance-ci/.terraform.lock.hcl') }}
-      - run: tofu fmt -check -recursive deploy/integrations
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci init -backend=false -lockfile=readonly
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci validate
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci test
@@ -1841,6 +1841,7 @@ jobs:
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
+      - run: tofu fmt -check -recursive deploy/integrations/firestore-security-epoch
       - name: Create the job-local provider cache directory
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
@@ -1848,7 +1849,6 @@ jobs:
         with:
           path: ${{ env.TF_PLUGIN_CACHE_DIR }}
           key: day2-tofu-providers-v1-${{ runner.os }}-${{ runner.arch }}-1.11.5-${{ hashFiles('deploy/integrations/firestore-security-epoch/.terraform.lock.hcl') }}
-      - run: tofu fmt -check -recursive deploy/integrations/firestore-security-epoch
       - run: tofu -chdir=deploy/integrations/firestore-security-epoch init -backend=false -lockfile=readonly
       - run: tofu -chdir=deploy/integrations/firestore-security-epoch validate
       - run: tofu -chdir=deploy/integrations/firestore-security-epoch test
@@ -1870,6 +1870,7 @@ jobs:
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
+      - run: tofu fmt -check -recursive deploy/integrations/gke-security-epoch-access
       - name: Create the job-local provider cache directory
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
@@ -1877,7 +1878,6 @@ jobs:
         with:
           path: ${{ env.TF_PLUGIN_CACHE_DIR }}
           key: day2-tofu-providers-v1-${{ runner.os }}-${{ runner.arch }}-1.11.5-${{ hashFiles('deploy/integrations/gke-security-epoch-access/.terraform.lock.hcl') }}
-      - run: tofu fmt -check -recursive deploy/integrations/gke-security-epoch-access
       - run: tofu -chdir=deploy/integrations/gke-security-epoch-access init -backend=false -lockfile=readonly
       - run: tofu -chdir=deploy/integrations/gke-security-epoch-access validate
       - run: tofu -chdir=deploy/integrations/gke-security-epoch-access test
