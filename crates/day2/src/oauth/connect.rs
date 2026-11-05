@@ -1434,7 +1434,7 @@ mod tests {
     fn unknown_connect_schema_version_fails_closed() {
         let db = Connection::open_in_memory().unwrap();
         install_schema(&db).unwrap();
-        db.execute("UPDATE oauth_connect_schema_version SET version = 3", [])
+        db.execute("UPDATE oauth_connect_schema_version SET version = 4", [])
             .unwrap();
         assert!(install_schema(&db).is_err());
     }

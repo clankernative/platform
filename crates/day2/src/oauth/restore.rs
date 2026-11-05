@@ -133,7 +133,7 @@ pub(crate) fn generation_floor(db: &Connection, slot: &str) -> Result<Option<i64
 /// Arithmetic DATA only, shared by captured views and actual SQL row checks.
 pub(super) fn next_generation(current: Option<i64>, floor: i64) -> Result<i64> {
     ensure!(
-        current.is_none_or(|generation| generation > 0) && floor >= 0 && floor < i64::MAX,
+        current.is_none_or(|generation| generation > 0) && (0..i64::MAX).contains(&floor),
         "invalid_connect_generation"
     );
     current

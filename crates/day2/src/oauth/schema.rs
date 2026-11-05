@@ -931,7 +931,7 @@ mod tests {
                 [],
                 |row| row.get::<_, i64>(0)
             )?,
-            2
+            3
         );
         super::super::connect::install_schema(&db)?;
         for sql in [
@@ -977,7 +977,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                2
+                3
             );
             assert!(db.is_autocommit());
         }
