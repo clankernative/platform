@@ -219,7 +219,7 @@ fn online_backup_restores_wal_data_into_a_new_instance_and_rejects_tampering() -
         inspected,
         serde_json::json!({
             "kind":"restore_archive_inspection_v1",
-            "archive":manifest.security_restore_digest()?,
+            "manifest_commitment":manifest.security_restore_digest()?,
             "scope":manifest.scope,
             "app":manifest.app,
             "artifact":manifest.artifact,
