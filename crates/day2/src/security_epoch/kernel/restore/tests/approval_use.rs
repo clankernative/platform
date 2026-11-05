@@ -121,7 +121,7 @@ fn exact_hour_does_not_extend_the_existing_five_second_current_observation() -> 
 fn signed_target_archive_custody_and_executor_are_compared_as_complete_values() -> Result<()> {
     let(selected,before)=initial();let(_,base)=plan(&selected,&before,9)?;
     for cut in 0..11 {
-        let mut intent=base.reservation.receipt.request.intent.clone();
+        let intent=base.reservation.receipt.request.intent.clone();
         let mut current=super::current(&selected,&intent,&before);
         match cut {
             0 => current.grant.approval.full_archive_digest=Digest::new(b"different-full-archive"),
@@ -139,7 +139,6 @@ fn signed_target_archive_custody_and_executor_are_compared_as_complete_values() 
         // Updating an unrelated intent digest must not hide a mismatched field.
         current.grant.intent=intent.commitment(&selected)?;
         assert!(Request::new(&selected,intent.clone(),&current,1000,&before).is_err());
-        intent.operation=Digest::new(b"another-operation");
     }
     Ok(())
 }
