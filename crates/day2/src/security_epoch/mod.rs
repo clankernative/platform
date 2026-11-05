@@ -28,6 +28,8 @@ mod native_namespace;
 mod preparation_image;
 pub(crate) mod restore_authority;
 pub(crate) mod restore_cut;
+mod restore_fencing;
+mod restore_staging;
 mod runtime_profile;
 mod seed_core;
 mod self_check_profile;
