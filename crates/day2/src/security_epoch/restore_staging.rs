@@ -586,4 +586,5 @@ fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
 #[cfg(test)]
 pub(super) mod tests;
 
-pub(in crate::security_epoch) mod writer;
+mod writer;
+pub(in crate::security_epoch) use writer::{Disposition, Flight};

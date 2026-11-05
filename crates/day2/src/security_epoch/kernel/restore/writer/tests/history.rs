@@ -1,7 +1,7 @@
 //! Replayable independent DATA/disposition oracle. The campaign never constructs
 //! a NativeRestoreApproval, Controller original, creator/P3 or serving owner.
 use super::*;
-use crate::security_epoch::restore_staging::writer::dispatch::Disposition;
+use crate::security_epoch::restore_staging::Disposition;
 use std::{
     io::Write as _,
     os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},

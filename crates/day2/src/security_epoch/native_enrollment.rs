@@ -32,7 +32,7 @@ mod process;
 mod protocol;
 #[cfg(target_os = "linux")]
 mod qualification;
-pub(in crate::security_epoch) mod restore_peer_wire;
+mod restore_peer_wire;
 mod root_kms;
 #[cfg(target_os = "linux")]
 mod runtime;
