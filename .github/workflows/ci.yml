@@ -1391,9 +1391,8 @@ jobs:
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
           MAC: ${{ needs.verify-mac-compatibility.result == 'success' && 'success' || needs.retry-mac-compatibility.result }}
-      # The global Actions cache can evict this run's actions before the final
-      # join. Retain bootstrap actions before the larger test-cache archive,
-      # independently of eviction and the current run-attempt number.
+      # The global Actions cache can evict this run's test actions before the
+      # final join. Its retained archive is independent of cache eviction.
       # This is compilation data only; the current verifier and all receipt
       # admission below still execute normally, even when transport fails.
       - name: Download retained compiler actions from the admitted preparation
