@@ -16,6 +16,7 @@ struct Fixture {
     oauth_schema: crate::oauth::restore::Profile,
     cut: restore_cut::Cut,
     peers: (String, String),
+    token: zeroize::Zeroizing<String>,
 }
 
 impl Fixture {
@@ -68,12 +69,13 @@ impl Fixture {
             authority_state::store_record_in(&tx, &previous, "fixture", "source")?;
             tx.commit()?;
         }
-        credentials::tests::committed_issue(&mut db)?;
+        let (_, token) = credentials::restore::seed_first_epoch_for_tests(&mut db)?;
         let peers = credentials::restore::seed_historical_peers_for_tests(
             &db,
             &scope,
             &previous.stamp,
             &previous.artifact_id,
+            1,
         )?;
         db.execute(
             "INSERT INTO day2_web_sessions VALUES(?1,'alice@example.com',200)",
@@ -144,7 +146,7 @@ impl Fixture {
                 909,
                 &scope,
                 Digest::new(b"schema"),
-                7,
+                1,
             )?;
             tx.rollback()?;
             cut
@@ -164,13 +166,14 @@ impl Fixture {
             oauth_schema,
             cut,
             peers,
+            token,
         })
     }
 
     fn selection(&self) -> Selection<'_> {
         Selection {
             namespace: &self.namespace,
-            source_epoch: 7,
+            source_epoch: 1,
             fence: &self.fence,
             authority_schema: &self.authority_schema,
             oauth_schema: &self.oauth_schema,
@@ -219,6 +222,9 @@ fn ledger(db: &Connection) -> Result<budget::LedgerStatus> {
 fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() -> Result<()> {
     effects::scope(simulation::World::new(98311), || {
         let fixture = Fixture::new()?;
+        assert!(credentials::restore::first_epoch_ingress_for_tests(
+            &fixture.db, &fixture.token, 1
+        )?);
         let material = rows(&fixture.db, "day2_credential_material")?;
         let receipts = rows(&fixture.db, "day2_credential_receipts")?;
         let outgoing = rows(&fixture.db, "day2_app_outgoing")?;
@@ -260,6 +266,11 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
                 ))?,
                 "revoked"
             );
+            for current_epoch in [1, 2] {
+                assert!(!credentials::restore::first_epoch_ingress_for_tests(
+                    &db, &fixture.token, current_epoch
+                )?);
+            }
             assert_eq!(
                 db.query_row("SELECT state FROM day2_credential_deliveries", [], |r| {
                     r.get::<_, String>(0)
@@ -326,7 +337,7 @@ fn cut_binding_failure_after_fence_rolls_back_even_when_caller_catches_and_commi
                 910,
                 "wonderly/dev/transcriber",
                 Digest::new(b"schema"),
-                7,
+                1,
             )?;
             let tx = Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
             assert!(
@@ -337,7 +348,7 @@ fn cut_binding_failure_after_fence_rolls_back_even_when_caller_catches_and_commi
                     &fixture.oauth_schema,
                     if after_cut { &fixture.cut } else { &wrong },
                     &fixture.namespace,
-                    if after_cut { 8 } else { 7 }
+                    if after_cut { 8 } else { 1 }
                 )
                 .is_err()
             );
@@ -359,7 +370,7 @@ fn credential_only_profile_still_refuses_closed_peer_history_and_nested_budget_c
         let fixture = Fixture::new()?;
         let before = snapshot(&fixture.db)?;
         let tx = Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
-        assert!(credentials::restore::stage_reset(&tx, &fixture.namespace, 7).is_err());
+        assert!(credentials::restore::stage_reset(&tx, &fixture.namespace, 1).is_err());
         crate::oauth::schema::admit(&tx, |db| {
             assert!(crate::oauth::schema::admit_memory_transaction(&tx, |_| Ok(())).is_err());
             crate::oauth::schema::require_admission(db)
@@ -368,4 +379,19 @@ fn credential_only_profile_still_refuses_closed_peer_history_and_nested_budget_c
         assert!(before == snapshot(&fixture.db)?);
         Ok(())
     })
+}
+
+#[test]
+fn first_restore_selection_refuses_noninitial_source_epochs() -> Result<()> {
+    for source_epoch in [7, 8] {
+        assert!(restore_cut::fixture_for_storage_epoch(
+            Digest::new(b"inventory"),
+            911,
+            "wonderly/dev/transcriber",
+            Digest::new(b"schema"),
+            source_epoch,
+        )
+        .is_err());
+    }
+    Ok(())
 }

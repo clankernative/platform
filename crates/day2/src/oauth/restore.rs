@@ -774,6 +774,21 @@ pub(crate) struct AppliedCut<'scope, 'database, 'cut> {
     count: usize,
 }
 
+const _: () = {
+    macro_rules! not_impl {
+        ($bound:path) => {{
+            trait AmbiguousIfImpl<A> { fn check() {} }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $bound> AmbiguousIfImpl<u8> for T {}
+            let _ = <AppliedCut<'static,'static,'static> as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    not_impl!(Clone);not_impl!(Copy);not_impl!(Default);not_impl!(std::fmt::Debug);
+    not_impl!(serde::Serialize);not_impl!(serde::Deserialize<'static>);
+    not_impl!(Send);not_impl!(Sync);not_impl!(std::ops::Deref);
+    not_impl!(AsRef<Connection>);not_impl!(std::borrow::Borrow<Connection>);
+};
+
 impl AppliedCut<'_, '_, '_> {
     pub(crate) fn cut(&self) -> &Cut {
         self.cut

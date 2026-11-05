@@ -208,6 +208,57 @@ fn reset_in(
     })
 }
 
+/// Create genuine encrypted epoch-one material through the ordinary store
+/// functions. The test selection is synthetic, not native or human authority.
+#[cfg(test)]
+pub(crate) fn seed_first_epoch_for_tests(
+    db: &mut Connection,
+) -> Result<(PublicReceipt, zeroize::Zeroizing<String>)> {
+    let mut intent = super::tests::issue("invocation-1");
+    intent.security_epoch = 1;
+    let prepared = prepare_issue(&super::tests::lease(), &super::tests::family(), intent)?;
+    let tx = db.transaction()?;
+    let receipt = stage_issue(&tx, prepared)?.public_identity().clone();
+    tx.commit()?;
+    let post = VerifiedHumanPost {
+        namespace: super::tests::namespace(),
+        version: receipt.version.clone().context("fixture_version")?,
+        recipient: "issuer/human-1".into(),
+        session: "session-1".into(),
+        attempt: "before-restore".into(),
+        now: 1100,
+        security_epoch: 1,
+    };
+    let token = authorize_reveal(db, post)?
+        .context("fixture_delivery_missing")?
+        .into_response_body(&super::tests::lease())?;
+    Ok((receipt, zeroize::Zeroizing::new(token)))
+}
+
+#[cfg(test)]
+pub(crate) fn first_epoch_ingress_for_tests(
+    db: &Connection,
+    token: &str,
+    current_epoch: u64,
+) -> Result<bool> {
+    let grant = super::tests::issue("unused").ceiling;
+    let family = super::tests::family();
+    Ok(verify_ingress(
+        db,
+        &super::tests::lease(),
+        IngressVerification {
+            namespace: &super::tests::namespace(),
+            family: family.id.as_str(),
+            family_contract: &family.contract,
+            security_epoch: current_epoch,
+            now: 1100,
+            operation: &grant.roots["SubmitTranscription"],
+        },
+        token,
+    )?
+    .is_some())
+}
+
 /// Canonical stored-record conformance DATA only. This seed contains no
 /// authentication signature and cannot construct a native or human owner.
 #[cfg(test)]
@@ -216,6 +267,7 @@ pub(crate) fn seed_historical_peers_for_tests(
     scope: &str,
     authority: &crate::authority_state::AuthorityStamp,
     artifact: &str,
+    source_epoch: u64,
 ) -> Result<(String, String)> {
     let source = super::tests::restored_peer_database()?;
     let raw: String =
@@ -234,6 +286,7 @@ pub(crate) fn seed_historical_peers_for_tests(
     let mut confirmation = record.confirmation;
     confirmation.authority = authority.clone();
     confirmation.artifact = artifact.into();
+    confirmation.security_epoch = source_epoch;
     let super::super::issuance::ConfirmationOrigin::Credential(mut original) = record.original
     else {
         anyhow::bail!("test_expected_credential_history")
