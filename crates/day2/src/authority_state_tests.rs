@@ -471,7 +471,7 @@ fn policy_retry_after_artifact_upgrade_returns_original_receipt_and_rejects_acti
         assert!(cached_policy_receipt_in(&tx, &operator, &different_document).is_err());
         let saved = current(&tx)?;
         initialize_restore_denial_units(&tx)?;
-    fence_restored_in(&tx, saved, Path::new("/restored/two"))?;
+        fence_restored_in(&tx, saved, Path::new("/restored/two"))?;
         assert!(cached_policy_receipt_in(&tx, &operator, &original_request)?.is_none());
         tx.commit()?;
     }
@@ -576,106 +576,228 @@ fn restore_fences_old_work_and_requires_explicit_new_activation() -> Result<()> 
 }
 
 #[test]
-fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reopen() -> Result<()> {
-    use crate::budget::{BudgetContext,Consumption,ReservationRequest,Settlement};
-    use day2_capabilities::resources::{BudgetDefinition,BudgetLimits,BudgetScope};
-    let directory=tempfile::tempdir()?;
-    let path=directory.path().join("app.sqlite");
-    let mut db=Connection::open(&path)?;initialize_restore_fence(&mut db)?;
+fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reopen() -> Result<()>
+{
+    use crate::budget::{BudgetContext, Consumption, ReservationRequest, Settlement};
+    use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("app.sqlite");
+    let mut db = Connection::open(&path)?;
+    initialize_restore_fence(&mut db)?;
     db.execute_batch("CREATE TABLE day2_web_sessions(hash TEXT PRIMARY KEY,actor TEXT NOT NULL,expires INTEGER NOT NULL) STRICT; CREATE TABLE day2_web_secret(id INTEGER PRIMARY KEY CHECK(id=1),secret BLOB NOT NULL) STRICT;")?;
-    let token="a".repeat(43);
-    db.execute("INSERT INTO day2_web_sessions VALUES(?1,'alice',200)",[crate::digest(token.as_bytes())])?;
-    db.execute("INSERT INTO day2_web_secret VALUES(1,?1)",[&[7u8;32][..]])?;
-    assert_eq!(crate::web_security::session_for_token_in(&db,&token,100)?.actor,"alice");
-    let previous=current(&db)?;
-    let request=|id:&str| ReservationRequest {
-        id:id.into(),binding:"authority+resource+input".into(),
-        context:BudgetContext {app:"app".into(),actor:"alice".into(),connection:"mailbox".into(),invocation_root:"copied".into(),now:100},
-        budgets:BTreeMap::from([("app".into(),BudgetDefinition {revision:1,scope:BudgetScope::App,period_seconds:60,limits:BudgetLimits {calls:Some(100),..Default::default()}})]),
-        quote:Consumption {calls:3,bytes:100,concurrency:1,..Default::default()},
+    let token = "a".repeat(43);
+    db.execute(
+        "INSERT INTO day2_web_sessions VALUES(?1,'alice',200)",
+        [crate::digest(token.as_bytes())],
+    )?;
+    db.execute("INSERT INTO day2_web_secret VALUES(1,?1)", [&[7u8; 32][..]])?;
+    assert_eq!(
+        crate::web_security::session_for_token_in(&db, &token, 100)?.actor,
+        "alice"
+    );
+    let previous = current(&db)?;
+    let request = |id: &str| ReservationRequest {
+        id: id.into(),
+        binding: "authority+resource+input".into(),
+        context: BudgetContext {
+            app: "app".into(),
+            actor: "alice".into(),
+            connection: "mailbox".into(),
+            invocation_root: "copied".into(),
+            now: 100,
+        },
+        budgets: BTreeMap::from([(
+            "app".into(),
+            BudgetDefinition {
+                revision: 1,
+                scope: BudgetScope::App,
+                period_seconds: 60,
+                limits: BudgetLimits {
+                    calls: Some(100),
+                    ..Default::default()
+                },
+            },
+        )]),
+        quote: Consumption {
+            calls: 3,
+            bytes: 100,
+            concurrency: 1,
+            ..Default::default()
+        },
     };
-    let outgoing=serde_json::to_string(&crate::delegation_commands::Delivery {first_at:90,incarnation:"original-source".into()})?;
+    let outgoing = serde_json::to_string(&crate::delegation_commands::Delivery {
+        first_at: 90,
+        incarnation: "original-source".into(),
+    })?;
     {
-        let tx=db.transaction()?;
+        let tx = db.transaction()?;
         tx.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status) VALUES('copied','submit','alice','{}','artifact-one',100,'pending')",[])?;
-        pin_invocation(&tx,"copied",&previous.stamp)?;
+        pin_invocation(&tx, "copied", &previous.stamp)?;
         crate::delegation_commands::upgrade(&tx)?;
-        tx.execute("INSERT INTO day2_app_outgoing VALUES('unknown-send','exact-fingerprint',?1,'copied')",[&outgoing])?;
-        crate::delegation_commands::restore_fence_in(&tx,200)?;
-        let known=crate::budget::reserve_in(&tx,&request("known"))?;
-        crate::budget::settle_in(&tx,&known,&Settlement::Known {actual:Consumption {calls:2,bytes:80,..Default::default()}})?;
-        let unknown=crate::budget::reserve_in(&tx,&request("unknown"))?;
-        crate::budget::settle_in(&tx,&unknown,&Settlement::Unknown)?;
+        tx.execute(
+            "INSERT INTO day2_app_outgoing VALUES('unknown-send','exact-fingerprint',?1,'copied')",
+            [&outgoing],
+        )?;
+        crate::delegation_commands::restore_fence_in(&tx, 200)?;
+        let known = crate::budget::reserve_in(&tx, &request("known"))?;
+        crate::budget::settle_in(
+            &tx,
+            &known,
+            &Settlement::Known {
+                actual: Consumption {
+                    calls: 2,
+                    bytes: 80,
+                    ..Default::default()
+                },
+            },
+        )?;
+        let unknown = crate::budget::reserve_in(&tx, &request("unknown"))?;
+        crate::budget::settle_in(&tx, &unknown, &Settlement::Unknown)?;
         tx.commit()?;
     }
-    let before=crate::budget::inspect(&mut db)?;
-    assert_eq!(before.known_usage.calls,2);
-    assert_eq!(before.unknown_usage.len(),1);
-    assert!(before.accounts.iter().any(|account|account.used==2 && account.reserved==3));
+    let before = crate::budget::inspect(&mut db)?;
+    assert_eq!(before.known_usage.calls, 2);
+    assert_eq!(before.unknown_usage.len(), 1);
+    assert!(
+        before
+            .accounts
+            .iter()
+            .any(|account| account.used == 2 && account.reserved == 3)
+    );
     // Preparation itself has no SQL effect and gives no restore permission.
-    let schema=RestoreFenceSchema::prepare()?;
-    let prepared=PreparedRestoreFence::new(previous.clone(),Path::new("/restored/one"),Digest::new(b"fresh-prepared-restore"),100)?;
-    assert!(db.is_autocommit());assert_eq!(current(&db)?,previous);
+    let schema = RestoreFenceSchema::prepare()?;
+    let prepared = PreparedRestoreFence::new(
+        previous.clone(),
+        Path::new("/restored/one"),
+        Digest::new(b"fresh-prepared-restore"),
+        100,
+    )?;
+    assert!(db.is_autocommit());
+    assert_eq!(current(&db)?, previous);
     {
-        let tx=db.transaction()?;prepared.apply_in(&tx, &schema)?;
-        assert!(is_blocked(&tx,"copied")?);
-        assert!(pin_invocation(&tx,"copied",&current(&tx)?.stamp).is_err());
+        let tx = db.transaction()?;
+        prepared.apply_in(&tx, &schema)?;
+        assert!(is_blocked(&tx, "copied")?);
+        assert!(pin_invocation(&tx, "copied", &current(&tx)?.stamp).is_err());
         tx.commit()?;
     }
     drop(db);
     for _ in 0..2 {
-        let mut reopened=Connection::open(&path)?;
-        let active=current(&reopened)?;
+        let mut reopened = Connection::open(&path)?;
+        let active = current(&reopened)?;
         assert!(!active.document.enabled);
-        assert_ne!(active.stamp.epoch,previous.stamp.epoch);
-        assert_eq!(active.stamp.revision,previous.stamp.revision+1);
-        assert_eq!(active.artifact_id,previous.artifact_id);
-        assert_eq!(active.artifact_path,"/restored/one");
-        assert!(crate::web_security::session_for_token_in(&reopened,&token,100).is_err());
-        assert_eq!(reopened.query_row("SELECT count(*) FROM day2_web_secret",[],|r|r.get::<_,i64>(0))?,0);
-        assert_eq!(invocation_stamp(&reopened,"copied")?,previous.stamp);
-        let after=crate::budget::inspect(&mut reopened)?;
+        assert_ne!(active.stamp.epoch, previous.stamp.epoch);
+        assert_eq!(active.stamp.revision, previous.stamp.revision + 1);
+        assert_eq!(active.artifact_id, previous.artifact_id);
+        assert_eq!(active.artifact_path, "/restored/one");
+        assert!(crate::web_security::session_for_token_in(&reopened, &token, 100).is_err());
+        assert_eq!(
+            reopened.query_row("SELECT count(*) FROM day2_web_secret", [], |r| r
+                .get::<_, i64>(0))?,
+            0
+        );
+        assert_eq!(invocation_stamp(&reopened, "copied")?, previous.stamp);
+        let after = crate::budget::inspect(&mut reopened)?;
         assert!(after.frozen_after_restore);
-        assert_eq!(after.ledger_id,before.ledger_id);
-        assert_eq!(after.accounts,before.accounts);
-        assert_eq!(after.known_usage,before.known_usage);
-        assert_eq!(after.unknown_usage,before.unknown_usage);
-        assert_eq!(after.outstanding_attempts,before.outstanding_attempts);
-        assert_eq!(reopened.query_row("SELECT delivery FROM day2_app_outgoing WHERE identity='unknown-send'",[],|r|r.get::<_,String>(0))?,outgoing);
-        assert_eq!(reopened.query_row("SELECT not_before FROM day2_app_restore_fence WHERE singleton=1",[],|r|r.get::<_,i64>(0))?,200);
-        let tx=reopened.transaction()?;
+        assert_eq!(after.ledger_id, before.ledger_id);
+        assert_eq!(after.accounts, before.accounts);
+        assert_eq!(after.known_usage, before.known_usage);
+        assert_eq!(after.unknown_usage, before.unknown_usage);
+        assert_eq!(after.outstanding_attempts, before.outstanding_attempts);
+        assert_eq!(
+            reopened.query_row(
+                "SELECT delivery FROM day2_app_outgoing WHERE identity='unknown-send'",
+                [],
+                |r| r.get::<_, String>(0)
+            )?,
+            outgoing
+        );
+        assert_eq!(
+            reopened.query_row(
+                "SELECT not_before FROM day2_app_restore_fence WHERE singleton=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            200
+        );
+        let tx = reopened.transaction()?;
         assert!(prepared.apply_in(&tx, &schema).is_err());
-        assert!(crate::budget::reserve_in(&tx,&request("new-work")).is_err());
-        assert_eq!(current(&tx)?,active);
+        assert!(crate::budget::reserve_in(&tx, &request("new-work")).is_err());
+        assert_eq!(current(&tx)?, active);
         tx.rollback()?;
     }
     Ok(())
 }
 
 #[test]
-fn prepared_restore_fence_refuses_changed_snapshot_reused_epoch_and_invalid_input_before_writes() -> Result<()> {
+fn prepared_restore_fence_refuses_changed_snapshot_reused_epoch_and_invalid_input_before_writes()
+-> Result<()> {
     for cut in 0..5 {
-        let mut db=Connection::open_in_memory()?;initialize_restore_fence(&mut db)?;
-        let original=current(&db)?;
-        let replacement=Digest::new(b"prepared-target-epoch");
-        let schema=RestoreFenceSchema::prepare()?;
-    let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),replacement.clone(),100)?;
-        let tx=db.transaction()?;
+        let mut db = Connection::open_in_memory()?;
+        initialize_restore_fence(&mut db)?;
+        let original = current(&db)?;
+        let replacement = Digest::new(b"prepared-target-epoch");
+        let schema = RestoreFenceSchema::prepare()?;
+        let prepared = PreparedRestoreFence::new(
+            original.clone(),
+            Path::new("/restored/one"),
+            replacement.clone(),
+            100,
+        )?;
+        let tx = db.transaction()?;
         match cut {
-            0=>{tx.execute("UPDATE day2_authority SET artifact_path='/different-current-path'",[])?;}
-            1=>{let mut changed=original.clone();changed.document.readers.insert("new-reader".into());tx.execute("UPDATE day2_authority SET document=?1",[serde_json::to_string(&changed.document)?])?;}
-            2=>{tx.execute("INSERT INTO day2_authority_history SELECT ?1,revision,document,artifact_id,artifact_path,operator,reason FROM day2_authority_history LIMIT 1",[replacement.as_str()])?;}
-            3=>{tx.execute_batch("CREATE TEMP TABLE day2_authority AS SELECT * FROM main.day2_authority")?;}
-            _=>{tx.execute_batch("ATTACH ':memory:' AS unselected")?;}
+            0 => {
+                tx.execute(
+                    "UPDATE day2_authority SET artifact_path='/different-current-path'",
+                    [],
+                )?;
+            }
+            1 => {
+                let mut changed = original.clone();
+                changed.document.readers.insert("new-reader".into());
+                tx.execute(
+                    "UPDATE day2_authority SET document=?1",
+                    [serde_json::to_string(&changed.document)?],
+                )?;
+            }
+            2 => {
+                tx.execute("INSERT INTO day2_authority_history SELECT ?1,revision,document,artifact_id,artifact_path,operator,reason FROM day2_authority_history LIMIT 1",[replacement.as_str()])?;
+            }
+            3 => {
+                tx.execute_batch(
+                    "CREATE TEMP TABLE day2_authority AS SELECT * FROM main.day2_authority",
+                )?;
+            }
+            _ => {
+                tx.execute_batch("ATTACH ':memory:' AS unselected")?;
+            }
         }
-        let before=current(&tx)?;
+        let before = current(&tx)?;
         assert!(prepared.apply_in(&tx, &schema).is_err());
-        assert_eq!(current(&tx)?,before);
-        assert_eq!(tx.query_row("SELECT restored FROM day2_budget_meta WHERE singleton=1",[],|r|r.get::<_,i64>(0))?,0);
+        assert_eq!(current(&tx)?, before);
+        assert_eq!(
+            tx.query_row(
+                "SELECT restored FROM day2_budget_meta WHERE singleton=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            0
+        );
         tx.rollback()?;
         assert!(prepared.apply_in(&db, &schema).is_err());
-        assert!(PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::try_from(original.stamp.epoch.clone())?,100).is_err());
-        assert!(PreparedRestoreFence::new(original,Path::new("/restored/one"),replacement,-1).is_err());
+        assert!(
+            PreparedRestoreFence::new(
+                original.clone(),
+                Path::new("/restored/one"),
+                Digest::try_from(original.stamp.epoch.clone())?,
+                100
+            )
+            .is_err()
+        );
+        assert!(
+            PreparedRestoreFence::new(original, Path::new("/restored/one"), replacement, -1)
+                .is_err()
+        );
     }
     Ok(())
 }
@@ -691,36 +813,78 @@ fn prepared_restore_fence_rejects_partial_unknown_or_corrupt_units_without_repai
         "CREATE TRIGGER extra_restore_trigger AFTER UPDATE ON day2_authority BEGIN UPDATE day2_budget_meta SET restored=0; END",
         "DROP TABLE day2_web_secret",
     ] {
-        let mut db=Connection::open_in_memory()?;
+        let mut db = Connection::open_in_memory()?;
         initialize_restore_fence(&mut db)?;
-        let original=current(&db)?;
-        let schema=RestoreFenceSchema::prepare()?;
-        let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::new(b"unrepaired-fence"),100)?;
+        let original = current(&db)?;
+        let schema = RestoreFenceSchema::prepare()?;
+        let prepared = PreparedRestoreFence::new(
+            original.clone(),
+            Path::new("/restored/one"),
+            Digest::new(b"unrepaired-fence"),
+            100,
+        )?;
         db.execute_batch(mutation)?;
-        let before_schema:Vec<(String,String,Option<String>)>=db.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
-        let before_meta:Vec<(String,i64,i64)>=db.prepare("SELECT ledger_id,restored,pool_return_version FROM day2_budget_meta")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+        let before_schema: Vec<(String, String, Option<String>)> = db
+            .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let before_meta: Vec<(String, i64, i64)> = db
+            .prepare("SELECT ledger_id,restored,pool_return_version FROM day2_budget_meta")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
         // Catching and committing the refusal cannot publish a replacement
         // table, guard, ledger or current marker from an initializer.
-        let tx=db.transaction()?;
-        assert!(prepared.apply_in(&tx,&schema).is_err(),"{mutation}");
+        let tx = db.transaction()?;
+        assert!(prepared.apply_in(&tx, &schema).is_err(), "{mutation}");
         tx.commit()?;
-        assert_eq!(current(&db)?,original);
-        let after_schema:Vec<(String,String,Option<String>)>=db.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
-        let after_meta:Vec<(String,i64,i64)>=db.prepare("SELECT ledger_id,restored,pool_return_version FROM day2_budget_meta")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
-        assert_eq!(after_schema,before_schema);assert_eq!(after_meta,before_meta);
+        assert_eq!(current(&db)?, original);
+        let after_schema: Vec<(String, String, Option<String>)> = db
+            .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let after_meta: Vec<(String, i64, i64)> = db
+            .prepare("SELECT ledger_id,restored,pool_return_version FROM day2_budget_meta")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(after_schema, before_schema);
+        assert_eq!(after_meta, before_meta);
     }
     Ok(())
 }
 
 #[test]
-fn prepared_restore_fence_rollback_preserves_original_authority_and_budget_on_reopen() -> Result<()> {
-    let directory=tempfile::tempdir()?;let path=directory.path().join("app.sqlite");
-    let mut db=Connection::open(&path)?;initialize_restore_fence(&mut db)?;let original=current(&db)?;
-    let schema=RestoreFenceSchema::prepare()?;
-    let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::new(b"uncommitted-fence"),100)?;
-    {let tx=db.transaction()?;prepared.apply_in(&tx, &schema)?;assert!(!current(&tx)?.document.enabled);}
+fn prepared_restore_fence_rollback_preserves_original_authority_and_budget_on_reopen() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("app.sqlite");
+    let mut db = Connection::open(&path)?;
+    initialize_restore_fence(&mut db)?;
+    let original = current(&db)?;
+    let schema = RestoreFenceSchema::prepare()?;
+    let prepared = PreparedRestoreFence::new(
+        original.clone(),
+        Path::new("/restored/one"),
+        Digest::new(b"uncommitted-fence"),
+        100,
+    )?;
+    {
+        let tx = db.transaction()?;
+        prepared.apply_in(&tx, &schema)?;
+        assert!(!current(&tx)?.document.enabled);
+    }
     drop(db);
-    for _ in 0..2 {let db=Connection::open(&path)?;assert_eq!(current(&db)?,original);assert_eq!(db.query_row("SELECT restored FROM day2_budget_meta WHERE singleton=1",[],|r|r.get::<_,i64>(0))?,0);}
+    for _ in 0..2 {
+        let db = Connection::open(&path)?;
+        assert_eq!(current(&db)?, original);
+        assert_eq!(
+            db.query_row(
+                "SELECT restored FROM day2_budget_meta WHERE singleton=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            0
+        );
+    }
     Ok(())
 }
 
@@ -821,7 +985,10 @@ fn initialize_restore_denial_units(db: &Connection) -> Result<()> {
     // Reuse actual authored web schemas, not a second fixture DDL.
     for table in ["day2_web_sessions", "day2_web_secret"] {
         let sql: String = schema.reference.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| row.get(0))?;
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |row| row.get(0),
+        )?;
         db.execute_batch(&sql)?;
     }
     Ok(())

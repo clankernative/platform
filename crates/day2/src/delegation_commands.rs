@@ -110,14 +110,20 @@ fn compact_in(connection: &Connection, at: i64) -> Result<()> {
 }
 
 pub(crate) fn restore_fence_in(connection: &Connection, at: i64) -> Result<()> {
-    ensure!(!connection.is_autocommit() && at >= 0, "restore_delegation_fence_requires_transaction");
+    ensure!(
+        !connection.is_autocommit() && at >= 0,
+        "restore_delegation_fence_requires_transaction"
+    );
     upgrade(connection)?;
     fence_current_restore_in(connection, at)
 }
 
 /// The schema is admitted by the enclosing reset before this SQL-only leaf.
 pub(crate) fn fence_current_restore_in(connection: &Connection, at: i64) -> Result<()> {
-    ensure!(!connection.is_autocommit() && at >= 0, "restore_delegation_fence_requires_transaction");
+    ensure!(
+        !connection.is_autocommit() && at >= 0,
+        "restore_delegation_fence_requires_transaction"
+    );
     connection.execute("INSERT INTO day2_app_restore_fence VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET not_before=max(not_before,excluded.not_before)", [at])?;
     Ok(())
 }
