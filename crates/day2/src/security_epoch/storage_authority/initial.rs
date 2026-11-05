@@ -636,7 +636,7 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
             );
             self.file.check()?;
             ensure!(
-                self.peer.request().binding == self.request.digest()?,
+                *self.peer.request().binding() == self.request.digest()?,
                 "initial_storage_peer_request_changed"
             );
             self.peer.check(self.file.controller_stage()?)?;

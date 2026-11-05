@@ -46,7 +46,7 @@ pub(crate) fn native_schema_metadata(
 pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort, RetainedEpochReads};
 pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
-    ControllerAdminReadLoan, CurrentAdminMembership, CurrentAppServingPhase,
+    ControllerAdminReadLoan, CurrentAppServingPhase,
 };
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;

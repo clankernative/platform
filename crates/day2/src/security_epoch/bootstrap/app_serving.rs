@@ -4,7 +4,7 @@ use super::{
     request_names,
 };
 use crate::security_epoch::{
-    native_enrollment::{EnrolledRoleStage, StoragePeerPurpose, StoragePeerRequest},
+    native_enrollment::{EnrolledRoleStage, StoragePeerRequest},
     serving::CurrentServingPhase,
 };
 use anyhow::{Result, ensure};
