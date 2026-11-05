@@ -688,6 +688,19 @@ fn store(
     require_transaction(connection)?;
     crate::budget::initialize_in(connection, &active.stamp.epoch)?;
     crate::budget::sync_definitions_in(connection, &active.document.resources.budgets)?;
+    store_record_in(connection, active, operator, reason)?;
+    release_blocked_cursor_pins(connection)
+}
+
+// The same authority record writes serve a pre-admitted restore denial. This
+// leaf neither initializes budget state nor discards retained cursor history.
+fn store_record_in(
+    connection: &Connection,
+    active: &ActiveAuthority,
+    operator: &str,
+    reason: &str,
+) -> Result<()> {
+    require_transaction(connection)?;
     let document = serde_json::to_string(&active.document)?;
     let revision = i64::try_from(active.stamp.revision)?;
     connection.execute(
@@ -715,7 +728,6 @@ fn store(
          WHERE i.status='pending' AND (a.invocation IS NULL OR a.epoch!=?1 OR a.revision!=?2)",
         params![active.stamp.epoch, revision],
     )?;
-    release_blocked_cursor_pins(connection)?;
     Ok(())
 }
 
@@ -1328,8 +1340,10 @@ fn fence_restored_in(
     let mut entropy = [0_u8; 32];
     getrandom::fill(&mut entropy)
         .map_err(|error| anyhow::anyhow!("authority restore entropy: {error}"))?;
+    let schema = RestoreFenceSchema::prepare()?;
     PreparedRestoreFence::new(active, relocated, Digest::new(&entropy), not_before)?
-        .apply_in(connection)?;
+        .apply_in(connection, &schema)?;
+    release_blocked_cursor_pins(connection)?;
     crate::rollout::invalidate(connection)
 }
 
@@ -1365,18 +1379,105 @@ impl PreparedRestoreFence {
 
     /// SQL only. No clock, entropy, artifact/provider IO, outer commit or
     /// readiness is produced. The enclosing complete reset owns rollback.
-    pub(crate) fn apply_in(&self, connection: &Connection) -> Result<()> {
+    pub(crate) fn apply_in(&self, connection: &Connection, schema: &RestoreFenceSchema) -> Result<()> {
         require_transaction(connection)?;
         require_single_restore_database(connection)?;
+        schema.require_current_in(connection)?;
         ensure!(current(connection)? == self.previous, "restore_authority_snapshot_changed");
         let reused: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM day2_authority_history WHERE epoch=?1)",
             [&self.disabled.stamp.epoch], |row| row.get(0))?;
         ensure!(!reused, "restore_authority_epoch_reused");
-        crate::budget::invalidate_restored(connection)?;
-        crate::delegation_commands::restore_fence_in(connection, self.not_before)?;
-        store(connection, &self.disabled, "platform-restore", "restore-fence")?;
+        crate::budget::freeze_current_restore_in(connection)?;
+        crate::delegation_commands::fence_current_restore_in(connection, self.not_before)?;
+        store_record_in(connection, &self.disabled, "platform-restore", "restore-fence")?;
         discard_restored_sessions_in(connection)
+    }
+}
+
+/// Canonical schema reference for the denial leaf only. Prepared on a trusted
+/// empty memory database before the restore loan; never installs on imported
+/// state and is not whole-application admission, approval or native exclusion.
+pub(crate) struct RestoreFenceSchema {
+    reference: Connection,
+}
+
+impl RestoreFenceSchema {
+    pub(crate) fn prepare() -> Result<Self> {
+        let mut reference = Connection::open_in_memory()?;
+        reference.pragma_update(None, "foreign_keys", true)?;
+        reference.execute_batch(crate::store::PLATFORM_DDL)?;
+        {
+            let tx = reference.transaction()?;
+            crate::audit::upgrade(&tx)?;
+            upgrade(&tx)?;
+            crate::budget::initialize_in(&tx, "restore-schema-reference")?;
+            crate::delegation_commands::upgrade(&tx)?;
+            tx.commit()?;
+        }
+        Ok(Self { reference })
+    }
+
+    /// The actual runtime's permanent execution hook must remain installed.
+    /// Its cumulative admission counter also bounds this nested read-only scan.
+    /// The complete reset must independently admit every other app/private unit.
+    fn require_current_in(&self, connection: &Connection) -> Result<()> {
+        require_transaction(connection)?;
+        require_single_restore_database(connection)?;
+        crate::oauth::schema::admit_with_runtime_hook(connection, |db| {
+            let expected = Self::objects(&self.reference)?;
+            ensure!(Self::objects(db)? == expected, "restore_denial_schema_changed");
+            for (kind, name, _) in expected {
+                match kind.as_str() {
+                    "table" => crate::oauth::schema::exact_layout(db, &self.reference, &name)?,
+                    "trigger" => ensure!(
+                        crate::oauth::schema::schema_sql(db, "trigger", &name)?
+                            == crate::oauth::schema::schema_sql(&self.reference, "trigger", &name)?,
+                        "restore_denial_guard_changed"
+                    ),
+                    "index" => {},
+                    _ => anyhow::bail!("restore_denial_schema_changed"),
+                }
+            }
+            // The upgrade routines are deliberately absent from the mutation
+            // path. In particular an empty/old budget marker cannot mint a new
+            // lineage or restamp the pool-return protocol.
+            let (ledger, restored, version): (String, i64, i64) = db.query_row(
+                "SELECT ledger_id,restored,pool_return_version FROM day2_budget_meta WHERE singleton=1",
+                [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+            Digest::try_from(ledger)?;
+            ensure!(restored == 0 && version == 1, "restore_budget_not_current");
+            crate::budget::inspect_in(db)?;
+            let mut statement = db.prepare("PRAGMA integrity_check")?;
+            let mut rows = statement.query([])?;
+            let first = rows.next()?.context("restore_integrity_result_missing")?;
+            crate::oauth::schema::materialize(first)?;
+            ensure!(first.get_ref(0)?.as_str()? == "ok" && rows.next()?.is_none(), "restore_integrity_refused");
+            Ok(())
+        })
+    }
+
+    fn owns(name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        name.starts_with("day2_authority") || name.starts_with("day2_budget_")
+            || name.starts_with("day2_app_") || name == "day2_invocation_authority"
+            || name == "day2_inherited_origins" || name == "day2_web_sessions"
+            || name == "day2_web_secret"
+    }
+
+    fn objects(db: &Connection) -> Result<Vec<(String,String,String)>> {
+        let mut statement = db.prepare("SELECT type,name,tbl_name FROM main.sqlite_master ORDER BY type,name,tbl_name")?;
+        let mut rows = statement.query([])?;
+        let mut objects = Vec::new();
+        while let Some(row) = rows.next()? {
+            crate::oauth::schema::materialize(row)?;
+            let name = row.get_ref(1)?.as_str()?;
+            let table = row.get_ref(2)?.as_str()?;
+            if Self::owns(name) || Self::owns(table) {
+                objects.push((row.get(0)?,row.get(1)?,row.get(2)?));
+            }
+        }
+        Ok(objects)
     }
 }
 
