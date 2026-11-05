@@ -105,9 +105,7 @@ fn commit(selection: &EpochStore, plan: &model::Plan, current: &Current) -> Resu
     let reply = serde_json::to_vec(&initial_reply(selection, plan)?)?;
     let transaction = wire::RestoreNames::new(selection, plan)?.transaction(&reply)?;
     assert_eq!(transaction.observed()?.snapshot, plan.reservation.before);
-    crate::json::decode(
-        &transaction.commit_body(selection, plan, current, 1000)?,
-    )
+    crate::json::decode(&transaction.commit_body(selection, plan, current, 1000)?)
 }
 
 #[test]
