@@ -341,6 +341,20 @@ fn validate_current_wiring(file: &syn::File) -> Result<()> {
     let mut actual = method(file, "verify_current")?.clone();
     let actual = body(&mut actual)?;
     ensure!(actual.stmts.len() >= 4, "verification result tail");
+    let requested=actual.stmts.iter().filter_map(|statement|match statement {
+        syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="requested")=>Some(local),_=>None,
+    }).collect::<Vec<_>>();
+    ensure!(
+        requested.len() == 1,
+        "actual requested signature result selector"
+    );
+    let syn::Expr::Block(signature) = &*requested[0].init.as_ref().unwrap().expr else {
+        anyhow::bail!("scoped key signature block")
+    };
+    ensure!(
+        matches!(signature.block.stmts.last(),Some(syn::Stmt::Expr(syn::Expr::Call(call),None)) if matches!(&*call.func,syn::Expr::Path(path) if path.path.segments.len()==2 && path.path.segments[0].ident=="super" && path.path.segments[1].ident=="verify") && call.args.len()==5),
+        "actual signature result must remain the requested result"
+    );
     let tail = &actual.stmts[actual.stmts.len() - 4..];
     ensure!(
         matches!(&tail[0],syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="checked") && local.init.as_ref().is_some_and(|init|matches!(&*init.expr,syn::Expr::MethodCall(call) if call.method=="observe"))),
@@ -379,7 +393,7 @@ fn production_capture_and_verification_cannot_lose_native_origin_or_final_curren
 -> Result<()> {
     let source = syn::parse_file(include_str!("../registry.rs"))?;
     validate_current_wiring(&source)?;
-    for mode in 0..4 {
+    for mode in 0..5 {
         let mut changed = source.clone();
         if mode == 0 {
             let block = body(method_mut(&mut changed, "capture")?)?;
@@ -398,6 +412,22 @@ fn production_capture_and_verification_cannot_lose_native_origin_or_final_curren
             } else if mode == 3 {
                 let length = block.stmts.len();
                 block.stmts.swap(length - 4, length - 3);
+            } else if mode == 4 {
+                let local=block.stmts.iter_mut().find_map(|statement|match statement {
+                    syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="requested")=>Some(local),_=>None,
+                }).unwrap();
+                let syn::Expr::Block(signature) = &mut *local.init.as_mut().unwrap().expr else {
+                    unreachable!()
+                };
+                let syn::Stmt::Expr(_, semicolon) = signature.block.stmts.last_mut().unwrap()
+                else {
+                    unreachable!()
+                };
+                *semicolon = Some(syn::token::Semi::default());
+                signature
+                    .block
+                    .stmts
+                    .push(syn::parse_quote!(Ok(forged_facts)));
             } else {
                 let targets=block.stmts.iter_mut().filter_map(|statement|match statement {
                     syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="checked")=>Some(local),_=>None,
@@ -635,6 +665,10 @@ fn native_input_retains_published_selector_before_canonicalization_and_actual_ru
                 == 1,
             "one existing native input canonicalization"
         );
+        ensure!(
+            matches!(block.stmts.last(),Some(syn::Stmt::Expr(syn::Expr::Call(call),None)) if matches!(&*call.func,syn::Expr::Path(path) if path.path.segments.len()==2 && path.path.segments[0].ident=="Self" && path.path.segments[1].ident=="admit") && call.args.len()==5 && matches!(&call.args[1],syn::Expr::Path(path) if path.path.is_ident("instance_selector"))),
+            "captured original reaches actual metadata constructor"
+        );
         Ok(())
     }
     let file = syn::parse_file(include_str!("../../../store.rs"))?;
@@ -646,6 +680,16 @@ fn native_input_retains_published_selector_before_canonicalization_and_actual_ru
     let mut late = load.block.clone();
     late.stmts.swap(0, 1);
     assert!(retains_first(&late).is_err());
+    let mut resolved = load.block.clone();
+    let syn::Stmt::Expr(syn::Expr::Call(call), None) = resolved.stmts.last_mut().unwrap() else {
+        unreachable!()
+    };
+    call.args[1] = syn::parse_quote!(instance_path.clone());
+    assert!(retains_first(&resolved).is_err());
+    let constructors=file.items.iter().filter_map(|item|match item {
+        syn::Item::Impl(block) if matches!(&*block.self_ty,syn::Type::Path(path) if path.path.is_ident("InitialStoreMetadata"))=>Some(block),_=>None,
+    }).flat_map(|block|&block.items).filter_map(|item|match item {syn::ImplItem::Fn(method) if method.sig.ident=="admit"=>Some(method),_=>None}).collect::<Vec<_>>();
+    ensure!(constructors.len() == 1, "actual metadata constructor");
     // The actual native Runtime initializer must carry this original DATA,
     // while all ordinary Runtime constructors leave it absent.
     use syn::visit::Visit;
@@ -661,6 +705,45 @@ fn native_input_retains_published_selector_before_canonicalization_and_actual_ru
             syn::visit::visit_expr_struct(self, node);
         }
     }
+    struct SelectorFields(Vec<syn::Expr>);
+    impl<'ast> Visit<'ast> for SelectorFields {
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            for field in &node.fields {
+                if matches!(&field.member,syn::Member::Named(name) if name=="instance_selector") {
+                    self.0.push(field.expr.clone());
+                }
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+    }
+    let validates_constructor = |block: &syn::Block| -> Result<()> {
+        let mut selected = SelectorFields(Vec::new());
+        selected.visit_block(block);
+        ensure!(
+            selected.0.len() == 1
+                && matches!(&selected.0[0],syn::Expr::Path(path) if path.path.is_ident("instance_selector")),
+            "metadata stores actual selector argument"
+        );
+        Ok(())
+    };
+    validates_constructor(&constructors[0].block)?;
+    let mut changed = constructors[0].block.clone();
+    let syn::Stmt::Expr(syn::Expr::Call(ok), None) = changed.stmts.last_mut().unwrap() else {
+        unreachable!()
+    };
+    let syn::Expr::Struct(actual) = &mut ok.args[0] else {
+        unreachable!()
+    };
+    let fields = actual
+        .fields
+        .iter_mut()
+        .filter(
+            |field| matches!(&field.member,syn::Member::Named(name) if name=="instance_selector"),
+        )
+        .collect::<Vec<_>>();
+    ensure!(fields.len() == 1, "actual selector field mutation target");
+    fields.into_iter().next().unwrap().expr = syn::parse_quote!(instance_path.clone());
+    assert!(validates_constructor(&changed).is_err());
     let native = syn::parse_file(include_str!("../../../store/native_storage.rs"))?;
     let mut fields = Fields(Vec::new());
     fields.visit_file(&native);
