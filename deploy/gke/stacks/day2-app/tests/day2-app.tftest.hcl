@@ -1603,3 +1603,48 @@ run "renders_freetool_app_resource_scope" {
     error_message = "day2-app must render the explicit any_app_resource Freetool scope without rewriting it."
   }
 }
+
+run "cli_bootstrap_registration_comes_from_the_edge_contract" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT_ID        = "123-desktop.apps.googleusercontent.com"
+      }
+    }
+  }
+  assert {
+    condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).identity == {
+      scheme                = "google_iap"
+      hosted_domain         = "example.com"
+      cli_desktop_client_id = "123-desktop.apps.googleusercontent.com"
+    }
+    error_message = "The runtime must publish the edge-selected registration with the existing instance identity, without a second client selection."
+  }
+}
+
+run "cli_bootstrap_refuses_a_malformed_contract_registration" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT_ID        = "https://evil.example/client"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}

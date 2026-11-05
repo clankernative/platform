@@ -6,6 +6,7 @@
     clippy::disallowed_macros
 )]
 
+pub mod cli_login;
 pub mod credential_runtime;
 pub mod credentials;
 pub mod integrations;

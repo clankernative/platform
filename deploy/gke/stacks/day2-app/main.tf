@@ -26,6 +26,7 @@ locals {
   contract_iap_audience = trimspace(lookup(local.contract, "IAP_JWT_AUDIENCE", ""))
   iap_audience          = var.iap_audience_override != "" ? var.iap_audience_override : local.contract_iap_audience
   contract_app_domain   = trimspace(lookup(local.contract, "APP_DOMAIN", ""))
+  cli_desktop_client_id = lookup(local.contract, "CLI_DESKTOP_CLIENT_ID", "")
   pvc_name              = lookup(local.contract, "PVC_NAME", "data")
   service_name          = lookup(local.contract, "SERVICE_NAME", "app")
   # The label the platform's Service selects. Required from the contract; the
@@ -53,10 +54,10 @@ locals {
   base_instance = merge({
     installation = var.installation
     environment  = var.environment
-    identity = {
+    identity = merge({
       scheme        = "google_iap"
       hosted_domain = var.hosted_domain
-    }
+    }, local.cli_desktop_client_id == "" ? {} : { cli_desktop_client_id = local.cli_desktop_client_id })
     apps = {
       (var.app_id) = merge({
         artifact  = "artifacts/${var.artifact_id}"
@@ -143,6 +144,10 @@ resource "kubernetes_config_map_v1" "instance" {
   }
 
   lifecycle {
+    precondition {
+      condition     = local.cli_desktop_client_id == "" || can(regex("^[A-Za-z0-9-]{1,200}\\.apps\\.googleusercontent\\.com$", local.cli_desktop_client_id))
+      error_message = "The platform contract's CLI_DESKTOP_CLIENT_ID must be a bounded Google OAuth client identifier."
+    }
     precondition {
       condition = var.security_shell_contract == null ? true : (
         lookup(local.shell_contract, "EDGE_ROLE", "") == "security_shell" &&

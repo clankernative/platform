@@ -764,6 +764,19 @@ resource "kubernetes_ingress_v1" "app" {
             }
           }
         }
+        dynamic "path" {
+          for_each = var.cli_desktop_client_id == "" ? [] : [true]
+          content {
+            path      = "/.well-known/day2-cli.json"
+            path_type = "Exact"
+            backend {
+              service {
+                name = kubernetes_service_v1.cli_discovery[0].metadata[0].name
+                port { number = 8080 }
+              }
+            }
+          }
+        }
         path {
           path      = "/"
           path_type = "Prefix"
@@ -835,11 +848,18 @@ resource "kubernetes_config_map_v1" "platform_contract" {
     labels    = local.platform_labels
   }
 
-  data = merge(local.contract_data, local.app_call_contract, local.oauth_runtime_contract)
+  data = merge(local.contract_data, local.app_call_contract, local.oauth_runtime_contract, var.cli_desktop_client_id == "" ? {} : {
+    CLI_DESKTOP_CLIENT_ID = var.cli_desktop_client_id
+  })
 
-  depends_on = [google_iap_web_backend_service_iam_binding.app_access, google_service_account_iam_member.app_call_workload, google_project_iam_member.oauth_edge_reads, google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
+  depends_on = [google_iap_web_backend_service_iam_binding.app_access, google_service_account_iam_member.app_call_workload, google_project_iam_member.oauth_edge_reads, google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients, google_iap_settings.cli_login]
 
   lifecycle {
+    precondition {
+      condition     = var.cli_desktop_client_id == "" || local.backend_service_resolved
+      error_message = "CLI login requires the resolved human IAP backend; bootstrap the ordinary edge before selecting a desktop client."
+    }
+
     precondition {
       condition     = local.oauth_roles_valid
       error_message = "OAuth runtime and its authoritative native client/key roles must be selected together."

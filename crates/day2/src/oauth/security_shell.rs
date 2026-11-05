@@ -2191,6 +2191,7 @@ mod tests {
         instance.identity = Some(crate::artifact::IdentityProvider {
             scheme: crate::artifact::IdentityScheme::GoogleIap,
             hosted_domain: "example.com".into(),
+            cli_desktop_client_id: None,
         });
         instance.security_shell = Some(crate::artifact::Edge {
             origin: "https://security.example.com".into(),

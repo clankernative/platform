@@ -239,6 +239,179 @@ fn issued(response: &Response) -> Option<(String, String)> {
     Some((pair, header))
 }
 
+const CLI_DISCOVERY: &str = "/.well-known/day2-cli.json";
+const CLI_CLIENT: &str = "123-desktop.apps.googleusercontent.com";
+
+#[test]
+fn cli_bootstrap_exposes_only_opted_in_instance_metadata() -> Result<()> {
+    let unconfigured = Server::start()?;
+    assert_eq!(
+        unconfigured.get(CLI_DISCOVERY).send()?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        unconfigured
+            .as_person(unconfigured.get(CLI_DISCOVERY), READER)
+            .send()?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let server = Server::start_with(|artifact| {
+        let mut value = instance(artifact);
+        value["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+        value
+    })?;
+    let response = server.get(CLI_DISCOVERY).send()?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert!(!response.headers().contains_key(SET_COOKIE));
+    assert_eq!(
+        response.json::<Value>()?,
+        json!({
+            "schema_version":1,
+            "instance_origin":ORIGIN,
+            "installation":"edgeco",
+            "environment":"test",
+            "identity":{"scheme":"google_iap","desktop_client_id":CLI_CLIENT,"hosted_domain":"exampleco.test"}
+        })
+    );
+    for method in [
+        reqwest::Method::POST,
+        reqwest::Method::PUT,
+        reqwest::Method::HEAD,
+        reqwest::Method::DELETE,
+    ] {
+        let response = server
+            .client
+            .request(method, format!("{}{CLI_DISCOVERY}", server.origin))
+            .header(HOST, AUTHORITY)
+            .send()?;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(response.headers()["allow"], "GET");
+        assert!(!response.headers().contains_key(SET_COOKIE));
+    }
+    for path in [
+        "/",
+        "/api/session",
+        "/login",
+        "/logout",
+        "/.well-known/other.json",
+        "/.well-known/day2-cli.json/",
+        "/.well-known/%64ay2-cli.json",
+    ] {
+        assert_eq!(
+            server.get(path).send()?.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path}"
+        );
+    }
+    assert!(
+        server
+            .get(CLI_DISCOVERY)
+            .header(HOST, "other.example.test")
+            .send()?
+            .status()
+            .is_client_error()
+    );
+    assert!(
+        server
+            .get(&format!("{CLI_DISCOVERY}?extra=1"))
+            .send()?
+            .status()
+            .is_client_error()
+    );
+    assert!(
+        server
+            .get(CLI_DISCOVERY)
+            .body("unexpected")
+            .send()?
+            .status()
+            .is_client_error()
+    );
+    assert_eq!(server.sessions()?, 0);
+    // Supplying a human assertion still cannot turn public metadata into a
+    // session-minting endpoint or expose fields from the private instance.
+    assert_eq!(
+        server
+            .as_person(server.get(CLI_DISCOVERY), READER)
+            .send()?
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(server.sessions()?, 0);
+    assert_eq!(
+        server
+            .as_person(server.get("/api/session"), READER)
+            .send()?
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(server.sessions()?, 1);
+    Ok(())
+}
+
+#[test]
+fn cli_bootstrap_refuses_live_metadata_replacement() -> Result<()> {
+    let server = Server::start_with(|artifact| {
+        let mut value = instance(artifact);
+        value["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+        value
+    })?;
+    let original = fs::read(server.runtime.instance_path())?;
+    for (pointer, replacement) in [
+        (
+            "/identity/cli_desktop_client_id",
+            json!("456-other.apps.googleusercontent.com"),
+        ),
+        ("/identity/cli_desktop_client_id", Value::Null),
+        ("/identity/hosted_domain", json!("other.test")),
+        (
+            "/apps/go/edge/origin",
+            json!("https://other.exampleco.test"),
+        ),
+        ("/environment", json!("another_environment")),
+        (
+            "/apps/go/edge/iap_audience",
+            json!("/projects/1234/global/backendServices/9999"),
+        ),
+    ] {
+        let mut changed: Value = serde_json::from_slice(&original)?;
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        fs::write(
+            server.runtime.instance_path(),
+            serde_json::to_vec(&changed)?,
+        )?;
+        let response = server.get(CLI_DISCOVERY).send()?;
+        assert!(response.status().is_client_error(), "{pointer}");
+        assert!(!response.headers().contains_key(SET_COOKIE));
+    }
+    fs::write(server.runtime.instance_path(), original)?;
+    assert_eq!(server.get(CLI_DISCOVERY).send()?.status(), StatusCode::OK);
+    assert_eq!(server.sessions()?, 0);
+    Ok(())
+}
+
+#[test]
+fn cli_bootstrap_instance_metadata_is_closed_and_validated() -> Result<()> {
+    for client in [
+        json!("https://evil.test"),
+        json!(""),
+        json!("123.apps.googleusercontent.com/path"),
+        json!({"client_secret":"never accepted"}),
+    ] {
+        let mut value = instance("/artifact");
+        value["identity"]["cli_desktop_client_id"] = client;
+        assert!(Instance::from_bytes(&serde_json::to_vec(&value)?).is_err());
+    }
+    let mut value = instance("/artifact");
+    value["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+    value["identity"]["client_secret"] = json!("never accepted");
+    assert!(Instance::from_bytes(&serde_json::to_vec(&value)?).is_err());
+    Ok(())
+}
+
 #[test]
 fn public_downloads_are_anonymous_pinned_and_do_not_open_other_edge_routes() -> Result<()> {
     fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> Result<()> {

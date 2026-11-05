@@ -20,6 +20,7 @@ pub mod carta;
 pub mod carta_http;
 pub mod carta_live;
 pub mod carta_qualification;
+mod cli_login;
 pub mod compatibility;
 pub mod credential_authority;
 pub mod credential_codegen;

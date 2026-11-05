@@ -1403,6 +1403,10 @@ pub struct IdentityProvider {
     /// The only domain whose people are admitted, checked against both the
     /// assertion's `hd` claim and the address itself.
     pub hosted_domain: String,
+    /// Opt-in public CLI bootstrap registration. IAP's programmatic allowlist
+    /// and the app's current authority remain separate admission requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_desktop_client_id: Option<day2_capabilities::cli_login::DesktopClientId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -646,3 +646,70 @@ run "refuses_a_secret_resource_name" {
   }
   expect_failures = [var.runtime_secret_ids]
 }
+
+run "cli_login_is_absent_by_default" {
+  command = plan
+  variables { backend_service_name = "" }
+  assert {
+    condition = (
+      length(kubernetes_service_v1.cli_discovery) == 0 && length(kubernetes_manifest.cli_discovery) == 0 &&
+      length(google_iap_settings.cli_login) == 0 && !contains(keys(kubernetes_config_map_v1.platform_contract.data), "CLI_DESKTOP_CLIENT_ID")
+    )
+    error_message = "Ordinary apps must not publish CLI metadata or acquire a programmatic OAuth allowlist."
+  }
+}
+
+run "cli_login_keeps_the_human_backend_and_bootstrap_path_separate" {
+  command = plan
+  variables { cli_desktop_client_id = "123-desktop.apps.googleusercontent.com" }
+  override_data {
+    target = data.google_compute_backend_service.app
+    values = {
+      generated_id = 5486495053471409653
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  assert {
+    condition = (
+      kubernetes_manifest.cli_discovery[0].manifest.spec.iap.enabled == false &&
+      kubernetes_manifest.backend_config.manifest.spec.iap.enabled == true &&
+      kubernetes_ingress_v1.app.spec[0].default_backend[0].service[0].name == "app" &&
+      length([for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path if path.backend[0].service[0].name == "cli-discovery"]) == 1 &&
+      length([for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path if path.backend[0].service[0].name == "cli-discovery" && path.path == "/.well-known/day2-cli.json" && path.path_type == "Exact"]) == 1
+    )
+    error_message = "Only the exact public bootstrap path may reach the non-IAP backend; human routes must retain their IAP default."
+  }
+  assert {
+    condition = (
+      google_iap_settings.cli_login[0].name == "projects/123456789012/iap_web/compute/services/5486495053471409653" &&
+      toset(google_iap_settings.cli_login[0].access_settings[0].oauth_settings[0].programmatic_clients) == toset([var.cli_desktop_client_id]) &&
+      kubernetes_config_map_v1.platform_contract.data["CLI_DESKTOP_CLIENT_ID"] == var.cli_desktop_client_id &&
+      toset(google_iap_web_backend_service_iam_binding.app_access[0].members) == toset(var.iap_members)
+    )
+    error_message = "The exact company desktop client must be selected on this human backend and in runtime metadata, without changing human IAM membership."
+  }
+}
+
+run "cli_login_requires_a_resolved_human_backend" {
+  command = plan
+  variables {
+    backend_service_name  = ""
+    cli_desktop_client_id = "123-desktop.apps.googleusercontent.com"
+  }
+  expect_failures = [kubernetes_config_map_v1.platform_contract]
+}
+
+run "cli_login_refuses_arbitrary_client_destinations" {
+  command = plan
+  variables { cli_desktop_client_id = "https://evil.example/client" }
+  override_data {
+    target = data.google_compute_backend_service.app
+    values = {
+      generated_id = 1
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  expect_failures = [var.cli_desktop_client_id]
+}
