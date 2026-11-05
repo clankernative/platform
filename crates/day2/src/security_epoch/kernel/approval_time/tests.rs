@@ -344,16 +344,16 @@ fn read(
     // Both rows belong to the same actual SQLite read snapshot, including
     // when this fixture is later exercised with a competing connection.
     let db = db.unchecked_transaction()?;
-    let (body, revision): (String, u64) = db.query_row(
+    let (body, revision): (String, i64) = db.query_row(
         "SELECT body,version FROM records WHERE name='floor'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let floor = Versioned {
         value: crate::json::decode(body.as_bytes())?,
-        version: version(revision),
+        version: version(revision.try_into()?),
     };
-    let receipt: Option<(String, u64)> = db
+    let receipt: Option<(String, i64)> = db
         .query_row(
             "SELECT body,version FROM receipts WHERE operation=?1",
             [operation.as_str()],
@@ -366,7 +366,7 @@ fn read(
             .map(|(body, revision)| -> Result<_> {
                 Ok(Versioned {
                     value: crate::json::decode(body.as_bytes())?,
-                    version: version(revision),
+                    version: version(revision.try_into()?),
                 })
             })
             .transpose()?,
@@ -706,9 +706,12 @@ fn replay(trace: &Trace) -> Result<()> {
                 && actual.version == version(3 + commits),
             "fixture_model_durable_state"
         );
-        let actual_receipts: u64 =
+        let actual_receipts: i64 =
             db.query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))?;
-        ensure!(actual_receipts == commits, "fixture_model_receipt_count");
+        ensure!(
+            actual_receipts == i64::try_from(commits)?,
+            "fixture_model_receipt_count"
+        );
     }
     Ok(())
 }
