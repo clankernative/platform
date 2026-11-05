@@ -1303,6 +1303,7 @@ pub fn invalidate_restored(connection: &Connection, artifact_path: &Path) -> Res
     crate::store::require_no_managed_credential_restore_state(connection)?;
     upgrade(connection)?;
     if !exists(connection)? {
+        discard_restored_sessions_in(connection)?;
         return Ok(());
     }
     let active = current(connection)?;
@@ -1362,6 +1363,7 @@ impl PreparedRestoreFence {
     /// readiness is produced. The enclosing complete reset owns rollback.
     pub(crate) fn apply_in(&self, connection: &Connection) -> Result<()> {
         require_transaction(connection)?;
+        require_single_restore_database(connection)?;
         ensure!(current(connection)? == self.previous, "restore_authority_snapshot_changed");
         let reused: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM day2_authority_history WHERE epoch=?1)",
@@ -1369,8 +1371,35 @@ impl PreparedRestoreFence {
         ensure!(!reused, "restore_authority_epoch_reused");
         crate::budget::invalidate_restored(connection)?;
         crate::delegation_commands::restore_fence_in(connection, self.not_before)?;
-        store(connection, &self.disabled, "platform-restore", "restore-fence")
+        store(connection, &self.disabled, "platform-restore", "restore-fence")?;
+        discard_restored_sessions_in(connection)
     }
+}
+
+fn require_single_restore_database(connection: &Connection) -> Result<()> {
+    let mut statement=connection.prepare("PRAGMA database_list")?;
+    let mut rows=statement.query([])?;
+    let mut count=0;
+    while let Some(row)=rows.next()? {
+        count+=1;
+        ensure!(count<=2 && ["main","temp"].contains(&row.get_ref(1)?.as_str()?),"restore_attached_database_refused");
+    }
+    let temporary:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM temp.sqlite_master)",[],|row|row.get(0))?;
+    ensure!(!temporary,"restore_temporary_schema_refused");
+    Ok(())
+}
+
+// Shared with the complete offline reset through the same prepared fence.
+// Imported profile/DDL admission remains the enclosing owner's obligation.
+fn discard_restored_sessions_in(connection: &Connection) -> Result<()> {
+    require_transaction(connection)?;
+    for table in ["day2_web_sessions", "day2_web_secret"] {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?1)",
+            [table], |row| row.get(0))?;
+        if exists {connection.execute(&format!("DELETE FROM main.{table}"), [])?;}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
