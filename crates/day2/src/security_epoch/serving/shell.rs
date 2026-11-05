@@ -126,6 +126,33 @@ struct ShellBorrow<'phase, 'peer> {
 }
 impl sealed::NativeServingOwner for ShellBorrow<'_, '_> {}
 impl CurrentServingPhase for ShellBorrow<'_, '_> {
+    fn begin_runtime_database(
+        &mut self,
+        _stage: &mut EnrolledRoleStage<'_>,
+        _metadata: &crate::store::InitialStoreMetadata,
+    ) -> Result<()> {
+        self.owner.refuse();
+        anyhow::bail!("native_shell_has_no_database_identity")
+    }
+
+    fn check_runtime_opened_database(
+        &mut self,
+        _stage: &mut EnrolledRoleStage<'_>,
+        _db: &rusqlite::Connection,
+    ) -> Result<()> {
+        self.owner.refuse();
+        anyhow::bail!("native_shell_has_no_database_identity")
+    }
+
+    fn retain_runtime_database(
+        &mut self,
+        _stage: &mut EnrolledRoleStage<'_>,
+        _keeper: crate::store::NativeSqliteKeeper,
+    ) -> Result<()> {
+        self.owner.refuse();
+        anyhow::bail!("native_shell_has_no_database_identity")
+    }
+
     fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         self.owner.check(stage)
     }

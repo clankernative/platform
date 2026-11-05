@@ -555,3 +555,27 @@ SAME-owner CurrentPreparedFilePhase, checks the exact projection before accept,
 and produces the fresh statement from that stage. The exchange's original
 five-second budget, per-message handles and strict HUP/CLOEXEC checks remain.
 Unknown or abandoned exchange state cannot reopen, rebind or adopt the listener.
+
+
+## First SQLite connection custody
+
+The App file continuation now consumes one SQLite birth attempt before the first
+persisted SQLite open. Existing WAL, SHM or rollback-journal leaves refuse the
+attempt. The first opened MAIN must match the actual retained App file before
+configuration or schema admission. The same first connection is held through WAL
+activation, its actual MAIN/WAL/SHM capture, runtime publication and subsequent
+App file checks. There is no close-and-reopen adoption path and no retained
+business transaction. Initial load cannot complete without moving that connection
+into the actual App continuation. Every failure remains terminal.
+
+Fresh checks compare the keeper's actual open descriptors and fixed sidecar paths
+with its original cohort; refusing a keeper does not close it under another SQL
+unit's locks. Resource teardown follows the App owner's borrowed lifetime.
+
+This keeper is not immutable storage, a native admission grant or writer exclusion.
+The real concurrent-writer control demonstrates that a retained SQLite snapshot
+can still see an older admin while every keeper identity matches. The accepting
+Controller admin reader remains closed until its actual authenticated request
+borrows App writer exclusion through the live read transaction, acknowledgement
+and final original checks. No such read loan is introduced by connection custody.
+Native/deployed qualification remains separate.

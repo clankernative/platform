@@ -1,6 +1,5 @@
-//! Real-SQLite observations and replacement counterexamples for the pinned
-//! Unix VFS. Test-only foundation: never native admission or file provenance.
-//! Matching actual handles does not establish creator MAIN/WAL/SHM continuity.
+//! Actual SQLite-owned descriptor observations for the pinned Unix VFS.
+//! These are DATA, never admission, provenance or writer exclusion by themselves.
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, Transaction};
 use serde_json::Value;
@@ -8,21 +7,22 @@ use serde_json::Value;
 const MAX_OBSERVATION: usize = 8192;
 
 #[derive(PartialEq, Eq)]
-struct Handles {
-    main: Handle,
-    journal: Option<Handle>,
-    shm: Option<Handle>,
+pub(super) struct Handles {
+    pub(super) main: Handle,
+    pub(super) journal: Option<Handle>,
+    pub(super) shm: Option<Handle>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Handle {
-    fd: i32,
-    device: u64,
-    inode: u64,
+pub(super) struct Handle {
+    pub(super) fd: i32,
+    pub(super) device: u64,
+    pub(super) inode: u64,
 }
 
 /// Borrows the actual transaction. No connection/handle getter, codec, clone,
 /// scalar constructor, permission or completion is supplied by this view.
+#[cfg(test)]
 struct OpenedFiles<'transaction> {
     connection: &'transaction Connection,
     handles: Handles,
@@ -101,6 +101,12 @@ fn read(connection: &Connection) -> Result<Handles> {
     // Force the actual read snapshot before inspecting the opened WAL/SHM.
     let _: i64 =
         connection.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| r.get(0))?;
+    held(connection)
+}
+
+// The already initialized keeper keeps all three actual descriptors alive even
+// between transactions. This query only describes those existing owned files.
+pub(super) fn held(connection: &Connection) -> Result<Handles> {
     let text: String =
         connection.query_row("SELECT substr(sqlite_filestat('main'),1,8193)", [], |r| {
             r.get(0)
@@ -108,6 +114,11 @@ fn read(connection: &Connection) -> Result<Handles> {
     decode(text.as_bytes())
 }
 
+pub(super) fn snapshot(transaction: &Transaction<'_>) -> Result<Handles> {
+    read(transaction)
+}
+
+#[cfg(test)]
 fn inspect<'transaction>(
     transaction: &'transaction Transaction<'_>,
 ) -> Result<OpenedFiles<'transaction>> {
@@ -118,6 +129,7 @@ fn inspect<'transaction>(
     })
 }
 
+#[cfg(test)]
 impl OpenedFiles<'_> {
     fn check_live(&self) -> Result<()> {
         ensure!(
