@@ -28,13 +28,15 @@ pub fn build(root: &Path) -> Result<PathBuf> {
         return Ok(checked);
     }
     fs::create_dir_all(executable.parent().context("runner directory")?)?;
+    let mut command = Command::new(&roc);
+    command
+        .arg("build")
+        .arg(root.join("ops/Runner.roc"))
+        .arg(format!("--output={}", executable.display()));
+    crate::roc_packages::configure(root, &mut command)?;
     run(
         root,
-        Command::new(&roc)
-            .arg("build")
-            .arg(root.join("ops/Runner.roc"))
-            .arg(format!("--output={}", executable.display()))
-            .env("ROC_CACHE_DIR", root.join("cli/.cache")),
+        command.env("ROC_CACHE_DIR", root.join("cli/.cache")),
     )?;
     for (name, expected) in day2::automation::SOURCES {
         ensure!(

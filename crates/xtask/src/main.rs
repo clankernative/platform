@@ -25,6 +25,7 @@ mod linux_qualification;
 mod linux_runtime_qualification;
 mod native_toolchain;
 mod provider_conformance;
+mod roc_packages;
 mod tooling;
 mod ui_assembly;
 mod ui_dependency;
@@ -328,6 +329,7 @@ fn main() -> Result<()> {
         "linux-provision-package",
         "linux-provision-inspect",
         "architecture-proof-candidate-inventory",
+        "admit-roc-packages",
     ]
     .contains(&action.as_str())
         || action == "app-contracts"
@@ -366,6 +368,10 @@ fn main() -> Result<()> {
         }
     }
     match action.as_str() {
+        "admit-roc-packages" => {
+            ensure!(args.next().is_none(), "package input admission accepts no overrides");
+            roc_packages::admit(&root)?;
+        }
         "build-tooling-image" => {
             ensure!(
                 args.next().is_none(),
@@ -1303,6 +1309,7 @@ fn build_cli(root: &Path) -> Result<()> {
                 if operation == "build" {
                     command.arg("--output=day2");
                 }
+                roc_packages::configure(root, &mut command)?;
                 run(
                     &root.join("cli"),
                     command.env("ROC_CACHE_DIR", root.join("cli/.cache")),
@@ -1311,11 +1318,12 @@ fn build_cli(root: &Path) -> Result<()> {
             }
             "cli-workflow-tests" => {
                 ensure!(args.is_empty(), "workflow tests accept no overrides");
+                let mut command = Command::new(&roc);
+                command.args(["test", "ops/Runner.roc"]);
+                roc_packages::configure(root, &mut command)?;
                 run(
                     root,
-                    Command::new(&roc)
-                        .args(["test", "ops/Runner.roc"])
-                        .env("ROC_CACHE_DIR", root.join("cli/.cache")),
+                    command.env("ROC_CACHE_DIR", root.join("cli/.cache")),
                 )?;
                 "workflows".to_owned()
             }
@@ -1403,7 +1411,9 @@ fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String
 }
 
 fn bootstrap(root: &Path) -> Result<()> {
-    native_toolchain::bootstrap(root)
+    native_toolchain::bootstrap(root)?;
+    let roc = native_toolchain::load(root)?.verified_compiler(root)?;
+    roc_packages::prepare(root, &roc)
 }
 
 fn build_migration_fixture(root: &Path) -> Result<PathBuf> {

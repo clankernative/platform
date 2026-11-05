@@ -562,6 +562,7 @@
     "crates/xtask/src/main.rs",
     "crates/xtask/src/native_toolchain.rs",
     "crates/xtask/src/provider_conformance.rs",
+    "crates/xtask/src/roc_packages.rs",
     "crates/xtask/src/tooling.rs",
     "crates/xtask/src/ui_assembly.rs",
     "crates/xtask/src/ui_assembly/external_tests.rs",
