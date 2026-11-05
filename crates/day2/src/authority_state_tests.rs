@@ -652,7 +652,12 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
         crate::budget::settle_in(&tx, &unknown, &Settlement::Unknown)?;
         tx.commit()?;
     }
-    let before = crate::budget::inspect(&mut db)?;
+    let before = {
+            let snapshot = db.transaction()?;
+            let value = crate::budget::inspect_in(&snapshot)?;
+            snapshot.commit()?;
+            value
+        };
     assert_eq!(before.known_usage.calls, 2);
     assert_eq!(before.unknown_usage.len(), 1);
     assert!(
@@ -694,7 +699,12 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
             0
         );
         assert_eq!(invocation_stamp(&reopened, "copied")?, previous.stamp);
-        let after = crate::budget::inspect(&mut reopened)?;
+        let after = {
+            let snapshot = reopened.transaction()?;
+            let value = crate::budget::inspect_in(&snapshot)?;
+            snapshot.commit()?;
+            value
+        };
         assert!(after.frozen_after_restore);
         assert_eq!(after.ledger_id, before.ledger_id);
         assert_eq!(after.accounts, before.accounts);
