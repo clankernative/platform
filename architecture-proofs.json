@@ -1114,6 +1114,44 @@
       "owning_children": []
     },
     {
+      "source": "crates/day2/src/oauth/restore.rs",
+      "type_name": "AppliedCut",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn closed_count (& self) -> usize",
+        "pub (crate) fn cut (& self) -> & Cut",
+        "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >",
+        "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn apply_in < 'scope , 'database , 'cut > (tx : & 'scope Transaction < 'database > , before : Snapshot , cut : & 'cut Cut , profile : & Profile) -> Result < AppliedCut < 'scope , 'database , 'cut > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn closed_count (& self) -> usize"
+        },
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn cut (& self) -> & Cut"
+        },
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >"
+        },
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
       "source": "crates/day2/src/oauth/store.rs",
       "type_name": "RefreshDispatchPermit",
       "kind": "consuming",
@@ -4292,6 +4330,29 @@
       ]
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_authority.rs",
+      "type_name": "ClosedCredentialPeers",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedRestoreFence",
+          "signature": "pub (crate) fn closed_credential_peers < 'db > (& 'db self , connection : & 'db rusqlite :: Transaction < '_ > , applied : & 'db crate :: oauth :: restore :: AppliedCut < '_ , '_ , '_ > , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < ClosedCredentialPeers < 'db > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ClosedCredentialPeers < '_ >",
+          "signature": "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
       "source": "crates/day2/src/security_epoch/serving.rs",
       "type_name": "CurrentShellServingPhase",
       "owning_children": [
@@ -5635,67 +5696,6 @@
       ],
       "proof_uses": [],
       "owning_children": []
-    },
-    {
-      "source": "crates/day2/src/oauth/restore.rs",
-      "type_name": "AppliedCut",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn closed_count (& self) -> usize",
-        "pub (crate) fn cut (& self) -> & Cut",
-        "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >",
-        "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
-      ],
-      "factories": [
-        {
-          "owner": null,
-          "signature": "fn apply_in < 'scope , 'database , 'cut > (tx : & 'scope Transaction < 'database > , before : Snapshot , cut : & 'cut Cut , profile : & Profile) -> Result < AppliedCut < 'scope , 'database , 'cut > >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn closed_count (& self) -> usize"
-        },
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn cut (& self) -> & Cut"
-        },
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >"
-        },
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_authority.rs",
-      "type_name": "ClosedCredentialPeers",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "PreparedRestoreFence",
-          "signature": "pub (crate) fn closed_credential_peers < 'db > (& 'db self , connection : & 'db rusqlite :: Transaction < '_ > , applied : & 'db crate :: oauth :: restore :: AppliedCut < '_ , '_ , '_ > , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < ClosedCredentialPeers < 'db > >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "ClosedCredentialPeers < '_ >",
-          "signature": "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
     }
   ],
   "buffer_destructors": [
