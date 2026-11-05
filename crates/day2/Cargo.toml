@@ -66,6 +66,9 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Keep in-process generators without optional subprocess or bit-set dependencies.
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 proc-macro2 = "=1.0.107"
+# Source-bound native approval controls print the parsed AST with the same
+# already-locked token printer used by xtask; this is test-only.
+quote = "=1.0.47"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }
 syn = { version = "=2.0.119", features = ["full", "visit"] }
 tokio = { version = "1", features = ["test-util"] }

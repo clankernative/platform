@@ -220,6 +220,7 @@ pub(crate) fn fixture_for_storage_epoch(
             authority: selected.authority_key()?,
             source_incarnation: Digest::new(b"old-db"),
             security_epoch: source_epoch,
+            full_archive_digest: Digest::new(b"restore-cut-full-archive-fixture"),
             image: Digest::new(b"archive-sqlite"),
             schema,
             artifact: Digest::new(b"artifact"),
