@@ -76,14 +76,27 @@ fn cut(db: &mut Connection, profile: &Profile, seed: u64) -> Result<usize> {
     Ok(count)
 }
 
-pub(in crate::oauth) fn apply_for_storage(db:&mut Connection,seed:u64)->Result<usize> {
-    let scope:String=db.query_row("SELECT value FROM main.day2_meta WHERE key='scope'",[],|r|r.get(0))?;
-    let schema:String=db.query_row("SELECT value FROM main.day2_meta WHERE key='schema'",[],|r|r.get(0))?;
-    let profile=Profile::prepare()?;
-    let mut tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let before=Snapshot::capture(&tx,&profile)?;
-    let cut=crate::security_epoch::restore_cut::fixture_for_storage(before.digest().clone(),seed,&scope,schema.try_into()?)?;
-    let count=close_in(&mut tx,before,&cut,&profile)?;
+pub(in crate::oauth) fn apply_for_storage(db: &mut Connection, seed: u64) -> Result<usize> {
+    let scope: String = db.query_row(
+        "SELECT value FROM main.day2_meta WHERE key='scope'",
+        [],
+        |r| r.get(0),
+    )?;
+    let schema: String = db.query_row(
+        "SELECT value FROM main.day2_meta WHERE key='schema'",
+        [],
+        |r| r.get(0),
+    )?;
+    let profile = Profile::prepare()?;
+    let mut tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let before = Snapshot::capture(&tx, &profile)?;
+    let cut = crate::security_epoch::restore_cut::fixture_for_storage(
+        before.digest().clone(),
+        seed,
+        &scope,
+        schema.try_into()?,
+    )?;
+    let count = close_in(&mut tx, before, &cut, &profile)?;
     tx.commit()?;
     Ok(count)
 }
@@ -390,85 +403,164 @@ fn ordinary_restore_allows_only_empty_current_cut_metadata() -> Result<()> {
 }
 
 #[test]
-fn ordinary_preflight_refuses_retained_oauth_after_selection_removal_and_readonly_reopen() -> Result<()> {
-    let directory=tempfile::tempdir()?;let path=directory.path().join("archive.sqlite");
-    let mut db=database(&path)?;
-    {let tx=db.transaction()?;crate::store::require_no_managed_credential_restore_state(&tx)?;tx.commit()?;}
-    seed(&mut db)?;let original=histories(&db)?;
+fn ordinary_preflight_refuses_retained_oauth_after_selection_removal_and_readonly_reopen()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("archive.sqlite");
+    let mut db = database(&path)?;
+    {
+        let tx = db.transaction()?;
+        crate::store::require_no_managed_credential_restore_state(&tx)?;
+        tx.commit()?;
+    }
+    seed(&mut db)?;
+    let original = histories(&db)?;
     // No credential family or desired OAuth selection participates in this
     // actual ordinary preflight. Empty restore-cut tables cannot hide history.
     drop(db);
     for _ in 0..2 {
-        let mut db=Connection::open_with_flags(&path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let tx=db.transaction()?;
+        let mut db =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let tx = db.transaction()?;
         assert!(crate::store::require_no_managed_credential_restore_state(&tx).is_err());
-        assert_eq!(histories(&tx)?,original);
-        assert_eq!(tx.query_row("SELECT count(*) FROM main.oauth_restore_cuts",[],|r|r.get::<_,i64>(0))?,0);
+        assert_eq!(histories(&tx)?, original);
+        assert_eq!(
+            tx.query_row("SELECT count(*) FROM main.oauth_restore_cuts", [], |r| r
+                .get::<_, i64>(0))?,
+            0
+        );
         tx.rollback()?;
     }
     Ok(())
 }
 
 #[test]
-fn ordinary_preflight_preserves_the_callers_actual_progress_hook_on_success_and_refusal() -> Result<()> {
-    use std::sync::{Arc,atomic::{AtomicBool,AtomicUsize,Ordering::SeqCst}};
-    for occupied in [false,true] {
-        let directory=tempfile::tempdir()?;let mut db=database(&directory.path().join("archive.sqlite"))?;
-        if occupied {seed(&mut db)?;}
-        let calls=Arc::new(AtomicUsize::new(0));let interrupt=Arc::new(AtomicBool::new(false));
-        let counter=calls.clone();let stop=interrupt.clone();
-        db.progress_handler(1,Some(move|| {counter.fetch_add(1,SeqCst);stop.load(SeqCst)}))?;
-        let tx=db.transaction()?;
-        assert_eq!(crate::store::require_no_managed_credential_restore_state(&tx).is_err(),occupied);
+fn ordinary_preflight_preserves_the_callers_actual_progress_hook_on_success_and_refusal()
+-> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+    };
+    for occupied in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let mut db = database(&directory.path().join("archive.sqlite"))?;
+        if occupied {
+            seed(&mut db)?;
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let counter = calls.clone();
+        let stop = interrupt.clone();
+        db.progress_handler(
+            1,
+            Some(move || {
+                counter.fetch_add(1, SeqCst);
+                stop.load(SeqCst)
+            }),
+        )?;
+        let tx = db.transaction()?;
+        assert_eq!(
+            crate::store::require_no_managed_credential_restore_state(&tx).is_err(),
+            occupied
+        );
         tx.rollback()?;
-        let before=calls.load(SeqCst);
+        let before = calls.load(SeqCst);
         let _:i64=db.query_row("WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<100) SELECT sum(i) FROM n",[],|r|r.get(0))?;
-        assert!(calls.load(SeqCst)>before,"preflight replaced the caller's hook");
-        interrupt.store(true,SeqCst);
-        assert!(db.query_row("SELECT 1",[],|r|r.get::<_,i64>(0)).is_err());
-        db.progress_handler(0,None::<fn()->bool>)?;
+        assert!(
+            calls.load(SeqCst) > before,
+            "preflight replaced the caller's hook"
+        );
+        interrupt.store(true, SeqCst);
+        assert!(
+            db.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                .is_err()
+        );
+        db.progress_handler(0, None::<fn() -> bool>)?;
     }
     Ok(())
 }
 
-const CHILD:&str="oauth::restore::tests::restore_cut_process_child";
+const CHILD: &str = "oauth::restore::tests::restore_cut_process_child";
 
 #[test]
 fn actual_process_loss_before_and_after_outer_commit_has_one_replayable_cut() -> Result<()> {
     for stage in 0..3 {
-        let directory=tempfile::tempdir()?;
-        let output=std::process::Command::new(std::env::current_exe()?)
-            .args(["--exact",CHILD,"--ignored","--nocapture","--test-threads=1"])
-            .env_clear().env("G1_RESTORE_CUT_ROOT",directory.path())
-            .env("G1_RESTORE_CUT_STAGE",stage.to_string()).output()?;
-        assert_eq!(output.status.code(),Some(70+stage),"child did not reach its controlled loss point");
+        let directory = tempfile::tempdir()?;
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                CHILD,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("G1_RESTORE_CUT_ROOT", directory.path())
+            .env("G1_RESTORE_CUT_STAGE", stage.to_string())
+            .output()?;
+        assert_eq!(
+            output.status.code(),
+            Some(70 + stage),
+            "child did not reach its controlled loss point"
+        );
         for _ in 0..2 {
-            let db=Connection::open(directory.path().join("app.sqlite"))?;
-            let applied=stage==2; // Independent expected durable boundary.
-            assert_eq!(db.query_row("SELECT count(*) FROM main.oauth_restore_cuts",[],|r|r.get::<_,i64>(0))?,i64::from(applied));
-            assert_eq!(db.query_row("SELECT count(*) FROM main.oauth_restore_closed",[],|r|r.get::<_,i64>(0))?,if applied {7} else {0});
+            let db = Connection::open(directory.path().join("app.sqlite"))?;
+            let applied = stage == 2; // Independent expected durable boundary.
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM main.oauth_restore_cuts", [], |r| r
+                    .get::<_, i64>(0))?,
+                i64::from(applied)
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM main.oauth_restore_closed", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+                if applied { 7 } else { 0 }
+            );
             assert_eq!(db.query_row("SELECT count(*) FROM main.oauth_connection_slots WHERE status=?1 AND security_epoch=?2",params![if applied {"reauth_required"} else {"active"},if applied {2} else {1}],|r|r.get::<_,i64>(0))?,4);
-            assert_eq!(db.query_row("SELECT state,code_ref FROM main.oauth_connect_attempts WHERE attempt='sent'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?,("exchange_may_have_been_sent".into(),"retained_code".into()));
-            assert_eq!(db.query_row("SELECT receipt FROM main.oauth_refresh_attempts WHERE attempt='refresh_3'",[],|r|r.get::<_,String>(0))?,"known_receipt");
+            assert_eq!(
+                db.query_row(
+                    "SELECT state,code_ref FROM main.oauth_connect_attempts WHERE attempt='sent'",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                )?,
+                ("exchange_may_have_been_sent".into(), "retained_code".into())
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT receipt FROM main.oauth_refresh_attempts WHERE attempt='refresh_3'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "known_receipt"
+            );
         }
     }
     Ok(())
 }
 
 #[test]
-#[ignore="singleton subprocess invoked by the mandatory process-loss parent"]
+#[ignore = "singleton subprocess invoked by the mandatory process-loss parent"]
 fn restore_cut_process_child() -> Result<()> {
-    let root=std::path::PathBuf::from(std::env::var_os("G1_RESTORE_CUT_ROOT").ok_or_else(||anyhow::anyhow!("owned child root required"))?);
-    let stage:i32=std::env::var("G1_RESTORE_CUT_STAGE")?.parse()?;
+    let root = std::path::PathBuf::from(
+        std::env::var_os("G1_RESTORE_CUT_ROOT")
+            .ok_or_else(|| anyhow::anyhow!("owned child root required"))?,
+    );
+    let stage: i32 = std::env::var("G1_RESTORE_CUT_STAGE")?.parse()?;
     assert!((0..3).contains(&stage));
-    let mut db=database(&root.join("app.sqlite"))?;seed(&mut db)?;
-    let profile=Profile::prepare()?;
-    let mut tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let before=Snapshot::capture(&tx,&profile)?;
-    let cut=crate::security_epoch::restore_cut::fixture(before.digest().clone(),101)?;
-    if stage==0 {std::process::exit(70);}
-    close_in(&mut tx,before,&cut,&profile)?;
-    if stage==1 {std::process::exit(71);}
+    let mut db = database(&root.join("app.sqlite"))?;
+    seed(&mut db)?;
+    let profile = Profile::prepare()?;
+    let mut tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let before = Snapshot::capture(&tx, &profile)?;
+    let cut = crate::security_epoch::restore_cut::fixture(before.digest().clone(), 101)?;
+    if stage == 0 {
+        std::process::exit(70);
+    }
+    close_in(&mut tx, before, &cut, &profile)?;
+    if stage == 1 {
+        std::process::exit(71);
+    }
     tx.commit()?;
     std::process::exit(72)
 }
@@ -519,7 +611,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         ensure!(selected.len() == 1, "actual_cut_gate_selector_count");
         Ok(selected.remove(0))
     }
-    fn accepts(block: &syn::Block, prefix: &str, guard: &str, count:usize) -> Result<bool> {
+    fn accepts(block: &syn::Block, prefix: &str, guard: &str, count: usize) -> Result<bool> {
         let expected: syn::Block = syn::parse_str(&format!("{{{prefix}{guard}}}"))?;
         let prefix: Vec<_> = expected
             .stmts
@@ -667,32 +759,53 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         };
         let guard = format!("{root}::require_open({db},{root}::Kind::{kind},{id})?;");
         let block = body(source, name, owner)?;
-        let count=if kind=="Use" {2} else {1};
-        assert!(accepts(&block, prefix, &guard,count)?, "{name}");
-        if kind=="Use" {
-            let decoded:syn::Stmt=syn::parse_str("let claims:Claims=crate::json::decode(encoded.as_bytes())?;")?;
-            let positions:Vec<_>=block.stmts.iter().enumerate().filter(|(_,statement)|statement.to_token_stream().to_string()==decoded.to_token_stream().to_string()).map(|(i,_)|i).collect();
-            assert_eq!(positions.len(),1);
-            let check:syn::Stmt=syn::parse_str("super::restore::require_open(db,super::restore::Kind::UseBinding,claim_identity(&claims)?.as_str())?;")?;
-            assert_eq!(block.stmts[positions[0]+1].to_token_stream().to_string(),check.to_token_stream().to_string());
-            let mut omitted=block.clone();omitted.stmts.remove(positions[0]+1);
-            assert!(!accepts(&omitted,prefix,&guard,count)?);
+        let count = if kind == "Use" { 2 } else { 1 };
+        assert!(accepts(&block, prefix, &guard, count)?, "{name}");
+        if kind == "Use" {
+            let decoded: syn::Stmt =
+                syn::parse_str("let claims:Claims=crate::json::decode(encoded.as_bytes())?;")?;
+            let positions: Vec<_> = block
+                .stmts
+                .iter()
+                .enumerate()
+                .filter(|(_, statement)| {
+                    statement.to_token_stream().to_string() == decoded.to_token_stream().to_string()
+                })
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(positions.len(), 1);
+            let check: syn::Stmt = syn::parse_str(
+                "super::restore::require_open(db,super::restore::Kind::UseBinding,claim_identity(&claims)?.as_str())?;",
+            )?;
+            assert_eq!(
+                block.stmts[positions[0] + 1].to_token_stream().to_string(),
+                check.to_token_stream().to_string()
+            );
+            let mut omitted = block.clone();
+            omitted.stmts.remove(positions[0] + 1);
+            assert!(!accepts(&omitted, prefix, &guard, count)?);
         }
         let expected: syn::Block = syn::parse_str(&format!("{{{prefix}{guard}}}"))?;
         let index = expected.stmts.len() - 1;
         let mut deleted = block.clone();
         deleted.stmts.remove(index);
-        assert!(!accepts(&deleted, prefix, &guard,count)?, "deleted {name}");
+        assert!(!accepts(&deleted, prefix, &guard, count)?, "deleted {name}");
         let mut delayed = block.clone();
         let check = delayed.stmts.remove(index);
         delayed.stmts.push(check);
-        assert!(!accepts(&delayed, prefix, &guard,count)?, "delayed {name}");
+        assert!(!accepts(&delayed, prefix, &guard, count)?, "delayed {name}");
         let mut duplicate = block.clone();
         duplicate.stmts.insert(index, expected.stmts[index].clone());
-        assert!(!accepts(&duplicate, prefix, &guard,count)?, "duplicate {name}");
+        assert!(
+            !accepts(&duplicate, prefix, &guard, count)?,
+            "duplicate {name}"
+        );
         let mut wrong = block.clone();
         wrong.stmts[index] = syn::parse_str(&guard.replace(id, "\"different_original\""))?;
-        assert!(!accepts(&wrong, prefix, &guard,count)?, "retargeted {name}");
+        assert!(
+            !accepts(&wrong, prefix, &guard, count)?,
+            "retargeted {name}"
+        );
     }
     Ok(())
 }
