@@ -151,6 +151,33 @@ impl Drop for Flight {
     }
 }
 
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($owner:ty, $bound:path) => {{
+            trait Ambiguous<T> { fn check() {} }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, Clone);
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, Copy);
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, Default);
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, Send);
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, Sync);
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, serde::Serialize);
+    assert_not_impl!(crate::security_epoch::restore_staging::Disposition, serde::Deserialize<'static>);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, Clone);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, Copy);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, Default);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, Send);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, Sync);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, serde::Serialize);
+    assert_not_impl!(crate::security_epoch::restore_staging::Flight, serde::Deserialize<'static>);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
