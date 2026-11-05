@@ -1773,6 +1773,8 @@ jobs:
       matrix:
         stack: [cluster, app-edge, security-shell-edge, security-shell, security-epoch-controller, day2-app, qualification-runner, native-enrollment, native-enrollment-observer-access, native-enrollment-pool, native-enrollment-profile, native-enrollment-root]
     steps:
+      - name: Create the job-local provider cache directory
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1781,8 +1783,6 @@ jobs:
           tofu_version: 1.11.5
           tofu_wrapper: false
       - run: tofu fmt -check -recursive deploy/gke/stacks
-      - name: Create the job-local provider cache directory
-        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1802,6 +1802,8 @@ jobs:
       TF_REGISTRY_DISCOVERY_RETRY: '5'
       TF_REGISTRY_CLIENT_TIMEOUT: '30'
     steps:
+      - name: Create the job-local provider cache directory
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1810,8 +1812,6 @@ jobs:
           tofu_version: 1.11.5
           tofu_wrapper: false
       - run: tofu fmt -check -recursive deploy/integrations
-      - name: Create the job-local provider cache directory
-        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1834,6 +1834,8 @@ jobs:
       TF_REGISTRY_DISCOVERY_RETRY: '5'
       TF_REGISTRY_CLIENT_TIMEOUT: '30'
     steps:
+      - name: Create the job-local provider cache directory
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1842,8 +1844,6 @@ jobs:
           tofu_version: 1.11.5
           tofu_wrapper: false
       - run: tofu fmt -check -recursive deploy/integrations/firestore-security-epoch
-      - name: Create the job-local provider cache directory
-        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1863,6 +1863,8 @@ jobs:
       TF_REGISTRY_DISCOVERY_RETRY: '5'
       TF_REGISTRY_CLIENT_TIMEOUT: '30'
     steps:
+      - name: Create the job-local provider cache directory
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1871,8 +1873,6 @@ jobs:
           tofu_version: 1.11.5
           tofu_wrapper: false
       - run: tofu fmt -check -recursive deploy/integrations/gke-security-epoch-access
-      - name: Create the job-local provider cache directory
-        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
