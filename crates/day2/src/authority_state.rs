@@ -1337,10 +1337,13 @@ fn fence_restored_in(
     let mut entropy = [0_u8; 32];
     getrandom::fill(&mut entropy)
         .map_err(|error| anyhow::anyhow!("authority restore entropy: {error}"))?;
-    let schema = RestoreFenceSchema::prepare()?;
-    PreparedRestoreFence::new(active, relocated, Digest::new(&entropy), not_before)?
-        .apply_in(connection, &schema)?;
-    release_blocked_cursor_pins(connection)
+    let prepared = PreparedRestoreFence::new(active, relocated, Digest::new(&entropy), not_before)?;
+    // Preserve the existing unmanaged restore contract and caller hook. The
+    // separate secure leaf never borrows this ordinary initialization path.
+    crate::budget::invalidate_restored(connection)?;
+    crate::delegation_commands::restore_fence_in(connection, not_before)?;
+    store(connection, &prepared.disabled, "platform-restore", "restore-fence")?;
+    discard_restored_sessions_in(connection)
 }
 
 /// Prepared denial DATA, never maintenance approval, a clock witness, native
@@ -1391,6 +1394,7 @@ impl PreparedRestoreFence {
         schema: &RestoreFenceSchema,
     ) -> Result<()> {
         require_transaction(connection)?;
+        crate::oauth::schema::require_admission(connection)?;
         require_single_restore_database(connection)?;
         schema.require_current_in(connection)?;
         ensure!(
@@ -1438,13 +1442,16 @@ impl RestoreFenceSchema {
         Ok(Self { reference })
     }
 
-    /// The actual runtime's permanent execution hook must remain installed.
-    /// Its cumulative admission counter also bounds this nested read-only scan.
-    /// The complete reset must independently admit every other app/private unit.
+    /// The enclosing adapter owns an active cumulative scope on this connection:
+    /// a raw offline target owns its temporary hook, while Runtime retains its
+    /// permanent hook. This leaf never installs, removes or assumes a hook.
+    /// Complete reset must independently admit every other app/private unit.
     fn require_current_in(&self, connection: &Connection) -> Result<()> {
         require_transaction(connection)?;
         require_single_restore_database(connection)?;
-        crate::oauth::schema::admit_with_runtime_hook(connection, |db| {
+        crate::oauth::schema::require_admission(connection)?;
+        let db = connection;
+        {
             let expected = Self::objects(&self.reference)?;
             ensure!(
                 Self::objects(db)? == expected,
@@ -1452,7 +1459,16 @@ impl RestoreFenceSchema {
             );
             for (kind, name, _) in expected {
                 match kind.as_str() {
-                    "table" => crate::oauth::schema::exact_layout(db, &self.reference, &name)?,
+                    "table" => {
+                        crate::oauth::schema::exact_layout(db, &self.reference, &name)?;
+                        // Partial integrity check covers only this admitted
+                        // table and its indexes, not unadmitted app/private units.
+                        let mut statement = db.prepare(&format!("PRAGMA integrity_check({name})"))?;
+                        let mut rows = statement.query([])?;
+                        let first = rows.next()?.context("restore_integrity_result_missing")?;
+                        crate::oauth::schema::materialize(first)?;
+                        ensure!(first.get_ref(0)?.as_str()? == "ok" && rows.next()?.is_none(), "restore_integrity_refused");
+                    },
                     "trigger" => ensure!(
                         crate::oauth::schema::schema_sql(db, "trigger", &name)?
                             == crate::oauth::schema::schema_sql(&self.reference, "trigger", &name)?,
@@ -1470,17 +1486,11 @@ impl RestoreFenceSchema {
                 [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
             Digest::try_from(ledger)?;
             ensure!(restored == 0 && version == 1, "restore_budget_not_current");
-            crate::budget::inspect_in(db)?;
-            let mut statement = db.prepare("PRAGMA integrity_check")?;
-            let mut rows = statement.query([])?;
-            let first = rows.next()?.context("restore_integrity_result_missing")?;
-            crate::oauth::schema::materialize(first)?;
-            ensure!(
-                first.get_ref(0)?.as_str()? == "ok" && rows.next()?.is_none(),
-                "restore_integrity_refused"
-            );
+            // This is structural denial admission. Semantic validation of all
+            // serialized receipts/history remains the complete owner's duty;
+            // do not traverse optional resource-provider units from here.
             Ok(())
-        })
+        }
     }
 
     fn owns(name: &str) -> bool {
@@ -1489,6 +1499,7 @@ impl RestoreFenceSchema {
             || name.starts_with("day2_budget_")
             || name.starts_with("day2_app_")
             || name == "day2_invocation_authority"
+            || name.starts_with("day2_invocations")
             || name == "day2_inherited_origins"
             || name == "day2_web_sessions"
             || name == "day2_web_secret"
