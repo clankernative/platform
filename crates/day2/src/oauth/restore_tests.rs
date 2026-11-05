@@ -194,35 +194,55 @@ fn each_imported_generation_source_contributes_its_own_conservative_floor() -> R
     // slot. It is not a valid provider credential, grant or publication proof.
     // It must still reserve its generation so fresh authorization cannot adopt
     // it or collide with old material. Expected values are independent literals.
-    for (source,slot,expected) in [
-        ("slot","refresh_slot_0",9),
-        ("refresh","refresh_slot_0",10),
-        ("pending","slot_pending",11),
-        ("token","opaque_token_slot",12),
-        ("quarantine","opaque_quarantine_slot",13),
+    for (source, slot, expected) in [
+        ("slot", "refresh_slot_0", 9),
+        ("refresh", "refresh_slot_0", 10),
+        ("pending", "slot_pending", 11),
+        ("token", "opaque_token_slot", 12),
+        ("quarantine", "opaque_quarantine_slot", 13),
     ] {
-        let dir=tempfile::tempdir()?;
-        let path=dir.path().join("source.sqlite");
-        let mut db=database(&path)?;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("source.sqlite");
+        let mut db = database(&path)?;
         seed(&mut db)?;
         match source {
-            "slot"=>{db.execute("UPDATE oauth_connection_slots SET generation=9 WHERE slot='refresh_slot_0'",[])?;}
-            "refresh"=>{db.execute("UPDATE oauth_refresh_attempts SET generation=10 WHERE attempt='refresh_0'",[])?;}
-            "pending"=>{db.execute("UPDATE oauth_connect_attempts SET expected_generation=10,proposed_generation=11 WHERE attempt='pending'",[])?;}
-            "token"=>{db.execute("INSERT INTO oauth_private_tokens VALUES('opaque_reference','opaque_token_slot',12,'account','opaque_digest','version',zeroblob(12),zeroblob(16))",[])?;}
-            "quarantine"=>{db.execute("INSERT INTO oauth_external_quarantine VALUES('pending','opaque_quarantine_slot',13,'account','scope','challenge',1,'reference','token_digest','version',zeroblob(12),zeroblob(16),'identity_digest','version',zeroblob(12),zeroblob(16))",[])?;}
-            _=>unreachable!(),
+            "slot" => {
+                db.execute(
+                    "UPDATE oauth_connection_slots SET generation=9 WHERE slot='refresh_slot_0'",
+                    [],
+                )?;
+            }
+            "refresh" => {
+                db.execute(
+                    "UPDATE oauth_refresh_attempts SET generation=10 WHERE attempt='refresh_0'",
+                    [],
+                )?;
+            }
+            "pending" => {
+                db.execute("UPDATE oauth_connect_attempts SET expected_generation=10,proposed_generation=11 WHERE attempt='pending'",[])?;
+            }
+            "token" => {
+                db.execute("INSERT INTO oauth_private_tokens VALUES('opaque_reference','opaque_token_slot',12,'account','opaque_digest','version',zeroblob(12),zeroblob(16))",[])?;
+            }
+            "quarantine" => {
+                db.execute("INSERT INTO oauth_external_quarantine VALUES('pending','opaque_quarantine_slot',13,'account','scope','challenge',1,'reference','token_digest','version',zeroblob(12),zeroblob(16),'identity_digest','version',zeroblob(12),zeroblob(16))",[])?;
+            }
+            _ => unreachable!(),
         }
-        cut(&mut db,&Profile::prepare()?,98)?;
+        cut(&mut db, &Profile::prepare()?, 98)?;
         drop(db);
         for _ in 0..2 {
-            let db=Connection::open(&path)?;
-            assert_eq!(super::generation_floor(&db,slot)?,Some(expected),"{source}");
-            assert_eq!(super::next_generation(None,expected)?,expected+1);
-            if source=="token" {
+            let db = Connection::open(&path)?;
+            assert_eq!(
+                super::generation_floor(&db, slot)?,
+                Some(expected),
+                "{source}"
+            );
+            assert_eq!(super::next_generation(None, expected)?, expected + 1);
+            if source == "token" {
                 assert_eq!(db.query_row("SELECT generation,hex(ciphertext) FROM oauth_private_tokens WHERE reference='opaque_reference'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?,(12,"00".repeat(16)));
             }
-            if source=="quarantine" {
+            if source == "quarantine" {
                 assert_eq!(db.query_row("SELECT generation,hex(token_ciphertext) FROM oauth_external_quarantine WHERE attempt='pending'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?,(13,"00".repeat(16)));
             }
         }
