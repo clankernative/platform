@@ -128,6 +128,7 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
         let path = dir.path().join("app.sqlite");
         let mut db = database(&path)?;
         seed(&mut db)?;
+        if seed_number == 17 {assert!(connect::mark_uncertain(&db,"sent")?);}
         let history = histories(&db)?;
         assert_eq!(cut(&mut db, &profile, seed_number)?, 7); // 2 connect + 4 refresh + 1 grant.
         drop(db);
@@ -163,6 +164,10 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
                 .is_err()
             );
             assert!(connect::begin(&mut db, &intent("pending"), 5).is_err());
+            for attempt in ["pending","sent"] {
+                assert!(connect::cancel(&mut db,attempt, |_|panic!("closed cancellation entered custody")).is_err());
+                assert!(connect::expire(&mut db,attempt,1000, |_|panic!("closed expiry entered custody")).is_err());
+            }
             assert!(require_open(&db, Kind::Inbound, "old_grant").is_err());
             assert!(require_no_history(&db).is_err());
             assert!(
@@ -775,6 +780,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     specs.push((connect,"authorize_and_commit_exchange",None,"identifier(attempt)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
     specs.push((connect,"await_account_approval",None,"identifier(attempt)?;identifier(account)?;identifier(scope_evidence)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
     specs.push((connect,"quarantine_external_bound",None,"let intent=verified.intent();let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","&intent.attempt"));
+    specs.push((connect,"finish_blocked",None,"identifier(attempt)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
     specs.push((
         exchange,
         "load_binding",
@@ -862,7 +868,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             id,
         ));
     }
-    assert_eq!(specs.len(), 34);
+    assert_eq!(specs.len(), 35);
     for (source, name, owner, prefix, kind, db, id) in specs {
         let root = if owner.is_some() {
             "crate::oauth::restore"

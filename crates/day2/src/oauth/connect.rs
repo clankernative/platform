@@ -536,6 +536,7 @@ fn finish_blocked(
 ) -> Result<bool> {
     identifier(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::restore::require_open(&tx, super::restore::Kind::Connect, attempt)?;
     let eligible: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM oauth_connect_attempts
          WHERE attempt = ?1 AND state IN (
