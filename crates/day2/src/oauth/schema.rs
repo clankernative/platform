@@ -115,9 +115,13 @@ pub(crate) fn materialize(row: &rusqlite::Row<'_>) -> Result<()> {
 pub(crate) fn require_admission(db: &Connection) -> Result<()> {
     ADMISSION.with(|active| {
         let active = active.borrow();
-        let budget = active.as_ref().context("restore_requires_owned_admission_scope")?;
-        ensure!(budget.connection == std::ptr::from_ref(db) as usize && !budget.exhausted,
-            "restore_admission_scope_changed");
+        let budget = active
+            .as_ref()
+            .context("restore_requires_owned_admission_scope")?;
+        ensure!(
+            budget.connection == std::ptr::from_ref(db) as usize && !budget.exhausted,
+            "restore_admission_scope_changed"
+        );
         Ok(())
     })
 }

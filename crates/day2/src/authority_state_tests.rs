@@ -1,6 +1,6 @@
 use super::*;
-use crate::security_epoch::restore_authority::RestoreFenceSchema;
 use crate::authority::{Mode, OperationPolicy};
+use crate::security_epoch::restore_authority::RestoreFenceSchema;
 use day2_capabilities::{
     BindingRef, Name,
     credentials::{
@@ -470,7 +470,7 @@ fn policy_retry_after_artifact_upgrade_returns_original_receipt_and_rejects_acti
         different_document.document.enabled = false;
         assert!(cached_policy_receipt_in(&tx, &operator, &different_document).is_err());
         let saved = current(&tx)?;
-            fence_restored_in(&tx, saved, Path::new("/restored/two"))?;
+        fence_restored_in(&tx, saved, Path::new("/restored/two"))?;
         assert!(cached_policy_receipt_in(&tx, &operator, &original_request)?.is_none());
         tx.commit()?;
     }
@@ -833,7 +833,10 @@ fn prepared_restore_fence_rejects_partial_unknown_or_corrupt_units_without_repai
         // Catching and committing the refusal cannot publish a replacement
         // table, guard, ledger or current marker from an initializer.
         let tx = db.transaction()?;
-        assert!(crate::oauth::schema::admit(&tx, |db| prepared.apply_in(db, &schema)).is_err(), "{mutation}");
+        assert!(
+            crate::oauth::schema::admit(&tx, |db| prepared.apply_in(db, &schema)).is_err(),
+            "{mutation}"
+        );
         tx.commit()?;
         assert_eq!(current(&db)?, original);
         let after_schema: Vec<(String, String, Option<String>)> = db
@@ -852,78 +855,122 @@ fn prepared_restore_fence_rejects_partial_unknown_or_corrupt_units_without_repai
 
 #[test]
 fn prepared_restore_fence_requires_same_active_scope_and_preserves_the_actual_hook() -> Result<()> {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-    let mut db=Connection::open_in_memory()?;initialize_restore_fence(&mut db)?;
-    let mut other=Connection::open_in_memory()?;initialize_restore_fence(&mut other)?;
-    let schema=RestoreFenceSchema::prepare()?;
-    let original=current(&db)?;
-    let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::new(b"hook-fence"),100)?;
-    let calls=Arc::new(AtomicUsize::new(0));let observed=calls.clone();
-    db.progress_handler(1,Some(move || {observed.fetch_add(1,Ordering::SeqCst);crate::oauth::schema::admission_step(1)}))?;
-    let tx=db.transaction()?;
-    assert!(prepared.apply_in(&tx,&schema).is_err());
-    assert_eq!(current(&tx)?,original);
-    let before=calls.load(Ordering::SeqCst);
-    assert_eq!(tx.query_row("SELECT 17",[],|r|r.get::<_,i64>(0))?,17);
-    assert!(calls.load(Ordering::SeqCst)>before);
-    let foreign=other.transaction()?;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let mut db = Connection::open_in_memory()?;
+    initialize_restore_fence(&mut db)?;
+    let mut other = Connection::open_in_memory()?;
+    initialize_restore_fence(&mut other)?;
+    let schema = RestoreFenceSchema::prepare()?;
+    let original = current(&db)?;
+    let prepared = PreparedRestoreFence::new(
+        original.clone(),
+        Path::new("/restored/one"),
+        Digest::new(b"hook-fence"),
+        100,
+    )?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    db.progress_handler(
+        1,
+        Some(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            crate::oauth::schema::admission_step(1)
+        }),
+    )?;
+    let tx = db.transaction()?;
+    assert!(prepared.apply_in(&tx, &schema).is_err());
+    assert_eq!(current(&tx)?, original);
+    let before = calls.load(Ordering::SeqCst);
+    assert_eq!(tx.query_row("SELECT 17", [], |r| r.get::<_, i64>(0))?, 17);
+    assert!(calls.load(Ordering::SeqCst) > before);
+    let foreign = other.transaction()?;
     // The explicitly installed callback above really debits the current scope;
     // this is not an assertion that an arbitrary raw connection has such a hook.
     crate::oauth::schema::admit_with_runtime_hook(&tx, |db| {
-        assert!(prepared.apply_in(&foreign,&schema).is_err());
-        prepared.apply_in(db,&schema)
+        assert!(prepared.apply_in(&foreign, &schema).is_err());
+        prepared.apply_in(db, &schema)
     })?;
-    let before=calls.load(Ordering::SeqCst);
-    assert_eq!(tx.query_row("SELECT 23",[],|r|r.get::<_,i64>(0))?,23);
-    assert!(calls.load(Ordering::SeqCst)>before);
-    tx.rollback()?;foreign.rollback()?;
-    assert_eq!(current(&db)?,original);
+    let before = calls.load(Ordering::SeqCst);
+    assert_eq!(tx.query_row("SELECT 23", [], |r| r.get::<_, i64>(0))?, 23);
+    assert!(calls.load(Ordering::SeqCst) > before);
+    tx.rollback()?;
+    foreign.rollback()?;
+    assert_eq!(current(&db)?, original);
     Ok(())
 }
 
 #[test]
-fn prepared_restore_fence_owned_scope_stops_at_actual_vm_budget_without_denial_writes() -> Result<()> {
-    let mut db=Connection::open_in_memory()?;initialize_restore_fence(&mut db)?;
-    let original=current(&db)?;
-    let schema=RestoreFenceSchema::prepare()?;
-    let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::new(b"step-bounded-fence"),100)?;
-    let tx=db.transaction()?;
-    let mut entered=false;
-    let result=crate::oauth::schema::admit_with_limits(&tx,1024,16384,8*1048576,|db| {
-        entered=true;
-        prepared.apply_in(db,&schema)
+fn prepared_restore_fence_owned_scope_stops_at_actual_vm_budget_without_denial_writes() -> Result<()>
+{
+    let mut db = Connection::open_in_memory()?;
+    initialize_restore_fence(&mut db)?;
+    let original = current(&db)?;
+    let schema = RestoreFenceSchema::prepare()?;
+    let prepared = PreparedRestoreFence::new(
+        original.clone(),
+        Path::new("/restored/one"),
+        Digest::new(b"step-bounded-fence"),
+        100,
+    )?;
+    let tx = db.transaction()?;
+    let mut entered = false;
+    let result = crate::oauth::schema::admit_with_limits(&tx, 1024, 16384, 8 * 1048576, |db| {
+        entered = true;
+        prepared.apply_in(db, &schema)
     });
     assert!(entered);
-    let error=result.unwrap_err();
+    let error = result.unwrap_err();
     assert!(error.to_string().contains("budget"));
-    assert_eq!(current(&tx)?,original);
-    assert_eq!(tx.query_row("SELECT restored FROM day2_budget_meta",[],|r|r.get::<_,i64>(0))?,0);
+    assert_eq!(current(&tx)?, original);
+    assert_eq!(
+        tx.query_row("SELECT restored FROM day2_budget_meta", [], |r| r
+            .get::<_, i64>(0))?,
+        0
+    );
     // The temporary callback has actually been removed; a later finite query
     // succeeds rather than inheriting the exhausted scope or a renewed budget.
     assert_eq!(tx.query_row("WITH RECURSIVE n(v) AS(VALUES(0) UNION ALL SELECT v+1 FROM n WHERE v<1000) SELECT sum(v) FROM n",[],|r|r.get::<_,i64>(0))?,500500);
     tx.commit()?;
-    assert_eq!(current(&db)?,original);
+    assert_eq!(current(&db)?, original);
     Ok(())
 }
 
 #[test]
 fn prepared_restore_fence_late_failure_rolls_back_inside_the_actual_owned_scope() -> Result<()> {
-    let mut db=Connection::open_in_memory()?;initialize_restore_fence(&mut db)?;
-    let original=current(&db)?;
-    let schema=RestoreFenceSchema::prepare()?;
-    let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::new(b"late-denial-fault"),100)?;
+    let mut db = Connection::open_in_memory()?;
+    initialize_restore_fence(&mut db)?;
+    let original = current(&db)?;
+    let schema = RestoreFenceSchema::prepare()?;
+    let prepared = PreparedRestoreFence::new(
+        original.clone(),
+        Path::new("/restored/one"),
+        Digest::new(b"late-denial-fault"),
+        100,
+    )?;
     // A controlled callback failure after the real denial writes exercises the
     // same enclosing adapter savepoint, including callers that then commit.
-    let tx=db.transaction()?;
-    let outcome:Result<()>=crate::oauth::schema::admit(&tx,|db| {
-        prepared.apply_in(db,&schema)?;
+    let tx = db.transaction()?;
+    let outcome: Result<()> = crate::oauth::schema::admit(&tx, |db| {
+        prepared.apply_in(db, &schema)?;
         assert!(!current(db)?.document.enabled);
         anyhow::bail!("controlled post-fence failure")
     });
-    assert!(outcome.is_err());tx.commit()?;
-    assert_eq!(current(&db)?,original);
-    assert_eq!(db.query_row("SELECT restored FROM day2_budget_meta",[],|r|r.get::<_,i64>(0))?,0);
-    assert_eq!(db.query_row("SELECT count(*) FROM day2_app_restore_fence",[],|r|r.get::<_,i64>(0))?,0);
+    assert!(outcome.is_err());
+    tx.commit()?;
+    assert_eq!(current(&db)?, original);
+    assert_eq!(
+        db.query_row("SELECT restored FROM day2_budget_meta", [], |r| r
+            .get::<_, i64>(0))?,
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM day2_app_restore_fence", [], |r| r
+            .get::<_, i64>(0))?,
+        0
+    );
     Ok(())
 }
 

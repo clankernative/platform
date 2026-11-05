@@ -1343,7 +1343,12 @@ fn fence_restored_in(
     // separate secure leaf never borrows this ordinary initialization path.
     crate::budget::invalidate_restored(connection)?;
     crate::delegation_commands::restore_fence_in(connection, not_before)?;
-    store(connection, &prepared.into_disabled(), "platform-restore", "restore-fence")?;
+    store(
+        connection,
+        &prepared.into_disabled(),
+        "platform-restore",
+        "restore-fence",
+    )?;
     discard_restored_sessions_in(connection)
 }
 
