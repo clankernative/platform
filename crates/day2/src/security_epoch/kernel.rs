@@ -253,8 +253,15 @@ pub(super) struct Completion {
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Phase {
     PendingFirstHolder,
-    ActiveFirstHolder { completion: Box<Completion> },
-    Fenced { fence: Box<advance::Fence> },
+    ActiveFirstHolder {
+        completion: Box<Completion>,
+    },
+    Fenced {
+        fence: Box<advance::Fence>,
+    },
+    RestoredFirstHolder {
+        restoration: Box<restore::writer::Completion>,
+    },
 }
 
 /// Preserve the original typed map: Value would erase duplicate nested keys.
@@ -300,6 +307,7 @@ impl<'de> Deserialize<'de> for Phase {
                 let mut phase = None;
                 let mut completion = None;
                 let mut fence = None;
+                let mut restoration = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "phase" => {
@@ -320,20 +328,34 @@ impl<'de> Deserialize<'de> for Phase {
                             }
                             fence = Some(map.next_value::<PhaseObject<Box<advance::Fence>>>()?.0);
                         }
+                        "restoration" => {
+                            if restoration.is_some() {
+                                return Err(A::Error::duplicate_field("restoration"));
+                            }
+                            restoration = Some(
+                                map.next_value::<PhaseObject<Box<restore::writer::Completion>>>()?
+                                    .0,
+                            );
+                        }
                         _ => {
                             return Err(A::Error::unknown_field(
                                 &key,
-                                &["phase", "completion", "fence"],
+                                &["phase", "completion", "fence", "restoration"],
                             ));
                         }
                     }
                 }
-                match (phase.as_deref(), completion, fence) {
-                    (Some("pending_first_holder"), None, None) => Ok(Phase::PendingFirstHolder),
-                    (Some("active_first_holder"), Some(completion), None) => {
+                match (phase.as_deref(), completion, fence, restoration) {
+                    (Some("pending_first_holder"), None, None, None) => {
+                        Ok(Phase::PendingFirstHolder)
+                    }
+                    (Some("active_first_holder"), Some(completion), None, None) => {
                         Ok(Phase::ActiveFirstHolder { completion })
                     }
-                    (Some("fenced"), None, Some(fence)) => Ok(Phase::Fenced { fence }),
+                    (Some("fenced"), None, Some(fence), None) => Ok(Phase::Fenced { fence }),
+                    (Some("restored_first_holder"), None, None, Some(restoration)) => {
+                        Ok(Phase::RestoredFirstHolder { restoration })
+                    }
                     _ => Err(A::Error::custom("invalid closed external epoch phase")),
                 }
             }
@@ -510,6 +532,9 @@ pub(super) fn reconcile(
             receipt.request.clone()
         }
         Phase::Fenced { .. } => anyhow::bail!("security_epoch_authority_fenced"),
+        Phase::RestoredFirstHolder { .. } => {
+            anyhow::bail!("security_epoch_restore_admission_required")
+        }
     };
     let (expected_root, expected_sentinel) = state_request.records()?;
     ensure!(
@@ -536,6 +561,9 @@ pub(super) fn reconcile(
                 Ok(Outcome::Applied(Box::new(request.receipt()?)))
             }
             Phase::Fenced { .. } => anyhow::bail!("security_epoch_authority_fenced"),
+            Phase::RestoredFirstHolder { .. } => {
+                anyhow::bail!("security_epoch_restore_admission_required")
+            }
         },
     }
 }

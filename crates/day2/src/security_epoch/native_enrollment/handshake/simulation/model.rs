@@ -47,6 +47,17 @@ pub(super) fn contract(protocol: Protocol, sequence: u64) -> Vec<(Actor, Frame)>
             (Controller, Complete),
             (App, Accepted),
         ],
+        Protocol::RestoredStorage => &[
+            (Actor::Controller, BeginReady),
+            (Actor::App, Hello),
+            (Actor::Controller, Offer),
+            (Actor::App, Confirm),
+            (Actor::Controller, Complete),
+            (Actor::App, Accepted),
+            (Actor::Controller, Known),
+            (Actor::App, Consumed),
+            (Actor::Controller, Released),
+        ],
         Protocol::CurrentStorage => &[
             (Controller, BeginReady),
             (App, Hello),
@@ -144,7 +155,9 @@ impl Machine for Model {
     fn new(protocol: Protocol, actor: Actor) -> Self {
         let allowed = match protocol {
             Protocol::Enrollment => [Actor::Client, Actor::Issuer].contains(&actor),
-            Protocol::InitialStorage => [Actor::App, Actor::Controller].contains(&actor),
+            Protocol::InitialStorage | Protocol::RestoredStorage => {
+                [Actor::App, Actor::Controller].contains(&actor)
+            }
             Protocol::InitialServing => [Actor::Shell, Actor::Controller].contains(&actor),
             _ => false,
         };
@@ -250,7 +263,9 @@ impl Machine for Model {
                 "model sequence"
             );
             let protocol = match self.protocol {
-                Protocol::InitialStorage | Protocol::CurrentStorage => Protocol::CurrentStorage,
+                Protocol::InitialStorage | Protocol::RestoredStorage | Protocol::CurrentStorage => {
+                    Protocol::CurrentStorage
+                }
                 Protocol::InitialServing | Protocol::CurrentServing => Protocol::CurrentServing,
                 _ => anyhow::bail!("model enrollment is not renewable"),
             };
