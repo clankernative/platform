@@ -630,8 +630,16 @@ struct Trace {
 fn source() -> Result<Digest> {
     Digest::of(&(
         "day2-restore-time-floor-campaign-v1",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
         include_str!("../approval_time.rs"),
         include_str!("tests.rs"),
+        include_str!("../../kernel.rs"),
+        include_str!("../../tests.rs"),
+        include_str!("../../../../../day2-capabilities/src/lib.rs"),
+        include_str!("../../../../../day2-capabilities/src/security_epoch.rs"),
+        include_str!("../../../../../../Cargo.lock"),
+        include_str!("../../../../../../toolchain.json"),
     ))
 }
 
