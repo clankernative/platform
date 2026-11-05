@@ -19,6 +19,7 @@ use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 mod paired;
 mod restore;
 pub(super) use paired::{ActionTransaction, begin_action, read_with_slot};
+#[cfg(test)]
 pub(super) use restore::{
     Names as RestoreNames, Transaction as RestoreTransaction, commit_reply as restore_commit_reply,
 };
