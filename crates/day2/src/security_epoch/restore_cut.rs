@@ -133,8 +133,18 @@ impl Cut {
 
 #[cfg(test)]
 pub(crate) fn fixture(inventory: Digest, seed: u64) -> Result<Cut> {
+    fixture_for_storage(inventory,seed,"company/canary/calendar",Digest::new(b"schema"))
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_for_storage(inventory:Digest,seed:u64,scope:&str,schema:Digest)->Result<Cut> {
     use super::kernel::restore::{Backup, ExactKey};
-    let selected = super::tests::selection();
+    let mut selected = super::tests::selection();
+    let parts:Vec<_>=scope.split('/').collect();
+    ensure!(parts.len()==3,"fixture_scope");
+    selected.scope.installation=parts[0].to_owned().try_into()?;
+    selected.scope.environment=parts[1].to_owned().try_into()?;
+    selected.scope.app=parts[2].to_owned().try_into()?;
     let custody = BindingRef {
         id: "vault".try_into()?,
         revision: Digest::new(b"vault-binding"),
@@ -153,7 +163,7 @@ pub(crate) fn fixture(inventory: Digest, seed: u64) -> Result<Cut> {
             source_incarnation: Digest::new(b"old-db"),
             security_epoch: 1,
             image: Digest::new(b"archive-sqlite"),
-            schema: Digest::new(b"schema"),
+            schema,
             artifact: Digest::new(b"artifact"),
             key_set: selected.key_set.clone(),
             required_keys: vec![ExactKey {
