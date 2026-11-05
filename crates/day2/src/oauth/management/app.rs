@@ -249,7 +249,7 @@ impl Manager {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<(View, String, Option<String>)> {
-    crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, id)?;
+        crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, id)?;
         crate::oauth::connect::identifier(id)?;
         let (json, state, session): (String, String, Option<String>) = db.query_row(
             "SELECT view,state,session FROM oauth_management_intents WHERE id=?1",
@@ -269,7 +269,7 @@ impl Manager {
     }
 
     fn check_in(&self, db: &Connection, view: &View, identity: &iap::Verified) -> Result<()> {
-    crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, &view.id)?;
+        crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, &view.id)?;
         ensure!(
             self.authority_in(db, identity)? == view.authority
                 && Self::fence(db, &view.slot)? == view.fence,

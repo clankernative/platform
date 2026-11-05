@@ -424,7 +424,11 @@ pub(super) fn claim(
     owner: &Digest,
     now: i64,
 ) -> Result<AllocationData> {
-    super::restore::require_open(db, super::restore::Kind::Fresh, intent.commitment()?.as_str())?;
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     ensure!(
         !db.is_autocommit(),
         "native fresh original app transaction required"
@@ -493,7 +497,11 @@ pub(super) fn publish(
     request: &[u8],
     now: i64,
 ) -> Result<Digest> {
-    super::restore::require_open(db, super::restore::Kind::Fresh, intent.commitment()?.as_str())?;
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     ensure!(
         !db.is_autocommit(),
         "native fresh original app transaction required"
@@ -559,7 +567,11 @@ pub(super) fn consume_in_current_app_transaction(
     result: &Digest,
     now: i64,
 ) -> Result<()> {
-    super::restore::require_open(db, super::restore::Kind::Fresh, intent.commitment()?.as_str())?;
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     ensure!(
         !db.is_autocommit(),
         "native fresh final app transaction required"
@@ -584,7 +596,11 @@ pub(super) fn terminal_history(
     intent: &FreshIntent,
     owner: &Digest,
 ) -> Result<Option<Digest>> {
-    super::restore::require_open(db, super::restore::Kind::Fresh, intent.commitment()?.as_str())?;
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     let value: Option<String> = db
         .query_row(
             "SELECT result_digest FROM native_fresh_owners

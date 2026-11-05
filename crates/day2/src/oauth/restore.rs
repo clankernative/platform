@@ -1,20 +1,33 @@
 //! One-way offline restore denial. This is not approval, native exclusion,
 //! provider rollback, a restored writer or a way to recover an old permit.
 //! Existing outcomes/material stay intact; exact old continuations are fenced.
-use anyhow::{Result, ensure};
 use crate::security_epoch::restore_cut::Cut;
+use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use ring::digest::{Context as Hash, SHA256};
 use rusqlite::{Connection, Transaction, params, types::ValueRef};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Kind { Connect, Refresh, Management, Use, Fresh, Inbound }
+pub(crate) enum Kind {
+    Connect,
+    Refresh,
+    Management,
+    Use,
+    Fresh,
+    Inbound,
+}
 impl Kind {
-    fn text(self) -> &'static str { match self {
-        Self::Connect => "connect", Self::Refresh => "refresh", Self::Management => "management",
-        Self::Use => "use", Self::Fresh => "fresh", Self::Inbound => "inbound",
-    } }
+    fn text(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Refresh => "refresh",
+            Self::Management => "management",
+            Self::Use => "use",
+            Self::Fresh => "fresh",
+            Self::Inbound => "inbound",
+        }
+    }
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
@@ -49,9 +62,16 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
 /// existing authentication, current epoch, purpose and owner checks still run.
 /// A missing/partial unit is an error, never an implicit pre-restore fallback.
 pub(crate) fn require_open(db: &Connection, kind: Kind, id: &str) -> Result<()> {
-    ensure!((1..=256).contains(&id.len()), "restore_continuation_identity_bound");
-    let current:bool=db.query_row("SELECT count(*)=1 AND min(version)=1 FROM main.oauth_restore_schema_version",[],|row|row.get(0))?;
-    ensure!(current,"restore_current_cut_unit_required");
+    ensure!(
+        (1..=256).contains(&id.len()),
+        "restore_continuation_identity_bound"
+    );
+    let current: bool = db.query_row(
+        "SELECT count(*)=1 AND min(version)=1 FROM main.oauth_restore_schema_version",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(current, "restore_current_cut_unit_required");
     let closed: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.oauth_restore_closed c LEFT JOIN main.oauth_restore_cuts k ON k.digest=c.cut WHERE c.kind=?1 AND c.id=?2)",
         params![kind.text(), id], |row| row.get(0))?;
@@ -62,16 +82,50 @@ pub(crate) fn require_open(db: &Connection, kind: Kind, id: &str) -> Result<()> 
 // Identity-bearing tables are explicitly classified. DDL is always obtained
 // from the real installers below, never copied into a second schema definition.
 const UNITS: &[(&str, &[&str])] = &[
-    ("oauth_schema_version", &["oauth_connection_slots", "oauth_refresh_attempts"]),
+    (
+        "oauth_schema_version",
+        &["oauth_connection_slots", "oauth_refresh_attempts"],
+    ),
     ("oauth_connect_schema_version", &["oauth_connect_attempts"]),
-    ("oauth_callback_schema_version", &["oauth_callback_bindings"]),
-    ("oauth_exchange_schema_version", &["oauth_exchange_bindings"]),
-    ("oauth_custody_schema_version", &["oauth_private_verifiers", "oauth_private_codes", "oauth_private_tokens", "oauth_external_quarantine"]),
-    ("oauth_management_schema_version", &["oauth_management_intents", "oauth_management_dispatch_slots"]),
+    (
+        "oauth_callback_schema_version",
+        &["oauth_callback_bindings"],
+    ),
+    (
+        "oauth_exchange_schema_version",
+        &["oauth_exchange_bindings"],
+    ),
+    (
+        "oauth_custody_schema_version",
+        &[
+            "oauth_private_verifiers",
+            "oauth_private_codes",
+            "oauth_private_tokens",
+            "oauth_external_quarantine",
+        ],
+    ),
+    (
+        "oauth_management_schema_version",
+        &[
+            "oauth_management_intents",
+            "oauth_management_dispatch_slots",
+        ],
+    ),
     ("native_fresh_schema_version", &["native_fresh_owners"]),
     ("oauth_use_schema_version", &["oauth_use_handles"]),
-    ("oauth_inbound_schema_version", &["oauth_inbound_grants", "oauth_inbound_codes", "oauth_inbound_refresh", "oauth_inbound_access"]),
-    ("oauth_restore_schema_version", &["oauth_restore_cuts", "oauth_restore_closed"]),
+    (
+        "oauth_inbound_schema_version",
+        &[
+            "oauth_inbound_grants",
+            "oauth_inbound_codes",
+            "oauth_inbound_refresh",
+            "oauth_inbound_access",
+        ],
+    ),
+    (
+        "oauth_restore_schema_version",
+        &["oauth_restore_cuts", "oauth_restore_closed"],
+    ),
 ];
 
 type Schema = BTreeMap<(String, String), (String, Option<String>)>;
@@ -83,7 +137,9 @@ fn sensitive(name: &str) -> bool {
 
 fn schema(db: &Connection, database: &'static str) -> Result<Schema> {
     let mut result = BTreeMap::new();
-    let mut statement = db.prepare(&format!("SELECT type,name,tbl_name,sql FROM {database}.sqlite_master ORDER BY type,name"))?;
+    let mut statement = db.prepare(&format!(
+        "SELECT type,name,tbl_name,sql FROM {database}.sqlite_master ORDER BY type,name"
+    ))?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         super::schema::materialize(row)?;
@@ -105,8 +161,12 @@ fn canonical() -> Result<(Connection, Schema)> {
     super::usage::install(&db)?;
     super::inbound::install_schema(&db)?;
     let expected = schema(&db, "main")?;
-    ensure!(expected.values().all(|(table,_)| UNITS.iter().any(|(version,tables)|
-        table == version || tables.contains(&table.as_str()))), "restore_unclassified_oauth_schema");
+    ensure!(
+        expected.values().all(|(table, _)| UNITS
+            .iter()
+            .any(|(version, tables)| table == version || tables.contains(&table.as_str()))),
+        "restore_unclassified_oauth_schema"
+    );
     Ok((db, expected))
 }
 
@@ -117,28 +177,39 @@ pub(crate) fn require_no_history(db: &Connection) -> Result<()> {
     let present: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE lower(name) GLOB 'oauth_restore_*' OR lower(tbl_name) GLOB 'oauth_restore_*')",
         [],|row|row.get(0))?;
-    if !present { return Ok(()); }
+    if !present {
+        return Ok(());
+    }
     // Existing partial/old units refuse before the canonical installer could
     // create anything; complete current units are validation-only.
     install(db)?;
     let history:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_restore_cuts) OR EXISTS(SELECT 1 FROM main.oauth_restore_closed)",[],|r|r.get(0))?;
-    ensure!(!history,"security_restore_preflight_required");
+    ensure!(!history, "security_restore_preflight_required");
     Ok(())
 }
 
 /// Trusted reference preparation stays outside the imported SQL/admission
 /// scope. It contains no imported values, keys or native permission.
-pub(crate) struct Profile { reference: Connection, expected: Schema }
+pub(crate) struct Profile {
+    reference: Connection,
+    expected: Schema,
+}
 impl Profile {
     pub(crate) fn prepare() -> Result<Self> {
-        let (reference,expected)=canonical()?;
-        Ok(Self {reference,expected})
+        let (reference, expected) = canonical()?;
+        Ok(Self {
+            reference,
+            expected,
+        })
     }
 }
 
 fn identities(table: &str) -> Result<Option<(Kind, usize)>> {
     Ok(match table {
-        "oauth_connect_attempts" | "oauth_callback_bindings" | "oauth_exchange_bindings" | "oauth_external_quarantine" => Some((Kind::Connect, 0)),
+        "oauth_connect_attempts"
+        | "oauth_callback_bindings"
+        | "oauth_exchange_bindings"
+        | "oauth_external_quarantine" => Some((Kind::Connect, 0)),
         "oauth_private_codes" | "oauth_private_verifiers" => Some((Kind::Connect, 1)),
         "oauth_refresh_attempts" => Some((Kind::Refresh, 0)),
         "oauth_management_intents" => Some((Kind::Management, 0)),
@@ -148,8 +219,11 @@ fn identities(table: &str) -> Result<Option<(Kind, usize)>> {
         "oauth_inbound_grants" => Some((Kind::Inbound, 0)),
         "oauth_inbound_codes" | "oauth_inbound_access" => Some((Kind::Inbound, 1)),
         "oauth_inbound_refresh" => Some((Kind::Inbound, 3)),
-        "oauth_connection_slots" | "oauth_private_tokens" | "oauth_restore_cuts" | "oauth_restore_closed" => None,
-        value if UNITS.iter().any(|(version,_)| value == *version) => None,
+        "oauth_connection_slots"
+        | "oauth_private_tokens"
+        | "oauth_restore_cuts"
+        | "oauth_restore_closed" => None,
+        value if UNITS.iter().any(|(version, _)| value == *version) => None,
         _ => anyhow::bail!("restore_unclassified_oauth_table"),
     })
 }
@@ -157,11 +231,22 @@ fn identities(table: &str) -> Result<Option<(Kind, usize)>> {
 fn hash_value(hash: &mut Hash, value: ValueRef<'_>) {
     let (tag, bytes): (u8, &[u8]) = match value {
         ValueRef::Null => (0, &[]),
-        ValueRef::Integer(value) => { hash.update(&[1]); hash.update(&value.to_be_bytes()); return; }
-        ValueRef::Real(value) => { hash.update(&[2]); hash.update(&value.to_bits().to_be_bytes()); return; }
-        ValueRef::Text(bytes) => (3, bytes), ValueRef::Blob(bytes) => (4, bytes),
+        ValueRef::Integer(value) => {
+            hash.update(&[1]);
+            hash.update(&value.to_be_bytes());
+            return;
+        }
+        ValueRef::Real(value) => {
+            hash.update(&[2]);
+            hash.update(&value.to_bits().to_be_bytes());
+            return;
+        }
+        ValueRef::Text(bytes) => (3, bytes),
+        ValueRef::Blob(bytes) => (4, bytes),
     };
-    hash.update(&[tag]); hash.update(&(bytes.len() as u64).to_be_bytes()); hash.update(bytes);
+    hash.update(&[tag]);
+    hash.update(&(bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
 }
 
 /// Complete bounded row/schema commitment. It is DATA, not source admission or
@@ -172,103 +257,190 @@ pub(crate) struct Snapshot {
     tables: BTreeSet<String>,
 }
 impl Snapshot {
-    pub(crate) fn digest(&self) -> &Digest { &self.digest }
+    pub(crate) fn digest(&self) -> &Digest {
+        &self.digest
+    }
 
     pub(crate) fn capture(db: &Connection, profile: &Profile) -> Result<Self> {
         ensure!(!db.is_autocommit(), "restore_snapshot_transaction_required");
-        let Profile {reference,expected}=profile;
+        let Profile {
+            reference,
+            expected,
+        } = profile;
         super::schema::admit(db, |db| {
             let mut databases = db.prepare("PRAGMA database_list")?;
             let mut rows = databases.query([])?;
             while let Some(row) = rows.next()? {
                 super::schema::materialize(row)?;
-                ensure!(["main", "temp"].contains(&row.get_ref(1)?.as_str()?), "restore_attached_database_refused");
+                ensure!(
+                    ["main", "temp"].contains(&row.get_ref(1)?.as_str()?),
+                    "restore_attached_database_refused"
+                );
             }
-            ensure!(schema(db, "temp")?.is_empty(), "restore_shadow_schema_refused");
+            ensure!(
+                schema(db, "temp")?.is_empty(),
+                "restore_shadow_schema_refused"
+            );
             let meta_shadow:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM temp.sqlite_master WHERE lower(name)='day2_meta' OR lower(tbl_name)='day2_meta')",[],|r|r.get(0))?;
-            ensure!(!meta_shadow,"restore_shadow_schema_refused");
-            super::schema::exact_layout(db,reference,"day2_meta")?;
+            ensure!(!meta_shadow, "restore_shadow_schema_refused");
+            super::schema::exact_layout(db, reference, "day2_meta")?;
             let actual = schema(db, "main")?;
-            ensure!(actual.iter().all(|(key,value)| expected.get(key) == Some(value)), "restore_oauth_schema_changed");
+            ensure!(
+                actual
+                    .iter()
+                    .all(|(key, value)| expected.get(key) == Some(value)),
+                "restore_oauth_schema_changed"
+            );
             for (version, tables) in UNITS {
-                let unit: Schema = expected.iter().filter(|(_, (table,_))| table == version || tables.contains(&table.as_str())).map(|(k,v)|(k.clone(),v.clone())).collect();
-                if actual.values().any(|(table,_)| table == version || tables.contains(&table.as_str())) {
-                    ensure!(unit.iter().all(|(key,value)| actual.get(key) == Some(value)), "restore_oauth_partial_unit");
+                let unit: Schema = expected
+                    .iter()
+                    .filter(|(_, (table, _))| table == version || tables.contains(&table.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if actual
+                    .values()
+                    .any(|(table, _)| table == version || tables.contains(&table.as_str()))
+                {
+                    ensure!(
+                        unit.iter()
+                            .all(|(key, value)| actual.get(key) == Some(value)),
+                        "restore_oauth_partial_unit"
+                    );
                     let query = format!("SELECT version FROM main.{version} ORDER BY version");
                     let read = |connection: &Connection| -> Result<Vec<i64>> {
                         let mut q = connection.prepare(&query)?;
-                        let mut rows=q.query([])?;
-                        let mut result=Vec::new();
-                        while let Some(row)=rows.next()? {
+                        let mut rows = q.query([])?;
+                        let mut result = Vec::new();
+                        while let Some(row) = rows.next()? {
                             super::schema::materialize(row)?;
-                            ensure!(result.len()<2,"restore_version_row_bound");
+                            ensure!(result.len() < 2, "restore_version_row_bound");
                             result.push(row.get(0)?);
                         }
                         Ok(result)
                     };
-                    ensure!(read(db)? == read(reference)?, "restore_oauth_version_changed");
+                    ensure!(
+                        read(db)? == read(reference)?,
+                        "restore_oauth_version_changed"
+                    );
                 }
             }
-            ensure!(actual.keys().any(|(_,name)| name == "oauth_restore_cuts"), "restore_current_cut_unit_required");
-            let present = |name: &str| actual.keys().any(|(kind,table)|kind=="table" && table==name);
+            ensure!(
+                actual.keys().any(|(_, name)| name == "oauth_restore_cuts"),
+                "restore_current_cut_unit_required"
+            );
+            let present = |name: &str| {
+                actual
+                    .keys()
+                    .any(|(kind, table)| kind == "table" && table == name)
+            };
             // Validation uses canonical row predicates. Dependencies must
             // already exist, so these calls cannot fill an imported gap.
             if present("oauth_connect_schema_version") {
-                ensure!(["oauth_schema_version","oauth_callback_schema_version","oauth_exchange_schema_version",
-                    "oauth_custody_schema_version","oauth_management_schema_version","native_fresh_schema_version"]
-                    .iter().all(|name|present(name)),"restore_oauth_dependency_missing");
+                ensure!(
+                    [
+                        "oauth_schema_version",
+                        "oauth_callback_schema_version",
+                        "oauth_exchange_schema_version",
+                        "oauth_custody_schema_version",
+                        "oauth_management_schema_version",
+                        "native_fresh_schema_version"
+                    ]
+                    .iter()
+                    .all(|name| present(name)),
+                    "restore_oauth_dependency_missing"
+                );
                 super::connect::install_schema(db)?;
             } else {
-                ensure!(!["oauth_callback_schema_version","oauth_exchange_schema_version","oauth_custody_schema_version"]
-                    .iter().any(|name|present(name)),"restore_oauth_dependency_missing");
-                if present("oauth_schema_version") { super::store::install_schema(db)?; }
-                if present("oauth_management_schema_version") { super::management::app::install(db)?; }
-                if present("native_fresh_schema_version") { super::fresh_owner::install(db)?; }
+                ensure!(
+                    ![
+                        "oauth_callback_schema_version",
+                        "oauth_exchange_schema_version",
+                        "oauth_custody_schema_version"
+                    ]
+                    .iter()
+                    .any(|name| present(name)),
+                    "restore_oauth_dependency_missing"
+                );
+                if present("oauth_schema_version") {
+                    super::store::install_schema(db)?;
+                }
+                if present("oauth_management_schema_version") {
+                    super::management::app::install(db)?;
+                }
+                if present("native_fresh_schema_version") {
+                    super::fresh_owner::install(db)?;
+                }
             }
             if present("oauth_use_schema_version") {
-                ensure!(present("oauth_connect_schema_version"),"restore_oauth_dependency_missing");
+                ensure!(
+                    present("oauth_connect_schema_version"),
+                    "restore_oauth_dependency_missing"
+                );
                 super::usage::install(db)?;
             }
-            if present("oauth_inbound_schema_version") { super::inbound::install_schema(db)?; }
+            if present("oauth_inbound_schema_version") {
+                super::inbound::install_schema(db)?;
+            }
             install(db)?;
-            ensure!(schema(db,"main")?==actual,"restore_schema_changed_during_validation");
+            ensure!(
+                schema(db, "main")? == actual,
+                "restore_schema_changed_during_validation"
+            );
             let mut foreign = db.prepare("PRAGMA main.foreign_key_check")?;
-            ensure!(foreign.query([])?.next()?.is_none(), "restore_oauth_foreign_key");
-            let tables: BTreeSet<_> = actual.iter().filter(|((kind,_),_)| kind == "table").map(|((_,name),_)|name.clone()).collect();
+            ensure!(
+                foreign.query([])?.next()?.is_none(),
+                "restore_oauth_foreign_key"
+            );
+            let tables: BTreeSet<_> = actual
+                .iter()
+                .filter(|((kind, _), _)| kind == "table")
+                .map(|((_, name), _)| name.clone())
+                .collect();
             let mut hash = Hash::new(&SHA256);
             hash.update(b"day2-complete-oauth-reset-snapshot-v1");
             hash.update(&serde_json::to_vec(&actual.iter().collect::<Vec<_>>())?);
-            let mut meta=db.prepare("SELECT key,value FROM main.day2_meta ORDER BY key")?;
-            let mut meta_rows=meta.query([])?;
-            while let Some(row)=meta_rows.next()? {
+            let mut meta = db.prepare("SELECT key,value FROM main.day2_meta ORDER BY key")?;
+            let mut meta_rows = meta.query([])?;
+            while let Some(row) = meta_rows.next()? {
                 super::schema::materialize(row)?;
                 hash.update(&[253]);
-                hash_value(&mut hash,row.get_ref(0)?);
-                hash_value(&mut hash,row.get_ref(1)?);
+                hash_value(&mut hash, row.get_ref(0)?);
+                hash_value(&mut hash, row.get_ref(1)?);
             }
             let mut identities_set = BTreeSet::new();
             for table in &tables {
                 let selector = identities(table)?;
-                hash.update(&(table.len() as u64).to_be_bytes()); hash.update(table.as_bytes());
-                let mut statement = db.prepare(&format!("SELECT * FROM main.{table} ORDER BY rowid"))?;
+                hash.update(&(table.len() as u64).to_be_bytes());
+                hash.update(table.as_bytes());
+                let mut statement =
+                    db.prepare(&format!("SELECT * FROM main.{table} ORDER BY rowid"))?;
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
                     super::schema::materialize(row)?;
                     hash.update(&[255]);
                     hash.update(&(row.as_ref().column_count() as u64).to_be_bytes());
-                    for index in 0..row.as_ref().column_count() { hash_value(&mut hash, row.get_ref(index)?); }
-                    if let Some((kind,index)) = selector {
+                    for index in 0..row.as_ref().column_count() {
+                        hash_value(&mut hash, row.get_ref(index)?);
+                    }
+                    if let Some((kind, index)) = selector {
                         let id = row.get_ref(index)?.as_str()?;
                         ensure!((1..=256).contains(&id.len()), "restore_identity_bound");
-                        identities_set.insert((kind,id.into()));
+                        identities_set.insert((kind, id.into()));
                         ensure!(identities_set.len() <= 8192, "restore_identity_count_bound");
                     }
-                    if table == "oauth_restore_cuts" { Cut::validate_record(row.get_ref(1)?.as_str()?,row.get_ref(0)?.as_str()?)?; }
+                    if table == "oauth_restore_cuts" {
+                        Cut::validate_record(row.get_ref(1)?.as_str()?, row.get_ref(0)?.as_str()?)?;
+                    }
                 }
                 hash.update(&[254]);
             }
-            let digest = Digest::try_from(format!("sha256:{}",crate::hex(hash.finish().as_ref())))?;
-            Ok(Self { digest, identities: identities_set, tables })
+            let digest =
+                Digest::try_from(format!("sha256:{}", crate::hex(hash.finish().as_ref())))?;
+            Ok(Self {
+                digest,
+                identities: identities_set,
+                tables,
+            })
         })
     }
 }
@@ -276,30 +448,57 @@ impl Snapshot {
 /// Atomic denial phase inside the private reset transaction. The caller must
 /// already own genuine exclusion and the unpublished target. No outer commit,
 /// external request, secret deletion, custody change or owner is produced.
-pub(crate) fn close_in(tx: &mut Transaction<'_>, before: Snapshot, cut: &Cut, profile: &Profile) -> Result<usize> {
+pub(crate) fn close_in(
+    tx: &mut Transaction<'_>,
+    before: Snapshot,
+    cut: &Cut,
+    profile: &Profile,
+) -> Result<usize> {
     cut.check_storage_metadata(tx)?;
-    ensure!(tx.pragma_query_value(None,"foreign_keys",|r|r.get::<_,bool>(0))?, "restore_foreign_keys_required");
-    ensure!(cut.inventory() == before.digest(), "restore_cut_inventory_changed");
-    let fresh = Snapshot::capture(tx,profile)?;
+    ensure!(
+        tx.pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))?,
+        "restore_foreign_keys_required"
+    );
+    ensure!(
+        cut.inventory() == before.digest(),
+        "restore_cut_inventory_changed"
+    );
+    let fresh = Snapshot::capture(tx, profile)?;
     ensure!(fresh.digest == before.digest, "restore_snapshot_changed");
     let savepoint = tx.savepoint()?;
-    let occupied: bool = savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_restore_cuts)", [], |r|r.get(0))?;
-    ensure!(!occupied,"restore_cut_already_present");
-    savepoint.execute("INSERT INTO main.oauth_restore_cuts(digest,binding,inventory) VALUES(?1,?2,?3)",
-        params![cut.digest().as_str(),cut.encoded()?,cut.inventory().as_str()])?;
-    for (kind,id) in &before.identities {
-        savepoint.execute("INSERT INTO main.oauth_restore_closed(kind,id,cut) VALUES(?1,?2,?3)",params![kind.text(),id,cut.digest().as_str()])?;
+    let occupied: bool = savepoint.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.oauth_restore_cuts)",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(!occupied, "restore_cut_already_present");
+    savepoint.execute(
+        "INSERT INTO main.oauth_restore_cuts(digest,binding,inventory) VALUES(?1,?2,?3)",
+        params![
+            cut.digest().as_str(),
+            cut.encoded()?,
+            cut.inventory().as_str()
+        ],
+    )?;
+    for (kind, id) in &before.identities {
+        savepoint.execute(
+            "INSERT INTO main.oauth_restore_closed(kind,id,cut) VALUES(?1,?2,?3)",
+            params![kind.text(), id, cut.digest().as_str()],
+        )?;
     }
     if before.tables.contains("oauth_connection_slots") {
         let exhausted:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_connection_slots WHERE security_epoch=9223372036854775807)",[],|r|r.get(0))?;
-        ensure!(!exhausted,"restore_local_epoch_exhausted");
+        ensure!(!exhausted, "restore_local_epoch_exhausted");
         savepoint.execute("UPDATE main.oauth_connection_slots SET status='reauth_required',security_epoch=security_epoch+1",[])?;
     }
     if before.tables.contains("oauth_inbound_grants") {
         let exhausted:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_inbound_grants WHERE epoch=9223372036854775807)",[],|r|r.get(0))?;
-        ensure!(!exhausted,"restore_inbound_epoch_exhausted");
+        ensure!(!exhausted, "restore_inbound_epoch_exhausted");
         savepoint.execute("UPDATE main.oauth_inbound_grants SET status='revoked',epoch=epoch+1 WHERE status='active'",[])?;
-        savepoint.execute("UPDATE main.oauth_inbound_refresh SET state='revoked' WHERE state='active'",[])?;
+        savepoint.execute(
+            "UPDATE main.oauth_inbound_refresh SET state='revoked' WHERE state='active'",
+            [],
+        )?;
     }
     if before.tables.contains("native_fresh_owners") {
         savepoint.execute("UPDATE main.native_fresh_owners SET stage='refused' WHERE stage IN ('allocated','offered')",[])?;
@@ -310,5 +509,5 @@ pub(crate) fn close_in(tx: &mut Transaction<'_>, before: Snapshot, cut: &Cut, pr
 }
 
 #[cfg(test)]
-#[path="restore_tests.rs"]
+#[path = "restore_tests.rs"]
 mod tests;
