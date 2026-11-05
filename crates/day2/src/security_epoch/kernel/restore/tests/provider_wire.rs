@@ -26,8 +26,23 @@ fn fields(value: Value) -> Result<Value> {
 
 fn names(selection: &EpochStore, plan: &model::Plan) -> Result<Vec<String>> {
     let request = &plan.reservation.receipt.request;
-    let bootstrap = &plan.reservation.before.root.as_ref().unwrap().value.bootstrap;
-    let activation = plan.reservation.before.activate.as_ref().unwrap().value.request.operation();
+    let bootstrap = &plan
+        .reservation
+        .before
+        .root
+        .as_ref()
+        .unwrap()
+        .value
+        .bootstrap;
+    let activation = plan
+        .reservation
+        .before
+        .activate
+        .as_ref()
+        .unwrap()
+        .value
+        .request
+        .operation();
     let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 {
         project,
         database,
@@ -52,12 +67,18 @@ fn names(selection: &EpochStore, plan: &model::Plan) -> Result<Vec<String>> {
             &bootstrap.create_operation.as_str()[7..]
         ),
         format!("{root}/operations/{}", &activation.as_str()[7..]),
-        format!("{root}/operations/{}", &request.intent.advance_operation(selection)?.as_str()[7..]),
+        format!(
+            "{root}/operations/{}",
+            &request.intent.advance_operation(selection)?.as_str()[7..]
+        ),
         format!(
             "{root}/restore_reservations/{}",
             &request.intent.operation.as_str()[7..]
         ),
-        format!("{root}/restore_grants/{}", &plan.approval_use.key(selection)?.as_str()[7..]),
+        format!(
+            "{root}/restore_grants/{}",
+            &plan.approval_use.key(selection)?.as_str()[7..]
+        ),
     ])
 }
 
