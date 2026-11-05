@@ -9,6 +9,15 @@ use anyhow::{Result, ensure};
 use day2_capabilities::credentials::Namespace;
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use super::{
+    IngressVerification, PublicReceipt, VerifiedHumanPost, authorize_reveal, prepare_issue,
+    stage_issue, verify_ingress,
+};
+#[cfg(test)]
+use anyhow::Context;
+#[cfg(test)]
+use rusqlite::Connection;
 
 const MAX_LINEAGES: usize = 1024;
 const MAX_VERSIONS: i64 = 4096;
