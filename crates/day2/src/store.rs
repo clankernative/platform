@@ -913,9 +913,8 @@ pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> R
 }
 
 mod native_storage;
-pub(crate) use native_storage::{
-    NativeSqliteKeeper, RuntimeSql, SqlDecision, budget_atomic, require_unopened_native_sqlite,
-};
+pub(crate) use native_storage::{NativeSqliteKeeper, require_unopened_native_sqlite};
+pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic};
 
 impl Runtime {
     pub(crate) fn rolling(&self) -> bool {

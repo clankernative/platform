@@ -480,6 +480,7 @@ dependencies = [
  "proc-macro2",
  "proptest",
  "prost",
+ "quote",
  "reqwest",
  "ring",
  "rusqlite",
