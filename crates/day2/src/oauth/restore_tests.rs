@@ -973,15 +973,24 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         assert!(!accepts(&deleted, prefix, &guard, count)?, "deleted {name}");
         let mut delayed = block.clone();
         let check = delayed.stmts.remove(index);
-        let last=delayed.stmts.pop().ok_or_else(||anyhow::anyhow!("guard_tail_missing"))?;
-        let syn::Stmt::Expr(value, None)=last else {anyhow::bail!("guard_tail_shape")};
-        let mut saved:syn::Stmt=syn::parse_str("let restore_guard_delayed_result=();")?;
-        let syn::Stmt::Local(local)=&mut saved else {unreachable!()};
-        local.init.as_mut().unwrap().expr=Box::new(value);
-        delayed.stmts.push(saved);
-        delayed.stmts.push(check);
-        let tail:syn::Block=syn::parse_str("{restore_guard_delayed_result}")?;
-        delayed.stmts.extend(tail.stmts);
+        let commit:syn::Stmt=syn::parse_str("tx.commit()?;")?;
+        let commits:Vec<_>=delayed.stmts.iter().enumerate()
+            .filter(|(_,value)|statement(value)==statement(&commit)).map(|(i,_)|i).collect();
+        assert!(commits.len()<=1);
+        if let Some(position)=commits.first() {
+            // Move after real work but before consuming the owned transaction.
+            delayed.stmts.insert(*position,check);
+        } else {
+            let last=delayed.stmts.pop().ok_or_else(||anyhow::anyhow!("guard_tail_missing"))?;
+            let syn::Stmt::Expr(value, None)=last else {anyhow::bail!("guard_tail_shape")};
+            let mut saved:syn::Stmt=syn::parse_str("let restore_guard_delayed_result=();")?;
+            let syn::Stmt::Local(local)=&mut saved else {unreachable!()};
+            local.init.as_mut().unwrap().expr=Box::new(value);
+            delayed.stmts.push(saved);
+            delayed.stmts.push(check);
+            let tail:syn::Block=syn::parse_str("{restore_guard_delayed_result}")?;
+            delayed.stmts.extend(tail.stmts);
+        }
         assert!(!accepts(&delayed, prefix, &guard, count)?, "delayed {name}");
         let mut duplicate = block.clone();
         duplicate.stmts.insert(index, expected.stmts[index].clone());
