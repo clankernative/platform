@@ -35,6 +35,13 @@ struct Identity {
 impl Discovery {
     pub(crate) fn load(runtime: &Runtime, origin: &str) -> Result<Option<Self>> {
         let instance = Instance::load(runtime.instance_path())?;
+        let Some(client) = instance
+            .identity
+            .as_ref()
+            .and_then(|identity| identity.cli_desktop_client_id.as_ref())
+        else {
+            return Ok(None);
+        };
         let (identity, edge) = instance.edge(runtime.app())?;
         ensure!(
             edge.origin == origin
@@ -42,7 +49,7 @@ impl Discovery {
                 && Some(identity.hosted_domain.as_str()) == runtime.hosted_domain(),
             crate::error::Failure::InstallationChanged
         );
-        Ok(identity.cli_desktop_client_id.as_ref().map(|client| Self {
+        Ok(Some(Self {
             iap_audience: edge.iap_audience.clone(),
             document: Document {
                 schema_version: 1,

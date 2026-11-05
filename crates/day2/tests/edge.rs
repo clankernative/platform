@@ -243,6 +243,46 @@ const CLI_DISCOVERY: &str = "/.well-known/day2-cli.json";
 const CLI_CLIENT: &str = "123-desktop.apps.googleusercontent.com";
 
 #[test]
+fn cli_bootstrap_requires_instance_edge_metadata_only_when_selected() -> Result<()> {
+    let artifact = std::env::var_os("DAY2_TEST_DELEGATION_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask verify or set DAY2_TEST_DELEGATION_ARTIFACT")?;
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let signer = Signer::new()?;
+    for (identity, selected) in [(false, false), (true, false), (true, true)] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("instance.json");
+        let mut document = instance(artifact.to_str().context("artifact path")?);
+        let edge: Edge = serde_json::from_value(document["apps"]["go"]["edge"].clone())?;
+        document["apps"]["go"]
+            .as_object_mut()
+            .unwrap()
+            .remove("edge");
+        if !identity {
+            document.as_object_mut().unwrap().remove("identity");
+        } else if selected {
+            document["identity"]["cli_desktop_client_id"] = json!(CLI_CLIENT);
+        }
+        fs::write(&path, serde_json::to_vec(&document)?)?;
+        let runtime = Runtime::load(&path, "go")?;
+        runtime.initialize()?;
+        let verifier = Verifier::new(AUDIENCE, "exampleco.test", Box::new(Keys(signer.keys())))?;
+        let result = executor.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            LocalServer::bind_edge_listener(runtime, listener, &edge, verifier, 1)
+        });
+        assert_eq!(
+            result.is_err(),
+            selected,
+            "identity={identity}, selected={selected}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn cli_bootstrap_exposes_only_opted_in_instance_metadata() -> Result<()> {
     let unconfigured = Server::start()?;
     assert_eq!(
