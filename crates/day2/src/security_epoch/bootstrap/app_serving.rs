@@ -313,11 +313,10 @@ impl<'storage> CurrentAppServingPhase<'storage> {
             crate::security_epoch::serving::ScopePurpose::Runtime(
                 crate::security_epoch::serving::RuntimeServingUse::InitialStorage
             )
-        ) {
-            if let Err(error) = self.physical.require_sqlite(stage) {
-                self.refuse();
-                return Err(error);
-            }
+        ) && let Err(error) = self.physical.require_sqlite(stage)
+        {
+            self.refuse();
+            return Err(error);
         }
         self.disposition = ServingDisposition::Known;
         self.check(stage)
