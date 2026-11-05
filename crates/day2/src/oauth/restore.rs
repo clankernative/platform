@@ -2,7 +2,7 @@
 //! provider rollback, a restored writer or a way to recover an old permit.
 //! Existing outcomes/material stay intact; exact old continuations are fenced.
 use crate::security_epoch::restore_cut::Cut;
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 use ring::digest::{Context as Hash, SHA256};
 use rusqlite::{Connection, Transaction, params, types::ValueRef};
