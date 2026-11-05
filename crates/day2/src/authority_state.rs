@@ -1316,24 +1316,61 @@ pub fn invalidate_restored(connection: &Connection, artifact_path: &Path) -> Res
 
 fn fence_restored_in(
     connection: &Connection,
-    mut active: ActiveAuthority,
+    active: ActiveAuthority,
     relocated: &Path,
 ) -> Result<()> {
     require_transaction(connection)?;
-    crate::budget::invalidate_restored(connection)?;
-    crate::delegation_commands::invalidate_restored(connection)?;
+    let not_before = crate::delegation_commands::now_seconds()?;
     let mut entropy = [0_u8; 32];
     getrandom::fill(&mut entropy)
         .map_err(|error| anyhow::anyhow!("authority restore entropy: {error}"))?;
-    active.stamp.epoch = crate::digest(&entropy);
-    active.stamp.revision = active
-        .stamp
-        .revision
-        .checked_add(1)
-        .context("authority_revision_exhausted")?;
-    active.document.enabled = false;
-    active.artifact_path = relocated.to_string_lossy().into_owned();
-    store(connection, &active, "platform-restore", "restore-fence")
+    PreparedRestoreFence::new(active, relocated, Digest::new(&entropy), not_before)?
+        .apply_in(connection)
+}
+
+/// Prepared denial DATA, never maintenance approval, a clock witness, native
+/// exclusion, a Runtime opener or a new writer. The secure owner must derive
+/// the fresh epoch and qualified delegation cutoff outside its SQL loan, bind
+/// the actual admitted artifact and retain those same owners through commit.
+/// The ordinary restore wrapper still performs its existing history refusal.
+pub(crate) struct PreparedRestoreFence {
+    previous: ActiveAuthority,
+    disabled: ActiveAuthority,
+    not_before: i64,
+}
+
+impl PreparedRestoreFence {
+    pub(crate) fn new(
+        previous: ActiveAuthority,
+        relocated: &Path,
+        fresh_epoch: Digest,
+        not_before: i64,
+    ) -> Result<Self> {
+        ensure!(not_before >= 0, "restore_delegation_clock_invalid");
+        ensure!(fresh_epoch.as_str() != previous.stamp.epoch, "restore_authority_epoch_reused");
+        let mut disabled = previous.clone();
+        disabled.stamp.epoch = fresh_epoch.as_str().into();
+        disabled.stamp.revision = previous.stamp.revision.checked_add(1)
+            .context("authority_revision_exhausted")?;
+        i64::try_from(disabled.stamp.revision).context("authority_revision_exhausted")?;
+        disabled.document.enabled = false;
+        disabled.artifact_path = relocated.to_string_lossy().into_owned();
+        Ok(Self { previous, disabled, not_before })
+    }
+
+    /// SQL only. No clock, entropy, artifact/provider IO, outer commit or
+    /// readiness is produced. The enclosing complete reset owns rollback.
+    pub(crate) fn apply_in(&self, connection: &Connection) -> Result<()> {
+        require_transaction(connection)?;
+        ensure!(current(connection)? == self.previous, "restore_authority_snapshot_changed");
+        let reused: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM day2_authority_history WHERE epoch=?1)",
+            [&self.disabled.stamp.epoch], |row| row.get(0))?;
+        ensure!(!reused, "restore_authority_epoch_reused");
+        crate::budget::invalidate_restored(connection)?;
+        crate::delegation_commands::restore_fence_in(connection, self.not_before)?;
+        store(connection, &self.disabled, "platform-restore", "restore-fence")
+    }
 }
 
 #[cfg(test)]
