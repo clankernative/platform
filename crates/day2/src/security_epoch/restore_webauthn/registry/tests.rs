@@ -424,10 +424,8 @@ fn production_capture_and_verification_cannot_lose_native_origin_or_final_curren
                     unreachable!()
                 };
                 *semicolon = Some(syn::token::Semi::default());
-                signature
-                    .block
-                    .stmts
-                    .push(syn::parse_quote!(Ok(forged_facts)));
+                let forged: syn::Expr = syn::parse_quote!(Ok(forged_facts));
+                signature.block.stmts.push(syn::Stmt::Expr(forged, None));
             } else {
                 let targets=block.stmts.iter_mut().filter_map(|statement|match statement {
                     syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="checked")=>Some(local),_=>None,
@@ -766,7 +764,7 @@ fn native_serving_forwards_the_published_input_not_the_layout_resolved_path() ->
             "published selector retained before layout"
         );
         let selected=block.stmts.iter().filter_map(|statement|match statement {
-            syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="runtime")=>Some(local),_=>None,
+            syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="runtime") && local.init.as_ref().is_some_and(|init|matches!(&*init.expr,syn::Expr::If(branch) if path(&branch.cond,"initial_storage")))=>Some(local),_=>None,
         }).collect::<Vec<_>>();
         ensure!(selected.len() == 1, "actual startup runtime selector");
         let syn::Expr::If(branch) = &*selected[0].init.as_ref().unwrap().expr else {
@@ -804,7 +802,7 @@ fn native_serving_forwards_the_published_input_not_the_layout_resolved_path() ->
     assert!(validate(&late).is_err());
     for mode in 0..2 {
         let mut changed = block.clone();
-        let local=changed.stmts.iter_mut().find_map(|statement|match statement {syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="runtime")=>Some(local),_=>None}).unwrap();
+        let local=changed.stmts.iter_mut().find_map(|statement|match statement {syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="runtime") && local.init.as_ref().is_some_and(|init|matches!(&*init.expr,syn::Expr::If(branch) if path(&branch.cond,"initial_storage")))=>Some(local),_=>None}).unwrap();
         let syn::Expr::If(branch) = &mut *local.init.as_mut().unwrap().expr else {
             unreachable!()
         };
