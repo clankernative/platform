@@ -175,6 +175,7 @@ impl Names {
                 "restore_provider_duplicate_document"
             );
             if let Some(found) = &entry.found {
+                document_times(found, at)?;
                 field_shapes(
                     found
                         .get("fields")
@@ -268,6 +269,16 @@ fn field_shapes(value: &Value, depth: usize) -> Result<()> {
 fn timestamp(text: &str) -> Result<time::OffsetDateTime> {
     time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
         .map_err(|_| anyhow::anyhow!("restore_provider_timestamp"))
+}
+
+fn document_times(value: &Value, read: time::OffsetDateTime) -> Result<()> {
+    let created = value.get("createTime").and_then(Value::as_str)
+        .context("restore_provider_document_time")?;
+    let updated = value.get("updateTime").and_then(Value::as_str)
+        .context("restore_provider_document_time")?;
+    let (created, updated) = (timestamp(created)?, timestamp(updated)?);
+    ensure!(created <= updated && updated <= read, "restore_provider_document_time_order");
+    Ok(())
 }
 
 #[derive(Deserialize)]

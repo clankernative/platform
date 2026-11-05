@@ -246,6 +246,27 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
     Ok(())
 }
 
+#[test]
+fn all_four_retained_documents_require_update_before_read_and_keep_cleanup_on_refusal() -> Result<()> {
+    let (selection, before) = initial();
+    let (current, plan) = approval_use::plan(&selection, &before, 49)?;
+    for index in 1..=4 {
+        for field in ["updateTime", "createTime"] {
+            let mut reply = initial_reply(&selection, &plan)?;
+            reply[index]["found"][field] = json!("2026-11-05T00:00:00Z");
+            let transaction = wire::Names::new(&selection, &plan)?
+                .transaction(&serde_json::to_vec(&reply)?)?;
+            assert!(transaction.observed().is_err(), "row={index}field={field}");
+            assert!(transaction.commit_body(&selection, &plan, &current, 1000).is_err());
+            let cleanup: Value = crate::json::decode(&transaction.rollback_body()?)?;
+            assert_eq!(cleanup, json!({"transaction":TX}));
+            let strong: Vec<_> = reply.into_iter().skip(1).collect();
+            assert!(wire::Names::new(&selection, &plan)?.strong(&serde_json::to_vec(&strong)?).is_err());
+        }
+    }
+    Ok(())
+}
+
 fn seed(db: &Connection, reply: &[Value]) -> Result<()> {
     db.execute_batch("CREATE TABLE records(name TEXT PRIMARY KEY,fields TEXT NOT NULL,version TEXT NOT NULL) STRICT")?;
     for entry in reply.iter().skip(1) {
