@@ -19,6 +19,8 @@ const BACKUP_ELIGIBLE: u8 = 0x08;
 const BACKED_UP: u8 = 0x10;
 const SUPPORTED_FLAGS: u8 = USER_PRESENT | USER_VERIFIED | BACKUP_ELIGIBLE | BACKED_UP;
 
+mod store;
+
 /// Exact admitted registry selection, not a browser-supplied key. A future
 /// registry owner must retain current admin membership and this exact version.
 /// Private fields and a scoped native registry source prevent scalar minting.
