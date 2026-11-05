@@ -694,13 +694,9 @@ fn actual_native_factory_moves_the_typed_consumed_owner_and_preserves_original_c
         arm.matches("self . observe_native ()").count() == 2
             && arm.matches("source . current (self)").count() == 1
             && arm.matches("self . observe (clock)").count() == 1
-            && [
-                "let post = self . observe_native ()",
-                "result ?",
-                "post ?",
-            ]
-            .iter()
-            .all(|marker| arm.matches(marker).count() == 1)
+            && ["let post = self . observe_native ()", "result ?", "post ?"]
+                .iter()
+                .all(|marker| arm.matches(marker).count() == 1)
             && arm.find("self . observe_native ()") < arm.find("source . current (self)")
             && arm.find("let post = self . observe_native ()") < arm.find("result ?")
             && arm.find("result ?") < arm.find("post ?")
@@ -747,8 +743,12 @@ fn actual_native_factory_moves_the_typed_consumed_owner_and_preserves_original_c
     )));
     let from = ".and_then(|clock| self.observe(clock))";
     assert_eq!(source.matches(from).count(), 1);
-    assert!(!refresh(&source.replacen(from,".map(|_| ())",1)));
-    let from="ApprovalOrigin::Native(native) => native.check()?";
-    assert_eq!(source.matches(from).count(),1);
-    assert!(!native_observer(&source.replacen(from,"ApprovalOrigin::Native(_) => untrusted_data()",1)));
+    assert!(!refresh(&source.replacen(from, ".map(|_| ())", 1)));
+    let from = "ApprovalOrigin::Native(native) => native.check()?";
+    assert_eq!(source.matches(from).count(), 1);
+    assert!(!native_observer(&source.replacen(
+        from,
+        "ApprovalOrigin::Native(_) => untrusted_data()",
+        1
+    )));
 }
