@@ -3,7 +3,11 @@
 use super::*;
 use crate::security_epoch::kernel::restore::approval_use as kernel;
 
-pub(super) fn plan(selected: &EpochStore, before: &Snapshot, seed: u64) -> Result<(Current, kernel::Plan)> {
+pub(super) fn plan(
+    selected: &EpochStore,
+    before: &Snapshot,
+    seed: u64,
+) -> Result<(Current, kernel::Plan)> {
     let intent = intent(selected, seed);
     let current = current(selected, &intent, before);
     let request = Request::new(selected, intent, &current, 1000, before)?;

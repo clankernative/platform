@@ -6,9 +6,9 @@ use std::{collections::BTreeMap, path::Path};
 
 mod approval_use;
 mod history;
-mod provider_wire;
 #[cfg(unix)]
 mod process;
+mod provider_wire;
 
 pub(super) fn version(n: u64) -> super::super::UpdateTime {
     format!("2026-11-04T00:00:00.{n:06}Z").try_into().unwrap()

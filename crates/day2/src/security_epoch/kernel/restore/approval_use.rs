@@ -66,8 +66,14 @@ impl Plan {
             None,
             None,
         )?;
-        let activation = &self.reservation.before.activate.as_ref()
-            .context("restore_provider_activation_missing")?.value.request;
+        let activation = &self
+            .reservation
+            .before
+            .activate
+            .as_ref()
+            .context("restore_provider_activation_missing")?
+            .value
+            .request;
         Ok(Selectors {
             bootstrap: activation.bootstrap().clone(),
             activation: activation.operation().clone(),
