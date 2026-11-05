@@ -367,6 +367,58 @@ mod tests {
     }
 
     #[test]
+    fn matching_all_three_inodes_still_does_not_prevent_in_place_authority_rollback() -> Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let path = root.join("actual.sqlite");
+        let expected = retained_sidecars(&root)?;
+        // Deliberate corruption while no creator process is alive. Preserve
+        // each existing inode and replace only its bytes: inode continuity is
+        // not content continuity or evidence of a live, exclusive writer.
+        for (old, suffix) in [("older-wal", "-wal"), ("older-shm", "-shm")] {
+            let bytes = fs::read(root.join(old))?;
+            fs::write(sidecar(&path, suffix), bytes)?;
+        }
+        assert_eq!(named_inode(&path)?, expected[0]);
+        assert_eq!(named_inode(sidecar(&path, "-wal"))?, expected[1]);
+        assert_eq!(named_inode(sidecar(&path, "-shm"))?, expected[2]);
+        let mut connection = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        let transaction = connection.transaction()?;
+        let stale = crate::authority_state::current(&transaction)?;
+        let current = current_authority(&root)?;
+        assert_eq!(stale.stamp.epoch, current.stamp.epoch);
+        assert_eq!(stale.artifact_id, current.artifact_id);
+        assert_eq!(stale.stamp.revision, 2);
+        assert_eq!(current.stamp.revision, 3);
+        assert_eq!(
+            stale.policy()?.admins,
+            BTreeSet::from([OLD_ADMIN.to_owned()])
+        );
+        assert_eq!(
+            current.policy()?.admins,
+            BTreeSet::from([CURRENT_ADMIN.to_owned()])
+        );
+        let files = inspect(&transaction)?;
+        assert_eq!(inode(files.handles.main)?, expected[0]);
+        assert_eq!(
+            inode(files.handles.journal.expect("same-inode WAL"))?,
+            expected[1]
+        );
+        assert_eq!(
+            inode(files.handles.shm.expect("same-inode SHM"))?,
+            expected[2]
+        );
+        files.check_live()?;
+        drop(files);
+        transaction.rollback()?;
+        Ok(())
+    }
+
+    #[test]
     fn sqlite_recreates_missing_shm_without_proving_creator_continuity() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path().canonicalize()?;
