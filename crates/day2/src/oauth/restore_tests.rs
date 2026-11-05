@@ -358,7 +358,7 @@ fn late_failure_rolls_back_cut_and_all_local_revocations_even_if_caller_catches_
 
 #[test]
 fn missing_partial_shadow_and_unknown_units_refuse_before_any_cut() -> Result<()> {
-    for mutation in 0..5 {
+    for mutation in 0..6 {
         let dir = tempfile::tempdir()?;
         let mut db = database(&dir.path().join("app.sqlite"))?;
         let profile = Profile::prepare()?;
@@ -367,7 +367,8 @@ fn missing_partial_shadow_and_unknown_units_refuse_before_any_cut() -> Result<()
             1 => db.execute_batch("CREATE TABLE oauth_unreviewed_callback(untrusted TEXT)")?,
             2 => db.execute_batch("DROP TABLE oauth_use_handles")?,
             3 => db.execute_batch("CREATE TEMP TABLE day2_meta(key TEXT,value TEXT)")?,
-            _ => db.execute_batch("ATTACH ':memory:' AS foreign_state")?,
+            4 => db.execute_batch("ATTACH ':memory:' AS foreign_state")?,
+            _ => {db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization')",["invalid\noriginal"])?;}
         }
         let tx = db.transaction()?;
         assert!(Snapshot::capture(&tx, &profile).is_err());
