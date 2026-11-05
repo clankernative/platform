@@ -156,7 +156,7 @@ pub(crate) fn fixture_for_storage(
     selected.scope.environment = parts[1].to_owned().try_into()?;
     selected.scope.app = parts[2].to_owned().try_into()?;
     let custody = BindingRef {
-        id: "vault".try_into()?,
+        id: "vault".to_owned().try_into()?,
         revision: Digest::new(b"vault-binding"),
     };
     let namespace = Namespace {
