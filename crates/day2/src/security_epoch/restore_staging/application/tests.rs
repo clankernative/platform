@@ -3,7 +3,6 @@ use crate::{
     authority_state, budget,
     managed_credentials::{effects, simulation, store as credentials},
 };
-use anyhow::Context as _;
 use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
 use rusqlite::types::Value;
 use serde::{Deserialize, Serialize};
