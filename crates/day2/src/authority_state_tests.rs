@@ -881,6 +881,31 @@ fn prepared_restore_fence_requires_same_active_scope_and_preserves_the_actual_ho
 }
 
 #[test]
+fn prepared_restore_fence_owned_scope_stops_at_actual_vm_budget_without_denial_writes() -> Result<()> {
+    let mut db=Connection::open_in_memory()?;initialize_restore_fence(&mut db)?;
+    let original=current(&db)?;
+    let schema=RestoreFenceSchema::prepare()?;
+    let prepared=PreparedRestoreFence::new(original.clone(),Path::new("/restored/one"),Digest::new(b"step-bounded-fence"),100)?;
+    let tx=db.transaction()?;
+    let mut entered=false;
+    let result=crate::oauth::schema::admit_with_limits(&tx,1024,16384,8*1048576,|db| {
+        entered=true;
+        prepared.apply_in(db,&schema)
+    });
+    assert!(entered);
+    let error=result.unwrap_err();
+    assert!(error.to_string().contains("budget"));
+    assert_eq!(current(&tx)?,original);
+    assert_eq!(tx.query_row("SELECT restored FROM day2_budget_meta",[],|r|r.get::<_,i64>(0))?,0);
+    // The temporary callback has actually been removed; a later finite query
+    // succeeds rather than inheriting the exhausted scope or a renewed budget.
+    assert_eq!(tx.query_row("WITH RECURSIVE n(v) AS(VALUES(0) UNION ALL SELECT v+1 FROM n WHERE v<1000) SELECT sum(v) FROM n",[],|r|r.get::<_,i64>(0))?,500500);
+    tx.commit()?;
+    assert_eq!(current(&db)?,original);
+    Ok(())
+}
+
+#[test]
 fn prepared_restore_fence_late_failure_rolls_back_inside_the_actual_owned_scope() -> Result<()> {
     let mut db=Connection::open_in_memory()?;initialize_restore_fence(&mut db)?;
     let original=current(&db)?;
