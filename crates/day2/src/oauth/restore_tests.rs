@@ -128,7 +128,9 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
         let path = dir.path().join("app.sqlite");
         let mut db = database(&path)?;
         seed(&mut db)?;
-        if seed_number == 17 {assert!(connect::mark_uncertain(&db,"sent")?);}
+        if seed_number == 17 {
+            assert!(connect::mark_uncertain(&db, "sent")?);
+        }
         let history = histories(&db)?;
         assert_eq!(cut(&mut db, &profile, seed_number)?, 7); // 2 connect + 4 refresh + 1 grant.
         drop(db);
@@ -164,9 +166,19 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
                 .is_err()
             );
             assert!(connect::begin(&mut db, &intent("pending"), 5).is_err());
-            for attempt in ["pending","sent"] {
-                assert!(connect::cancel(&mut db,attempt, |_|panic!("closed cancellation entered custody")).is_err());
-                assert!(connect::expire(&mut db,attempt,1000, |_|panic!("closed expiry entered custody")).is_err());
+            for attempt in ["pending", "sent"] {
+                assert!(
+                    connect::cancel(&mut db, attempt, |_| panic!(
+                        "closed cancellation entered custody"
+                    ))
+                    .is_err()
+                );
+                assert!(
+                    connect::expire(&mut db, attempt, 1000, |_| panic!(
+                        "closed expiry entered custody"
+                    ))
+                    .is_err()
+                );
             }
             assert!(require_open(&db, Kind::Inbound, "old_grant").is_err());
             assert!(require_no_history(&db).is_err());
