@@ -64,7 +64,7 @@ locals {
         writers   = sort(distinct(var.writers))
         authority = var.authority
         runtime = {
-          kind = "linux_sqlite_single_v1"
+          kind = var.rolling_deploys ? "linux_sqlite_rwo_v1" : "linux_sqlite_single_v1"
           resources = {
             memory_mib    = var.runtime_resources.memory_mib
             cpu_millis    = var.runtime_resources.cpu_millis
@@ -110,6 +110,7 @@ locals {
   pod_labels = merge(var.extra_pod_labels, local.contract_pod_labels, local.selector_labels, {
     "app.kubernetes.io/managed-by" = "opentofu"
     "app.kubernetes.io/part-of"    = "day2"
+    "day2.dev/state-claim"         = local.pvc_name
   })
 
   # Limits equal the runtime profile. day2-serve reads its private cgroup and
@@ -203,6 +204,7 @@ resource "kubernetes_config_map_v1" "instance" {
 }
 
 resource "kubernetes_stateful_set_v1" "day2" {
+  count      = var.rolling_deploys ? 0 : 1
   depends_on = [terraform_data.release_admission]
   metadata {
     name        = local.workload_name

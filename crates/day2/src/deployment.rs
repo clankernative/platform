@@ -1,4 +1,4 @@
-//! One guarded Linux container per SQLite app. This is development authentication,
+//! Guarded Linux containers sharing a node-local SQLite app. This is development authentication,
 //! not an enterprise identity adapter or a high-availability storage profile.
 
 use crate::{artifact::Instance, store::Runtime, web::LocalServer};
@@ -408,7 +408,7 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
         None
     };
     let desired = root.join(&binding.artifact);
-    let artifact = active.as_ref().map_or_else(
+    let artifact = active.as_ref().filter(|_| !profile.rolling()).map_or_else(
         || desired.clone(),
         |active| PathBuf::from(&active.artifact_path),
     );
@@ -416,7 +416,7 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
         Some(active) => crate::store::activated_artifact_unavailable(active, &desired, error),
         None => error,
     })?;
-    if let Some(active) = active {
+    if let Some(active) = active.filter(|_| !profile.rolling()) {
         ensure!(
             artifact.file_name().and_then(|name| name.to_str())
                 == Some(day2_assets::hash_part(&active.artifact_id)?),
@@ -454,7 +454,12 @@ fn initial_layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimePr
     Ok((instance_path, profile, state))
 }
 
+#[cfg(test)]
 fn replica_lock(state: &Path, app: &str) -> Result<File> {
+    serving_lock(state, app, false)
+}
+
+fn serving_lock(state: &Path, app: &str, rolling: bool) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     day2_contracts::names::identifier(app)?;
     let path = state.join(format!("{app}.serve.lock"));
@@ -467,9 +472,15 @@ fn replica_lock(state: &Path, app: &str) -> Result<File> {
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)?;
-    file.try_lock()
-        .context("another server owns this SQLite app")?;
+    if rolling {
+        file.try_lock_shared()
+            .context("maintenance owns this SQLite app")?;
+    } else {
+        file.try_lock()
+            .context("another server owns this SQLite app")?;
+    }
     Ok(file)
 }
 
@@ -553,7 +564,7 @@ pub async fn serve(instance_path: &Path, app: &str, access: Access<'_>) -> Resul
 pub fn admit_store(runtime: &Runtime) -> Result<Option<crate::security_admission::Requirements>> {
     runtime.initialize()?;
     let db = crate::store::open(runtime.db())?;
-    let authority = crate::authority_state::current(&db)?;
+    let authority = crate::rollout::authority_for(runtime, &db)?;
     if let Some(requirements) = &authority.document.security {
         requirements.validate(runtime.artifact())?;
     }
@@ -566,6 +577,75 @@ pub fn admit_store(runtime: &Runtime) -> Result<Option<crate::security_admission
         crate::oauth::schema::admit_with_runtime_hook(&db, crate::oauth::connect::install_schema)?;
     }
     Ok(authority.document.security)
+}
+
+/// Proof that no serving process holds this ordinary store. This lease cannot
+/// be constructed outside the deployment boundary or used for another database.
+pub(crate) struct StoreMaintenanceLease {
+    database: PathBuf,
+    _file: File,
+}
+
+impl StoreMaintenanceLease {
+    pub(crate) fn check(&self, database: &Path) -> Result<()> {
+        ensure!(self.database == database, "maintenance_store_changed");
+        Ok(())
+    }
+}
+
+/// Explicit offline admission for incompatible runtime/private-schema changes.
+/// A shared serving lease makes this fail before any initialization writes.
+fn maintenance_lease(
+    runtime: &Runtime,
+    operator: &crate::authority_state::LocalOperator,
+) -> Result<StoreMaintenanceLease> {
+    ensure!(
+        !runtime.uses_native_storage()
+            && Instance::load(runtime.instance_path())?
+                .native_bootstrap_for(runtime.app())?
+                .is_none(),
+        "ordinary_store_required"
+    );
+    ensure!(
+        runtime.operators()?.contains(operator.name())
+            || runtime.sql_read(|db| Ok(crate::authority_state::current(db)?
+                .policy()?
+                .admins
+                .contains(operator.name())))?,
+        "maintenance_operator_required"
+    );
+    Ok(StoreMaintenanceLease {
+        database: runtime.db().to_path_buf(),
+        _file: serving_lock(
+            runtime.db().parent().context("store directory")?,
+            runtime.app(),
+            false,
+        )?,
+    })
+}
+
+pub fn admit_maintenance_store(
+    runtime: &Runtime,
+    operator: &crate::authority_state::LocalOperator,
+) -> Result<()> {
+    let lease = maintenance_lease(runtime, operator)?;
+    runtime.initialize_maintenance(&lease)?;
+    admit_store(runtime)?;
+    Ok(())
+}
+
+/// Activate desired target authority against the actual incumbent while holding
+/// the exclusive store lease. The target instance cannot select serving code yet.
+pub fn activate_maintenance(
+    runtime: &Runtime,
+    target: &crate::artifact::LoadedArtifact,
+    desired: &Path,
+    operator: &crate::authority_state::LocalOperator,
+    expected: &crate::authority_state::AuthorityStamp,
+    id: &str,
+) -> Result<crate::authority_state::AuthorityReceipt> {
+    let _lease = maintenance_lease(runtime, operator)?;
+    crate::migration::activate_checked(runtime, target, operator, expected, id, desired)
 }
 
 /// The enforcing container lifecycle with host-owned adapter installation.
@@ -786,7 +866,7 @@ async fn serve_configured(
     let _lease = if initial_storage {
         None
     } else {
-        Some(replica_lock(&state, app)?)
+        Some(serving_lock(&state, app, profile.rolling())?)
     };
     let runtime = if initial_storage {
         AppStartupRuntime::Initial(Box::new(crate::store::InitialStoreMetadata::load(
@@ -796,6 +876,13 @@ async fn serve_configured(
     } else {
         AppStartupRuntime::Ordinary(Box::new(Runtime::load(&instance_path, app)?))
     };
+    if let Ok(expected) = std::env::var("DAY2_EXPECTED_ROLLOUT") {
+        let AppStartupRuntime::Ordinary(runtime) = &runtime else {
+            anyhow::bail!("ordinary_rolling_profile_required")
+        };
+        ensure!(profile.rolling(), "ordinary_rolling_profile_required");
+        crate::rollout::require_expected_release(runtime, &expected)?;
+    }
     // Runtime loading samples the active database binding independently. Check
     // the actual selected code too, so activation between layout and load cannot
     // select a writable artifact outside the kernel-guarded read-only tree.
@@ -968,6 +1055,22 @@ pub fn observe_epoch_controller_preparation(instance: &Path, app: &str) -> Resul
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rolling_serving_leases_exclude_offline_maintenance() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let incumbent = serving_lock(directory.path(), "app", true)?;
+        let candidate = serving_lock(directory.path(), "app", true)?;
+        assert!(serving_lock(directory.path(), "app", false).is_err());
+        drop(incumbent);
+        assert!(serving_lock(directory.path(), "app", false).is_err());
+        drop(candidate);
+        let maintenance = serving_lock(directory.path(), "app", false)?;
+        assert!(serving_lock(directory.path(), "app", true).is_err());
+        drop(maintenance);
+        serving_lock(directory.path(), "app", true)?;
+        Ok(())
+    }
 
     #[test]
     fn profile_manifest_digest_uses_exact_reviewed_bytes_without_qualification() -> Result<()> {

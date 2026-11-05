@@ -94,7 +94,8 @@ fn status_in(
         .context(crate::error::Failure::NotFound)?;
     ensure!(owner == actor, crate::error::Failure::Forbidden);
     ensure!(
-        artifact == runtime.artifact().id(),
+        artifact == runtime.artifact().id()
+            || crate::rollout::compatible_ticket(connection, runtime, &artifact)?,
         crate::error::Failure::ArtifactBindingChanged
     );
     let authority = crate::authority_state::authorize_in(connection, runtime, &operation, actor)?;
@@ -414,6 +415,21 @@ fn children_in(connection: &Connection, parent: &str) -> Result<Vec<Invocation>>
 /// and SQLite transaction determine the winner, not process-local ownership.
 pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
     ensure!(budget <= 1000, "invocation_drain_budget");
+    if runtime.rolling() {
+        let mut outcomes = Vec::new();
+        for artifact in crate::rollout::pending_artifacts(runtime)? {
+            if outcomes.len() >= budget {
+                break;
+            }
+            let selected = runtime.with_rollout_artifact(&artifact)?;
+            outcomes.extend(drain_artifact(&selected, budget - outcomes.len())?);
+        }
+        return Ok(outcomes);
+    }
+    drain_artifact(runtime, budget)
+}
+
+fn drain_artifact(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
     // Immutable admitted declarations can exclude this pump without opening
     // SQLite. Queue emptiness itself must be read under the SQL-unit guard.
     let commands: Vec<_> = runtime

@@ -848,6 +848,22 @@ pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeRe
     host.credential_effects
         .clone()
         .run_async(async move {
+            if !host.runtime.uses_native_storage()
+                && matches!(request.uri().path(), "/health/ready" | "/health/candidate")
+                && host.runtime.rolling()
+            {
+                let candidate_probe = request.uri().path() == "/health/candidate";
+                let runtime = host.runtime.clone();
+                let ready = tokio::task::spawn_blocking(move || {
+                    crate::rollout::ready(&runtime, candidate_probe)
+                })
+                .await
+                .is_ok_and(|result| result.unwrap_or(false));
+                return NativeResponse::health(
+                    request.method(),
+                    ready && host.admitting.load(Ordering::Acquire),
+                );
+            }
             if let Some(response) = native_literal_health(&host, &request) {
                 return response;
             }

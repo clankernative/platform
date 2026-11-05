@@ -934,6 +934,7 @@ fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
             "migration:apply",
             "workflow:authority-inspect",
             "workflow:authority-activate",
+            "store-admission",
             "mark-activated",
             "finish",
         ]
@@ -1067,5 +1068,84 @@ fn maintain_stops_at_a_refused_confirmation_before_the_fence() -> Result<()> {
         )
         .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn rolling_release_proves_candidate_before_promotion_without_an_offline_fence() -> Result<()> {
+    for resuming in [false, true] {
+        let mut steps = Vec::new();
+        automation::run(
+            &automation::runner()?,
+            &["platform", "maintain", "rollout", "request.json"],
+            |request| {
+                let input: Value = request.decode()?;
+                steps.push(match request.action.as_str() {
+                    "maintenance-rollout" => format!("rollout:{}", input["step"].as_str().unwrap()),
+                    "maintenance-migration" => {
+                        format!("migration:{}", input["step"].as_str().unwrap())
+                    }
+                    "maintenance-workflow" => {
+                        format!("workflow:{}", input["workflow"].as_str().unwrap())
+                    }
+                    other => other.trim_start_matches("maintenance-").into(),
+                });
+                Ok(if request.action == "maintenance-rollout-resume" {
+                    json!({"resuming":resuming})
+                } else {
+                    json!({})
+                })
+            },
+        )?;
+        let mut expected = vec![
+            "open",
+            "artifacts",
+            "stop",
+            "measure",
+            "pod",
+            "rollout-resume",
+        ];
+        if !resuming {
+            expected.extend([
+                "workflow:backup",
+                "copy-backup",
+                "migration:plan",
+                "admission",
+                "confirm",
+            ]);
+        }
+        expected.extend([
+            "rollout:prepare",
+            "rollout:bind",
+            "rollout:admit",
+            "rollout:deploy",
+            "rollout:observe",
+            "rollout:probe",
+            "rollout:promote",
+            "rollout:wait",
+            "rollout:complete",
+            "finish",
+        ]);
+        assert_eq!(steps, expected);
+    }
+    let mut steps = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "rollout", "request.json"],
+        |request| {
+            let input: Value = request.decode()?;
+            steps.push(request.action.clone());
+            if request.action == "maintenance-rollout" && input["step"] == "probe" {
+                bail!("candidate write failed");
+            }
+            Ok(if request.action == "maintenance-rollout-resume" {
+                json!({"resuming":false})
+            } else {
+                json!({})
+            })
+        },
+    );
+    assert!(result.is_err());
+    assert_ne!(steps.last().map(String::as_str), Some("maintenance-finish"));
     Ok(())
 }

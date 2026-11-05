@@ -87,6 +87,7 @@ pub enum Operation {
     Activate,
     /// Recovery for `activate` of a new artifact when its own stamp step failed.
     MarkActivated,
+    Rollout,
 }
 
 impl Operation {
@@ -96,6 +97,7 @@ impl Operation {
             "backup" => Self::Backup,
             "authority-apply" => Self::AuthorityApply,
             "activate" => Self::Activate,
+            "rollout" => Self::Rollout,
             "mark-activated" => Self::MarkActivated,
             _ => bail!(
                 "maintain operation must be inspect, backup, authority-apply, activate or mark-activated"
@@ -109,13 +111,14 @@ impl Operation {
             Self::Backup => "backup",
             Self::AuthorityApply => "authority-apply",
             Self::Activate => "activate",
+            Self::Rollout => "rollout",
             Self::MarkActivated => "mark-activated",
         }
     }
 
     /// `activate` and its `mark-activated` recovery take the same request.
     fn targeted(self) -> bool {
-        matches!(self, Self::Activate | Self::MarkActivated)
+        matches!(self, Self::Activate | Self::MarkActivated | Self::Rollout)
     }
 
     /// How many times the app's stores fit on the pod's scratch volume at the
@@ -129,7 +132,7 @@ impl Operation {
             // the WAL and SQLite temporary files that migration grows. The
             // real migration's WAL is on the app's volume; its temporary files
             // reuse the space the removed rehearsal freed.
-            Self::Activate => 2,
+            Self::Activate | Self::Rollout => 2,
         }
     }
 }
@@ -153,7 +156,7 @@ fn scratch_bytes(copies: u64, stores: u64, artifacts: u64) -> u64 {
 /// provider store the backup takes, each with its WAL.
 fn store_sizes(listing: &str, app: &str) -> Result<BTreeMap<String, u64>> {
     let database = format!("{app}.sqlite");
-    let mut wanted = vec![database.clone()];
+    let mut wanted = vec![database.clone(), format!("{app}.artifacts.sqlite")];
     wanted.extend(
         day2::capabilities::LOCAL_PROVIDER_DATABASES
             .iter()
@@ -196,6 +199,36 @@ pub struct Target {
     pub instance: PathBuf,
     pub app_image: String,
     pub artifact_id: String,
+    /// App-owned canary operations, required only by the rolling release lane.
+    pub probe: Option<RolloutProbe>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutProbe {
+    pub actor: String,
+    pub command: String,
+    pub input: Value,
+    pub query: String,
+    pub query_input: Value,
+    pub expected: Value,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadKind {
+    #[default]
+    Statefulset,
+    Deployment,
+}
+
+impl WorkloadKind {
+    fn resource(self) -> &'static str {
+        match self {
+            Self::Statefulset => "statefulset",
+            Self::Deployment => "deployment",
+        }
+    }
 }
 
 /// Everything the old flags carried, as one reviewed file.
@@ -204,6 +237,8 @@ pub struct Target {
 pub struct Request {
     pub namespace: String,
     pub statefulset: String,
+    #[serde(default)]
+    pub workload_kind: WorkloadKind,
     pub configmap: String,
     pub app: String,
     pub pvc: String,
@@ -225,6 +260,14 @@ pub struct Request {
 }
 
 impl Request {
+    fn kind(&self, operation: Operation) -> WorkloadKind {
+        if operation == Operation::Rollout {
+            WorkloadKind::Deployment
+        } else {
+            self.workload_kind
+        }
+    }
+
     pub fn validate(&self, operation: Operation) -> Result<()> {
         for (field, value) in [
             ("namespace", &self.namespace),
@@ -259,7 +302,12 @@ impl Request {
             "operator must be the operator's e-mail address"
         );
         ensure!(
-            label_key(&self.pod_label.key) && label_value(&self.pod_label.value),
+            label_key(&self.pod_label.key)
+                && label_value(&self.pod_label.value)
+                && !matches!(
+                    self.pod_label.key.as_str(),
+                    "app.kubernetes.io/name" | "app.kubernetes.io/part-of"
+                ),
             "pod_label must be a Kubernetes label key and value"
         );
         let needs_id = operation == Operation::AuthorityApply || operation.targeted();
@@ -267,11 +315,16 @@ impl Request {
             Some(id) => ensure!(
                 needs_id
                     && !id.is_empty()
-                    && id.len() <= 128
+                    && id.len()
+                        <= if operation == Operation::Rollout {
+                            96
+                        } else {
+                            128
+                        }
                     && id
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
-                "request_id is 1-128 letters, digits, dots, dashes or underscores, for authority-apply, activate and mark-activated only"
+                "request_id is 1-128 letters, digits, dots, dashes or underscores, for authority-apply, activate, mark-activated or rollout (96 maximum)"
             ),
             None => ensure!(!needs_id, "{} requires request_id", operation.name()),
         }
@@ -899,6 +952,9 @@ fn private(path: &Path) -> Result<()> {
 
 #[derive(Default)]
 struct State {
+    resumed: bool,
+    candidate_observed: bool,
+    probe_verified: bool,
     artifacts: bool,
     stopped: bool,
     /// The pod measuring the store may exist.
@@ -922,6 +978,7 @@ struct State {
     fenced: bool,
     migrated: bool,
     activated: bool,
+    store_admitted: bool,
     /// The artifact the app's database activates, from `authority-inspect`.
     active_artifact: Option<String>,
     marked: bool,
@@ -934,6 +991,7 @@ pub struct Session {
     request: Request,
     /// For the `mark-activated` recovery command an `activate` failure prints.
     request_file: PathBuf,
+    request_digest: String,
     operation: Operation,
     stamp: String,
     pod: String,
@@ -943,6 +1001,9 @@ pub struct Session {
     journal: PathBuf,
     events: Vec<Value>,
     target_instance: Option<String>,
+    controller: Value,
+    online_node: Option<String>,
+    pvc_uid: Option<String>,
     state: State,
 }
 
@@ -954,8 +1015,18 @@ impl Session {
             metadata.is_file() && metadata.len() <= 65_536,
             "maintenance request file size"
         );
-        let request: Request = day2::json::decode(&fs::read(request_file)?)?;
+        let request_bytes = fs::read(request_file)?;
+        let request_digest = day2::digest(&request_bytes);
+        let request: Request = day2::json::decode(&request_bytes)?;
         request.validate(operation)?;
+        ensure!(
+            operation != Operation::Rollout
+                || request
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.probe.is_some()),
+            "rolling_release_requires_app_owned_probe"
+        );
         let target_instance = match &request.target {
             Some(target) => {
                 let metadata = fs::metadata(&target.instance).context("target instance")?;
@@ -984,7 +1055,7 @@ impl Session {
         };
         let statefulset: Value = serde_json::from_str(&kubectl(&[
             "get",
-            "statefulset",
+            request.kind(operation).resource(),
             &request.statefulset,
             "-o",
             "json",
@@ -995,8 +1066,15 @@ impl Session {
         let running = statefulset["spec"]["template"]["spec"]["containers"][0]["image"]
             .as_str()
             .context("StatefulSet image")?;
+        let resuming = operation == Operation::Rollout
+            && statefulset["metadata"]["annotations"]["day2.dev/rollout"].as_str()
+                == request.request_id.as_deref()
+            && request
+                .target
+                .as_ref()
+                .is_some_and(|target| target.app_image == running);
         ensure!(
-            running == request.app_image,
+            running == request.app_image || resuming,
             "the StatefulSet runs {running}, not app_image {}",
             request.app_image
         );
@@ -1006,12 +1084,162 @@ impl Session {
         if operation == Operation::MarkActivated {
             unmarked(&request, replicas, marked.as_deref())?;
         }
-        let others = kubectl(&["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"])?;
-        ensure!(
-            others.trim().is_empty(),
-            "another maintenance session is running in {namespace}: {}",
-            others.trim()
-        );
+        let online_node = if operation == Operation::Rollout {
+            ensure!(
+                replicas == 1
+                    && statefulset["spec"]["strategy"]["type"] == "RollingUpdate"
+                    && statefulset["spec"]["strategy"]["rollingUpdate"]["maxSurge"] == 1
+                    && statefulset["spec"]["strategy"]["rollingUpdate"]["maxUnavailable"] == 0
+                    && statefulset["spec"]["template"]["spec"]["volumes"]
+                        .as_array()
+                        .is_some_and(|volumes| volumes
+                            .iter()
+                            .any(|volume| volume["name"] == "state"
+                                && volume["persistentVolumeClaim"]["claimName"] == request.pvc)),
+                "rolling_deployment_required"
+            );
+            let pods: Value = serde_json::from_str(&kubectl(&[
+                "get",
+                "pods",
+                "-l",
+                &format!("app.kubernetes.io/name={}", request.statefulset),
+                "-o",
+                "json",
+            ])?)?;
+            let replicasets: Value =
+                serde_json::from_str(&kubectl(&["get", "replicasets", "-o", "json"])?)?;
+            let owners: Vec<_> = replicasets["items"]
+                .as_array()
+                .context("replicasets")?
+                .iter()
+                .filter(|replica| {
+                    replica["metadata"]["ownerReferences"]
+                        .as_array()
+                        .is_some_and(|owners| {
+                            owners.iter().any(|owner| {
+                                owner["controller"] == true
+                                    && owner["uid"] == statefulset["metadata"]["uid"]
+                            })
+                        })
+                })
+                .filter_map(|replica| replica["metadata"]["uid"].as_str())
+                .collect();
+            for pod in pods["items"].as_array().context("pods")? {
+                if matches!(
+                    pod["status"]["phase"].as_str(),
+                    Some("Succeeded" | "Failed")
+                ) {
+                    continue;
+                }
+                ensure!(
+                    pod["metadata"]["ownerReferences"]
+                        .as_array()
+                        .is_some_and(|references| references.iter().any(
+                            |owner| owner["controller"] == true
+                                && owner["uid"]
+                                    .as_str()
+                                    .is_some_and(|uid| owners.contains(&uid))
+                        ))
+                        && pod["spec"]["volumes"]
+                            .as_array()
+                            .is_some_and(|volumes| volumes.iter().any(|volume| volume["name"]
+                                == "state"
+                                && volume["persistentVolumeClaim"]["claimName"] == request.pvc)),
+                    "rollout_pod_owner_or_claim_changed"
+                );
+            }
+            let services: Value =
+                serde_json::from_str(&kubectl(&["get", "services", "-o", "json"])?)?;
+            let mut helper_labels = serde_json::Map::from_iter([
+                ("app.kubernetes.io/name".into(), json!("day2-maintenance")),
+                ("app.kubernetes.io/part-of".into(), json!("day2")),
+            ]);
+            helper_labels.insert(
+                request.pod_label.key.clone(),
+                json!(request.pod_label.value),
+            );
+            for service in services["items"].as_array().context("services")? {
+                ensure!(
+                    !service["spec"]["selector"]
+                        .as_object()
+                        .is_some_and(|selector| !selector.is_empty()
+                            && selector
+                                .iter()
+                                .all(|(key, value)| helper_labels.get(key) == Some(value))),
+                    "maintenance_pod_must_not_match_a_service"
+                );
+            }
+            let nodes: Vec<_> = pods["items"]
+                .as_array()
+                .context("pod list")?
+                .iter()
+                .filter(|pod| {
+                    pod["metadata"]["deletionTimestamp"].is_null()
+                        && pod["spec"]["containers"]
+                            .as_array()
+                            .is_some_and(|containers| {
+                                containers.iter().any(|container| {
+                                    container["name"] == "day2"
+                                        && (container["image"] == request.app_image
+                                            || (resuming && container["image"] == running))
+                                })
+                            })
+                })
+                .filter_map(|pod| pod["spec"]["nodeName"].as_str().map(str::to_owned))
+                .collect();
+            ensure!(
+                !nodes.is_empty() && nodes.iter().all(|node| node == &nodes[0]),
+                "one_incumbent_node_required"
+            );
+            Some(nodes[0].clone())
+        } else {
+            None
+        };
+        let pvc_uid = if operation == Operation::Rollout {
+            let pvc: Value =
+                serde_json::from_str(&kubectl(&["get", "pvc", &request.pvc, "-o", "json"])?)?;
+            ensure!(
+                pvc["status"]["phase"] == "Bound"
+                    && pvc["spec"]["accessModes"] == json!(["ReadWriteOnce"]),
+                "bound_read_write_once_claim_required"
+            );
+            Some(
+                pvc["metadata"]["uid"]
+                    .as_str()
+                    .context("PVC UID")?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        if operation == Operation::Rollout {
+            let others: Value = serde_json::from_str(&kubectl(&[
+                "get",
+                "pods",
+                "-l",
+                MAINTENANCE_LABEL,
+                "-o",
+                "json",
+            ])?)?;
+            ensure!(
+                others["items"]
+                    .as_array()
+                    .context("maintenance pods")?
+                    .iter()
+                    .all(
+                        |pod| pod["metadata"]["annotations"]["day2.dev/rollout-request"]
+                            == request_digest
+                    ),
+                "another_maintenance_session_is_running"
+            );
+        } else {
+            let others = kubectl(&["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"])?;
+            ensure!(
+                others.trim().is_empty(),
+                "another maintenance session is running in {namespace}: {}",
+                others.trim()
+            );
+        }
         let stamp = crate::offsite::utc_stamp(SystemTime::now())?;
         let pod = format!("day2-maintenance-{}", stamp.to_ascii_lowercase());
         let backup_root = match &request.backup_dir {
@@ -1030,6 +1258,7 @@ impl Session {
         let mut session = Self {
             tools,
             request_file: request_file.to_path_buf(),
+            request_digest,
             operation,
             stamp,
             pod,
@@ -1039,6 +1268,9 @@ impl Session {
             journal,
             events: Vec::new(),
             target_instance,
+            controller: statefulset,
+            online_node,
+            pvc_uid,
             state: State::default(),
             request,
         };
@@ -1167,6 +1399,11 @@ impl Session {
             self.state.artifacts && !self.state.stopped,
             "stop follows the artifact fetch, once"
         );
+        if self.operation == Operation::Rollout {
+            self.state.stopped = true; // Ordering marker; no workload is scaled.
+            self.record("incumbent-kept-serving", json!({"node":self.online_node}))?;
+            return Ok(json!({"incumbent_running":true}));
+        }
         eprintln!(
             "== stopping {} (was {} replica(s))",
             self.request.statefulset, self.replicas
@@ -1176,27 +1413,47 @@ impl Session {
         self.record("stop", json!({"replicas": self.replicas}))?;
         let statefulset = self.request.statefulset.clone();
         self.kubectl(
-            &["scale", "statefulset", &statefulset, "--replicas=0"],
+            &[
+                "scale",
+                self.request.kind(self.operation).resource(),
+                &statefulset,
+                "--replicas=0",
+            ],
             None,
             Duration::from_secs(60),
         )?;
-        for ordinal in 0..self.replicas.max(1) {
-            let pod = format!("{statefulset}-{ordinal}");
-            let started = Instant::now();
-            loop {
-                let found = self.kubectl(
-                    &["get", "pod", &pod, "--ignore-not-found", "-o", "name"],
-                    None,
-                    Duration::from_secs(60),
-                )?;
-                if found.trim().is_empty() {
-                    break;
+        if self.request.kind(self.operation) == WorkloadKind::Deployment {
+            self.kubectl(
+                &[
+                    "wait",
+                    "--for=delete",
+                    "pods",
+                    "-l",
+                    &format!("app.kubernetes.io/name={statefulset}"),
+                    "--timeout=300s",
+                ],
+                None,
+                Duration::from_secs(330),
+            )?;
+        } else {
+            for ordinal in 0..self.replicas.max(1) {
+                let pod = format!("{statefulset}-{ordinal}");
+                let started = Instant::now();
+                loop {
+                    let found = self.kubectl(
+                        &["get", "pod", &pod, "--ignore-not-found", "-o", "name"],
+                        None,
+                        Duration::from_secs(60),
+                    )?;
+                    if found.trim().is_empty() {
+                        break;
+                    }
+                    ensure!(
+                        started.elapsed() < Duration::from_secs(300),
+                        "{pod} did not stop"
+                    );
+                    std::thread::sleep(Duration::from_secs(2));
                 }
-                ensure!(
-                    started.elapsed() < Duration::from_secs(300),
-                    "{pod} did not stop"
-                );
-                std::thread::sleep(Duration::from_secs(2));
             }
         }
         Ok(json!({"stopped": statefulset}))
@@ -1225,7 +1482,24 @@ impl Session {
             ("DAY2_MAINT_SCRATCH", scratch.as_str()),
             ("DAY2_MAINT_EPHEMERAL_STORAGE", ephemeral.as_str()),
         ];
-        render_template(POD_TEMPLATE, &values)
+        let rendered = render_template(POD_TEMPLATE, &values)?;
+        if let Some(node) = &self.online_node {
+            ensure!(label_value(node), "invalid_incumbent_node");
+            let rendered = rendered.replacen(
+                "\nmetadata:\n",
+                &format!(
+                    "\nmetadata:\n  annotations:\n    day2.dev/rollout-request: {}\n",
+                    self.request_digest
+                ),
+                1,
+            );
+            return Ok(rendered.replacen(
+                "\nspec:\n",
+                &format!("\nspec:\n  nodeName: {node}\n"),
+                1,
+            ));
+        }
+        Ok(rendered)
     }
 
     /// Apply a rendered pod and wait until it runs. A pod that never starts
@@ -1511,7 +1785,10 @@ impl Session {
                 ensure!(
                     matches!(
                         self.operation,
-                        Operation::Backup | Operation::AuthorityApply | Operation::Activate
+                        Operation::Backup
+                            | Operation::AuthorityApply
+                            | Operation::Activate
+                            | Operation::Rollout
                     ) && !self.state.pod_backup,
                     "one backup per session, not for inspect or mark-activated"
                 );
@@ -1585,16 +1862,34 @@ impl Session {
                     json!({"expected": expected, "request_id": request_id}),
                 )?;
                 let artifact = format!("{ROOT}/artifacts/{}", target.artifact_id);
-                let receipt = self.host_workflow(&[
-                    "authority",
-                    "activate",
-                    TARGET,
-                    &app,
-                    &artifact,
-                    &operator,
-                    &expected,
-                    &request_id,
-                ])?;
+                let receipt = if self.request.kind(self.operation) == WorkloadKind::Deployment {
+                    let raw = self.exec(
+                        &[
+                            DAY2,
+                            "activate-maintenance",
+                            CURRENT,
+                            &app,
+                            TARGET,
+                            &artifact,
+                            &operator,
+                            &expected,
+                            &request_id,
+                        ],
+                        Duration::from_secs(600),
+                    )?;
+                    serde_json::from_str(raw.trim())?
+                } else {
+                    self.host_workflow(&[
+                        "authority",
+                        "activate",
+                        TARGET,
+                        &app,
+                        &artifact,
+                        &operator,
+                        &expected,
+                        &request_id,
+                    ])?
+                };
                 self.state.stamp = None;
                 self.state.activated = true;
                 self.state.result = Some(receipt.clone());
@@ -1669,7 +1964,7 @@ impl Session {
 
     pub fn migration(&mut self, step: &str) -> Result<Value> {
         ensure!(
-            self.operation == Operation::Activate && self.state.pod,
+            matches!(self.operation, Operation::Activate | Operation::Rollout) && self.state.pod,
             "migrations belong to activate"
         );
         let target = self.request.target.clone().context("target")?;
@@ -1683,11 +1978,29 @@ impl Session {
                 );
                 eprintln!("== migration plan to {}", target.artifact_id);
                 self.exec(
-                    &[DAY2, "migration-plan", TARGET, &app, &artifact, PLAN],
+                    &[
+                        DAY2,
+                        "migration-plan",
+                        if self.request.kind(self.operation) == WorkloadKind::Deployment {
+                            CURRENT
+                        } else {
+                            TARGET
+                        },
+                        &app,
+                        &artifact,
+                        PLAN,
+                    ],
                     Duration::from_secs(600),
                 )?;
                 let plan: Value =
                     serde_json::from_str(&self.exec(&["cat", PLAN], Duration::from_secs(60))?)?;
+                if self.operation == Operation::Rollout {
+                    ensure!(
+                        plan["source_schema"] == plan["target_schema"]
+                            && self.state.providers.is_empty(),
+                        "rolling_release_requires_unchanged_schema_and_single_store"
+                    );
+                }
                 let backup = self.state.backup.clone().context("backup")?;
                 fs::write(
                     backup.join("migration-plan.json"),
@@ -1704,7 +2017,18 @@ impl Session {
                     "migration apply needs the fence, once"
                 );
                 let receipt = self.exec(
-                    &[DAY2, "migration-apply", TARGET, &app, &artifact, PLAN],
+                    &[
+                        DAY2,
+                        "migration-apply",
+                        if self.request.kind(self.operation) == WorkloadKind::Deployment {
+                            CURRENT
+                        } else {
+                            TARGET
+                        },
+                        &app,
+                        &artifact,
+                        PLAN,
+                    ],
                     Duration::from_secs(1_800),
                 )?;
                 eprintln!("{}", receipt.trim());
@@ -1728,7 +2052,7 @@ impl Session {
     /// the confirmation and the fence, so the app is restored on its image.
     pub fn admission(&mut self) -> Result<Value> {
         ensure!(
-            self.operation == Operation::Activate
+            matches!(self.operation, Operation::Activate | Operation::Rollout)
                 && self.state.plan.is_some()
                 && !self.state.rehearsed
                 && !self.state.confirmed,
@@ -1772,7 +2096,18 @@ impl Session {
         let state = format!("{ADMISSION}/.state");
         // No -p: a leftover copy is refused, never reused.
         self.exec(&["mkdir", ADMISSION, &state], Duration::from_secs(60))?;
-        self.exec(&["cp", TARGET, ADMISSION_INSTANCE], Duration::from_secs(60))?;
+        self.exec(
+            &[
+                "cp",
+                if self.request.kind(self.operation) == WorkloadKind::Deployment {
+                    CURRENT
+                } else {
+                    TARGET
+                },
+                ADMISSION_INSTANCE,
+            ],
+            Duration::from_secs(60),
+        )?;
         let mut stores = vec![("app.sqlite".to_owned(), format!("{app}.sqlite"))];
         for name in self.state.providers.clone() {
             ensure!(
@@ -1790,35 +2125,118 @@ impl Session {
                 Duration::from_secs(60),
             )?;
         }
-        self.exec(
-            &[
+        if self.operation == Operation::Rollout {
+            let source_image = self.request.app_image.clone();
+            self.exec(
+                &[
+                    DAY2,
+                    "rollout-prepare",
+                    ADMISSION_INSTANCE,
+                    &app,
+                    TARGET,
+                    &source_image,
+                    &target.app_image,
+                    &request_id,
+                    &operator,
+                ],
+                Duration::from_secs(600),
+            )?;
+            let path = self.work.path().join("rehearsal-placement.json");
+            fs::write(
+                &path,
+                serde_json::to_vec(
+                    &json!({"namespace":self.request.namespace,"controller_uid":self.controller["metadata"]["uid"],"pvc_uid":self.pvc_uid,"node":self.online_node,"request_digest":self.request_digest}),
+                )?,
+            )?;
+            self.copy_in(&path, "/srv/day2/rehearsal-placement.json")?;
+            self.exec(
+                &[
+                    DAY2,
+                    "rollout-bind",
+                    ADMISSION_INSTANCE,
+                    &app,
+                    &request_id,
+                    "/srv/day2/rehearsal-placement.json",
+                    &operator,
+                ],
+                Duration::from_secs(60),
+            )?;
+            self.exec(
+                &[
+                    DAY2,
+                    "rollout-transition",
+                    ADMISSION_INSTANCE,
+                    &app,
+                    &request_id,
+                    "prepared",
+                    "serving",
+                    &operator,
+                ],
+                Duration::from_secs(60),
+            )?;
+            self.exec(&["cp", TARGET, ADMISSION_INSTANCE], Duration::from_secs(60))?;
+        } else {
+            self.exec(
+                &[
+                    DAY2,
+                    "migration-apply",
+                    ADMISSION_INSTANCE,
+                    &app,
+                    &artifact,
+                    PLAN,
+                ],
+                Duration::from_secs(1_800),
+            )?;
+            let inspected =
+                self.host_workflow(&["authority", "inspect", ADMISSION_INSTANCE, &app])?;
+            let stamp = &inspected["active"]["stamp"];
+            ensure!(stamp.is_object(), "no active authority stamp in the copy");
+            let expected = serde_json::to_string(stamp)?;
+            if self.request.kind(self.operation) == WorkloadKind::Deployment {
+                self.exec(
+                    &[
+                        DAY2,
+                        "activate-maintenance",
+                        ADMISSION_INSTANCE,
+                        &app,
+                        TARGET,
+                        &artifact,
+                        &operator,
+                        &expected,
+                        &request_id,
+                    ],
+                    Duration::from_secs(600),
+                )?;
+            } else {
+                self.host_workflow(&[
+                    "authority",
+                    "activate",
+                    ADMISSION_INSTANCE,
+                    &app,
+                    &artifact,
+                    &operator,
+                    &expected,
+                    &request_id,
+                ])?;
+            }
+            if self.request.kind(self.operation) == WorkloadKind::Deployment {
+                self.exec(&["cp", TARGET, ADMISSION_INSTANCE], Duration::from_secs(60))?;
+            }
+        }
+        let admission_args = if self.operation == Operation::Activate
+            && self.request.kind(self.operation) == WorkloadKind::Deployment
+        {
+            vec![
                 DAY2,
-                "migration-apply",
+                "admit-maintenance",
                 ADMISSION_INSTANCE,
                 &app,
-                &artifact,
-                PLAN,
-            ],
-            Duration::from_secs(1_800),
-        )?;
-        let inspected = self.host_workflow(&["authority", "inspect", ADMISSION_INSTANCE, &app])?;
-        let stamp = &inspected["active"]["stamp"];
-        ensure!(stamp.is_object(), "no active authority stamp in the copy");
-        let expected = serde_json::to_string(stamp)?;
-        self.host_workflow(&[
-            "authority",
-            "activate",
-            ADMISSION_INSTANCE,
-            &app,
-            &artifact,
-            &operator,
-            &expected,
-            &request_id,
-        ])?;
-        let output = self.exec(
-            &[DAY2, "admit", ADMISSION_INSTANCE, &app],
-            Duration::from_secs(600),
-        )?;
+                &operator,
+            ]
+        } else {
+            vec![DAY2, "admit", ADMISSION_INSTANCE, &app]
+        };
+        let output = self.exec(&admission_args, Duration::from_secs(600))?;
         let admitted: Value = serde_json::from_str(output.trim()).context("day2 admit output")?;
         ensure!(
             admitted["admitted"] == true
@@ -1830,9 +2248,590 @@ impl Session {
         Ok(admitted)
     }
 
+    fn rollout_state(&mut self) -> Result<Value> {
+        let app = self.request.app.clone();
+        let raw = self.exec(
+            &[DAY2, "rollout-inspect", CURRENT, &app],
+            Duration::from_secs(60),
+        )?;
+        Ok(serde_json::from_str(raw.trim())?)
+    }
+
+    pub fn rollout_resume(&mut self) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Rollout && self.state.pod,
+            "rolling_session_required"
+        );
+        let state = self.rollout_state()?;
+        if state["id"].as_str() != self.request.request_id.as_deref() {
+            return Ok(json!({"resuming":false}));
+        }
+        let target = self.request.target.as_ref().context("target")?;
+        ensure!(
+            state["source_image"] == self.request.app_image
+                && state["target_image"] == target.app_image
+                && state["target"] == format!("sha256:{}", target.artifact_id)
+                && state["phase"] != "aborted",
+            "rollout_resume_conflict"
+        );
+        if !state["placement"].is_null() {
+            ensure!(
+                state["placement"]["controller_uid"] == self.controller["metadata"]["uid"]
+                    && state["placement"]["pvc_uid"].as_str() == self.pvc_uid.as_deref()
+                    && state["placement"]["node"].as_str() == self.online_node.as_deref()
+                    && state["placement"]["request_digest"] == self.request_digest,
+                "rollout_placement_changed"
+            );
+        }
+        self.state.resumed = true;
+        self.record("rollout-resumed", state)?;
+        Ok(json!({"resuming":true}))
+    }
+
+    fn rollout_transition(&mut self, expected: &str, next: &str) -> Result<Value> {
+        let app = self.request.app.clone();
+        let id = self.request.request_id.clone().context("release id")?;
+        let operator = self.request.operator.clone();
+        let instance = if next == "complete" { TARGET } else { CURRENT };
+        let raw = self.exec(
+            &[
+                DAY2,
+                "rollout-transition",
+                instance,
+                &app,
+                &id,
+                expected,
+                next,
+                &operator,
+            ],
+            Duration::from_secs(300),
+        )?;
+        Ok(serde_json::from_str(raw.trim())?)
+    }
+
+    fn immutable_map(&mut self, name: &str, data: Value) -> Result<()> {
+        let found = self.kubectl(
+            &["get", "configmap", name, "--ignore-not-found", "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?;
+        if !found.trim().is_empty() {
+            let existing: Value = serde_json::from_str(&found)?;
+            ensure!(
+                existing["immutable"] == true && existing["data"] == data,
+                "rollout_configmap_conflict"
+            );
+            return Ok(());
+        }
+        let object = json!({"apiVersion":"v1","kind":"ConfigMap","immutable":true,
+            "metadata":{"name":name,"namespace":self.request.namespace},"data":data});
+        self.kubectl(
+            &["create", "-f", "-"],
+            Some(&serde_json::to_vec(&object)?),
+            Duration::from_secs(60),
+        )?;
+        Ok(())
+    }
+
+    /// Each step is selected by ops/Maintain.roc. This lane never scales down
+    /// the incumbent, migrates live state, or restores a backup over live writes.
+    pub fn rollout(&mut self, step: &str) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Rollout
+                && self.state.pod
+                && ((self.state.admission.is_some() && self.state.confirmed) || self.state.resumed),
+            "rollout_preparation_required"
+        );
+        let target = self.request.target.clone().context("target")?;
+        let app = self.request.app.clone();
+        let id = self.request.request_id.clone().context("release id")?;
+        let operator = self.request.operator.clone();
+        let suffix = day2::digest(id.as_bytes())[7..23].to_owned();
+        let state = self.rollout_state()?;
+        ensure!(
+            state.is_null()
+                || state["id"] == id
+                || matches!(state["phase"].as_str(), Some("complete" | "aborted")),
+            "another_rollout_is_running"
+        );
+        match step {
+            "prepare" => {
+                if state["id"] != id {
+                    let source_image = self.request.app_image.clone();
+                    let raw = self.exec(
+                        &[
+                            DAY2,
+                            "rollout-prepare",
+                            CURRENT,
+                            &app,
+                            TARGET,
+                            &source_image,
+                            &target.app_image,
+                            &id,
+                            &operator,
+                        ],
+                        Duration::from_secs(600),
+                    )?;
+                    self.record("rollout-prepared", serde_json::from_str(raw.trim())?)?;
+                } else {
+                    ensure!(
+                        state["source_image"] == self.request.app_image
+                            && state["target_image"] == target.app_image
+                            && state["target"] == format!("sha256:{}", target.artifact_id),
+                        "rollout_id_conflict"
+                    );
+                }
+                Ok(json!({"prepared":true}))
+            }
+            "bind" => {
+                ensure!(state["id"] == id, "rollout_preparation_required");
+                let placement = json!({"namespace":self.request.namespace,"controller_uid":self.controller["metadata"]["uid"],"pvc_uid":self.pvc_uid,"node":self.online_node,"request_digest":self.request_digest});
+                let path = self.work.path().join("placement.json");
+                fs::write(&path, serde_json::to_vec(&placement)?)?;
+                self.copy_in(&path, "/srv/day2/placement.json")?;
+                // Raw inspection above allows a completed release to reconcile
+                // after its final response was lost, without loading old code.
+                if state["phase"] != "complete" {
+                    self.exec(
+                        &[
+                            DAY2,
+                            "rollout-bind",
+                            CURRENT,
+                            &app,
+                            &id,
+                            "/srv/day2/placement.json",
+                            &operator,
+                        ],
+                        Duration::from_secs(60),
+                    )?;
+                }
+                Ok(json!({"placement_bound":true}))
+            }
+            "admit" => {
+                ensure!(state["id"] == id, "rollout_preparation_required");
+                if state["phase"] == "prepared" {
+                    self.rollout_transition("prepared", "serving")?;
+                }
+                self.state.marked = true;
+                Ok(json!({"overlap_admitted":true}))
+            }
+            "deploy" => {
+                ensure!(
+                    self.state.marked
+                        && matches!(
+                            state["phase"].as_str(),
+                            Some("serving" | "draining" | "complete")
+                        ),
+                    "rollout_admission_required"
+                );
+                let name = self.request.statefulset.clone();
+                let live: Value = serde_json::from_str(&self.kubectl(
+                    &["get", "deployment", &name, "-o", "json"],
+                    None,
+                    Duration::from_secs(60),
+                )?)?;
+                ensure!(
+                    live["metadata"]["uid"] == self.controller["metadata"]["uid"]
+                        && live["spec"]["replicas"] == 1,
+                    "rollout_controller_changed"
+                );
+                if live["metadata"]["annotations"]["day2.dev/rollout"] == id {
+                    ensure!(
+                        live["spec"]["template"]["metadata"]["annotations"]["day2.dev/artifact"]
+                            == format!("sha256:{}", target.artifact_id)
+                            && live["spec"]["template"]["spec"]["containers"]
+                                .as_array()
+                                .is_some_and(|containers| containers
+                                    .iter()
+                                    .any(|container| container["name"] == "day2"
+                                        && container["image"] == target.app_image))
+                            && live["spec"]["template"]["metadata"]["annotations"]["day2.dev/instance-sha256"]
+                                == day2::digest(
+                                    self.target_instance
+                                        .as_ref()
+                                        .context("target instance")?
+                                        .as_bytes()
+                                )
+                                .trim_start_matches("sha256:"),
+                        "rollout_deployment_conflict"
+                    );
+                    return Ok(json!({"already_deployed":true}));
+                }
+                ensure!(
+                    live["metadata"]["resourceVersion"]
+                        == self.controller["metadata"]["resourceVersion"],
+                    "rollout_controller_changed"
+                );
+                let instance_name = format!("day2-rollout-{suffix}-instance");
+                let instance_text = self.target_instance.clone().context("target instance")?;
+                self.immutable_map(&instance_name, json!({"instance.json":instance_text}))?;
+                let mut template = live["spec"]["template"].clone();
+                template["metadata"]["labels"]["day2.dev/rollout"] = json!(suffix);
+                template["metadata"]["annotations"]["day2.dev/artifact"] =
+                    json!(format!("sha256:{}", target.artifact_id));
+                template["metadata"]["annotations"]["day2.dev/instance-sha256"] =
+                    json!(day2::digest(instance_text.as_bytes()).trim_start_matches("sha256:"));
+                for container in template["spec"]["containers"]
+                    .as_array_mut()
+                    .context("containers")?
+                {
+                    if container["name"] == "day2" {
+                        container["image"] = json!(target.app_image);
+                        let env = container["env"].as_array_mut().context("runtime env")?;
+                        env.retain(|entry| entry["name"] != "DAY2_EXPECTED_ROLLOUT");
+                        env.push(json!({"name":"DAY2_EXPECTED_ROLLOUT","value":id}));
+                        for env in container["env"].as_array_mut().context("runtime env")? {
+                            if env["name"] == "DAY2_EXPECTED_ARTIFACT" {
+                                env["value"] = json!(format!("sha256:{}", target.artifact_id));
+                            }
+                        }
+                    }
+                }
+                // Provider keys and grants are unchanged by admission. Re-render
+                // their reviewed instance and plan for the target artifact only.
+                let credential_source = template["spec"]["volumes"]
+                    .as_array()
+                    .context("volumes")?
+                    .iter()
+                    .find(|volume| volume["name"] == "credential-metadata")
+                    .and_then(|volume| volume["configMap"]["name"].as_str())
+                    .map(str::to_owned);
+                let credential_name = if let Some(source) = credential_source {
+                    let metadata: Value = serde_json::from_str(&self.kubectl(
+                        &["get", "configmap", &source, "-o", "json"],
+                        None,
+                        Duration::from_secs(60),
+                    )?)?;
+                    let mut data = metadata["data"].clone();
+                    let mut instance: Value = serde_json::from_str(
+                        data["operator-instance.json"]
+                            .as_str()
+                            .context("credential instance")?,
+                    )?;
+                    instance["apps"][&app]["artifact"] =
+                        json!(format!("artifacts/{}", target.artifact_id));
+                    let encoded = serde_json::to_string(&instance)?;
+                    let mut plan: Value = serde_json::from_str(
+                        data["provisioning.json"]
+                            .as_str()
+                            .context("credential plan")?,
+                    )?;
+                    plan["instance_digest"] = json!(day2::digest(encoded.as_bytes()));
+                    data["operator-instance.json"] = json!(encoded);
+                    data["provisioning.json"] = json!(serde_json::to_string(&plan)?);
+                    let name = format!("day2-rollout-{suffix}-credentials");
+                    self.immutable_map(&name, data)?;
+                    Some(name)
+                } else {
+                    None
+                };
+                if let Some(inits) = template["spec"]["initContainers"].as_array_mut() {
+                    for init in inits {
+                        if init["name"] == "credential-registration" {
+                            init["image"] = json!(target.app_image);
+                        }
+                    }
+                }
+                for volume in template["spec"]["volumes"]
+                    .as_array_mut()
+                    .context("volumes")?
+                {
+                    if volume["name"] == "instance" {
+                        volume["configMap"]["name"] = json!(instance_name);
+                    }
+                    if volume["name"] == "credential-metadata" {
+                        volume["configMap"]["name"] = json!(credential_name);
+                    }
+                }
+                let mut annotations = live["metadata"]["annotations"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                annotations.insert("day2.dev/rollout".into(), json!(id));
+                let patch = json!([
+                    {"op":"test","path":"/metadata/uid","value":live["metadata"]["uid"]},
+                    {"op":"test","path":"/metadata/resourceVersion","value":live["metadata"]["resourceVersion"]},
+                    {"op":"add","path":"/metadata/annotations","value":annotations},
+                    {"op":"replace","path":"/spec/template","value":template}
+                ]);
+                self.record(
+                    "rollout-apply-started",
+                    json!({"controller":live["metadata"],"image":target.app_image}),
+                )?;
+                self.kubectl(
+                    &[
+                        "patch",
+                        "deployment",
+                        &name,
+                        "--type=json",
+                        "-p",
+                        &patch.to_string(),
+                    ],
+                    None,
+                    Duration::from_secs(60),
+                )?;
+                Ok(json!({"candidate_requested":true}))
+            }
+            "observe" => {
+                if state["phase"] == "complete" {
+                    return Ok(state);
+                }
+                ensure!(
+                    matches!(state["phase"].as_str(), Some("serving" | "draining")),
+                    "rollout_not_serving"
+                );
+                if state["phase"] == "serving" {
+                    let selector = format!("day2.dev/rollout={suffix}");
+                    self.kubectl(
+                        &[
+                            "wait",
+                            "--for=jsonpath={.status.phase}=Running",
+                            "pod",
+                            "-l",
+                            &selector,
+                            "--timeout=300s",
+                        ],
+                        None,
+                        Duration::from_secs(330),
+                    )?;
+                    let pods: Value = serde_json::from_str(&self.kubectl(
+                        &["get", "pods", "-l", &selector, "-o", "json"],
+                        None,
+                        Duration::from_secs(60),
+                    )?)?;
+                    let pod = pods["items"].as_array().context("candidate pods")?;
+                    ensure!(
+                        pod.len() == 1
+                            && pod[0]["spec"]["nodeName"].as_str() == self.online_node.as_deref(),
+                        "same_node_candidate_required"
+                    );
+                    let pod_name = pod[0]["metadata"]["name"]
+                        .as_str()
+                        .context("candidate name")?;
+                    self.kubectl(
+                        &[
+                            "exec",
+                            pod_name,
+                            "-c",
+                            "day2",
+                            "--",
+                            "/usr/local/bin/day2-health",
+                            "8080",
+                            "--candidate",
+                        ],
+                        None,
+                        Duration::from_secs(60),
+                    )?;
+                    let all: Value = serde_json::from_str(&self.kubectl(
+                        &[
+                            "get",
+                            "pods",
+                            "-l",
+                            &format!("app.kubernetes.io/name={}", self.request.statefulset),
+                            "-o",
+                            "json",
+                        ],
+                        None,
+                        Duration::from_secs(60),
+                    )?)?;
+                    for peer in all["items"].as_array().context("serving peers")? {
+                        if !peer["metadata"]["deletionTimestamp"].is_null() {
+                            continue;
+                        }
+                        ensure!(
+                            peer["spec"]["nodeName"].as_str() == self.online_node.as_deref(),
+                            "same_node_peer_required"
+                        );
+                        let name = peer["metadata"]["name"].as_str().context("peer name")?;
+                        self.kubectl(
+                            &[
+                                "exec",
+                                name,
+                                "-c",
+                                "day2",
+                                "--",
+                                "/usr/local/bin/day2-health",
+                                "8080",
+                                "--candidate",
+                            ],
+                            None,
+                            Duration::from_secs(60),
+                        )?;
+                    }
+                    let pvc: Value = serde_json::from_str(&self.kubectl(
+                        &["get", "pvc", &self.request.pvc.clone(), "-o", "json"],
+                        None,
+                        Duration::from_secs(60),
+                    )?)?;
+                    ensure!(
+                        pvc["metadata"]["uid"].as_str() == self.pvc_uid.as_deref(),
+                        "rollout_pvc_changed"
+                    );
+                }
+                self.state.candidate_observed = true;
+                Ok(json!({"candidate_observed":true}))
+            }
+            "probe" => {
+                if matches!(state["phase"].as_str(), Some("draining" | "complete")) {
+                    return Ok(state);
+                }
+                ensure!(
+                    state["phase"] == "serving" && self.state.candidate_observed,
+                    "candidate_observation_required"
+                );
+                let probe = target.probe.context("app-owned release probe")?;
+                let path = self.work.path().join("release-probe.json");
+                fs::write(&path, serde_json::to_vec(&probe)?)?;
+                self.copy_in(&path, "/srv/day2/release-probe.json")?;
+                let raw = self.exec(
+                    &[
+                        DAY2,
+                        "release-probe",
+                        TARGET,
+                        &app,
+                        "/srv/day2/release-probe.json",
+                        &id,
+                    ],
+                    Duration::from_secs(600),
+                )?;
+                self.record(
+                    "candidate-read-write-verified",
+                    serde_json::from_str(raw.trim())?,
+                )?;
+                self.state.probe_verified = true;
+                Ok(json!({"probe_verified":true}))
+            }
+            "promote" => {
+                if matches!(state["phase"].as_str(), Some("draining" | "complete")) {
+                    return Ok(state);
+                }
+                ensure!(
+                    self.state.probe_verified,
+                    "candidate_read_write_proof_required"
+                );
+                self.rollout_transition("serving", "draining")
+            }
+            "wait" => {
+                if state["phase"] == "complete" {
+                    return Ok(state);
+                }
+                ensure!(state["phase"] == "draining", "rollout_promotion_required");
+                let controller = format!("deployment/{}", self.request.statefulset);
+                self.kubectl(
+                    &["rollout", "status", &controller, "--timeout=300s"],
+                    None,
+                    Duration::from_secs(330),
+                )?;
+                self.record("candidate-serving", json!({"release":id}))?;
+                Ok(json!({"candidate_serving":true}))
+            }
+            "complete" => {
+                if state["phase"] != "complete" {
+                    ensure!(state["phase"] == "draining", "rollout_not_drained");
+                    let pods: Value = serde_json::from_str(&self.kubectl(
+                        &[
+                            "get",
+                            "pods",
+                            "-l",
+                            &format!("app.kubernetes.io/name={}", self.request.statefulset),
+                            "-o",
+                            "json",
+                        ],
+                        None,
+                        Duration::from_secs(60),
+                    )?)?;
+                    for pod in pods["items"].as_array().context("pods")? {
+                        if pod["metadata"]["labels"]["day2.dev/rollout"] != suffix
+                            && !matches!(
+                                pod["status"]["phase"].as_str(),
+                                Some("Succeeded" | "Failed")
+                            )
+                        {
+                            let name =
+                                pod["metadata"]["name"].as_str().context("incumbent name")?;
+                            self.kubectl(
+                                &[
+                                    "wait",
+                                    "--for=delete",
+                                    &format!("pod/{name}"),
+                                    "--timeout=300s",
+                                ],
+                                None,
+                                Duration::from_secs(330),
+                            )?;
+                        }
+                    }
+                    let latest: Value = serde_json::from_str(&self.kubectl(
+                        &[
+                            "get",
+                            "pods",
+                            "-l",
+                            &format!("app.kubernetes.io/name={}", self.request.statefulset),
+                            "-o",
+                            "json",
+                        ],
+                        None,
+                        Duration::from_secs(60),
+                    )?)?;
+                    let live: Vec<_> = latest["items"]
+                        .as_array()
+                        .context("pods")?
+                        .iter()
+                        .filter(|pod| {
+                            !matches!(
+                                pod["status"]["phase"].as_str(),
+                                Some("Succeeded" | "Failed")
+                            )
+                        })
+                        .collect();
+                    ensure!(
+                        live.len() == 1
+                            && live[0]["metadata"]["labels"]["day2.dev/rollout"] == suffix
+                            && live[0]["status"]["conditions"].as_array().is_some_and(
+                                |conditions| conditions
+                                    .iter()
+                                    .any(|condition| condition["type"] == "Ready"
+                                        && condition["status"] == "True")
+                            ),
+                        "rollout_incumbent_not_terminated"
+                    );
+                    let result = self.rollout_transition("draining", "complete")?;
+                    self.record("rollout-completed", result.clone())?;
+                    self.state.result = Some(result.clone());
+                    Ok(result)
+                } else {
+                    self.state.result = Some(state.clone());
+                    Ok(state)
+                }
+            }
+            _ => bail!("unknown rollout step"),
+        }
+    }
+
+    pub fn store_admission(&mut self) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Activate && self.state.activated && self.state.fenced,
+            "activated_offline_store_required"
+        );
+        let app = self.request.app.clone();
+        let operator = self.request.operator.clone();
+        let raw = self.exec(
+            &[DAY2, "admit-maintenance", TARGET, &app, &operator],
+            Duration::from_secs(600),
+        )?;
+        let admitted: Value = serde_json::from_str(raw.trim())?;
+        ensure!(
+            admitted["admitted"] == true,
+            "maintenance_store_admission_required"
+        );
+        self.state.store_admitted = true;
+        self.record("live-store-admitted", admitted.clone())?;
+        Ok(admitted)
+    }
+
     pub fn confirm(&mut self) -> Result<Value> {
         let (question, word) = match self.operation {
-            Operation::Activate => {
+            Operation::Activate | Operation::Rollout => {
                 ensure!(
                     self.state.plan.is_some() && self.state.admission.is_some(),
                     "confirm the migration plan after it is shown and the target admitted the store"
@@ -1921,6 +2920,12 @@ impl Session {
             }
             _ => bail!("only activate and mark-activated mark the StatefulSet"),
         }
+        ensure!(
+            self.operation != Operation::Activate
+                || self.request.kind(self.operation) == WorkloadKind::Statefulset
+                || self.state.store_admitted,
+            "live_store_admission_required"
+        );
         let marked = self.stamp(&target.app_image);
         if self.operation == Operation::Activate {
             return marked.with_context(|| self.recovery());
@@ -1957,7 +2962,13 @@ impl Session {
         )?;
         let statefulset = self.request.statefulset.clone();
         let live: Value = serde_json::from_str(&self.kubectl(
-            &["get", "statefulset", &statefulset, "-o", "json"],
+            &[
+                "get",
+                self.request.kind(self.operation).resource(),
+                &statefulset,
+                "-o",
+                "json",
+            ],
             None,
             Duration::from_secs(60),
         )?)?;
@@ -1988,7 +2999,7 @@ impl Session {
                 &[
                     "annotate",
                     "--overwrite",
-                    "statefulset",
+                    self.request.kind(self.operation).resource(),
                     &statefulset,
                     &format!("{ACTIVATED}={value}"),
                 ],
@@ -1997,7 +3008,13 @@ impl Session {
             )?;
         }
         let actual: Value = serde_json::from_str(&self.kubectl(
-            &["get", "statefulset", &statefulset, "-o", "json"],
+            &[
+                "get",
+                self.request.kind(self.operation).resource(),
+                &statefulset,
+                "-o",
+                "json",
+            ],
             None,
             Duration::from_secs(60),
         )?)?;
@@ -2023,6 +3040,7 @@ impl Session {
             "finish closes an open session, once"
         );
         match self.operation {
+            Operation::Rollout => ensure!(self.state.result.is_some(), "rollout has not finished"),
             Operation::Inspect => ensure!(self.state.result.is_some(), "inspect has not run"),
             Operation::Backup => ensure!(
                 self.state.backup.is_some(),
@@ -2053,7 +3071,7 @@ impl Session {
             "journal": self.journal,
         });
         self.record("finish", receipt.clone())?;
-        if self.operation.targeted() {
+        if self.operation.targeted() && self.operation != Operation::Rollout {
             eprintln!(
                 "\nActivated. {} stays at 0 replicas. Release the activated image\nnext: day2-gke-release restores the replica for a release-managed app.\nOtherwise apply day2-app with image and artifact_id set to the activated build.",
                 self.request.statefulset
@@ -2082,7 +3100,10 @@ impl Session {
                 failures.push(format!("deleting {pod}: {error:#}"));
             }
         }
-        let restore = self.state.stopped && !self.state.fenced && self.replicas > 0;
+        let restore = self.operation != Operation::Rollout
+            && self.state.stopped
+            && !self.state.fenced
+            && self.replicas > 0;
         if restore {
             eprintln!(
                 "== restoring {} to {} replica(s)",
@@ -2091,7 +3112,12 @@ impl Session {
             let statefulset = self.request.statefulset.clone();
             let replicas = format!("--replicas={}", self.replicas);
             match self.kubectl(
-                &["scale", "statefulset", &statefulset, &replicas],
+                &[
+                    "scale",
+                    self.request.kind(self.operation).resource(),
+                    &statefulset,
+                    &replicas,
+                ],
                 None,
                 Duration::from_secs(60),
             ) {
@@ -2100,7 +3126,10 @@ impl Session {
                         &[
                             "rollout",
                             "status",
-                            &format!("statefulset/{statefulset}"),
+                            &format!(
+                                "{}/{statefulset}",
+                                self.request.kind(self.operation).resource()
+                            ),
                             "--timeout=300s",
                         ],
                         None,

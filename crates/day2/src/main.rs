@@ -48,11 +48,94 @@ fn main() -> Result<()> {
             runtime.initialize()?;
             serde_json::json!({"scope": runtime.scope(), "database": runtime.db(), "artifact": runtime.artifact().id()})
         }
+        [
+            "rollout-prepare",
+            instance,
+            app,
+            candidate,
+            source_image,
+            target_image,
+            id,
+            operator,
+        ] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            serde_json::to_value(day2::rollout::prepare(
+                &runtime,
+                Path::new(candidate),
+                source_image,
+                target_image,
+                id,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?)?
+        }
+        ["rollout-inspect", instance, app] => {
+            serde_json::to_value(day2::rollout::inspect_file(Path::new(instance), app)?)?
+        }
+        ["rollout-bind", instance, app, id, placement, operator] => {
+            day2::rollout::bind_placement(
+                &Runtime::load(Path::new(instance), app)?,
+                id,
+                day2::json::decode(&fs::read(placement)?)?,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?;
+            serde_json::json!({"bound":true})
+        }
+        [
+            "rollout-transition",
+            instance,
+            app,
+            id,
+            expected,
+            next,
+            operator,
+        ] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            let phase = |value: &str| -> Result<day2::rollout::Phase> {
+                Ok(serde_json::from_value(serde_json::json!(value))?)
+            };
+            serde_json::to_value(day2::rollout::transition(
+                &runtime,
+                id,
+                phase(expected)?,
+                phase(next)?,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?)?
+        }
         // What day2-serve admits about the store before it serves, without
         // serving. Maintenance runs it on a migrated and activated copy.
         ["admit", instance, app] => {
             let runtime = Runtime::load(Path::new(instance), app)?;
             day2::deployment::admit_store(&runtime)?;
+            serde_json::json!({"admitted": true, "scope": runtime.scope(), "artifact": runtime.artifact().id()})
+        }
+        [
+            "activate-maintenance",
+            instance,
+            app,
+            desired,
+            target,
+            operator,
+            expected,
+            id,
+        ] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            let target = LoadedArtifact::load(Path::new(target))?;
+            let receipt = day2::deployment::activate_maintenance(
+                &runtime,
+                &target,
+                Path::new(desired),
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+                &day2::json::decode(expected.as_bytes())?,
+                id,
+            )?;
+            serde_json::json!({"artifact":target.id(),"receipt":receipt,"mode":"local-operator-only"})
+        }
+        ["admit-maintenance", instance, app, operator] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            day2::deployment::admit_maintenance_store(
+                &runtime,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?;
             serde_json::json!({"admitted": true, "scope": runtime.scope(), "artifact": runtime.artifact().id()})
         }
         ["invoke", instance, app, operation, actor, id, input] => {
@@ -66,6 +149,62 @@ fn main() -> Result<()> {
                 now,
                 Fault::None,
             )?)?
+        }
+        ["release-probe", instance, app, probe_file, id] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            let probe: serde_json::Value = day2::json::decode(&fs::read(probe_file)?)?;
+            let actor = probe["actor"].as_str().context("probe actor")?;
+            let command = probe["command"].as_str().context("probe command")?;
+            let query = probe["query"].as_str().context("probe query")?;
+            anyhow::ensure!(
+                runtime.artifact().operation(command)?.kind == "command"
+                    && runtime.artifact().operation(query)?.kind == "query",
+                "release_probe_operations"
+            );
+            let contracts = runtime
+                .artifact()
+                .contract()
+                .app_contract
+                .as_ref()
+                .context("release_probe_contract")?;
+            anyhow::ensure!(
+                [command, query]
+                    .iter()
+                    .all(|name| contracts
+                        .operations
+                        .get(*name)
+                        .is_some_and(|operation| operation.execution.effects.iter().all(
+                            |effect| matches!(
+                                effect.kind.as_str(),
+                                "create" | "update" | "update_created" | "soft_delete"
+                            )
+                        ) && operation.observations.is_empty()
+                            && !operation.credential_access.enabled)),
+                "release_probe_must_have_no_external_effects"
+            );
+            let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+            let write = runtime.invoke(
+                command,
+                actor,
+                &format!("{id}_write"),
+                &probe["input"],
+                now,
+                Fault::None,
+            )?;
+            anyhow::ensure!(write.status == "success", "release_probe_write_failed");
+            let read = runtime.invoke(
+                query,
+                actor,
+                &format!("{id}_read"),
+                &probe["query_input"],
+                now,
+                Fault::None,
+            )?;
+            anyhow::ensure!(
+                read.status == "success" && read.result == probe["expected"],
+                "release_probe_readback_failed"
+            );
+            serde_json::json!({"verified":true,"artifact":runtime.artifact().id()})
         }
         ["import", instance, app, operation, operator, source] => {
             let runtime = Runtime::load(Path::new(instance), app)?;
@@ -153,6 +292,7 @@ fn main() -> Result<()> {
                 &day2::authority_state::LocalOperator::assert_local(operator)?,
                 &day2::json::decode(expected.as_bytes())?,
                 request_id,
+                runtime.instance_path(),
             )?;
             serde_json::json!({"activated":target.id(),"receipt":receipt,"mode":"local-operator-only"})
         }
