@@ -82,7 +82,7 @@ impl Manifest {
 #[derive(Serialize)]
 pub struct RestoreArchiveInspection {
     kind: &'static str,
-    archive: day2_capabilities::Digest,
+    manifest_commitment: day2_capabilities::Digest,
     scope: String,
     app: String,
     artifact: String,
@@ -95,7 +95,7 @@ impl RestoreArchiveInspection {
     fn from_verified(manifest: &Manifest) -> Result<Self> {
         let record = Self {
             kind: "restore_archive_inspection_v1",
-            archive: manifest.security_restore_digest()?,
+            manifest_commitment: manifest.security_restore_digest()?,
             scope: manifest.scope.clone(),
             app: manifest.app.clone(),
             artifact: manifest.artifact.clone(),
@@ -1005,7 +1005,7 @@ mod tests {
             record,
             serde_json::json!({
                 "kind":"restore_archive_inspection_v1",
-                "archive":day2_capabilities::Digest::of(&("day2-security-backup-v1", &manifest))?,
+                "manifest_commitment":day2_capabilities::Digest::of(&("day2-security-backup-v1", &manifest))?,
                 "scope":manifest.scope,
                 "app":manifest.app,
                 "artifact":manifest.artifact,
@@ -1036,7 +1036,7 @@ mod tests {
             let changed: Manifest = serde_json::from_value(changed)?;
             let projection =
                 serde_json::to_value(RestoreArchiveInspection::from_verified(&changed)?)?;
-            assert_ne!(projection["archive"], record["archive"], "{pointer}");
+            assert_ne!(projection["manifest_commitment"], record["manifest_commitment"], "{pointer}");
             assert_eq!(projection["scope"], record["scope"]);
             assert_eq!(projection["artifact"], record["artifact"]);
             assert_eq!(projection["database"], record["database"]);

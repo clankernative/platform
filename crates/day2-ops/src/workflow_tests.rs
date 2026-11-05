@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn restore_inspection_only_verifies_the_exact_archive_without_entering_restore() -> Result<()> {
     let expected = json!({
         "kind":"restore_archive_inspection_v1",
-        "archive":"sha256:fixture-only-archive",
+        "manifest_commitment":"sha256:fixture-only-archive",
         "scope":"example/sandbox/app",
         "app":"app",
         "artifact":"sha256:fixture-only-artifact",

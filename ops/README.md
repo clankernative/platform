@@ -110,8 +110,8 @@ configuration and its journal are separate. No cloud secrets are placed in Roc
 inputs, command arguments, examples or generated IaC.
 
 `restore inspect BACKUP` runs the same complete archive verifier and returns only
-the versioned archive commitment, scope, app, artifact and database identities.
-Its archive commitment includes the verified manifest's provider/companion state,
+the versioned semantic manifest commitment, scope, app, artifact and database identities.
+Its manifest commitment includes the verified manifest's provider/companion state,
 historical authority and instance selection, without exporting those contents.
 This is historical DATA for the secure-restore command shell, never current
 approval, a trusted epoch, a consumed grant or a new writer. It does not copy an
@@ -161,3 +161,7 @@ The full verifier additionally builds platform-owned relational, migration and
 HTTP conformance fixtures and runs their ported suites. Missing artifacts or failed
 tests prevent a passing receipt. See the [acceptance record](../docs/VERIFICATION-COVERAGE.md)
 for the required fixtures and evidence scope.
+
+The manifest commitment is not the approval contract's `full_archive_digest`.
+That contract requires the actual complete captured archive bytes/inventory;
+inspection does not produce or authenticate that future capture.
