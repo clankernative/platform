@@ -132,12 +132,16 @@ impl RestoreFenceSchema {
                         crate::oauth::schema::exact_layout(db, &self.reference, &name)?;
                         // Partial integrity check covers only this admitted
                         // table and its indexes, not unadmitted app/private units.
-                        let mut statement = db.prepare(&format!("PRAGMA integrity_check({name})"))?;
+                        let mut statement =
+                            db.prepare(&format!("PRAGMA integrity_check({name})"))?;
                         let mut rows = statement.query([])?;
                         let first = rows.next()?.context("restore_integrity_result_missing")?;
                         crate::oauth::schema::materialize(first)?;
-                        ensure!(first.get_ref(0)?.as_str()? == "ok" && rows.next()?.is_none(), "restore_integrity_refused");
-                    },
+                        ensure!(
+                            first.get_ref(0)?.as_str()? == "ok" && rows.next()?.is_none(),
+                            "restore_integrity_refused"
+                        );
+                    }
                     "trigger" => ensure!(
                         crate::oauth::schema::schema_sql(db, "trigger", &name)?
                             == crate::oauth::schema::schema_sql(&self.reference, "trigger", &name)?,
@@ -211,4 +215,3 @@ fn require_single_restore_database(connection: &Connection) -> Result<()> {
     ensure!(!temporary, "restore_temporary_schema_refused");
     Ok(())
 }
-
