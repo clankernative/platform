@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::{Digest, oauth::AccountBindingPolicy};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use usage::Authority as _;
@@ -1020,20 +1020,7 @@ impl Manager {
                 WHERE slot=?1 AND generation=?2 AND token_version=?3 AND security_epoch=?4 AND status='active'",
                 params![view.slot.as_str(), fence.generation, fence.token_version, fence.epoch])?;
                         ensure!(changed == 1, "OAuth disconnect fence lost");
-                        tx.execute(
-                    "UPDATE oauth_refresh_attempts SET state='publication_rejected' WHERE slot=?1
-                AND state IN ('ready','may_have_been_sent','uncertain')",
-                    [view.slot.as_str()],
-                )?;
-                        tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL WHERE slot=?1
-                AND state IN ('awaiting_provider_authorization','exchange_ready','exchange_may_have_been_sent','exchange_uncertain','awaiting_account_approval')", [view.slot.as_str()])?;
-                        tx.execute("DELETE FROM oauth_private_codes WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                        tx.execute("DELETE FROM oauth_private_verifiers WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                        tx.execute("DELETE FROM oauth_external_quarantine WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                        tx.execute(
-                            "DELETE FROM oauth_private_tokens WHERE slot=?1",
-                            [view.slot.as_str()],
-                        )?;
+                        reject_disconnected_material(tx,view.slot.as_str(),fence)?;
                         tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
                 params![view.id, proof.session.as_str()])?;
                         Ok(true)
@@ -1050,6 +1037,28 @@ impl Manager {
         // safe. Local use is fenced; an operator must resolve provider cleanup.
         Ok(Reply::Completed { status: "Disconnected locally. Google grant revocation requires operator cleanup; no revocation request was sent.".into() })
     }
+}
+
+fn reject_disconnected_material(tx: &Transaction<'_>, slot: &str, fence: &SlotFence) -> Result<()> {
+    crate::oauth::store::reject_current_refresh_in(tx,&crate::oauth::store::RefreshEligibility {
+        slot:slot.into(),generation:fence.generation,base_version:fence.token_version,security_epoch:fence.epoch,
+        profile:fence.profile.clone(),account:fence.account.clone(),affinity:fence.affinity.clone(),
+    })?;
+    tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL
+        WHERE slot=?1 AND expected_epoch=?2 AND (expected_generation=?3 OR proposed_generation=?3)
+        AND state IN ('awaiting_provider_authorization','exchange_ready','exchange_may_have_been_sent','exchange_uncertain','awaiting_account_approval')
+        AND NOT EXISTS(SELECT 1 FROM oauth_restore_closed c WHERE c.kind='connect' AND c.id=oauth_connect_attempts.attempt)",
+        params![slot,fence.epoch,fence.generation])?;
+    for table in ["oauth_private_codes","oauth_private_verifiers","oauth_external_quarantine"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE attempt IN
+            (SELECT a.attempt FROM oauth_connect_attempts a WHERE a.slot=?1 AND a.expected_epoch=?2
+                AND (a.expected_generation=?3 OR a.proposed_generation=?3) AND a.state='cancelled'
+                AND NOT EXISTS(SELECT 1 FROM oauth_restore_closed c WHERE c.kind='connect' AND c.id=a.attempt))"),
+            params![slot,fence.epoch,fence.generation])?;
+    }
+    tx.execute("DELETE FROM oauth_private_tokens WHERE slot=?1 AND generation=?2 AND account=?3",
+        params![slot,fence.generation,fence.account])?;
+    Ok(())
 }
 
 /// A transaction borrow of the actual manager and immutable original context.
