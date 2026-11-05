@@ -34,6 +34,17 @@ authentication, purpose, account, binding and generation check. In particular,
 there is no implicit adoption of a restored connection slot; the existing
 replacement-profile refusal stays in place.
 
+Immutability refers to the cut and its closed-identity ledger. Ordinary bounded
+reclamation of expired, unsent management navigation and read-only Use rows may
+still run; it cannot remove that independent closure or create authority.
+Cut-closed callback, cancellation, expiry and definitive-rejection paths refuse
+before custody work or rewriting old uncertainty. May-to-uncertain bookkeeping
+may still truthfully refine an unknown outcome; it cannot issue or reopen a permit.
+An explicit future fresh-reauthorization profile must also keep old generations'
+history and custody separate from later disconnect/cleanup. This slice retains
+the existing dispatched-slot and replacement refusals rather than claiming that
+new profile is ready.
+
 The ordinary restore preflight independently refuses occupied OAuth or
 Fresh-owner history even when current declarations have been removed and even
 before any cut exists. Its bounded read-only scan preserves the caller's
