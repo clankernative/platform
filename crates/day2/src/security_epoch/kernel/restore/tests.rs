@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
 mod history;
+mod approval_use;
 #[cfg(unix)]
 mod process;
 
@@ -66,6 +67,7 @@ pub(super) fn intent(selected: &EpochStore, seed: u64) -> Intent {
                 .database_incarnation
                 .clone(),
             security_epoch: 1,
+            full_archive_digest: Digest::of(&("complete-archive", seed)).unwrap(),
             image: Digest::of(&("backup-image", seed)).unwrap(),
             schema: Digest::new(b"exact-private-schema"),
             artifact: Digest::new(b"admitted-artifact"),
@@ -88,15 +90,29 @@ pub(super) fn current(selected: &EpochStore, intent: &Intent, before: &Snapshot)
     let Phase::ActiveFirstHolder { completion } = &root.phase else {
         panic!("fixture root");
     };
+    let target = crate::security_epoch::restore_approval::TargetBinding {
+        scope: selected.scope.clone(), binding_generation: 1,
+        authority: selected.authority_key().unwrap(), selection: Digest::of(selected).unwrap(),
+        incarnation: intent.target_incarnation.clone(), security_epoch: 2,
+        artifact: intent.archive.artifact.clone(), schema: intent.archive.schema.clone(),
+    };
+    let custody = intent.archive.required_keys[0].binding.clone();
+    let executor = crate::security_epoch::restore_approval::AdminIdentity {
+        email: "operator@example.test".into(), subject: "stable-operator-subject".into(),
+    };
     Current {
+        target: target.clone(), custody: custody.clone(), executor: executor.clone(),
         grant: Grant {
             intent: intent.commitment(selected).unwrap(),
             issuer: Digest::new(b"independent-maintenance-issuer"),
             revision: Digest::new(b"original-approval-revision"),
             policy: Digest::new(b"restore-only-policy"),
             clock_domain: Digest::new(b"maintenance-clock-domain"),
-            issued_at: 1000,
-            expires_at: 1100,
+            approval: crate::security_epoch::restore_approval::ApprovalRequest {
+                grant_id: Digest::of(&("approval-id", &intent.operation)).unwrap(),
+                full_archive_digest: intent.archive.full_archive_digest.clone(), target,
+                executor, custody, approved_at: 1000, expires_at: 4600,
+            },
             fence: Fence {
                 root: Digest::of(root).unwrap(),
                 holder: Digest::of(&completion.holder).unwrap(),
@@ -590,7 +606,7 @@ fn fresh_authority_exact_keys_fence_and_clock_are_required_without_renewing_the_
                 changed.ready_until = 1101;
                 at = 1099;
             }
-            10 => changed.grant.expires_at = 1200,
+            10 => changed.grant.approval.expires_at = 1200,
             11 => changed.grant.issuer = Digest::new(b"foreign-maintenance-issuer"),
             12 => changed.grant.policy = Digest::new(b"foreign-maintenance-policy"),
             13 => changed.grant.intent = Digest::new(b"another-restore-intent"),

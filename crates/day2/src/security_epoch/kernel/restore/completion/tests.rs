@@ -464,7 +464,7 @@ fn expiry_revocation_key_loss_and_rewind_cannot_create_even_a_refusal_plan() -> 
                 3 => at = 999,
                 4 => current.observed_at = 999,
                 5 => current.grant.revision = Digest::new(b"changed"),
-                6 => current.grant.expires_at = 1200,
+                6 => current.grant.approval.expires_at = 1200,
                 7 => current.grant.clock_domain = Digest::new(b"other-domain"),
                 _ => current.grant.fence.receipt = Digest::new(b"another-fence"),
             }
