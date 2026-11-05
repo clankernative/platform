@@ -358,8 +358,7 @@ fn changed_selection_and_spent_original_refuse_before_any_network_attempt() -> R
         let mut original = acquisition(limit);
         let error = kms
             .sign(selection, &statement, authorization(), &mut original)
-            .err()
-            .expect("must refuse");
+            .expect_err("must refuse");
         if limit.is_zero() {
             assert!(original.remaining().is_err());
         } else {
@@ -410,8 +409,7 @@ fn rejected_status_oversize_duplicate_json_and_timeout_do_not_retry() -> Result<
         let mut original = acquisition(limit);
         let error = kms
             .sign(&selected, &statement, authorization(), &mut original)
-            .err()
-            .expect("must refuse");
+            .expect_err("must refuse");
         assert!(!error.to_string().contains("provider-private"));
         assert_eq!(server.join().unwrap().len(), 1);
         assert!(original.remaining().is_err());
@@ -478,8 +476,7 @@ fn actual_default_client_requires_https_and_refusal_reaches_the_parent_original(
     let mut child = parent.narrow(1, Duration::from_secs(12))?;
     let error = kms
         .sign(&selected, &statement, authorization(), &mut child)
-        .err()
-        .expect("HTTP origin refused by actual production client");
+        .expect_err("HTTP origin refused by actual production client");
     assert_eq!(error.to_string(), "restore_kms_transport");
     assert!(
         listener
