@@ -1079,7 +1079,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             let syn::Stmt::Local(local) = &mut saved else {
                 unreachable!()
             };
-            local.init.as_mut().unwrap().expr = Box::new(value);
+            *local.init.as_mut().unwrap().expr = value;
             delayed.stmts.push(saved);
             delayed.stmts.push(check);
             let tail: syn::Block = syn::parse_str("{restore_guard_delayed_result}")?;
