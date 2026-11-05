@@ -529,7 +529,13 @@ impl Snapshot {
                     .all(|name| present(name)),
                     "restore_oauth_dependency_missing"
                 );
-                super::connect::install_schema(db)?;
+                // A current Use unit's canonical installer begins with this
+                // same complete Connect validation. No effect or wait occurs
+                // before that call, and all unit/version/dependency checks
+                // above still precede either route. Validate it exactly once.
+                if !present("oauth_use_schema_version") {
+                    super::connect::install_schema(db)?;
+                }
             } else {
                 ensure!(
                     ![
