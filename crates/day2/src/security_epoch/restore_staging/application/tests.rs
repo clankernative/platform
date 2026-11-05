@@ -508,7 +508,12 @@ enum RecordingCut {
     AfterFirstObservation,
 }
 
-fn history(seed: u64, actions: &[Action], recording: RecordingCut, captured: &mut HistoryRun) -> Result<()> {
+fn history(
+    seed: u64,
+    actions: &[Action],
+    recording: RecordingCut,
+    captured: &mut HistoryRun,
+) -> Result<()> {
     effects::scope(simulation::World::new(seed), || {
         let fixture = Fixture::new()?;
         let material = rows(&fixture.db, "day2_credential_material")?;
@@ -697,11 +702,16 @@ fn write_history_file(path: &std::path::Path, bundle: &HistoryBundle) -> Result<
 }
 
 fn save_history(bundle: &HistoryBundle) -> Result<std::path::PathBuf> {
-    ensure!(bundle.recording == RecordingCut::Ordinary, "recorder_control_not_campaign_evidence");
+    ensure!(
+        bundle.recording == RecordingCut::Ordinary,
+        "recorder_control_not_campaign_evidence"
+    );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../artifacts/credential-restore-application-histories");
     std::fs::create_dir_all(&root)?;
-    let directory = tempfile::Builder::new().prefix("failure-").tempdir_in(root)?;
+    let directory = tempfile::Builder::new()
+        .prefix("failure-")
+        .tempdir_in(root)?;
     let path = directory.path().join("failure.json");
     write_history_file(&path, bundle)?;
     let _retained = directory.keep();
@@ -829,8 +839,13 @@ fn generated_offline_reset_histories_replay_twice_with_independent_terminal_expe
     // An explicitly requested replay is additional; it never skips the twelve
     // mandatory schedules. Records contain only bounded typed synthetic DATA.
     if let Some(path) = std::env::var_os("DAY2_OFFLINE_RESTORE_REPLAY") {
-        assert_eq!(replay_history_file(std::path::Path::new(&path))?, ReplayDisposition::FailureReproduced);
-        println!("offline restore saved failure reproduced; separate mandatory schedules completed");
+        assert_eq!(
+            replay_history_file(std::path::Path::new(&path))?,
+            ReplayDisposition::FailureReproduced
+        );
+        println!(
+            "offline restore saved failure reproduced; separate mandatory schedules completed"
+        );
     }
     Ok(())
 }
@@ -903,7 +918,8 @@ fn failed_history_bundle_preserves_both_prefixes_with_strict_private_data_only()
 }
 
 #[test]
-fn exact_file_replay_reports_a_real_recorder_cut_without_exporting_control_evidence() -> Result<()> {
+fn exact_file_replay_reports_a_real_recorder_cut_without_exporting_control_evidence() -> Result<()>
+{
     let actions = vec![Action::Inspect, Action::Commit];
     let recording = RecordingCut::AfterFirstObservation;
     let first = run_history(9214, &actions, recording);
@@ -912,12 +928,24 @@ fn exact_file_replay_reports_a_real_recorder_cut_without_exporting_control_evide
     assert_eq!(first.step, Some(0));
     assert_eq!(first.actual, vec![expected(false)]);
     assert_eq!(first, second);
-    let mut bundle = HistoryBundle { format: 1, source: implementation()?, seed: 9214, recording, expected: expected_sequence(&actions), actions, first, second };
+    let mut bundle = HistoryBundle {
+        format: 1,
+        source: implementation()?,
+        seed: 9214,
+        recording,
+        expected: expected_sequence(&actions),
+        actions,
+        first,
+        second,
+    };
     assert!(save_history(&bundle).is_err());
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("actual-recorder-cut.json");
     write_history_file(&path, &bundle)?;
-    assert_eq!(replay_history_file(&path)?, ReplayDisposition::FailureReproduced);
+    assert_eq!(
+        replay_history_file(&path)?,
+        ReplayDisposition::FailureReproduced
+    );
     bundle.second.actual.clear();
     let altered = directory.path().join("changed-prefix.json");
     write_history_file(&altered, &bundle)?;
