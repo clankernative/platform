@@ -633,6 +633,14 @@ fn implementation() -> Result<Digest> {
             include_str!("../../../../../day2-capabilities/src/credentials.rs"),
             include_str!("../../../../../day2-capabilities/src/security_epoch.rs"),
             include_str!("../../../../../../Cargo.lock"),
+            include_str!("../../../../../../Cargo.toml"),
+            include_str!("../../../../../../toolchain.json"),
+            include_str!("../../../../../../MODULE.bazel"),
+            include_str!("../../../../../../.bazelrc"),
+            include_str!("../../../../Cargo.toml"),
+            include_str!("../../../../BUILD.bazel"),
+            include_str!("../../../../../day2-capabilities/Cargo.toml"),
+            include_str!("../../../../../day2-capabilities/BUILD.bazel"),
         ],
     ))
 }
