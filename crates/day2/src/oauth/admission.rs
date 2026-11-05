@@ -4166,6 +4166,7 @@ pub(super) mod tests {
             "models":{"entries":{"fields":{"note":"text"}}},
             "inputs":{"input":{"fields":{}}},"foreign_keys":[]
         }))?;
+        contract.schema_digest = crate::digest(&serde_json::to_vec(&contract.schema)?);
         if consumers {
             contract.operations.push(crate::artifact::Operation {
                 name: "read".into(),
