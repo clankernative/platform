@@ -8,8 +8,10 @@ filegroup(name = "font_fixture_bytes", srcs = ["tests/fixtures/fonts/test-subset
 COMPILE_INPUTS = [
     ":font_fixture_bytes",
     "//crates/worker:src/first_request.rs",
+    "//:.bazelrc",
     "//:Cargo.lock",
     "//:Cargo.toml",
+    "//:MODULE.bazel",
     "//:assets/api-docs.css",
     "//:assets/api-docs.js",
     "//:assets/datastar-1.0.1.js",
@@ -68,9 +70,13 @@ COMPILE_INPUTS = [
     "//:toolchains/linux-aarch64.json",
     "//:toolchains/linux-x86_64.json",
     "//:tools/app-platform.roc",
+    "//crates/day2-capabilities:BUILD.bazel",
+    "//crates/day2-capabilities:Cargo.toml",
+    "//crates/day2-capabilities:src/credentials.rs",
     "//crates/day2-capabilities:src/lib.rs",
     "//crates/day2-capabilities:src/oauth.rs",
     "//crates/day2-capabilities:src/security_epoch.rs",
+    "//crates/day2:BUILD.bazel",
     "//crates/day2:Cargo.toml",
     "//crates/day2:fixtures/credential-schema-v1.sql",
     "//crates/day2:fixtures/provider-responses/carta.access_token.json",
@@ -392,6 +398,7 @@ platform_rust_test(
 )
 
 exports_files([
+    "BUILD.bazel",
     "Cargo.toml",
     "fixtures/credential-schema-v1.sql",
     "fixtures/provider-responses/carta.access_token.json",

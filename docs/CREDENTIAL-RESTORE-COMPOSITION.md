@@ -30,6 +30,10 @@ booleans/counts, not token material, snapshots or error strings. CI retains it
 under `artifacts/credential-restore-application-histories/failure-*/failure.json`.
 Setting `DAY2_OFFLINE_RESTORE_REPLAY` to one such record adds its exact-source
 replay after the mandatory twelve schedules; it never replaces them.
+An exact match reports failure reproduction, not a successful model campaign.
+Recorder fault-injection controls use separate temporary files and are refused
+by the real campaign's exporter, so CI never mistakes those controls for an
+actual reset counterexample.
 
 These unit schedules neither construct native owners nor qualify a loaded app
 artifact. Transaction drop and reopened copied DATA do not establish native
