@@ -431,14 +431,14 @@ fn production_capture_and_verification_cannot_lose_native_origin_or_final_curren
                     syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="checked")=>Some(local),_=>None,
                 }).collect::<Vec<_>>();
                 ensure!(targets.len() == 1, "actual checked local selector");
-                targets
+                *targets
                     .into_iter()
                     .next()
                     .unwrap()
                     .init
                     .as_mut()
                     .unwrap()
-                    .expr = Box::new(syn::parse_quote!(Ok(())));
+                    .expr = syn::parse_quote!(Ok(()));
             }
         }
         assert!(validate_current_wiring(&changed).is_err());
