@@ -38,10 +38,6 @@ impl Fixture {
             "INSERT INTO day2_meta VALUES('schema',?1)",
             [Digest::new(b"schema").as_str()],
         )?;
-        credentials::install_schema(&db)?;
-        crate::managed_credentials::issuance::install(&db)?;
-        crate::oauth::usage::install(&db)?;
-        crate::oauth::inbound::install_schema(&db)?;
         let previous = authority_state::ActiveAuthority {
             stamp: authority_state::AuthorityStamp {
                 epoch: Digest::new(b"old-application-authority").as_str().into(),
@@ -69,6 +65,13 @@ impl Fixture {
             authority_state::store_record_in(&tx, &previous, "fixture", "source")?;
             tx.commit()?;
         }
+        // Match ordinary initialization: complete host/audit setup before any
+        // private OAuth tables exist. The host's business-row upgrade must not
+        // add model columns to an already installed private identity unit.
+        credentials::install_schema(&db)?;
+        crate::managed_credentials::issuance::install(&db)?;
+        crate::oauth::usage::install(&db)?;
+        crate::oauth::inbound::install_schema(&db)?;
         let (_, token) = credentials::restore::seed_first_epoch_for_tests(&mut db)?;
         let peers = credentials::restore::seed_historical_peers_for_tests(
             &db,
