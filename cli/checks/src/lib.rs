@@ -37,16 +37,23 @@ mod tests {
             .current_dir(cli.parent().unwrap())
             .status()
             .unwrap();
-        assert!(admitted.success(), "run xtask bootstrap and cli for current offline package inputs");
-        let pins: Value = serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
+        assert!(
+            admitted.success(),
+            "run xtask bootstrap and cli for current offline package inputs"
+        );
+        let pins: Value =
+            serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
         let mut command = Command::new(cli.join("../../.toolchains/roc"));
         for p in pins["packages"].as_array().unwrap() {
             let name = p["name"].as_str().unwrap();
             let version = p["version"].as_str().unwrap();
             let archive = p["archive"].as_str().unwrap();
             let hash = archive.strip_suffix(".tar.zst").unwrap();
-            command.arg("--replace-dep")
-                .arg(format!("https://github.com/roc-lang/{name}/releases/download/{version}/{archive}"))
+            command
+                .arg("--replace-dep")
+                .arg(format!(
+                    "https://github.com/roc-lang/{name}/releases/download/{version}/{archive}"
+                ))
                 .arg(cli.join(".cache/roc-packages").join(hash).join("main.roc"));
         }
         command
@@ -93,12 +100,21 @@ mod tests {
     #[test]
     fn compiler_checks_use_local_packages_with_network_unavailable_and_poisoned_default_cache() {
         let scratch = Scratch::new();
-        let pins: Value = serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
+        let pins: Value =
+            serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
         for p in pins["packages"].as_array().unwrap() {
-            let hash = p["archive"].as_str().unwrap().strip_suffix(".tar.zst").unwrap();
+            let hash = p["archive"]
+                .as_str()
+                .unwrap()
+                .strip_suffix(".tar.zst")
+                .unwrap();
             let cached = scratch.0.join("roc/packages").join(hash);
             fs::create_dir_all(&cached).unwrap();
-            fs::write(cached.join("main.roc"), "intentionally invalid package contents").unwrap();
+            fs::write(
+                cached.join("main.roc"),
+                "intentionally invalid package contents",
+            )
+            .unwrap();
         }
         let output = compiler()
             .args(["check", "--no-cache", "main.roc"])
@@ -115,7 +131,12 @@ mod tests {
             .env("no_proxy", "")
             .output()
             .unwrap();
-        assert!(output.status.success(), "offline current-source compiler check failed: code {:?}, stderr bytes {}", output.status.code(), output.stderr.len());
+        assert!(
+            output.status.success(),
+            "offline current-source compiler check failed: code {:?}, stderr bytes {}",
+            output.status.code(),
+            output.stderr.len()
+        );
     }
 
     fn run(args: &[&str], instance: Option<&Path>) -> Output {

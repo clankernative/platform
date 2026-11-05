@@ -34,10 +34,7 @@ pub fn build(root: &Path) -> Result<PathBuf> {
         .arg(root.join("ops/Runner.roc"))
         .arg(format!("--output={}", executable.display()));
     crate::roc_packages::configure(root, &mut command)?;
-    run(
-        root,
-        command.env("ROC_CACHE_DIR", root.join("cli/.cache")),
-    )?;
+    run(root, command.env("ROC_CACHE_DIR", root.join("cli/.cache")))?;
     for (name, expected) in day2::automation::SOURCES {
         ensure!(
             fs::read(root.join(name))? == *expected,

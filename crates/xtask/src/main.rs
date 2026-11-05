@@ -369,7 +369,10 @@ fn main() -> Result<()> {
     }
     match action.as_str() {
         "admit-roc-packages" => {
-            ensure!(args.next().is_none(), "package input admission accepts no overrides");
+            ensure!(
+                args.next().is_none(),
+                "package input admission accepts no overrides"
+            );
             roc_packages::admit(&root)?;
         }
         "build-tooling-image" => {
@@ -1321,10 +1324,7 @@ fn build_cli(root: &Path) -> Result<()> {
                 let mut command = Command::new(&roc);
                 command.args(["test", "ops/Runner.roc"]);
                 roc_packages::configure(root, &mut command)?;
-                run(
-                    root,
-                    command.env("ROC_CACHE_DIR", root.join("cli/.cache")),
-                )?;
+                run(root, command.env("ROC_CACHE_DIR", root.join("cli/.cache")))?;
                 "workflows".to_owned()
             }
             "cli-receipt" => {
