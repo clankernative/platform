@@ -2573,7 +2573,7 @@ pub(crate) mod tests {
         assert_eq!(expected.len(), CREDENTIAL_TABLES.len());
         assert_eq!(expected, CREDENTIAL_TABLES.iter().copied().collect());
         let store = include_str!("store.rs")
-            .split("\n#[cfg(test)]\nmod tests {")
+            .split("\n#[cfg(test)]")
             .next()
             .unwrap();
         let schema = include_str!("../oauth/schema.rs")
