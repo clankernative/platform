@@ -96,8 +96,10 @@ fn validate_id(id: &str) -> Result<()> {
 fn require_current_unit(db: &Connection) -> Result<()> {
     let current: bool = db.query_row(
         "SELECT count(*)=1 AND min(version)=?1 FROM main.oauth_restore_schema_version",
-        [VERSION], |row| row.get(0))?;
-    ensure!(current,"restore_current_cut_unit_required");
+        [VERSION],
+        |row| row.get(0),
+    )?;
+    ensure!(current, "restore_current_cut_unit_required");
     Ok(())
 }
 
@@ -106,26 +108,40 @@ fn require_current_unit(db: &Connection) -> Result<()> {
 pub(crate) fn generation_floor(db: &Connection, slot: &str) -> Result<Option<i64>> {
     validate_id(slot)?;
     require_current_unit(db)?;
-    let mut statement=db.prepare("SELECT f.generation,k.binding,k.digest FROM main.oauth_restore_slot_floors f
+    let mut statement = db.prepare(
+        "SELECT f.generation,k.binding,k.digest FROM main.oauth_restore_slot_floors f
         LEFT JOIN main.oauth_restore_cuts k ON k.digest=f.cut
         LEFT JOIN main.oauth_restore_closed c ON c.id=f.slot AND c.kind='connect'
-        WHERE f.slot=?1")?;
-    let mut rows=statement.query([slot])?;
-    let Some(row)=rows.next()? else {return Ok(None)};
-    let generation=row.get::<_,i64>(0)?;
-    let binding=row.get_ref(1)?.as_str()?;
-    let digest=row.get_ref(2)?.as_str()?;
-    ensure!(binding.len()<=32768 && digest.len()==71 && generation>0 && generation<i64::MAX,"restore_slot_floor_invalid");
-    Cut::validate_record(binding,digest)?;
-    ensure!(rows.next()?.is_none(),"restore_slot_floor_ambiguous");
+        WHERE f.slot=?1",
+    )?;
+    let mut rows = statement.query([slot])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let generation = row.get::<_, i64>(0)?;
+    let binding = row.get_ref(1)?.as_str()?;
+    let digest = row.get_ref(2)?.as_str()?;
+    ensure!(
+        binding.len() <= 32768 && digest.len() == 71 && generation > 0 && generation < i64::MAX,
+        "restore_slot_floor_invalid"
+    );
+    Cut::validate_record(binding, digest)?;
+    ensure!(rows.next()?.is_none(), "restore_slot_floor_ambiguous");
     Ok(Some(generation))
 }
 
 /// Arithmetic DATA only, shared by captured views and actual SQL row checks.
 pub(super) fn next_generation(current: Option<i64>, floor: i64) -> Result<i64> {
-    ensure!(current.is_none_or(|generation|generation>0) && floor>=0 && floor<i64::MAX,"invalid_connect_generation");
-    current.unwrap_or(0).max(floor).checked_add(1).filter(|next|*next<i64::MAX)
-        .ok_or_else(||anyhow::anyhow!("connect_generation_exhausted"))
+    ensure!(
+        current.is_none_or(|generation| generation > 0) && floor >= 0 && floor < i64::MAX,
+        "invalid_connect_generation"
+    );
+    current
+        .unwrap_or(0)
+        .max(floor)
+        .checked_add(1)
+        .filter(|next| *next < i64::MAX)
+        .ok_or_else(|| anyhow::anyhow!("connect_generation_exhausted"))
 }
 
 /// Absence in a CURRENT installed unit is only absence of this denial. All
@@ -186,7 +202,11 @@ const UNITS: &[(&str, &[&str])] = &[
     ),
     (
         "oauth_restore_schema_version",
-        &["oauth_restore_cuts", "oauth_restore_closed", "oauth_restore_slot_floors"],
+        &[
+            "oauth_restore_cuts",
+            "oauth_restore_closed",
+            "oauth_restore_slot_floors",
+        ],
     ),
 ];
 
@@ -577,24 +597,43 @@ impl Snapshot {
                     db.prepare(&format!("SELECT * FROM main.{table} ORDER BY rowid"))?;
                 let columns = statement.column_names();
                 let floor_columns = match table.as_str() {
-                    "oauth_connection_slots" | "oauth_private_tokens" | "oauth_external_quarantine" | "oauth_refresh_attempts" => Some(("slot", "generation")),
+                    "oauth_connection_slots"
+                    | "oauth_private_tokens"
+                    | "oauth_external_quarantine"
+                    | "oauth_refresh_attempts" => Some(("slot", "generation")),
                     "oauth_connect_attempts" => Some(("slot", "proposed_generation")),
                     _ => None,
-                }.map(|(slot,generation)| -> Result<(usize,usize)> {
-                    Ok((columns.iter().position(|name|*name==slot).ok_or_else(||anyhow::anyhow!("restore_slot_column_missing"))?,
-                        columns.iter().position(|name|*name==generation).ok_or_else(||anyhow::anyhow!("restore_generation_column_missing"))?))
-                }).transpose()?;
+                }
+                .map(|(slot, generation)| -> Result<(usize, usize)> {
+                    Ok((
+                        columns
+                            .iter()
+                            .position(|name| *name == slot)
+                            .ok_or_else(|| anyhow::anyhow!("restore_slot_column_missing"))?,
+                        columns
+                            .iter()
+                            .position(|name| *name == generation)
+                            .ok_or_else(|| anyhow::anyhow!("restore_generation_column_missing"))?,
+                    ))
+                })
+                .transpose()?;
                 drop(columns);
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
                     super::schema::materialize(row)?;
-                    if let Some((slot_index,generation_index))=floor_columns {
-                        let slot=row.get_ref(slot_index)?.as_str()?;
+                    if let Some((slot_index, generation_index)) = floor_columns {
+                        let slot = row.get_ref(slot_index)?.as_str()?;
                         super::connect::identifier(slot)?;
-                        let generation=row.get::<_,i64>(generation_index)?;
-                        ensure!(generation>0 && generation<i64::MAX,"restore_generation_exhausted");
-                        generations.entry(slot.into()).and_modify(|value|*value=(*value).max(generation)).or_insert(generation);
-                        ensure!(generations.len()<=8192,"restore_slot_count_bound");
+                        let generation = row.get::<_, i64>(generation_index)?;
+                        ensure!(
+                            generation > 0 && generation < i64::MAX,
+                            "restore_generation_exhausted"
+                        );
+                        generations
+                            .entry(slot.into())
+                            .and_modify(|value| *value = (*value).max(generation))
+                            .or_insert(generation);
+                        ensure!(generations.len() <= 8192, "restore_slot_count_bound");
                     }
                     hash.update(&[255]);
                     hash.update(&(row.as_ref().column_count() as u64).to_be_bytes());
@@ -651,9 +690,13 @@ pub(crate) fn close_in(
         "restore_cut_inventory_changed"
     );
     let fresh = Snapshot::capture(tx, profile)?;
-    ensure!(fresh.digest == before.digest && fresh.generations == before.generations
-        && fresh.identities == before.identities && fresh.tables == before.tables,
-        "restore_snapshot_changed");
+    ensure!(
+        fresh.digest == before.digest
+            && fresh.generations == before.generations
+            && fresh.identities == before.identities
+            && fresh.tables == before.tables,
+        "restore_snapshot_changed"
+    );
     let savepoint = tx.savepoint()?;
     let occupied: bool = savepoint.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.oauth_restore_cuts)",
@@ -675,9 +718,11 @@ pub(crate) fn close_in(
             params![kind.text(), id, cut.digest().as_str()],
         )?;
     }
-    for (slot,generation) in &before.generations {
-        savepoint.execute("INSERT INTO main.oauth_restore_slot_floors(slot,generation,cut) VALUES(?1,?2,?3)",
-            params![slot,generation,cut.digest().as_str()])?;
+    for (slot, generation) in &before.generations {
+        savepoint.execute(
+            "INSERT INTO main.oauth_restore_slot_floors(slot,generation,cut) VALUES(?1,?2,?3)",
+            params![slot, generation, cut.digest().as_str()],
+        )?;
     }
     if before.tables.contains("oauth_management_dispatch_slots") {
         // This barrier is released only by the actual restore cut, never by an
@@ -687,9 +732,12 @@ pub(crate) fn close_in(
                OR NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='connect' AND c.id=d.attempt AND c.cut=?1)
                OR NOT EXISTS(SELECT 1 FROM main.oauth_connect_attempts a WHERE a.attempt=d.attempt AND a.slot=d.slot))",
             [cut.digest().as_str()],|row|row.get(0))?;
-        ensure!(!unsupported,"restore_dispatch_claim_not_closed");
-        savepoint.execute("DELETE FROM main.oauth_management_dispatch_slots WHERE attempt IN
-            (SELECT id FROM main.oauth_restore_closed WHERE kind='management' AND cut=?1)", [cut.digest().as_str()])?;
+        ensure!(!unsupported, "restore_dispatch_claim_not_closed");
+        savepoint.execute(
+            "DELETE FROM main.oauth_management_dispatch_slots WHERE attempt IN
+            (SELECT id FROM main.oauth_restore_closed WHERE kind='management' AND cut=?1)",
+            [cut.digest().as_str()],
+        )?;
     }
     if before.tables.contains("oauth_connection_slots") {
         let exhausted:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_connection_slots WHERE security_epoch=9223372036854775807)",[],|r|r.get(0))?;

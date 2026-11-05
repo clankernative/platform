@@ -119,11 +119,18 @@ impl View {
             "OAuth management callback refused"
         );
         match (self.action, &self.fence) {
-            (Action::Connect, None) => { self.connect_generations()?; }
+            (Action::Connect, None) => {
+                self.connect_generations()?;
+            }
             (Action::Connect, Some(fence)) => {
-                ensure!(self.generation_floor>0 && fence.status=="reauth_required"
-                    && fence.generation>0 && fence.epoch>0 && fence.token_version>0,
-                    "OAuth restored slot context refused");
+                ensure!(
+                    self.generation_floor > 0
+                        && fence.status == "reauth_required"
+                        && fence.generation > 0
+                        && fence.epoch > 0
+                        && fence.token_version > 0,
+                    "OAuth restored slot context refused"
+                );
                 self.connect_generations()?;
             }
             (Action::Disconnect, Some(fence)) => ensure!(
@@ -143,19 +150,29 @@ impl View {
 
     /// Version selection DATA only. Actual current authority, the complete
     /// captured view and genuine fresh consumer remain mandatory at every post.
-    pub(super) fn connect_generations(&self) -> Result<(Option<i64>,i64,i64)> {
-        ensure!(self.action==Action::Connect && self.generation_floor>=0 && self.generation_floor<i64::MAX,
-            "OAuth connect floor refused");
-        let (previous,epoch)=match &self.fence {
-            None=>(None,1),
-            Some(fence)=>{
-                ensure!(self.generation_floor>0 && fence.status=="reauth_required" && fence.generation>0
-                    && fence.epoch>0 && fence.token_version>0,"OAuth restored slot context refused");
-                (Some(fence.generation),fence.epoch)
+    pub(super) fn connect_generations(&self) -> Result<(Option<i64>, i64, i64)> {
+        ensure!(
+            self.action == Action::Connect
+                && self.generation_floor >= 0
+                && self.generation_floor < i64::MAX,
+            "OAuth connect floor refused"
+        );
+        let (previous, epoch) = match &self.fence {
+            None => (None, 1),
+            Some(fence) => {
+                ensure!(
+                    self.generation_floor > 0
+                        && fence.status == "reauth_required"
+                        && fence.generation > 0
+                        && fence.epoch > 0
+                        && fence.token_version > 0,
+                    "OAuth restored slot context refused"
+                );
+                (Some(fence.generation), fence.epoch)
             }
         };
-        let proposed=super::restore::next_generation(previous,self.generation_floor)?;
-        Ok((previous,epoch,proposed))
+        let proposed = super::restore::next_generation(previous, self.generation_floor)?;
+        Ok((previous, epoch, proposed))
     }
 
     pub(super) fn digest(&self) -> Result<Digest> {
