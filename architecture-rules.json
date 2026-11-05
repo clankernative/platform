@@ -295,6 +295,7 @@
     "crates/day2/src/oauth/registration_tests.rs",
     "crates/day2/src/oauth/schema.rs",
     "crates/day2/src/oauth/security_shell.rs",
+    "crates/day2/src/oauth/security_shell/passkey_export.rs",
     "crates/day2/src/oauth/shell_oidc.rs",
     "crates/day2/src/oauth/shell_transport.rs",
     "crates/day2/src/oauth/shell_transport_tests.rs",

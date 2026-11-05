@@ -76,6 +76,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ),
     ("schema.rs", include_str!("schema.rs")),
     ("security_shell.rs", include_str!("security_shell.rs")),
+    (
+        "security_shell/passkey_export.rs",
+        include_str!("security_shell/passkey_export.rs"),
+    ),
     ("shell_oidc.rs", include_str!("shell_oidc.rs")),
     ("shell_transport.rs", include_str!("shell_transport.rs")),
     (
