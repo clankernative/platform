@@ -1,6 +1,6 @@
 //! Actual SQLite-owned descriptor observations for the pinned Unix VFS.
 //! These are DATA, never admission, provenance or writer exclusion by themselves.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, Transaction};
 use serde_json::Value;
 
@@ -112,6 +112,18 @@ pub(super) fn held(connection: &Connection) -> Result<Handles> {
             r.get(0)
         })?;
     decode(text.as_bytes())
+}
+
+pub(super) fn cohort(
+    files: &Handles,
+) -> Result<crate::security_epoch::native_enrollment::SqliteCohort> {
+    let wal = files.journal.context("native_sqlite_wal_missing")?;
+    let shm = files.shm.context("native_sqlite_shm_missing")?;
+    crate::security_epoch::native_enrollment::SqliteCohort::from_identities(
+        (files.main.device, files.main.inode),
+        (wal.device, wal.inode),
+        (shm.device, shm.inode),
+    )
 }
 
 pub(super) fn snapshot(transaction: &Transaction<'_>) -> Result<Handles> {

@@ -62,12 +62,13 @@ pub(crate) use storage_peer::{
     CurrentStoragePeerPhase, InitialHolderConnection, InitialHolderListener, InitialHolderServer,
     PendingAppCurrentPeer, QueuedAppCurrentPeer,
 };
-pub(crate) use storage_peer_wire::StoragePeerRequest;
+pub(crate) use storage_peer_wire::{SqliteCohort, StoragePeerRequest};
 
 /// Closed current-peer request DATA, never storage or serving permission.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StoragePeerPurpose {
+    AdminRead,
     BootstrapCreate,
     BootstrapComplete,
     CurrentServing,

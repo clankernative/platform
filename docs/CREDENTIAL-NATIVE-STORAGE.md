@@ -579,3 +579,31 @@ Controller admin reader remains closed until its actual authenticated request
 borrows App writer exclusion through the live read transaction, acknowledgement
 and final original checks. No such read loan is introduced by connection custody.
 Native/deployed qualification remains separate.
+
+
+## Authenticated admin read loan
+
+A dedicated signed `AdminRead` exchange binds the exact operation and the App's
+retained MAIN/WAL/SHM device-and-inode cohort. It is not an ordinary serving or
+SQL-read label. The App holds its actual executor, role and active-storage
+borrow, with the continuation Busy, while the Controller owns the reader.
+The Controller retains its original physical-file and peer handles across the
+whole SQL unit, including rollback, connection close and error cleanup. The
+fixed reader opens read-only without following a symlink, checks actual SQLite
+handles against the App cohort and original MAIN, and closes the transaction
+and connection before coherent reobservation or peer acknowledgement.
+
+The resulting membership proof borrows the real loan, metadata and exact
+operation. It is current policy membership, not authentication of a claimed
+email or subject, a signing permission or a restore approval. A future producer
+must supply genuine passkey/executor authentication and use the membership
+while this loan is still held. There is no public grant-producing route here.
+The loan preserves the original five-second bound and permanent refusal; an
+unknown close, abandoned loan or failed final peer exchange cannot restore the
+App or Controller continuation. This is read exclusion, not complete stopped
+rights or permission to replace a writer after restore.
+
+Portable tests exercise the local SQL disposition against an independent seeded
+model, real SQLite cohort/readonly/refusal behavior, signed wire controls and
+production wiring mutations. They do not establish native process-death,
+App/Controller concurrency or deployed restore qualification.

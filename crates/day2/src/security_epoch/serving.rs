@@ -404,6 +404,17 @@ pub(crate) struct CurrentShellServingPhase<'peer> {
 impl ServingParticipant {
     /// Only wakeup/readiness DATA is exchanged here. The caller acquires its
     /// real fresh role afterwards; no provider or consumer scope is returned.
+    pub(crate) fn admin_read(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        operation: &Digest,
+    ) -> Result<()> {
+        let ParticipantOwner::App(app) = &mut self.native else {
+            anyhow::bail!("native_admin_read_app_required")
+        };
+        app.admin_read(stage, operation)
+    }
+
     pub(crate) fn prepare_current(&mut self) -> Result<()> {
         match &mut self.native {
             ParticipantOwner::App(app) => app.prepare_current(),

@@ -141,6 +141,19 @@ impl NativeSqliteKeeper {
         result
     }
 
+    /// Historical cohort DATA. The caller must keep and check the genuine App
+    /// owner; this neither borrows that owner nor grants a read or writer.
+    pub(crate) fn cohort_data(
+        &self,
+    ) -> Result<crate::security_epoch::native_enrollment::SqliteCohort> {
+        ensure!(!self.refused, "native_sqlite_keeper_refused");
+        opened_files::cohort(
+            self.files
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("native_sqlite_keeper_cohort_not_bound"))?,
+        )
+    }
+
     /// Retain the connection even on refusal. Closing an auxiliary same-inode
     /// descriptor while another SQLite unit is alive can release its locks.
     /// Actual resource teardown follows the App owner's borrowed lifetime.

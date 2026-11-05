@@ -397,6 +397,17 @@ impl AppFileContinuity {
         result
     }
 
+    pub(in crate::security_epoch) fn sqlite_cohort(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<crate::security_epoch::native_enrollment::SqliteCohort> {
+        self.require_sqlite(stage)?;
+        self.sqlite
+            .as_ref()
+            .context("app_sqlite_keeper_not_retained")?
+            .cohort_data()
+    }
+
     /// Checks physical continuity with a NEW bounded stage of the SAME live
     /// enrollment. It intentionally does not compare initial bytes or length:
     /// legitimate SQLite writes change those after activation. No active epoch,

@@ -913,6 +913,7 @@ pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> R
 }
 
 mod native_storage;
+pub(crate) use native_storage::{ControllerAdminData, check_controller_sqlite_files};
 pub(crate) use native_storage::{NativeSqliteKeeper, require_unopened_native_sqlite};
 pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic};
 
