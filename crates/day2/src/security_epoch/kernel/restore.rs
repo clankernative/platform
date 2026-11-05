@@ -1,8 +1,8 @@
 //! First prepare-for-restore transition. All inputs and outputs are DATA, not
 //! maintenance permission, a copy permit, a native owner or writer readiness.
 //! The epoch fence and both create-only receipts must commit atomically.
-pub(in crate::security_epoch) mod completion;
 pub(in crate::security_epoch) mod approval_use;
+pub(in crate::security_epoch) mod completion;
 
 use super::{EpochStore, Phase, Snapshot, Versioned, advance};
 use crate::security_epoch::restore_approval::{AdminIdentity, ApprovalRequest, TargetBinding};

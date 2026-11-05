@@ -66,7 +66,10 @@ impl Plan {
             reservation: Digest::of(&reservation.receipt)?,
         };
         approval_use.key(selected)?;
-        Ok(Self { reservation, approval_use })
+        Ok(Self {
+            reservation,
+            approval_use,
+        })
     }
 
     /// Recheck the actual same original immediately before send. In particular,
@@ -80,17 +83,19 @@ impl Plan {
         ledger: Option<&Versioned<Receipt>>,
         used: Option<&Versioned<UseRecord>>,
     ) -> Result<()> {
-        self.reservation.revalidate(selected, current, at, observed, ledger)?;
+        self.reservation
+            .revalidate(selected, current, at, observed, ledger)?;
         ensure!(used.is_none(), "restore_approval_already_consumed");
         let request = &self.reservation.receipt.request;
         ensure!(
-            self.approval_use == (UseRecord {
-                format: Format::Day2RestoreApprovalUseV1,
-                approval: request.authorization.grant.approval.clone(),
-                operation: request.intent.operation.clone(),
-                request: request.digest()?,
-                reservation: Digest::of(&self.reservation.receipt)?,
-            }),
+            self.approval_use
+                == (UseRecord {
+                    format: Format::Day2RestoreApprovalUseV1,
+                    approval: request.authorization.grant.approval.clone(),
+                    operation: request.intent.operation.clone(),
+                    request: request.digest()?,
+                    reservation: Digest::of(&self.reservation.receipt)?,
+                }),
             "restore_approval_use_plan_changed"
         );
         self.approval_use.key(selected)?;
@@ -126,4 +131,3 @@ pub(in crate::security_epoch) fn reconcile(
         _ => Outcome::Conflict,
     })
 }
-

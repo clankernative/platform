@@ -4,8 +4,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
-mod history;
 mod approval_use;
+mod history;
 #[cfg(unix)]
 mod process;
 
@@ -91,17 +91,24 @@ pub(super) fn current(selected: &EpochStore, intent: &Intent, before: &Snapshot)
         panic!("fixture root");
     };
     let target = crate::security_epoch::restore_approval::TargetBinding {
-        scope: selected.scope.clone(), binding_generation: 1,
-        authority: selected.authority_key().unwrap(), selection: Digest::of(selected).unwrap(),
-        incarnation: intent.target_incarnation.clone(), security_epoch: 2,
-        artifact: intent.archive.artifact.clone(), schema: intent.archive.schema.clone(),
+        scope: selected.scope.clone(),
+        binding_generation: 1,
+        authority: selected.authority_key().unwrap(),
+        selection: Digest::of(selected).unwrap(),
+        incarnation: intent.target_incarnation.clone(),
+        security_epoch: 2,
+        artifact: intent.archive.artifact.clone(),
+        schema: intent.archive.schema.clone(),
     };
     let custody = intent.archive.required_keys[0].binding.clone();
     let executor = crate::security_epoch::restore_approval::AdminIdentity {
-        email: "operator@example.test".into(), subject: "stable-operator-subject".into(),
+        email: "operator@example.test".into(),
+        subject: "stable-operator-subject".into(),
     };
     Current {
-        target: target.clone(), custody: custody.clone(), executor: executor.clone(),
+        target: target.clone(),
+        custody: custody.clone(),
+        executor: executor.clone(),
         grant: Grant {
             intent: intent.commitment(selected).unwrap(),
             issuer: Digest::new(b"independent-maintenance-issuer"),
@@ -110,8 +117,12 @@ pub(super) fn current(selected: &EpochStore, intent: &Intent, before: &Snapshot)
             clock_domain: Digest::new(b"maintenance-clock-domain"),
             approval: crate::security_epoch::restore_approval::ApprovalRequest {
                 grant_id: Digest::of(&("approval-id", &intent.operation)).unwrap(),
-                full_archive_digest: intent.archive.full_archive_digest.clone(), target,
-                executor, custody, approved_at: 1000, expires_at: 4600,
+                full_archive_digest: intent.archive.full_archive_digest.clone(),
+                target,
+                executor,
+                custody,
+                approved_at: 1000,
+                expires_at: 4600,
             },
             fence: Fence {
                 root: Digest::of(root).unwrap(),
