@@ -236,6 +236,28 @@ jobs:
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
+      # Capture the freshly used bootstrap actions before test compilation grows
+      # and collects the disk cache. This is compiler data, never a test receipt.
+      - name: Archive current verifier bootstrap compiler actions
+        if: ${{ matrix.part == 'tests' }}
+        id: bootstrap_actions_archive
+        continue-on-error: true
+        timeout-minutes: 3
+        run: tar -I 'gzip -1' -cf /tmp/day2-bazel-linux-bootstrap-actions.tgz -C "$HOME/.cache/bazel-disk" .
+      - name: Retain current verifier bootstrap compiler actions
+        if: ${{ matrix.part == 'tests' && steps.bootstrap_actions_archive.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          # A rerun keeps its checkout SHA and run ID. Preserve the first complete
+          # snapshot if the producer is skipped or retried on a later attempt.
+          name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/day2-bazel-linux-bootstrap-actions.tgz
+          overwrite: false
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
@@ -393,7 +415,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         id: linux_actions_archive
-        run: tar -czf /tmp/day2-bazel-linux-actions.tgz -C "$HOME/.cache/bazel-disk" .
+        run: tar -I 'gzip -1' -cf /tmp/day2-bazel-linux-actions.tgz -C "$HOME/.cache/bazel-disk" .
       - name: Retain Linux compiler actions for trusted main publication
         if: ${{ matrix.part == 'tests' && steps.linux_actions_archive.outcome == 'success' }}
         continue-on-error: true
@@ -1369,8 +1391,9 @@ jobs:
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
           MAC: ${{ needs.verify-mac-compatibility.result == 'success' && 'success' || needs.retry-mac-compatibility.result }}
-      # The global Actions cache can evict this run's test actions before the
-      # final join. Its retained archive is independent of cache eviction.
+      # The global Actions cache can evict this run's actions before the final
+      # join. Retain bootstrap actions before the larger test-cache archive,
+      # independently of eviction and the current run-attempt number.
       # This is compilation data only; the current verifier and all receipt
       # admission below still execute normally, even when transport fails.
       - name: Download retained compiler actions from the admitted preparation
@@ -1382,7 +1405,7 @@ jobs:
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
-          name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}
+          name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}
           path: /tmp/day2-bazel-linux-bootstrap-actions
       - name: Retry retained compiler action download once
         id: bootstrap_actions_retry
@@ -1394,7 +1417,7 @@ jobs:
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
-          name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}
+          name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}
           path: /tmp/day2-bazel-linux-bootstrap-actions
       - name: Create the retained compiler cache directory
         id: bootstrap_actions_directory
@@ -1405,7 +1428,7 @@ jobs:
         if: ${{ steps.bootstrap_actions_directory.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 2
-        run: tar -xzf /tmp/day2-bazel-linux-bootstrap-actions/day2-bazel-linux-actions.tgz -C "$HOME/.cache/bazel-disk"
+        run: tar -xzf /tmp/day2-bazel-linux-bootstrap-actions/day2-bazel-linux-bootstrap-actions.tgz -C "$HOME/.cache/bazel-disk"
       - name: Bootstrap the current source artifact admission guard
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - name: Establish the mandatory bounded native Linux compiler context
