@@ -4,7 +4,7 @@ The registry source selects a restore-verification key from the actual runtime's
 instance configuration, using `control.restore_passkeys`. Registry records are
 public data. They become a verifier input only inside the closed verification
 method, while borrowing the actual native runtime SQL owner for that runtime.
-Ordinary SQL, an OAuth human original, a cloned runtime, desired policy and a
+Ordinary SQL, an OAuth human original, a runtime clone alone, desired policy and a
 serialized record cannot supply that owner.
 
 Capture reads the configuration and the currently activated, enabled app policy.
@@ -15,14 +15,21 @@ RP ID and origin are all bound, together with the complete configuration, held
 file identity and current authority stamp. Changing another registry entry also
 invalidates this conservative selection. A new capture rereads the file: a
 removed key cannot authorize a new attempt.
+Every observation also requires the retained path to be the actual current
+runtime's original published selector, before reading retained bytes. Native
+input capture retains that selector before startup canonicalization. Ordinary
+runtimes carry no restore selector; this metadata is never permission.
 
-The source opens an absolute, bounded, canonical configuration path through
+The source opens the absolute, bounded published configuration path through
 descriptor-relative operations that refuse symlinks at every component. It
 retains the directory and file handles. The regular file must have one link, be
 at most one MiB and have no group/other write permission. Every selection rereads
 the bounded contents through the held descriptor, checks fresh path identity,
 and compares file metadata and the immediate parent directory's change time.
-Replacement, removal and readdition, an in-place write, an added hard link or a
+A startup-resolved version file cannot replace the published selector. Relative
+inputs and symlink-based configuration projections are unsupported and refused
+before any key is trusted. Replacement, removal and readdition, an in-place
+write, an added hard link or a
 changed parent refuse the retained ceremony. Paths with symlink ancestors must
 be corrected in deployment configuration before use.
 

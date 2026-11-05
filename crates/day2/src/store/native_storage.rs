@@ -82,6 +82,7 @@ impl Runtime {
                 scope: metadata.scope,
                 hosted_domain: desired.hosted_domain().map(str::to_owned),
                 instance_path: metadata.instance_path,
+                restore_registry_selector: Some(metadata.instance_selector),
                 app: metadata.app,
                 db: PathBuf::from(DATABASE),
                 artifact: Arc::new(metadata.artifact),

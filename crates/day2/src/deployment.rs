@@ -834,6 +834,7 @@ async fn serve_configured(
     providers: Option<crate::oauth::host::Providers>,
     configure: impl FnOnce(Runtime) -> Result<Runtime> + Send + 'static,
 ) -> Result<()> {
+    let published_instance_path = instance_path;
     // Decided from the instance before anything else. An installation that
     // declares an identity provider has no development mode: if it did, the
     // provider would be one flag away from optional.
@@ -869,10 +870,9 @@ async fn serve_configured(
         Some(serving_lock(&state, app, profile.rolling())?)
     };
     let runtime = if initial_storage {
-        AppStartupRuntime::Initial(Box::new(crate::store::InitialStoreMetadata::load(
-            &instance_path,
-            app,
-        )?))
+        let metadata = crate::store::InitialStoreMetadata::load(published_instance_path, app)?;
+        metadata.require_input_path(&instance_path)?;
+        AppStartupRuntime::Initial(Box::new(metadata))
     } else {
         AppStartupRuntime::Ordinary(Box::new(Runtime::load(&instance_path, app)?))
     };

@@ -158,6 +158,7 @@ fn selected(
     id: &[u8],
 ) -> Result<KeyRecord> {
     sql.require_native_registry_read(runtime)?;
+    held.require_path(runtime.restore_registry_path()?)?;
     let bytes = held.read()?;
     let instance = Instance::from_bytes(&bytes)
         .map_err(|_| anyhow::anyhow!("restore_registry_config_invalid"))?;
@@ -199,7 +200,7 @@ impl RegistryCeremony {
                 (1..=1023).contains(&credential_id.len()),
                 "restore_registry_credential_bound"
             );
-            let held = file::Held::open(runtime.instance_path())?;
+            let held = file::Held::open(runtime.restore_registry_path()?)?;
             let record = selected(runtime, sql, &held, credential_id)?;
             let mut nonce = [0; 32];
             getrandom::fill(&mut nonce)
