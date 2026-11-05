@@ -11,14 +11,14 @@ const MAX_CEREMONY_SECONDS: i64 = 300;
 /// Schema for the independently owned instance authentication store. Only the
 /// fixture installs it today. It is never installed in a restored app database.
 const DDL: &str = "
-    CREATE TABLE restore_passkey_keys (
+    CREATE TABLE main.restore_passkey_keys (
         credential BLOB PRIMARY KEY,
         binding TEXT NOT NULL CHECK(length(binding)=71),
         version INTEGER NOT NULL CHECK(version>0),
         counter INTEGER NOT NULL CHECK(counter BETWEEN 0 AND 4294967295),
         enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
     ) STRICT;
-    CREATE TABLE restore_passkey_challenges (
+    CREATE TABLE main.restore_passkey_challenges (
         id TEXT PRIMARY KEY CHECK(length(id)=71),
         request TEXT NOT NULL CHECK(length(request)=71),
         binding TEXT NOT NULL CHECK(length(binding)=71),
@@ -38,15 +38,21 @@ fn current(tx: &Transaction<'_>, key: &TrustedKey) -> Result<(i64, u32)> {
     key.validate()?;
     // PRAGMAs refuse non-durable storage; they do not attest its actual FD,
     // filesystem/profile or outside-restore placement. The native owner must.
-    let mode: String = tx.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-    let synchronous: i64 = tx.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+    let mode: String =
+        tx.pragma_query_value(Some(rusqlite::DatabaseName::Main), "journal_mode", |row| {
+            row.get(0)
+        })?;
+    let synchronous: i64 =
+        tx.pragma_query_value(Some(rusqlite::DatabaseName::Main), "synchronous", |row| {
+            row.get(0)
+        })?;
     ensure!(
         matches!(mode.as_str(), "delete" | "truncate" | "persist" | "wal")
             && matches!(synchronous, 2 | 3),
         "restore_passkey_store_not_durable"
     );
     let (binding, version, counter, enabled): (String, i64, u32, i64) = tx.query_row(
-        "SELECT binding,version,counter,enabled FROM restore_passkey_keys
+        "SELECT binding,version,counter,enabled FROM main.restore_passkey_keys
          WHERE credential=?1 AND length(binding)=71",
         [&key.record.credential_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -84,7 +90,7 @@ pub(super) fn issue(
         let id = challenge_id(challenge)?;
         ensure!(
             tx.execute(
-                "INSERT INTO restore_passkey_challenges
+                "INSERT INTO main.restore_passkey_challenges
              (id,request,binding,nonce,key_version,counter,created_at,expires_at,state)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'pending')",
                 params![
@@ -129,7 +135,7 @@ fn claim(db: &mut Connection, key: &TrustedKey, id: &Digest, expected: &Digest) 
         i64,
     ) = tx.query_row(
         "SELECT request,binding,nonce,key_version,counter,created_at,expires_at
-         FROM restore_passkey_challenges WHERE id=?1 AND state='pending'
+         FROM main.restore_passkey_challenges WHERE id=?1 AND state='pending'
          AND length(request)=71 AND length(binding)=71 AND length(nonce)=32",
         [id.as_str()],
         |row| {
@@ -161,7 +167,7 @@ fn claim(db: &mut Connection, key: &TrustedKey, id: &Digest, expected: &Digest) 
     );
     ensure!(
         tx.execute(
-            "UPDATE restore_passkey_challenges SET state='claimed' WHERE id=?1 AND state='pending'",
+            "UPDATE main.restore_passkey_challenges SET state='claimed' WHERE id=?1 AND state='pending'",
             [id.as_str()]
         )? == 1,
         "restore_passkey_challenge_already_used"
@@ -220,7 +226,7 @@ pub(super) fn complete(
             .context("restore_passkey_version_exhausted")?;
         ensure!(
             tx.execute(
-                "UPDATE restore_passkey_keys SET version=?1,counter=?2
+                "UPDATE main.restore_passkey_keys SET version=?1,counter=?2
              WHERE credential=?3 AND binding=?4 AND enabled=1 AND version=?5 AND counter=?6",
                 params![
                     next,
@@ -235,7 +241,7 @@ pub(super) fn complete(
         );
         checkpoint(Cut::AfterCounter)?;
         ensure!(tx.execute(
-            "UPDATE restore_passkey_challenges SET state='verified'
+            "UPDATE main.restore_passkey_challenges SET state='verified'
              WHERE id=?1 AND state='claimed' AND key_version=?2 AND counter=?3 AND binding=?4 AND request=?5
              AND nonce=?6 AND created_at=?7 AND expires_at=?8",
             params![id.as_str(),version,counter,claimed.challenge.enrollment.as_str(),expected_request.as_str(),claimed.challenge.nonce.as_slice(),claimed.created_at,claimed.expires_at],
