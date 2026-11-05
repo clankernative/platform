@@ -20,6 +20,9 @@ use std::{
 
 const DATABASE: &str = "/state/day2-native/day2-initial.sqlite";
 
+#[cfg(test)]
+mod opened_files;
+
 impl Runtime {
     /// The sealed native scope is retained before SQLite open/recovery and
     /// through the actual result and physical/provider postchecks. No pathname

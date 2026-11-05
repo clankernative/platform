@@ -82,6 +82,15 @@ crate.annotation(
     patches = ["//build/bazel:patches/libc-0.2.189-cargo-context.patch"],
     patch_args = ["-p1"],
 )
+# Actual opened-file observations for the closed native SQLite adapter. The
+# pinned upstream implementation reports Unix VFS descriptors; this does not
+# make the observation DATA into native ownership or permission.
+crate.annotation(
+    crate = "libsqlite3-sys",
+    version = "0.38.2",
+    build_script_env = {"LIBSQLITE3_FLAGS": "-DSQLITE_ENABLE_FILESTAT"},
+)
+
 crate.annotation(
     crate = "linux-raw-sys",
     version = "0.12.1",
