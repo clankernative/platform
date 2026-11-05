@@ -1066,13 +1066,14 @@ mod tests {
                 account_policy: AccountBindingPolicy::MappedHuman,
                 usage: "Read work events.".into(),
             };
-            let contract = serde_json::from_value(json!({
+            let mut contract: crate::artifact::Artifact = serde_json::from_value(json!({
                 "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test","schema_digest":"host-test",
                 "schema":{"models":{"entries":{"fields":{"note":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
                 "operations":[{"name":"read","kind":"query","input_type":"input","output_type":""}],
                 "connection_declarations":[ConnectionDeclaration { registration: Name::try_from("calendar".to_owned())?, requirement: requirement.clone() }],
                 "sources":{},"admission":"local-spike-only"
             }))?;
+            contract.schema_digest = crate::digest(&serde_json::to_vec(&contract.schema)?);
             fs::write(
                 &instance_path,
                 serde_json::to_vec(&json!({
@@ -1178,8 +1179,10 @@ mod tests {
             let fixture = Fixture::new()?;
             let path = fixture.runtime.db().to_path_buf();
             let mut db = store::open(&path)?;
+            {
+            let tx=db.transaction()?;
             load(
-                &db,
+                &tx,
                 &fixture.runtime,
                 &fixture.request,
                 "calendar",
@@ -1188,11 +1191,13 @@ mod tests {
             )?;
             for read in [false, true] {
                 validate_cached(
-                    &db,
+                    &tx,
                     &fixture.runtime,
                     &fixture.request,
                     &fixture.observation(read),
                 )?;
+            }
+            tx.commit()?;
             }
             let old: String = db.query_row(
                 "SELECT claims FROM oauth_use_handles WHERE reference=?1",
@@ -1228,9 +1233,10 @@ mod tests {
             for _ in 0..2 {
                 drop(db);
                 db = store::open(&path)?;
+                let tx=db.transaction()?;
                 assert!(
                     load(
-                        &db,
+                        &tx,
                         &fixture.runtime,
                         &fixture.request,
                         "calendar",
@@ -1241,7 +1247,7 @@ mod tests {
                 );
                 assert!(
                     load(
-                        &db,
+                        &tx,
                         &fixture.runtime,
                         &fixture.request,
                         "calendar",
@@ -1253,7 +1259,7 @@ mod tests {
                 for read in [false, true] {
                     assert!(
                         validate_cached(
-                            &db,
+                            &tx,
                             &fixture.runtime,
                             &fixture.request,
                             &fixture.observation(read)
@@ -1263,7 +1269,7 @@ mod tests {
                     for reference in &aliases {
                         assert!(
                             load(
-                                &db,
+                                &tx,
                                 &fixture.runtime,
                                 &fixture.request,
                                 "calendar",
@@ -1282,19 +1288,20 @@ mod tests {
                             observation.result = json!({"Available":reference}).to_string();
                         }
                         assert!(
-                            validate_cached(&db, &fixture.runtime, &fixture.request, &observation)
+                            validate_cached(&tx, &fixture.runtime, &fixture.request, &observation)
                                 .is_err()
                         );
                     }
                 }
                 assert_eq!(
-                    db.query_row(
+                    tx.query_row(
                         "SELECT claims FROM oauth_use_handles WHERE reference=?1",
                         [&fixture.reference],
                         |r| r.get::<_, String>(0)
                     )?,
                     old
                 );
+                tx.commit()?;
             }
             // A distinct authenticated invocation and freshly established
             // generation are not the old receipt/handle under another name.
@@ -1334,11 +1341,10 @@ mod tests {
                 "INSERT INTO oauth_use_handles VALUES(?1,'new_authenticated_invocation',?2)",
                 params![reference, serde_json::to_string(&current)?],
             )?;
-            tx.commit()?;
-            load(&db, &fixture.runtime, &request, "calendar", &reference, 100)?;
+            load(&tx, &fixture.runtime, &request, "calendar", &reference, 100)?;
             assert!(
                 load(
-                    &db,
+                    &tx,
                     &fixture.runtime,
                     &fixture.request,
                     "calendar",
@@ -1347,6 +1353,7 @@ mod tests {
                 )
                 .is_err()
             );
+            tx.commit()?;
             Ok(())
         })
     }
