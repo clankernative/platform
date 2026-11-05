@@ -27,10 +27,18 @@ jobs:
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
       - name: Install the pinned Linux Bazel executable
         run: sudo install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3
         with:
           bazelisk-cache: false
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: true
       - name: Restore compiled image qualification tools
