@@ -3,11 +3,11 @@ use crate::{
     authority_state, budget,
     managed_credentials::{effects, simulation, store as credentials},
 };
+use anyhow::Context as _;
 use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
 use rusqlite::types::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use anyhow::Context as _;
 
 struct Fixture {
     db: Connection,
@@ -71,10 +71,12 @@ impl Fixture {
         // private OAuth tables exist. The host's business-row upgrade must not
         // add model columns to an already installed private identity unit.
         credentials::install_schema(&db).context("fixture_credential_schema")?;
-        crate::managed_credentials::issuance::install(&db).context("fixture_confirmation_schema")?;
+        crate::managed_credentials::issuance::install(&db)
+            .context("fixture_confirmation_schema")?;
         crate::oauth::usage::install(&db).context("fixture_oauth_schema")?;
         crate::oauth::inbound::install_schema(&db).context("fixture_inbound_schema")?;
-        let (_, token) = credentials::restore::seed_first_epoch_for_tests(&mut db).context("fixture_epoch_one_issue")?;
+        let (_, token) = credentials::restore::seed_first_epoch_for_tests(&mut db)
+            .context("fixture_epoch_one_issue")?;
         let peers = credentials::restore::seed_historical_peers_for_tests(
             &db,
             &scope,
@@ -141,11 +143,14 @@ impl Fixture {
             budget::settle_in(&tx, &unknown, &budget::Settlement::Unknown)?;
             tx.commit()?;
         }
-        let authority_schema = restore_authority::RestoreFenceSchema::prepare().context("fixture_authority_reference")?;
-        let oauth_schema = crate::oauth::restore::Profile::prepare().context("fixture_oauth_reference")?;
+        let authority_schema = restore_authority::RestoreFenceSchema::prepare()
+            .context("fixture_authority_reference")?;
+        let oauth_schema =
+            crate::oauth::restore::Profile::prepare().context("fixture_oauth_reference")?;
         let cut = {
             let tx = db.transaction()?;
-            let snapshot = crate::oauth::restore::Snapshot::capture(&tx, &oauth_schema).context("fixture_source_snapshot")?;
+            let snapshot = crate::oauth::restore::Snapshot::capture(&tx, &oauth_schema)
+                .context("fixture_source_snapshot")?;
             let cut = restore_cut::fixture_for_storage_epoch(
                 snapshot.digest().clone(),
                 909,
@@ -227,11 +232,10 @@ fn ledger(db: &Connection) -> Result<budget::LedgerStatus> {
 fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() -> Result<()> {
     effects::scope(simulation::World::new(98311), || {
         let fixture = Fixture::new()?;
-        assert!(credentials::restore::first_epoch_ingress_for_tests(
-            &fixture.db,
-            &fixture.token,
-            1
-        ).context("fixture_pre_reset_ingress")?);
+        assert!(
+            credentials::restore::first_epoch_ingress_for_tests(&fixture.db, &fixture.token, 1)
+                .context("fixture_pre_reset_ingress")?
+        );
         let material = rows(&fixture.db, "day2_credential_material")?;
         let receipts = rows(&fixture.db, "day2_credential_receipts")?;
         let outgoing = rows(&fixture.db, "day2_app_outgoing")?;
@@ -946,7 +950,12 @@ fn exact_file_replay_reports_a_real_recorder_cut_without_exporting_control_evide
         replay_history_file(&path)?,
         ReplayDisposition::FailureReproduced
     );
-    assert_eq!(require_requested_replay(&path).expect_err("a reproduced failure cannot pass the campaign").to_string(), "offline_restore_requested_failure_reproduced");
+    assert_eq!(
+        require_requested_replay(&path)
+            .expect_err("a reproduced failure cannot pass the campaign")
+            .to_string(),
+        "offline_restore_requested_failure_reproduced"
+    );
     bundle.second.actual.clear();
     let altered = directory.path().join("changed-prefix.json");
     write_history_file(&altered, &bundle)?;
