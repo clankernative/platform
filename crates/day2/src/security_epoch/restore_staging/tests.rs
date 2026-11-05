@@ -78,12 +78,13 @@ use rusqlite::OpenFlags;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use syn::visit::{self, Visit};
 
-struct Fixture {
+pub(super) struct Fixture {
     state: State,
     refused: bool,
     calls: usize,
     fail_after_directory: bool,
     reject_application: bool,
+    pub(super) expire_current: Option<Rc<Cell<(u64, u64)>>>,
 }
 impl sealed::Sealed for Fixture {}
 impl Checks for Fixture {
@@ -92,6 +93,9 @@ impl Checks for Fixture {
     }
     fn current(&mut self) -> Result<()> {
         self.calls += 1;
+        if let Some(clock) = self.expire_current.take() {
+            clock.set((99, 100));
+        }
         ensure!(!self.refused, "fixture_refused");
         ensure!(
             !(self.fail_after_directory && self.state.directory_may_exist),
@@ -113,13 +117,13 @@ impl Checks for Fixture {
     }
 }
 
-struct World {
+pub(super) struct World {
     source: tempfile::TempDir,
     target: tempfile::TempDir,
-    owner: Fixture,
+    pub(super) owner: Fixture,
     source_digest: Digest,
 }
-fn world() -> Result<World> {
+pub(super) fn world() -> Result<World> {
     let (source, mut db) = fixture::database()?;
     fixture::committed_issue(&mut db)?;
     db.execute_batch("CREATE TABLE fixture_business(value TEXT) STRICT; INSERT INTO fixture_business VALUES('keep-data'); CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
@@ -137,7 +141,11 @@ fn world() -> Result<World> {
         source_digest,
     })
 }
-fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Result<Fixture> {
+pub(super) fn fixture_owner(
+    source: PathBuf,
+    root_path: PathBuf,
+    database: Digest,
+) -> Result<Fixture> {
     // The fixture supplies the private-root precondition explicitly, independent
     // of the process umask. Production admission must still refuse public roots.
     std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700))?;
@@ -161,11 +169,15 @@ fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Resul
         directory_may_exist: false,
         directory: None,
         creator: None,
+        creator_identity: None,
+        frozen_image: None,
+        birth_original: None,
         source: None,
         sql: None,
         consumed: 0,
         written: 0,
         complete: false,
+        writer_attempted: false,
     };
     Ok(Fixture {
         state,
@@ -173,6 +185,7 @@ fn fixture_owner(source: PathBuf, root_path: PathBuf, database: Digest) -> Resul
         calls: 0,
         fail_after_directory: false,
         reject_application: false,
+        expire_current: None,
     })
 }
 
