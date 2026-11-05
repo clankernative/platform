@@ -51,3 +51,23 @@ Only a known atomic commit plus actual postchecks may create a consumed grant.
 Consumption must be keyed by the grant identifier outside the restored app's
 rollback domain, joined to the restore reservation/epoch transition. An uncertain
 send or historical receipt cannot reconstruct permission or justify a retry.
+
+## Closed native consumer input
+
+`restore_approval::native` now declares the lifetime-bound consumer input. Its
+origin is empty in production and tests: no wire record, fixture, decoded request,
+receipt, boolean or local clock can construct it. This deliberately enables no
+native approval or secure-restore execution.
+
+The input is moved into its single `consume(expected, operation)` entry. A future
+genuine producer must compare the complete request and operation, arm its actual
+owner before the existing durable single-use CAS, and return the owned consumed
+input only after known commitment and same-original postchecks. The existing
+atomic-use codec is to be called once inside that entry; a loaded receipt cannot
+be converted into permission afterwards. Unknown completion permanently refuses.
+
+The consumed owner retains the source lifetime and supplies mutable checks.
+Observation bounds are DATA in the qualified restore original's fixed clock
+domain, in nanoseconds. The producer must separately enforce the signed grant's
+unchanged one-hour absolute expiry with its genuine qualified clock and floor.
+There is no caller-supplied sample, renewed original or public constructor.

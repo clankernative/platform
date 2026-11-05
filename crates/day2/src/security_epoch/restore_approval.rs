@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) const RESTORE_APPROVAL_LIFETIME_SECONDS: u64 = 3600;
 const MAX_REQUEST_BYTES: usize = 16_384;
 
+pub(crate) mod native;
+
 /// Exact selected target DATA. The consumer must compare every field with its
 /// actual current selection, fenced epoch and held target, not just a digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
