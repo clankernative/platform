@@ -65,6 +65,7 @@ pub mod operation_catalog;
 pub mod operation_contract;
 pub mod operation_metadata;
 pub mod output_schema;
+pub mod owners;
 pub mod packaging;
 pub mod people_providers;
 mod preparation;

@@ -1198,13 +1198,7 @@ impl Runtime {
         self.sql_read(|tx| self.authorize_audit_in(tx, actor))
     }
     fn authorize_audit_in(&self, db: &Connection, actor: &str) -> Result<()> {
-        self.check_binding(db)?;
-        let active = crate::authority_state::current(db)?;
-        active.document.validate(self.artifact())?;
-        if let Some(requirements) = &active.document.security {
-            requirements.require_runtime()?;
-        }
-        active.document.authorize_audit(actor)?;
+        crate::owners::authorize_in(db, self, actor, crate::owners::Permission::AuditRead)?;
         require_current_schema(db)
     }
     pub fn audit_entries(&self, actor: &str, filter: &Filter) -> Result<Vec<Entry>> {
