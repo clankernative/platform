@@ -613,9 +613,9 @@ fn fresh_authority_exact_keys_fence_and_clock_are_required_without_renewing_the_
             7 => at = 999,
             8 => at = 1005,
             9 => {
-                changed.observed_at = 1099;
-                changed.ready_until = 1101;
-                at = 1099;
+                changed.observed_at = 4599;
+                changed.ready_until = 4601;
+                at = 4599;
             }
             10 => changed.grant.approval.expires_at = 1200,
             11 => changed.grant.issuer = Digest::new(b"foreign-maintenance-issuer"),
@@ -632,11 +632,11 @@ fn fresh_authority_exact_keys_fence_and_clock_are_required_without_renewing_the_
         );
     }
     let mut fresh = current.clone();
-    fresh.observed_at = 1099;
-    fresh.ready_until = 1100;
-    plan.revalidate(&selected, &fresh, 1099, &before, None)?;
+    fresh.observed_at = 4599;
+    fresh.ready_until = 4600;
+    plan.revalidate(&selected, &fresh, 4599, &before, None)?;
     assert!(
-        plan.revalidate(&selected, &fresh, 1100, &before, None)
+        plan.revalidate(&selected, &fresh, 4600, &before, None)
             .is_err()
     );
     let mut original = current.clone();
