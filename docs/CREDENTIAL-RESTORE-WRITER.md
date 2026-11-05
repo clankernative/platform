@@ -4,7 +4,10 @@ This borrows the actual closed incumbent-drain session and restore-staging owner
 it does not construct a production writer. There is no production approval,
 complete renewal-stop, current settled-root or P3/writer/peer supplier. The source
 is sealed, has no production/default implementation, and its admission origin
-has no production variants. Approval policy remains a separate user decision.
+has no production variants. The approved policy requires a current instance admin,
+a reviewed-registry passkey, a signed archive/target/epoch/executor-bound approval
+and a single-use, non-renewable one-hour grant. Its genuine producer and
+consuming native owner remain separate implementations.
 
 The staged owner freezes the reset image commitment before any target creation,
 and records the identity from its first actual creator file before postchecks.
