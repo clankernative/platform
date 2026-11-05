@@ -9,9 +9,9 @@ fn request() -> Result<ApprovalRequest> {
         full_archive_digest: digest("complete-captured-archive-bytes-and-inventory"),
         target: TargetBinding {
             scope: AuthorityScope {
-                installation: Name::new("one-instance")?,
-                environment: Name::new("test")?,
-                app: Name::new("one-app")?,
+                installation: Name::try_from("one-instance".to_owned())?,
+                environment: Name::try_from("test".to_owned())?,
+                app: Name::try_from("one-app".to_owned())?,
             },
             binding_generation: 3,
             authority: digest("selected-external-authority"),
@@ -26,7 +26,7 @@ fn request() -> Result<ApprovalRequest> {
             subject: "one-stable-subject".into(),
         },
         custody: BindingRef {
-            id: Name::new("existing-vault")?,
+            id: Name::try_from("existing-vault".to_owned())?,
             revision: digest("existing-vault-revision"),
         },
         approved_at: 100,
