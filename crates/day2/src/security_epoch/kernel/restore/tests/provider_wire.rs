@@ -181,7 +181,7 @@ fn semantic_rejection_keeps_the_canonical_transaction_available_only_for_cleanup
             9 => reply[1]["found"]["fields"]["phase"]["mapValue"] = json!([]),
             10 => reply[0]["readTime"] = json!(READ),
             11 => reply[2]["unexpected"] = json!(true),
-            _ => reply[2] = json!([null,null,null,null]),
+            _ => reply[2] = json!([null, null, null, null]),
         }
         // A ninth entry is rejected before any header can be trusted.
         if reply.len() > 8 {
@@ -501,9 +501,17 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
         json!({"writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)});
     let record = wire::commit_reply(&serde_json::to_vec(&reply)?)?;
     observed.after_commit(&record)?;
-    assert!(matches!(model::reconcile(&selection, &plan, &observed.snapshot,
-        observed.advance.as_ref(), observed.reservation.as_ref(), observed.grant.as_ref())?,
-        Outcome::NotApplied));
+    assert!(matches!(
+        model::reconcile(
+            &selection,
+            &plan,
+            &observed.snapshot,
+            observed.advance.as_ref(),
+            observed.reservation.as_ref(),
+            observed.grant.as_ref()
+        )?,
+        Outcome::NotApplied
+    ));
     for cut in 0..7 {
         let mut changed = reply.clone();
         match cut {

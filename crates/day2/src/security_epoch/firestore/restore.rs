@@ -101,9 +101,14 @@ impl Names {
     /// decoding so a rejected document can still be rolled back by its sender.
     pub(in crate::security_epoch) fn transaction(self, bytes: &[u8]) -> Result<Transaction> {
         let mut entries = entries(bytes)?;
-        let first = entries.first_mut().context("restore_provider_stream_empty")?
-            .as_object_mut().context("restore_provider_entry_object")?;
-        let token = first.remove("transaction").and_then(|value| value.as_str().map(str::to_owned))
+        let first = entries
+            .first_mut()
+            .context("restore_provider_stream_empty")?
+            .as_object_mut()
+            .context("restore_provider_entry_object")?;
+        let token = first
+            .remove("transaction")
+            .and_then(|value| value.as_str().map(str::to_owned))
             .context("restore_provider_transaction_missing")?;
         let decoded = STANDARD
             .decode(&token)
