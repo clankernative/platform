@@ -49,6 +49,9 @@ creator file. Existing pre-fence issuance owners and their HTTP clocks cannot
 be retagged as post-fence storage authority. Counts or local commit cannot
 create current-root, first-holder, P3, writer or serving permission.
 
-This draft has not been compiled or qualified. Real SQLite/model, late-fault,
-crash/reopen and stale-consumer controls, complete facts, native formatting,
-normal verification and final reviews remain required before publication.
+The earlier complete-reset composition passed its real SQLite/model and
+late-fault controls, complete inventories, formatting, architecture enforcement
+and normal local verification. The public draft includes newer foundation and
+main changes, so those results do not qualify this composed head. Its current
+local and hosted checks, exact-head reviews, native accepting owner and physical
+writer qualification remain separate requirements.
