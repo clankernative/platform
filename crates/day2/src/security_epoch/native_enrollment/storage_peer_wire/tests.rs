@@ -3578,11 +3578,14 @@ fn admin_read_is_signed_distinct_and_exact_with_a_mandatory_cohort() {
     ordinary_with_cohort["body"]["request"]["purpose"] = serde_json::json!("current_serving");
     assert!(decode(&serde_json::to_vec(&ordinary_with_cohort).unwrap()).is_err());
     for field in ["purpose", "binding", "cohort"] {
-        let raw = String::from_utf8(serde_json::to_vec(&hello).unwrap()).unwrap();
+        let raw = serde_json::to_string(&original).unwrap();
         let value = serde_json::to_string(&original["body"]["request"][field]).unwrap();
         let fragment = format!("\"{field}\":{value}");
         let duplicate = raw.replacen(&fragment, &format!("{fragment},{fragment}"), 1);
-        assert_ne!(raw, duplicate);
+        assert!(
+            raw != duplicate,
+            "duplicate-field mutation must change the exact wire bytes"
+        );
         assert!(decode(duplicate.as_bytes()).is_err());
     }
 }
