@@ -320,6 +320,7 @@ impl Operations {
                     &operator,
                     &expected,
                     &parameters.request_id,
+                    &parameters.instance,
                 )?;
                 Ok(json!({"artifact":target.id(),"receipt":receipt,"mode":"local-operator-only"}))
             }
@@ -579,6 +580,17 @@ impl Operations {
                 self.maintenance()?.migration(&step)
             }
             "maintenance-admission" => self.maintenance()?.admission(),
+            "maintenance-store-admission" => self.maintenance()?.store_admission(),
+            "maintenance-rollout-resume" => self.maintenance()?.rollout_resume(),
+            "maintenance-rollout" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    step: String,
+                }
+                let step = input::<Input>(&request)?.step;
+                self.maintenance()?.rollout(&step)
+            }
             "maintenance-confirm" => self.maintenance()?.confirm(),
             "maintenance-fence" => self.maintenance()?.fence(),
             "maintenance-mark-activated" => self.maintenance()?.mark_activated(),

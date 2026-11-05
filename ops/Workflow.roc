@@ -52,6 +52,7 @@ Workflow :: [].{
 		["maintain", "backup", request_file] => Ok(Maintain("backup", request_file))
 		["maintain", "authority-apply", request_file] => Ok(Maintain("authority-apply", request_file))
 		["maintain", "activate", request_file] => Ok(Maintain("activate", request_file))
+		["maintain", "rollout", request_file] => Ok(Maintain("rollout", request_file))
 		["maintain", "mark-activated", request_file] => Ok(Maintain("mark-activated", request_file))
 		["backup", instance, app_name, output] => Ok(Backup(instance, app_name, output))
 		["restore", backup, output] => Ok(Restore(backup, output))

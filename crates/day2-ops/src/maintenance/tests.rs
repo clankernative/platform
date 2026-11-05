@@ -127,9 +127,12 @@ impl Prompt for FakePrompt {
 struct FakeCluster {
     calls: Rc<RefCell<Vec<Vec<String>>>>,
     pod_root: PathBuf,
+    release: Rc<RefCell<Value>>,
     running_image: String,
     instance: String,
     other_sessions: String,
+    rollout_claim: String,
+    helper_service: bool,
     fail_on: Option<String>,
     drop_on_copy_out: Option<String>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
@@ -249,12 +252,12 @@ impl Cluster for FakeCluster {
         }
         let args: Vec<&str> = args[2..].iter().map(String::as_str).collect();
         Ok(match args.as_slice() {
-            ["get", "statefulset", STATEFULSET, "-o", "json"] => json!({
-                "metadata": {"annotations": *self.annotations.borrow()},
-                "spec": {"replicas": self.replicas, "template": {"spec": {"containers": [{"image": self.running_image}]}}}
+            ["get", "statefulset" | "deployment", STATEFULSET, "-o", "json"] => json!({
+                "metadata": {"uid":"controller-uid","resourceVersion":"1","annotations": *self.annotations.borrow()},
+                "spec": {"replicas": self.replicas,"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}}, "template": {"spec": {"containers": [{"name":"day2","image": self.running_image}],"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"data"}}]}}}
             })
             .to_string(),
-            ["annotate", "--overwrite", "statefulset", STATEFULSET, annotation] => {
+            ["annotate", "--overwrite", "statefulset" | "deployment", STATEFULSET, annotation] => {
                 let (key, value) = annotation.split_once('=').unwrap();
                 self.annotations
                     .borrow_mut()
@@ -262,7 +265,12 @@ impl Cluster for FakeCluster {
                 String::new()
             }
             ["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"] => self.other_sessions.clone(),
-            ["scale", "statefulset", STATEFULSET, replicas] => {
+            ["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "json"] => json!({"items":[]}).to_string(),
+            ["get", "services", "-o", "json"] => json!({"items":[{"spec":{"selector":{"app.kubernetes.io/name":if self.helper_service {"day2-maintenance"} else {STATEFULSET}}}}]}).to_string(),
+            ["get", "replicasets", "-o", "json"] => json!({"items":[{"metadata":{"uid":"replicaset-uid","ownerReferences":[{"uid":"controller-uid","controller":true}]}}]}).to_string(),
+            ["get", "pvc", "data", "-o", "json"] => json!({"metadata":{"uid":"pvc-uid"},"spec":{"accessModes":["ReadWriteOnce"]},"status":{"phase":"Bound"}}).to_string(),
+            ["get", "pods", "-l", _, "-o", "json"] => json!({"items":[{"metadata":{"name":"incumbent","ownerReferences":[{"uid":"replicaset-uid","controller":true}]},"spec":{"nodeName":"node-a","containers":[{"name":"day2","image":self.running_image}],"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":self.rollout_claim}}]}}]}).to_string(),
+            ["scale", "statefulset" | "deployment", STATEFULSET, replicas] => {
                 self.replicas = replicas.trim_start_matches("--replicas=").parse()?;
                 String::new()
             }
@@ -308,6 +316,11 @@ impl Cluster for FakeCluster {
                 fs::rename(self.pod_path(from), self.pod_path(to))?;
                 String::new()
             }
+            ["exec", _, "--", DAY2, "rollout-inspect", CURRENT, _] => self.release.borrow().to_string(),
+            ["exec", _, "--", DAY2, "rollout-probe", CURRENT, _, _, _, _] => {
+                self.release.borrow_mut()["probe"] = json!({"status":"verified"});
+                json!({"requested":true}).to_string()
+            }
             ["exec", _, "--", DAY2, "admit", instance, app] => self.admit(instance, app)?,
             ["exec", pod, "--", "find", STATE, "-maxdepth", "1", "-type", "f", "-exec", "stat", "-c", "%s %n", "{}", "+"] => {
                 assert!(pod.ends_with("-measure"), "measured from the probe");
@@ -338,6 +351,7 @@ struct Harness {
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
     asked: Rc<RefCell<usize>>,
     applied: Rc<RefCell<Vec<String>>>,
+    release: Rc<RefCell<Value>>,
     running: Image,
     target: Image,
 }
@@ -350,6 +364,7 @@ impl Harness {
             annotations: Rc::default(),
             asked: Rc::default(),
             applied: Rc::default(),
+            release: Rc::default(),
             running: image(b"old worker", None),
             target: image(b"new worker", None),
         }
@@ -377,6 +392,9 @@ impl Harness {
         if operation.targeted() {
             request["target"] = json!({"instance": target_file, "app_image": self.target.reference,
                 "artifact_id": self.target.artifact_id});
+            if operation == Operation::Rollout {
+                request["target"]["probe"] = json!({"actor":"alice","command":"create","input":{},"query":"read","query_input":{},"expected":{}});
+            }
         }
         let path = self.directory.path().join("request.json");
         fs::write(&path, request.to_string()).unwrap();
@@ -389,9 +407,12 @@ impl Harness {
         let mut cluster = FakeCluster {
             calls: self.calls.clone(),
             pod_root: self.directory.path().join("pod"),
+            release: self.release.clone(),
             running_image: self.running.reference.clone(),
             instance: Self::instance(&self.running.artifact_id),
             other_sessions: String::new(),
+            rollout_claim: "data".into(),
+            helper_service: false,
             fail_on: None,
             drop_on_copy_out: None,
             annotations: self.annotations.clone(),
@@ -1436,5 +1457,161 @@ fn the_reviewed_pod_template_renders_completely() -> Result<()> {
     let mut hostile = values;
     hostile[1].1 = "x\n  hostNetwork: true";
     assert!(render_template(POD_TEMPLATE, &hostile).is_err());
+    Ok(())
+}
+
+#[test]
+fn rollout_helpers_stay_on_incumbent_node_and_failure_never_scales_it() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
+    session.artifacts()?;
+    session.stop()?;
+    session.measure()?;
+    session.start_pod()?;
+    assert!(session.rollout("promote").is_err());
+    session.close()?;
+    let calls = harness.calls.borrow();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "scale"))
+    );
+    for rendered in harness.applied.borrow().iter() {
+        assert!(rendered.contains("nodeName: node-a"));
+        assert!(rendered.contains("day2.dev/rollout-request: sha256:"));
+        assert!(rendered.contains("app.kubernetes.io/name: day2-maintenance"));
+    }
+    Ok(())
+}
+
+#[test]
+fn offline_deployment_maintenance_stops_and_restores_the_selected_controller() -> Result<()> {
+    let harness = Harness::new();
+    let path = harness.request(Operation::Inspect);
+    let mut request: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    request["workload_kind"] = json!("deployment");
+    fs::write(&path, serde_json::to_vec(&request)?)?;
+    let mut session = Session::open("inspect", &path, harness.tools(|_| {}, true))?;
+    session.artifacts()?;
+    session.stop()?;
+    session.close()?;
+    let calls = harness.calls.borrow();
+    assert!(calls.iter().any(|call| {
+        call.windows(3)
+            .any(|args| args == ["scale", "deployment", STATEFULSET])
+    }));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "statefulset"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "--replicas=0"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "--replicas=1"))
+    );
+    Ok(())
+}
+
+#[test]
+fn rolling_preflight_refuses_another_claim_and_a_serving_helper() -> Result<()> {
+    for helper_service in [false, true] {
+        let harness = Harness::new();
+        let error = match harness.open(
+            Operation::Rollout,
+            |cluster| {
+                cluster.helper_service = helper_service;
+                if !helper_service {
+                    cluster.rollout_claim = "another-claim".into();
+                }
+            },
+            true,
+        ) {
+            Ok(_) => bail!("unsafe topology admitted"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains(if helper_service {
+                "maintenance_pod_must_not_match_a_service"
+            } else {
+                "rollout_pod_owner_or_claim_changed"
+            }),
+            "{error}"
+        );
+        assert!(!harness.calls.borrow().iter().any(|call| {
+            call.iter()
+                .any(|arg| matches!(arg.as_str(), "scale" | "patch" | "apply"))
+        }));
+    }
+    Ok(())
+}
+
+#[test]
+fn resumed_release_requires_exact_target_instance_bytes_before_any_step() -> Result<()> {
+    let harness = Harness::new();
+    let request = harness.request(Operation::Rollout);
+    let request_bytes = fs::read(&request)?;
+    let target = harness.directory.path().join("target-instance.json");
+    let original = fs::read(&target)?;
+    let release = json!({"id":"release-1", "source_image":harness.running.reference,
+        "target_image":harness.target.reference,"target":format!("sha256:{}",harness.target.artifact_id),
+        "target_instance_digest":day2::digest(&original),"phase":"prepared",
+        "placement":{"controller_uid":"controller-uid","pvc_uid":"pvc-uid","node":"node-a","request_digest":day2::digest(&request_bytes)}});
+    *harness.release.borrow_mut() = release;
+    // The same request and exact target bytes can resume.
+    let mut session = Session::open("rollout", &request, harness.tools(|_| {}, true))?;
+    session.state.pod = true;
+    assert_eq!(session.rollout_resume()?["resuming"], true);
+    let journal = session.journal.clone();
+    drop(session);
+    fs::remove_file(journal)?;
+    let mut changed: Value = serde_json::from_slice(&original)?;
+    changed["apps"]["example_app"]["readers"] = json!(["unreviewed-reader"]);
+    fs::write(&target, serde_json::to_vec(&changed)?)?;
+    assert_eq!(fs::read(&request)?, request_bytes);
+    let mut session = Session::open("rollout", &request, harness.tools(|_| {}, true))?;
+    session.state.pod = true;
+    assert!(
+        format!("{:#}", session.rollout_resume().unwrap_err())
+            .contains("rollout_target_instance_changed")
+    );
+    // Even a caller that bypasses the recipe's resume step cannot deploy it.
+    session.state.resumed = true;
+    for step in ["prepare", "deploy"] {
+        assert!(
+            format!("{:#}", session.rollout(step).unwrap_err())
+                .contains("rollout_target_instance_changed")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn release_probe_only_publishes_then_observes_the_candidate_result() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
+    session.state.pod = true;
+    session.state.resumed = true;
+    session.state.candidate_observed = true;
+    *harness.release.borrow_mut() = json!({"id":"release-1","phase":"serving",
+        "target":format!("sha256:{}",harness.target.artifact_id),
+        "target_instance_digest":day2::digest(session.target_instance.as_ref().unwrap().as_bytes())});
+    session.rollout("probe")?;
+    assert!(session.state.probe_verified);
+    let calls = harness.calls.borrow();
+    assert!(
+        calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "rollout-probe"))
+    );
+    assert!(!calls.iter().any(|args| {
+        args.iter()
+            .any(|arg| arg == "release-probe" || arg == "invoke")
+    }));
     Ok(())
 }

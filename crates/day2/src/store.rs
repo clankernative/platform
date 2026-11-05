@@ -567,6 +567,7 @@ pub struct Runtime {
     /// The installation's verified edge domain, as declared when this runtime
     /// loaded. Activated `domain:` entries admit only while it still matches.
     hosted_domain: Option<String>,
+    rolling: bool,
     artifact: Arc<LoadedArtifact>,
     host: Arc<dyn crate::host::Host>,
     inputs: crate::host_inputs::Inputs,
@@ -836,6 +837,9 @@ impl SchemaInitialization<'_> {
                 &desired,
             )?;
         }
+        if self.fresh_selection.is_none() {
+            crate::rollout::install(tx)?;
+        }
         crate::audit::upgrade(tx)?;
         crate::delegation::upgrade_origin(tx)?;
         crate::delegation_commands::upgrade(tx)?;
@@ -912,6 +916,10 @@ mod native_storage;
 pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic};
 
 impl Runtime {
+    pub(crate) fn rolling(&self) -> bool {
+        self.rolling
+    }
+
     pub(crate) fn credential_authority(
         &self,
     ) -> Result<&dyn crate::managed_credentials::issuance::Authority> {
@@ -934,6 +942,11 @@ impl Runtime {
             app_calls: None,
             credentials: None,
             connections: None,
+            rolling: instance
+                .apps
+                .get(&app)
+                .and_then(|binding| binding.runtime.as_ref())
+                .is_some_and(|profile| profile.rolling()),
             scope: instance.scope(&app)?,
             hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
             instance_path,
@@ -1106,7 +1119,11 @@ impl Runtime {
             None
         };
         let desired = parent.join(&binding.artifact);
-        let artifact = LoadedArtifact::load(&active.as_ref().map_or_else(
+        let rolling = binding
+            .runtime
+            .as_ref()
+            .is_some_and(|profile| profile.rolling());
+        let artifact = LoadedArtifact::load(&active.as_ref().filter(|_| !rolling).map_or_else(
             || desired.clone(),
             |authority| PathBuf::from(&authority.artifact_path),
         ))
@@ -1116,7 +1133,13 @@ impl Runtime {
         })?;
         if let Some(active) = &active {
             ensure!(
-                active.artifact_id == artifact.id(),
+                active.artifact_id == artifact.id()
+                    || (rolling
+                        && crate::rollout::admitted(
+                            &open(&db)?,
+                            artifact.id(),
+                            &instance.scope(app)?
+                        )?),
                 "active_artifact_digest_mismatch"
             );
         }
@@ -1127,6 +1150,7 @@ impl Runtime {
             app_calls: None,
             credentials: None,
             connections: None,
+            rolling,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,
@@ -1139,6 +1163,21 @@ impl Runtime {
         Ok(runtime)
     }
     pub fn initialize(&self) -> Result<()> {
+        self.initialize_store(None)
+    }
+
+    pub(crate) fn initialize_maintenance(
+        &self,
+        lease: &crate::deployment::StoreMaintenanceLease,
+    ) -> Result<()> {
+        lease.check(self.db())?;
+        self.initialize_store(Some(lease))
+    }
+
+    fn initialize_store(
+        &self,
+        maintenance: Option<&crate::deployment::StoreMaintenanceLease>,
+    ) -> Result<()> {
         ensure!(
             Instance::load(&self.instance_path)?
                 .native_bootstrap_for(&self.app)?
@@ -1146,6 +1185,18 @@ impl Runtime {
             "native_runtime_initializer_forbidden"
         );
         let mut connection = open(&self.db)?;
+        if maintenance.is_none() && self.rolling() && crate::authority_state::exists(&connection)? {
+            // Rolling startup is verification only. Platform/schema upgrades
+            // require the separately fenced maintenance path.
+            let tx = connection.transaction()?;
+            self.check_binding(&tx)?;
+            crate::rollout::authority_for(self, &tx)?
+                .document
+                .validate(self.artifact())?;
+            crate::rollout::verify_storage_shape(self, &tx)?;
+            tx.rollback()?;
+            return Ok(());
+        }
         connection.pragma_update(None, "journal_mode", "WAL")?;
         let tx = crate::write_queue::immediate(&mut connection)?;
         self.initialize_in_transaction(&tx)?;
@@ -1170,6 +1221,22 @@ impl Runtime {
     }
     pub(crate) fn check_binding(&self, connection: &Connection) -> Result<()> {
         check_storage_binding(connection, &self.artifact, &self.scope)
+    }
+
+    pub(crate) fn with_rollout_artifact(&self, id: &str) -> Result<Self> {
+        if id == self.artifact.id() {
+            return Ok(self.clone());
+        }
+        self.sql_read(|db| {
+            ensure!(
+                crate::rollout::admitted(db, id, self.scope())?,
+                crate::error::Failure::ArtifactBindingChanged
+            );
+            Ok(())
+        })?;
+        let mut runtime = self.clone();
+        runtime.artifact = Arc::new(crate::rollout::retained(self, id)?);
+        Ok(runtime)
     }
     pub(crate) fn authority(&self, operation: &str, actor: &str) -> Result<Policy> {
         self.sql_read(|connection| {
@@ -1558,7 +1625,7 @@ impl Runtime {
                     op == operation
                         && user == actor
                         && same_input
-                        && artifact == self.artifact.id()
+                        && (artifact == self.artifact.id() || crate::rollout::compatible_ticket(tx, self, &artifact)?)
                         && same_cause,
                     crate::error::Failure::IdempotencyKeyConflict
                 );
@@ -1690,6 +1757,31 @@ impl Runtime {
         self.execute(id, fault)
     }
     pub fn execute(&self, id: &str, fault: Fault) -> Result<Outcome> {
+        let Some(_owner) = crate::rollout::execution_lock(self, id)? else {
+            return Ok(Outcome {
+                status: "pending".into(),
+                result: json!({"invocation_id":id}),
+                error: String::new(),
+            });
+        };
+        if self.rolling() {
+            let (artifact, pending): (String, bool) = self.sql_read(|db| {
+                Ok(db.query_row(
+                    "SELECT artifact,status='pending' FROM day2_invocations WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })?;
+            if pending && artifact != self.artifact.id() {
+                return self
+                    .with_rollout_artifact(&artifact)?
+                    .execute_owned(id, fault);
+            }
+        }
+        self.execute_owned(id, fault)
+    }
+
+    fn execute_owned(&self, id: &str, fault: Fault) -> Result<Outcome> {
         // Blocking is host-owned execution metadata, not an application failure or
         // permission to rerun already committed work with another identity.
         let blocked = self.sql_read(|connection| {
@@ -1750,7 +1842,45 @@ impl Runtime {
         result
     }
     fn execute_inner(&self, id: &str, fault: Fault) -> Result<Outcome> {
+        // A duplicate can reach either artifact after the first process commits.
+        // Return the authority-checked receipt before entering code preparation;
+        // a completed invocation never needs its retired worker to run again.
         let credential_keys = self.prepare_credential_keys(id)?;
+        if self.rolling()
+            && let Some(outcome) = self.sql_read(|db| {
+                let (artifact, status, completed, operation, actor): (
+                String,
+                String,
+                Option<String>,
+                String,
+                String,
+            ) = db.query_row(
+                "SELECT artifact,status,outcome,operation,actor FROM day2_invocations WHERE id=?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+                if status == "pending" || artifact == self.artifact.id() {
+                    return Ok(None);
+                }
+                ensure!(
+                    artifact == self.artifact.id()
+                        || crate::rollout::compatible_ticket(db, self, &artifact)?,
+                    "pinned_artifact_unavailable"
+                );
+                let active = crate::authority_state::authorize_in(db, self, &operation, &actor)?;
+                completed_outcome(db, id, completed.as_deref(), active.policy()?).map(Some)
+            })?
+        {
+            return Ok(outcome);
+        }
         let continuing = crate::execution::advance(self, id, fault)?;
         let prepared = if continuing {
             Vec::new()
@@ -1771,7 +1901,7 @@ impl Runtime {
             tx.query_row("SELECT operation,actor,input,artifact,status,outcome FROM day2_invocations WHERE id=?1", [id],
                 |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
         ensure!(
-            artifact == self.artifact.id(),
+            artifact == self.artifact.id() || (status != "pending" && crate::rollout::compatible_ticket(tx, self, &artifact)?),
             "pinned_artifact_unavailable"
         );
         let active = crate::authority_state::authorize_in(tx, self, &operation, &actor)?;
@@ -2371,7 +2501,8 @@ fn check_storage_binding(
     if crate::authority_state::exists(connection)? {
         let active = crate::authority_state::current(connection)?;
         ensure!(
-            active.artifact_id == artifact.id(),
+            active.artifact_id == artifact.id()
+                || crate::rollout::admitted(connection, artifact.id(), expected_scope)?,
             crate::error::Failure::ArtifactBindingChanged
         );
     }

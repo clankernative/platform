@@ -81,34 +81,34 @@ run "native_app_preserves_uid_and_uses_unprivileged_same_volume_attachment" {
   command = plan
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].host_pid &&
-      !kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].host_network &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-pool" &&
-      !kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].automount_service_account_token &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["kubernetes.io/hostname"] == "native-node" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["day2.dev.node-restriction.kubernetes.io/enrollment"] == "native-fixture" &&
-      !kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].security_context[0].privileged &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].security_context[0].capabilities[0].drop == tolist(["ALL"]) &&
-      tonumber(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].security_context[0].run_as_user) == 10001
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].host_pid &&
+      !kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].host_network &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-pool" &&
+      !kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].automount_service_account_token &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].node_selector["kubernetes.io/hostname"] == "native-node" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].node_selector["day2.dev.node-restriction.kubernetes.io/enrollment"] == "native-fixture" &&
+      !kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].security_context[0].privileged &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].security_context[0].capabilities[0].drop == tolist(["ALL"]) &&
+      tonumber(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].security_context[0].run_as_user) == 10001
     )
     error_message = "Only the selected native node/host PID namespace may be added; the App remains unprivileged under its own KSA."
   }
   assert {
     condition = (
       kubernetes_config_map_v1.native_policy[0].immutable &&
-      one([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/etc/day2/native-enrollment.json"]).sub_path == "native-enrollment.json" &&
-      one([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/run/day2-native-enrollment"]).read_only &&
-      one([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/state"]).name == "state" &&
-      length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container) == 0 &&
-      length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].liveness_probe) == 0 &&
+      one([for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/etc/day2/native-enrollment.json"]).sub_path == "native-enrollment.json" &&
+      one([for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/run/day2-native-enrollment"]).read_only &&
+      one([for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/state"]).name == "state" &&
+      length(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container) == 0 &&
+      length(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].liveness_probe) == 0 &&
       kubernetes_cron_job_v1.backup.spec[0].suspend
     )
     error_message = "Native mode must retain the same PVC, a regular immutable policy and read-only socket parent, without mutating original ownership or running unsupported ordinary backup/restart paths."
   }
   assert {
     condition = (
-      one([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if volume.name == "native-subject"]).projected[0].sources[0].service_account_token[0].audience == "day2-native-app-fixture" &&
-      length(one([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if volume.name == "native-api"]).projected[0].sources) == 2
+      one([for volume in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : volume if volume.name == "native-subject"]).projected[0].sources[0].service_account_token[0].audience == "day2-native-app-fixture" &&
+      length(one([for volume in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : volume if volume.name == "native-api"]).projected[0].sources) == 2
     )
     error_message = "Only the exact App subject audience and its own API token/CA are projected."
   }

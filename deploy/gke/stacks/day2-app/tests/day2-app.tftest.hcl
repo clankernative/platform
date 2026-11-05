@@ -25,8 +25,8 @@ run "backup_can_fit_fractional_headroom_without_changing_hard_limits" {
     condition = (
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].resources[0].requests.cpu == "50m" &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].resources[0].limits.cpu == "1" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].resources[0].requests.cpu == "1000m" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].resources[0].limits.cpu == "1000m"
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].resources[0].requests.cpu == "1000m" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].resources[0].limits.cpu == "1000m"
     )
     error_message = "Only the backup scheduling reservation changes; backup and serving CPU limits stay intact."
   }
@@ -55,10 +55,10 @@ run "loopback_services_are_absent_by_default" {
 
   assert {
     condition = (
-      length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container) == 1 &&
+      length(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container) == 1 &&
       length(kubernetes_manifest.loopback_service_secrets) == 0 &&
-      !contains(keys(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations), "day2.dev/loopback-services-sha256") &&
-      !strcontains(jsonencode(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0]), "loopback-service")
+      !contains(keys(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].annotations), "day2.dev/loopback-services-sha256") &&
+      !strcontains(jsonencode(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0]), "loopback-service")
     )
     error_message = "Without loopback_services the workload has no companion container, secret class, or companion mounts."
   }
@@ -84,48 +84,48 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
   }
 
   assert {
-    condition     = length(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/loopback-services-sha256"]) == 64
+    condition     = length(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].annotations["day2.dev/loopback-services-sha256"]) == 64
     error_message = "A companion config or image change triggers a pod rollout."
   }
 
   assert {
     condition = (
-      length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container) == 2 &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].name == "executor" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].image == "registry.example.com/freetool/executor@sha256:1111111111111111111111111111111111111111111111111111111111111111" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].port[0].container_port == 43210
+      length(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container) == 2 &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].name == "executor" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].image == "registry.example.com/freetool/executor@sha256:1111111111111111111111111111111111111111111111111111111111111111" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].port[0].container_port == 43210
     )
     error_message = "The typed companion is a second digest-pinned container with its configured port and service argument."
   }
 
   assert {
-    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[0] == "serve"
+    condition     = kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].args[0] == "serve"
     error_message = "The companion starts the service command."
   }
 
   assert {
-    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[1] == "/run/day2/private-config.json"
+    condition     = kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].args[1] == "/run/day2/private-config.json"
     error_message = "The companion receives the mounted private config file as its argument."
   }
 
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[0] == "/usr/local/bin/freetool-executor" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[1] == "healthcheck" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[2] == "http://127.0.0.1:43210/healthz"
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[0] == "/usr/local/bin/freetool-executor" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[1] == "healthcheck" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[2] == "http://127.0.0.1:43210/healthz"
     )
     error_message = "The liveness probe executes the configured health command against the service's loopback path."
   }
 
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].run_as_user == "10001" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].run_as_non_root &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].read_only_root_filesystem &&
-      !kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].allow_privilege_escalation &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].limits.cpu == "250m" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].limits.memory == "256Mi" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].requests == kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].limits
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].security_context[0].run_as_user == "10001" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].security_context[0].run_as_non_root &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].security_context[0].read_only_root_filesystem &&
+      !kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].security_context[0].allow_privilege_escalation &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].resources[0].limits.cpu == "250m" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].resources[0].limits.memory == "256Mi" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].resources[0].requests == kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].resources[0].limits
     )
     error_message = "The companion shares day2's non-root read-only security posture and has Guaranteed bounded resources."
   }
@@ -139,7 +139,7 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
 
   assert {
     condition = anytrue([
-      for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container :
+      for init in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container :
       init.name == "loopback-service-config-files" && contains(init.command, "10001") && contains(init.command, "0600") && contains(init.command, "/run/day2/loopback-config-sources/executor.json")
     ])
     error_message = "The exact config is staged as a regular file owned by UID 10001 with mode 0600."
@@ -147,7 +147,7 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
 
   assert {
     condition = anytrue([
-      for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].volume_mount :
+      for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].volume_mount :
       mount.name == "loopback-service-configs" && mount.mount_path == "/run/day2/private-config.json" && mount.sub_path == "executor.json" && mount.read_only
     ])
     error_message = "The companion mounts its private config file read-only at the service argument path."
@@ -155,7 +155,7 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
 
   assert {
     condition = anytrue([
-      for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].volume_mount :
+      for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[1].volume_mount :
       mount.name == "state" && mount.sub_path == "companions/executor" && mount.mount_path == "/var/lib/day2/loopback-state"
     ])
     error_message = "The companion mounts its selected PVC state subpath."
@@ -163,7 +163,7 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
 
   assert {
     condition = anytrue([
-      for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container :
+      for init in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container :
       init.name == "loopback-state-executor" && contains(init.command, "10001:10001") && contains(init.command, "/loopback-state")
     ])
     error_message = "The companion PVC subpath is owned by UID 10001."
@@ -203,7 +203,7 @@ run "two_loopback_companions_keep_private_config_isolated" {
 
   assert {
     condition = length([
-      for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount
+      for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : mount
       if mount.name == "loopback-service-configs"
     ]) == 0
     error_message = "The main day2 host must not mount any companion's private configuration."
@@ -213,7 +213,7 @@ run "two_loopback_companions_keep_private_config_isolated" {
     condition = alltrue([
       for companion_name in ["executor", "vault"] :
       length([
-        for container in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container : container
+        for container in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container : container
         if container.name == companion_name && length([
           for mount in container.volume_mount : mount
           if mount.name == "loopback-service-configs" && mount.sub_path == "${companion_name}.json" && mount.read_only
@@ -225,7 +225,7 @@ run "two_loopback_companions_keep_private_config_isolated" {
 
   assert {
     condition = alltrue([
-      for container in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container :
+      for container in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container :
       length(container.volume_mount) == length(distinct([for mount in container.volume_mount : mount.mount_path]))
     ])
     error_message = "Mount paths must be unique within every container."
@@ -339,11 +339,11 @@ run "wires_private_app_calls_into_the_normal_host" {
     }
   }
   assert {
-    condition     = contains(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].args, "--app-calls") && jsondecode(kubernetes_config_map_v1.app_calls[0].data["host.json"]).workload_email == "example-call@example-tools.iam.gserviceaccount.com"
+    condition     = contains(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].args, "--app-calls") && jsondecode(kubernetes_config_map_v1.app_calls[0].data["host.json"]).workload_email == "example-call@example-tools.iam.gserviceaccount.com"
     error_message = "The real day2-serve entrypoint must receive its fixed private host bindings."
   }
   assert {
-    condition     = kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/artifact"] == "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb" && length(kubernetes_manifest.app_call_keys) == 1
+    condition     = kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/artifact"] == "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb" && length(kubernetes_manifest.app_call_keys) == 1
     error_message = "Serving evidence must expose the exact artifact and keys must use the managed CSI mount."
   }
   assert {
@@ -354,7 +354,7 @@ run "wires_private_app_calls_into_the_normal_host" {
     error_message = "App-call projections must use the JSON array admitted by the release verifier."
   }
   assert {
-    condition     = length([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if volume.name == "app-call-selection" && volume.config_map[0].optional]) == 1
+    condition     = length([for volume in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : volume if volume.name == "app-call-selection" && volume.config_map[0].optional]) == 1
     error_message = "The host can become ready before activation publishes the selector; calls still fail closed until it exists."
   }
 }
@@ -408,22 +408,22 @@ run "infrastructure_preserves_software_after_release_handoff" {
     }] }
   }
   assert {
-    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].env[0].value == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    condition     = kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].env[0].value == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     error_message = "An infrastructure plan must keep the released image and artifact guard."
   }
   assert {
-    condition     = kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/activated-image"] == "registry.example.com/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" && !contains(keys(kubernetes_stateful_set_v1.day2.metadata[0].annotations), "unrelated.example.com/note")
+    condition     = kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/activated-image"] == "registry.example.com/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" && !contains(keys(kubernetes_stateful_set_v1.day2[0].metadata[0].annotations), "unrelated.example.com/note")
     error_message = "Infrastructure must keep a maintenance activation stamp until the release consumes it, and only the release-owned annotations."
   }
   # The stamp names another image than the live one: the old image must not
   # restart on the migrated state, and the plan says why it stays stopped.
   assert {
-    condition     = kubernetes_stateful_set_v1.day2.spec[0].replicas == "0"
+    condition     = kubernetes_stateful_set_v1.day2[0].spec[0].replicas == "0"
     error_message = "A pending activation must hold a release-managed workload at its live zero replicas."
   }
   expect_failures = [check.maintenance_activation]
   assert {
-    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two" && kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/release-effect"] == "effect-two" && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/release-id"] == "release-two"
+    condition     = kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two" && kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/release-effect"] == "effect-two" && kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].annotations["day2.dev/release-id"] == "release-two"
     error_message = "Infrastructure must preserve the immutable release instance and reconciliation markers."
   }
   assert {
@@ -452,11 +452,11 @@ run "direct_apply_rolls_exactly_the_activated_build" {
     }] }
   }
   assert {
-    condition     = local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1" && kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == var.image && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/artifact"] == "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+    condition     = local.activation_pending && kubernetes_stateful_set_v1.day2[0].spec[0].replicas == "1" && kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].image == var.image && kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].annotations["day2.dev/artifact"] == "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
     error_message = "Set to the activated build, the apply rolls it and restores the one replica."
   }
   assert {
-    condition     = !contains(keys(kubernetes_stateful_set_v1.day2.metadata[0].annotations), "day2.dev/activated-image")
+    condition     = !contains(keys(kubernetes_stateful_set_v1.day2[0].metadata[0].annotations), "day2.dev/activated-image")
     error_message = "A directly deployed app never declares the stamp, so the rolling apply removes it."
   }
 }
@@ -516,7 +516,7 @@ run "an_activation_stamp_equal_to_the_live_image_is_inert" {
     }] }
   }
   assert {
-    condition     = !local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1"
+    condition     = !local.activation_pending && kubernetes_stateful_set_v1.day2[0].spec[0].replicas == "1"
     error_message = "A stamp the workload already runs authorizes and holds nothing; an apply of the live image needs no activation."
   }
 }
@@ -529,7 +529,7 @@ run "first_install_plans_without_a_workload" {
     values = { objects = [] }
   }
   assert {
-    condition     = local.live == null && !local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1"
+    condition     = local.live == null && !local.activation_pending && kubernetes_stateful_set_v1.day2[0].spec[0].replicas == "1"
     error_message = "The first install reads no StatefulSet and plans the profile's one replica."
   }
 }
@@ -614,21 +614,21 @@ run "infrastructure_preserves_released_credential_registration" {
   }
   assert {
     condition = (
-      one([for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.image if init.name == "credential-registration"]) == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      one([for init in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container : init.image if init.name == "credential-registration"]) == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     )
     error_message = "Registration must keep the released image, which alone contains the released artifact."
   }
   assert {
-    condition     = !local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1"
+    condition     = !local.activation_pending && kubernetes_stateful_set_v1.day2[0].spec[0].replicas == "1"
     error_message = "Without a pending activation a release-managed workload keeps the profile's one replica."
   }
   assert {
     condition = (
-      one([for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.command if init.name == "credential-files"]) == tolist(["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials", "/run/day2/credential-sources/ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a"]) &&
-      one([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume.config_map[0].name if volume.name == "credential-metadata"]) == "day2-release-two-credentials" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/credentials-sha256"] == "released-credentials" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two"
+      one([for init in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container : init.command if init.name == "credential-files"]) == tolist(["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials", "/run/day2/credential-sources/ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a"]) &&
+      one([for volume in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : volume.config_map[0].name if volume.name == "credential-metadata"]) == "day2-release-two-credentials" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].annotations["day2.dev/credentials-sha256"] == "released-credentials" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two"
     )
     error_message = "Infrastructure must preserve the released credential files, metadata ConfigMap and digest."
   }
@@ -884,34 +884,34 @@ run "renders_instance_from_platform_contract" {
 
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.metadata[0].name == "day2-example-app" &&
-      kubernetes_stateful_set_v1.day2.spec[0].replicas == "1" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].service_account_name == "runtime" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["kubernetes.io/arch"] == "amd64" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].labels["platform.example.com/service"] == "app" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].labels["telemetry.example.com/service"] == "example-api"
+      kubernetes_stateful_set_v1.day2[0].metadata[0].name == "day2-example-app" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].replicas == "1" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].service_account_name == "runtime" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].node_selector["kubernetes.io/arch"] == "amd64" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].labels["platform.example.com/service"] == "app" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].labels["telemetry.example.com/service"] == "example-api"
     )
     error_message = "one replica, contract service account and labels, x86_64 nodes"
   }
 
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-serve"]) &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "--edge"]) &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].resources[0].limits["cpu"] == "1000m" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].resources[0].limits["memory"] == "512Mi" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].resources[0].requests["memory"] == "512Mi"
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-serve"]) &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "--edge"]) &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].resources[0].limits["cpu"] == "1000m" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].resources[0].limits["memory"] == "512Mi" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].resources[0].requests["memory"] == "512Mi"
     )
     error_message = "day2-serve --edge with limits equal to the runtime profile"
   }
 
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].security_context[0].run_as_user == "10001" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem == true &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].security_context[0].allow_privilege_escalation == false &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].security_context[0].capabilities[0].drop == tolist(["ALL"]) &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].security_context[0].seccomp_profile[0].type == "RuntimeDefault"
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].security_context[0].run_as_user == "10001" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem == true &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].security_context[0].allow_privilege_escalation == false &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].security_context[0].capabilities[0].drop == tolist(["ALL"]) &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].security_context[0].seccomp_profile[0].type == "RuntimeDefault"
     )
     error_message = "non-root 10001, read-only root, no privilege escalation, no capabilities, RuntimeDefault seccomp"
   }
@@ -977,12 +977,12 @@ run "native_placement_selects_dedicated_pool_and_only_read_only_issuer_socket" {
   }
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].host_pid &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-enrollment" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["day2.dev.node-restriction.kubernetes.io/enrollment"] == "calendar" &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].toleration[0].value == "calendar" &&
-      length([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if length(volume.host_path) > 0 && volume.host_path[0].path == "/run/day2-native-enrollment"]) == 1 &&
-      length([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/run/day2-native-enrollment" && mount.read_only]) == 1
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].host_pid &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-enrollment" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].node_selector["day2.dev.node-restriction.kubernetes.io/enrollment"] == "calendar" &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].toleration[0].value == "calendar" &&
+      length([for volume in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : volume if length(volume.host_path) > 0 && volume.host_path[0].path == "/run/day2-native-enrollment"]) == 1 &&
+      length([for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/run/day2-native-enrollment" && mount.read_only]) == 1
     )
     error_message = "Enrolled App must select its dedicated pool and readonly issuer socket without runtime or root-key mounts."
   }
@@ -1199,8 +1199,8 @@ run "state_ownership_is_idempotent_with_only_cap_chown" {
 
   assert {
     condition = (
-      jsonencode(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[0].command) == jsonencode(["/busybox/chown", "10001:10001", "/srv/day2/.state"]) &&
-      jsonencode(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[0].security_context[0].capabilities[0].add) == jsonencode(["CHOWN"])
+      jsonencode(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[0].command) == jsonencode(["/busybox/chown", "10001:10001", "/srv/day2/.state"]) &&
+      jsonencode(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[0].security_context[0].capabilities[0].add) == jsonencode(["CHOWN"])
     )
     error_message = "the state-ownership init container only chowns (idempotent under CAP_CHOWN); day2 itself chmods .state to 0700 as its owner"
   }
@@ -1250,7 +1250,7 @@ run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
       length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution) == 1 &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution[0].topology_key == "kubernetes.io/hostname" &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution[0].label_selector[0].match_labels == tomap({ "app.kubernetes.io/name" = "day2-example-app" }) &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].labels["app.kubernetes.io/name"] == "day2-example-app"
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].labels["app.kubernetes.io/name"] == "day2-example-app"
     )
     error_message = "The ReadWriteOnce state volume requires the backup pod on the app pod's node."
   }
@@ -1259,7 +1259,7 @@ run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
     condition = (
       length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container) == 1 &&
       length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].init_container) == 0 &&
-      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].image &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-backup"]) &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "/backup/snapshot", "--upload-gcs", "example-tools-example-backups", "--object-prefix", "example_app"]) &&
       length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].env) == 0 &&
@@ -1269,7 +1269,7 @@ run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
         ["tmp", "/tmp", "", false],
         ["backup", "/backup", "", false],
       ]) &&
-      jsonencode([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : [mount.name, mount.mount_path, mount.sub_path == null ? "" : mount.sub_path, mount.read_only == true] if mount.name != "tmp"]) == jsonencode([
+      jsonencode([for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : [mount.name, mount.mount_path, mount.sub_path == null ? "" : mount.sub_path, mount.read_only == true] if mount.name != "tmp"]) == jsonencode([
         ["instance", "/srv/day2/instance.json", "instance.json", true],
         ["state", "/srv/day2/.state", "", false],
       ]) &&
@@ -1283,7 +1283,7 @@ run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
     condition = (
       one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.empty_dir[0] if volume.name == "tmp"]).medium == "Memory" &&
       one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.empty_dir[0] if volume.name == "tmp"]).size_limit ==
-      one([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume.empty_dir[0] if volume.name == "tmp"]).size_limit
+      one([for volume in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : volume.empty_dir[0] if volume.name == "tmp"]).size_limit
     )
     error_message = "day2-backup copies the worker executable into /tmp as day2-serve does, so the backup Job's memory /tmp is the app pod's size."
   }
@@ -1473,17 +1473,17 @@ run "provisions_outbound_and_verification_secrets_from_exact_versions" {
 
   assert {
     condition = (
-      [for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.name] == ["state-ownership", "credential-files", "credential-registration"] &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[1].security_context[0].capabilities[0].add == tolist(["CHOWN", "FOWNER"]) &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[1].command == tolist(["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials",
+      [for init in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container : init.name] == ["state-ownership", "credential-files", "credential-registration"] &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[1].security_context[0].capabilities[0].add == tolist(["CHOWN", "FOWNER"]) &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[1].command == tolist(["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials",
         "/run/day2/credential-sources/a5a7f32250a55cfbb38de1f5486d175644a40d22f95411b6acd303ca29c08d4c",
       "/run/day2/credential-sources/51af0efaac59f9189aad4f7e27487636512661c49b0b7d003e22971c8a7c2602"]) &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].image == var.image &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].args == tolist(["/srv/day2/operator-instance.json", "example_app", "operator@example.com", "/srv/day2/provisioning.json"]) &&
-      try(length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].security_context[0].capabilities[0].add), 0) == 0 &&
-      alltrue([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].volume_mount :
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[2].image == var.image &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[2].args == tolist(["/srv/day2/operator-instance.json", "example_app", "operator@example.com", "/srv/day2/provisioning.json"]) &&
+      try(length(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[2].security_context[0].capabilities[0].add), 0) == 0 &&
+      alltrue([for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container[2].volume_mount :
       mount.sub_path != "" if mount.name == "credential-metadata"]) &&
-      anytrue([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount :
+      anytrue([for mount in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount :
       mount.name == "credentials" && mount.mount_path == "/run/day2/credentials" && mount.read_only])
     )
     error_message = "Credentials are copied as root with CHOWN and FOWNER only, registered by the runtime image as 10001 from regular files, and mounted read-only into day2."
@@ -1496,8 +1496,8 @@ run "renders_no_credential_machinery_without_credentials" {
   assert {
     condition = (
       length(kubernetes_config_map_v1.credentials) == 0 && length(kubernetes_manifest.credentials) == 0 &&
-      [for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.name] == ["state-ownership"] &&
-      !contains(keys(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations), "day2.dev/credentials-sha256")
+      [for init in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container : init.name] == ["state-ownership"] &&
+      !contains(keys(kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].annotations), "day2.dev/credentials-sha256")
     )
     error_message = "An app without provider credentials must render exactly as before."
   }
@@ -1602,4 +1602,57 @@ run "renders_freetool_app_resource_scope" {
     }
     error_message = "day2-app must render the explicit any_app_resource Freetool scope without rewriting it."
   }
+}
+
+run "rolling_sqlite_keeps_incumbent_and_requires_same_node" {
+  command = plan
+  variables { rolling_deploys = true }
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [] }
+  }
+  override_data {
+    target = data.kubernetes_resources.exclusive_workload
+    values = { objects = [] }
+  }
+  assert {
+    condition = (
+      length(kubernetes_stateful_set_v1.day2) == 0 &&
+      kubernetes_deployment_v1.rolling[0].spec[0].replicas == "1" &&
+      kubernetes_deployment_v1.rolling[0].spec[0].strategy[0].rolling_update[0].max_surge == "1" &&
+      kubernetes_deployment_v1.rolling[0].spec[0].strategy[0].rolling_update[0].max_unavailable == "0" &&
+      kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution[0].topology_key == "kubernetes.io/hostname" &&
+      kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution[0].label_selector[0].match_labels["day2.dev/state-claim"] == "data" &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.runtime.kind == "linux_sqlite_rwo_v1"
+    )
+    error_message = "A rolling app must retain one available replica and place its surge replica on the same PVC node."
+  }
+}
+
+run "rolling_refuses_implicit_statefulset_replacement" {
+  command = plan
+  variables { rolling_deploys = true }
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [] }
+  }
+  override_data {
+    target = data.kubernetes_resources.exclusive_workload
+    values = { objects = [{ metadata = { name = "day2-example-app" } }] }
+  }
+  expect_failures = [terraform_data.rolling_admission]
+}
+
+run "rolling_refuses_unadmitted_direct_image_change" {
+  command = plan
+  variables { rolling_deploys = true }
+  override_data {
+    target = data.kubernetes_resources.exclusive_workload
+    values = { objects = [] }
+  }
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{ spec = { template = { spec = { containers = [{ name = "day2", image = "registry.example/app@sha256:1111111111111111111111111111111111111111111111111111111111111111" }] } } } }] }
+  }
+  expect_failures = [terraform_data.rolling_admission]
 }

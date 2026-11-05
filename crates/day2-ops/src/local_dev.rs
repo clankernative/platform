@@ -816,6 +816,7 @@ impl Session {
             &operator,
             &expected,
             "local-development-activation",
+            old.instance_path(),
         )?;
         self.candidate = Some(day2::development::reopen_for(&instance)?);
         self.checked = false;

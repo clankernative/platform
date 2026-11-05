@@ -468,9 +468,10 @@ to restricted storage outside the cluster; exercise restore in a separate privat
 environment and verify properties before declaring the backup usable. A disk
 snapshot alone does not prove cross-provider consistency.
 
-For tooling against the PVC, scale the StatefulSet to zero and wait for termination
-before attaching a trusted maintenance pod with the tooling image. Never run two
-servers or maintenance writers against the same state. Remove maintenance pods
+For incompatible changes or recovery tooling against the PVC, scale the workload
+to zero and wait for termination before attaching a trusted maintenance pod with
+the tooling image. The compatible rolling profile below authorizes a specific
+pair of same-node servers and its bounded online maintenance operations. Remove maintenance pods
 before restoring the one-replica workload. The runtime image intentionally lacks
 operator tools other than the read-only `day2-inspect` and the online
 `day2-backup`. Online backups are scheduled (below); restore is an operator
@@ -479,12 +480,14 @@ procedure.
 ### Maintenance: `day2 platform maintain`
 
 `day2 platform maintain OPERATION REQUEST_JSON` runs day2's own operations
-against a stopped app. `ops/Maintain.roc` orders the steps; the Rust session
+against a stopped app, or keeps the incumbent running for `rollout`.
+`ops/Maintain.roc` orders the steps; the Rust session
 behind its `maintenance-*` capabilities (`crates/day2-ops/src/maintenance.rs`)
 does every native action with `kubectl` and the registry API. Operations:
 
 | Operation | What it does | App afterwards |
 | --- | --- | --- |
+| `rollout` | Online backup and copy rehearsal; admits the exact compatible artifact pair; starts a same-node candidate; proves app-owned read/write/readback; promotes readiness and waits for source termination before completing | serving the target; candidate failures preserve the incumbent |
 | `inspect` | Reads the active authority stamp and policy | restored |
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
@@ -506,7 +509,7 @@ The request file names the target exactly:
 }
 ```
 
-An initialized app serves only the artifact its database activated. An image
+In the exclusive profile, an initialized app serves only the artifact its database activated. An image
 whose artifact differs will not serve until `activate` has run for that
 artifact: `day2-serve` refuses with `active_artifact_unavailable`, naming the
 activated and the requested artifact. An image that keeps the artifact still
@@ -519,7 +522,9 @@ refuses an image change with `release_image_requires_activation`, before any
 write, until `activate` has stamped the StatefulSet for that image, and the
 day2-app stack refuses a direct apply of it (below).
 
-`request_id` is for `authority-apply`, `activate` and `mark-activated`; `target`
+`workload_kind` selects `statefulset` (default) or `deployment` for offline
+operations; `rollout` always selects a Deployment. `request_id` is for
+`authority-apply`, `activate`, `mark-activated` and `rollout`; `target`
 (the desired instance, e.g. rendered from the day2-app plan) is for `activate`
 and `mark-activated`, which take the same request file;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
@@ -582,6 +587,100 @@ What the session guarantees, whatever the recipe does:
   [the release workflow](../../docs/RELEASE-WORKFLOW.md#image-changes)).
 - Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
   before it runs, for recovery after the operator's machine dies mid-session.
+
+#### Compatible same-node SQLite rolling releases
+
+Set `rolling_deploys = true` in `day2-app` at installation to select
+`linux_sqlite_rwo_v1`. It uses a Deployment with one steady replica,
+`maxSurge: 1`, `maxUnavailable: 0`, and required pod affinity to the incumbent's
+hostname and state-claim label. Both serving processes hold shared kernel locks
+on the same RWO PVC. Offline store admission takes the exclusive lock and fails
+while either server owns it. Ordinary rolling startup verifies the complete
+SQLite schema and authority without upgrades or repair.
+
+An existing StatefulSet is refused by this setting. Disposable canaries can be
+reinstalled; preserving GoLinks' existing links requires a separately reviewed
+operator procedure that retains the PVC. This change performs no automatic
+controller conversion or production deployment.
+
+Build, verify and publish the target image before running:
+
+```text
+day2 platform maintain rollout release-request.json
+```
+
+Use the request above with a fresh `request_id`, the current live instance
+ConfigMap and image, and add a probe to `target`, for example:
+
+```json
+"probe": {
+  "actor": "release-probe@example.com",
+  "command": "items.create", "input": {"name": "release-2026-11-04"},
+  "query": "items.by_name", "query_input": {"name": "release-2026-11-04"},
+  "expected": {"name": "release-2026-11-04"}
+}
+```
+
+These operations and the exact expected result belong to the application. Use
+an authorized actor and dedicated canary data; the command's write persists.
+The host refuses external writes, observations, child commands or credential
+access in the probe. Its command and query have separate stable idempotency IDs.
+The tooling image must be from the reviewed target platform build. Tooling queues
+the immutable canary request; the running candidate executes it in its host pump
+and records the result. The probe therefore retains the serving supervisor pin.
+
+The compatibility gate requires identical schema, operation/page/routing
+contracts, runtime/platform sources, resources, authority and instance bindings.
+Only application executable/presentation bytes and the corresponding artifact
+security pin may change. OAuth, native enrollment, app-call release bindings and
+mutable loopback companion stores use their separate exclusive protocols. A
+runtime/private-schema change or rebuilding the same artifact under a different
+image requires `maintain activate` with `workload_kind: "deployment"`. That lane
+stops both replicas, rehearses the upgrade, fences the source, activates and
+exclusively admits the target store before stamping its image. Apply exactly that
+image afterwards. For a release-managed RWO Deployment, set `release_managed = false`
+for the apply that installs the stamped image, then re-enable it once the target
+is ready. Model retirement is refused during copy rehearsal by this
+profile's schema verifier; it needs a separately reviewed preservation procedure.
+Policy changes continue through explicit authority operations. A policy revision
+preserves the admitted artifact pair through draining and immediately fences old
+business work; the remaining target continues serving the current grants.
+
+The rolling helper is pinned to the observed node and excluded from all Service
+selectors. The durable release binds the exact images/artifacts, authority stamp,
+controller UID, PVC UID, node, request digest and exact target instance bytes.
+Immutable ConfigMaps plus Kubernetes UID/resource-version tests prevent a retry from changing another
+release. Re-run the identical request to recover after a lost response or operator
+process exit; prepared, promoted and completed releases reconcile idempotently.
+An edit to that request or its referenced target instance requires a new release.
+The candidate's private health check admits its store while public readiness stays false. A successful app
+probe promotes readiness; the source remains admitted until its pod has drained
+and actually terminated. No force deletion, automatic rollback or snapshot
+replacement occurs on failure. Investigate a failed candidate and resume the
+same request. An operator can abort an unpromoted release with the atomic
+`rollout-transition` CLI after its candidate stops and its pending work settles.
+
+HTTP and background execution use the same kernel-held invocation ownership.
+Paused processes retain ownership; process death releases it. Pending work runs
+under its original retained artifact, and completion waits for source work to
+settle. Current business authority still governs both versions: revocation does
+not become a new release grant. Existing browser sessions, signed forms and
+artifact-scoped resources survive replacement. Retired resource bundles remain
+for at least the 30-minute form lifetime and while pending invocations need them;
+expired resources return a reload response. Immutable bundles are bounded at
+16 MiB/8,192 files per artifact and 512 MiB total, and included in backups.
+Restore disables authority, rotates sessions and clears historical overlap.
+
+After the first successful rollout enable `release_managed` so infrastructure
+reconciliation preserves the released image, instance, credentials and release
+identity. Keep enough memory/CPU/ephemeral capacity on the same node for both app
+replicas and the helper. Capacity failure leaves the incumbent in place. This
+profile addresses planned compatible deploys; it provides no node-failure HA.
+Before enabling it for a live app, run continuous read/write traffic through the
+real ingress during a rollout, kill the candidate before promotion, interrupt
+and resume the operator, and verify old pages plus original-artifact pending
+work. Unit and mocked infrastructure checks do not qualify GKE endpoint
+propagation, CSI behavior or application-specific version compatibility.
 
 #### The maintenance pod's scratch volume
 
