@@ -11,10 +11,28 @@ use std::{marker::PhantomData, rc::Rc};
 // genuine source is a separate reviewed producer join, not a DTO conversion.
 enum NativeOrigin {}
 
+// The actual source owns terminal cleanup. Keep its destructor nongeneric so
+// the existing proof scanner pins it without an exception or weaker rule.
+struct NativeSource {
+    origin: NativeOrigin,
+}
+
+impl NativeSource {
+    fn refuse(&mut self) {
+        match self.origin {}
+    }
+}
+
+impl Drop for NativeSource {
+    fn drop(&mut self) {
+        self.refuse();
+    }
+}
+
 /// The lifetime is reserved for the genuine retained source. This marker is
 /// not authentication; the empty origin makes safe construction impossible.
 pub(crate) struct NativeRestoreApproval<'source> {
-    origin: NativeOrigin,
+    origin: NativeSource,
     source: PhantomData<(&'source mut (), Rc<()>)>,
 }
 
@@ -49,19 +67,13 @@ impl<'source> NativeRestoreApproval<'source> {
         _expected: &ApprovalRequest,
         _operation: &Digest,
     ) -> Result<ConsumedRestoreApproval<'source>> {
-        match &self.origin {}
+        match self.origin.origin {}
     }
 
     /// Local terminal refusal only, including after expiry; no IO, clock sample
     /// or authority acquisition. Drop must never regrant an available input.
     pub(crate) fn refuse(&mut self) {
-        match &self.origin {}
-    }
-}
-
-impl Drop for NativeRestoreApproval<'_> {
-    fn drop(&mut self) {
-        self.refuse();
+        self.origin.refuse();
     }
 }
 
@@ -71,7 +83,7 @@ impl ConsumedRestoreApproval<'_> {
     /// any refusal permanently poisons the retained source; clock/input repair
     /// cannot resurrect it. Caller-supplied clock samples are never accepted.
     pub(crate) fn check(&mut self) -> Result<ApprovalObservation> {
-        match &self.approval.origin {}
+        match self.approval.origin.origin {}
     }
 
     pub(crate) fn refuse(&mut self) {
@@ -139,11 +151,19 @@ mod tests {
         if origins.len() != 1 || !origins[0].variants.is_empty() {
             return Ok(false);
         }
+        let mut native_source = false;
         let mut input = false;
         let mut consumed = false;
         let mut consume = false;
         for item in &file.items {
             if let Item::Struct(value) = item {
+                if value.ident == "NativeSource" {
+                    native_source = value.fields.len() == 1 && value.fields.iter().all(|field| {
+                        matches!(field.vis, syn::Visibility::Inherited)
+                            && field.ident.as_ref().is_some_and(|id| id == "origin")
+                            && matches!(&field.ty, Type::Path(p) if p.path.is_ident("NativeOrigin"))
+                    });
+                }
                 if matches!(
                     value.ident.to_string().as_str(),
                     "NativeRestoreApproval" | "ConsumedRestoreApproval"
@@ -158,7 +178,7 @@ mod tests {
                     if value.ident == "NativeRestoreApproval" {
                         input=value.fields.iter().any(|field|
                             field.ident.as_ref().is_some_and(|id| id=="origin")
-                            && matches!(&field.ty,Type::Path(p) if p.path.is_ident("NativeOrigin")));
+                            && matches!(&field.ty,Type::Path(p) if p.path.is_ident("NativeSource")));
                     } else {
                         consumed=value.fields.len()==1 && value.fields.iter().all(|field|
                             matches!(&field.ty,Type::Path(p) if p.path.segments.last().is_some_and(|p|p.ident=="NativeRestoreApproval")));
@@ -200,7 +220,7 @@ mod tests {
                 }
             }
         }
-        Ok(input && consumed && consume)
+        Ok(native_source && input && consumed && consume)
     }
 
     #[test]
@@ -222,8 +242,8 @@ mod tests {
             ),
             ("        self,", "        &mut self,"),
             (
-                "    origin: NativeOrigin,",
-                "    pub(crate) origin: NativeOrigin,",
+                "    origin: NativeSource,",
+                "    pub(crate) origin: NativeSource,",
             ),
             (
                 "    approval: NativeRestoreApproval<'source>,",
