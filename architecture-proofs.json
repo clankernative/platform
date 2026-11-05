@@ -2331,6 +2331,13 @@
             "source": "crates/day2/src/security_epoch/firestore.rs",
             "module": "restore"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/firestore/restore/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/firestore/restore.rs",
+            "module": "writer"
+          }
         }
       ],
       "methods": [

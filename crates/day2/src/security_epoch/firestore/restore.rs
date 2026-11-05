@@ -18,7 +18,7 @@ use std::{collections::BTreeSet, marker::PhantomData, rc::Rc};
 
 const MAX_RECORD_BYTES: usize = 32_768;
 
-pub(in crate::security_epoch) mod writer;
+mod writer;
 
 /// Names and full original-plan commitment, never caller-selected paths.
 pub(in crate::security_epoch) struct Names {
