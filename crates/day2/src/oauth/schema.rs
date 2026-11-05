@@ -126,6 +126,15 @@ pub(crate) fn require_admission(db: &Connection) -> Result<()> {
     })
 }
 
+/// Actual counter DATA for offline reset tests only. It cannot admit work,
+/// change hooks or renew a budget, and never selects an accepting decision.
+#[cfg(test)]
+pub(crate) fn remaining_steps_for_tests(db: &Connection) -> Option<usize> {
+    ADMISSION.with(|active| {
+        active.borrow().as_ref().filter(|budget| budget.connection == std::ptr::from_ref(db) as usize).map(|budget| budget.steps)
+    })
+}
+
 /// Raw SQLite adapters explicitly grant ownership of their progress callback:
 /// this installs/removes a temporary hook, and cannot preserve an unknown hook.
 /// Production connections use `admit_with_runtime_hook` instead.
