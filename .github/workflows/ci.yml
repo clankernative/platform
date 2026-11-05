@@ -1765,7 +1765,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/day2-tofu-providers
+      TF_PLUGIN_CACHE_DIR: /tmp/day2-tofu-providers
       TF_PROVIDER_DOWNLOAD_RETRY: '5'
       TF_REGISTRY_DISCOVERY_RETRY: '5'
       TF_REGISTRY_CLIENT_TIMEOUT: '30'
@@ -1797,7 +1797,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/day2-tofu-providers
+      TF_PLUGIN_CACHE_DIR: /tmp/day2-tofu-providers
       TF_PROVIDER_DOWNLOAD_RETRY: '5'
       TF_REGISTRY_DISCOVERY_RETRY: '5'
       TF_REGISTRY_CLIENT_TIMEOUT: '30'
@@ -1829,7 +1829,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/day2-tofu-providers
+      TF_PLUGIN_CACHE_DIR: /tmp/day2-tofu-providers
       TF_PROVIDER_DOWNLOAD_RETRY: '5'
       TF_REGISTRY_DISCOVERY_RETRY: '5'
       TF_REGISTRY_CLIENT_TIMEOUT: '30'
@@ -1858,7 +1858,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/day2-tofu-providers
+      TF_PLUGIN_CACHE_DIR: /tmp/day2-tofu-providers
       TF_PROVIDER_DOWNLOAD_RETRY: '5'
       TF_REGISTRY_DISCOVERY_RETRY: '5'
       TF_REGISTRY_CLIENT_TIMEOUT: '30'
