@@ -124,7 +124,7 @@ fn namespace() -> Namespace {
     }
 }
 
-fn lease() -> KeyLease {
+pub(super) fn lease() -> KeyLease {
     KeyLease::new(
         &[3; 32],
         &[4; 32],
@@ -159,7 +159,7 @@ fn ceiling() -> GrantCeiling {
     .unwrap()
 }
 
-fn family() -> ManifestFamily {
+pub(super) fn family() -> ManifestFamily {
     ManifestFamily::derive(
         FamilyDeclaration {
             registration: name("fixture_client"),
@@ -186,7 +186,7 @@ fn family() -> ManifestFamily {
     .unwrap()
 }
 
-fn issue(now: i64) -> store::IssueIntent {
+pub(super) fn issue(now: i64) -> store::IssueIntent {
     store::IssueIntent {
         namespace: namespace(),
         family: family().id.as_str().into(),

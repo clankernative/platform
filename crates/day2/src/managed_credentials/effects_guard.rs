@@ -193,6 +193,7 @@ const REVIEWED_SOURCES: &[&str] = &[
     "ingress.rs",
     "issuance.rs",
     "lifecycle.rs",
+    "maintenance_authority.rs",
     "mod.rs",
     "restore.rs",
     "rewrap.rs",
@@ -244,6 +245,10 @@ fn managed_credential_ambient_effects_are_confined_to_the_reviewed_adapter() {
         ("ingress", include_str!("ingress.rs")),
         ("issuance", include_str!("issuance.rs")),
         ("lifecycle", include_str!("lifecycle.rs")),
+        (
+            "maintenance_authority",
+            include_str!("maintenance_authority.rs"),
+        ),
         ("restore", include_str!("restore.rs")),
         ("rewrap", include_str!("rewrap.rs")),
         ("store", include_str!("store.rs")),
