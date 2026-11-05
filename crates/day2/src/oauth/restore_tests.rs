@@ -1,11 +1,11 @@
 //! Real SQLite/crypto adapters and an independent expected denial cut. These
 //! fixtures never construct a native owner, passkey approval or writer.
 use super::{Kind, Profile, Snapshot, close_in, install, require_no_history, require_open};
-use crate::oauth::{connect, custody, exchange, inbound, profiles, store};
+use crate::oauth::{connect, custody, exchange, inbound, outbound, profiles, protocol, store};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use rusqlite::{Connection, TransactionBehavior, params};
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 pub(in crate::oauth) fn database(path: &Path) -> Result<Connection> {
     let db = Connection::open(path)?;
@@ -251,6 +251,49 @@ fn late_prepared_code_and_tokens_cannot_publish_or_decrypt_after_cut() -> Result
             before
         );
         tx.commit()?;
+        Ok(())
+    })
+}
+
+#[test]
+fn actual_code_and_provider_denial_callbacks_cannot_change_cut_closed_rows_or_material() -> Result<()> {
+    fn rows(db:&Connection,sql:&str)->Result<Vec<Vec<rusqlite::types::Value>>> {
+        let mut query=db.prepare(sql)?;
+        let result=query.query_map([],|row|(0..row.as_ref().column_count()).map(|i|row.get(i)).collect())?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(result)
+    }
+    crate::oauth::effects::scope(crate::oauth::simulation::World::new(9722),|| {
+        for denied in [false,true] {
+            for restored in [false,true] {
+                let directory=tempfile::tempdir()?;let path=directory.path().join("callback.sqlite");
+                let mut db=database(&path)?;
+                let fixture=profiles::tests::external_fixture();let key=profiles::tests::exchange_key();
+                let authorization=exchange::prepare_authorization(fixture.input(),&key,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")?;
+                let code_ref=authorization.code_ref().to_owned();
+                assert!(authorization.begin(&mut db,1)?);
+                let raw:&[u8]=if denied {b"state=0123456789abcdefghijklmnopqrstuvwxyzABCDEF&error=access_denied&iss=https%3A%2F%2Fissuer.example%2Ftenant"}
+                    else {b"state=0123456789abcdefghijklmnopqrstuvwxyzABCDEF&code=fixture_code&iss=https%3A%2F%2Fissuer.example%2Ftenant"};
+                let ingress=||outbound::CallbackIngress {attempt:&fixture.intent.attempt,raw_query:raw,route:&fixture.instance.registration.callback,session:fixture.binding.session(),issuer_binding:&fixture.reviewed.issuer,code_ref:&code_ref,now:2};
+                if !restored {
+                    let outcome=exchange::handle_qualified_callback(&mut db,fixture.input(),ingress(),&key)?;
+                    assert!(if denied {matches!(outcome,outbound::CallbackOutcome::Denied{..})}
+                        else {matches!(outcome,outbound::CallbackOutcome::CodeAccepted{..})});
+                    continue;
+                }
+                let original=rows(&db,"SELECT * FROM oauth_connect_attempts ORDER BY attempt")?;
+                let verifier=rows(&db,"SELECT * FROM oauth_private_verifiers ORDER BY reference")?;
+                assert!(!verifier.is_empty());
+                cut(&mut db,&Profile::prepare()?,92)?;
+                for _ in 0..2 {
+                    drop(db);db=Connection::open(&path)?;
+                    assert!(outbound::handle_callback_profile(&mut db,ingress(),&protocol::CallbackParameters {require_issuer:true,allowed_extras:BTreeSet::new()},|_,_|panic!("closed real callback entered custody")).is_err());
+                    assert_eq!(rows(&db,"SELECT * FROM oauth_connect_attempts ORDER BY attempt")?,original);
+                    assert_eq!(rows(&db,"SELECT * FROM oauth_private_verifiers ORDER BY reference")?,verifier);
+                    assert!(rows(&db,"SELECT * FROM oauth_private_codes ORDER BY reference")?.is_empty());
+                }
+            }
+        }
         Ok(())
     })
 }
@@ -765,6 +808,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     let management = include_str!("management/app.rs");
     let usage = include_str!("usage.rs");
     let inbound = include_str!("inbound.rs");
+    let outbound = include_str!("outbound.rs");
     let mut specs = Vec::new();
     for name in ["begin_in", "slot_matches"] {
         specs.push((connect, name, None, "", "Connect", "tx", "&intent.attempt"));
@@ -793,6 +837,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     specs.push((connect,"await_account_approval",None,"identifier(attempt)?;identifier(account)?;identifier(scope_evidence)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
     specs.push((connect,"quarantine_external_bound",None,"let intent=verified.intent();let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","&intent.attempt"));
     specs.push((connect,"finish_blocked",None,"identifier(attempt)?;let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;","Connect","&tx","attempt"));
+    specs.push((outbound,"handle_callback_in",None,"","Connect","tx","ingress.attempt"));
     specs.push((
         exchange,
         "load_binding",
@@ -880,7 +925,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             id,
         ));
     }
-    assert_eq!(specs.len(), 35);
+    assert_eq!(specs.len(), 36);
     for (source, name, owner, prefix, kind, db, id) in specs {
         let root = if owner.is_some() {
             "crate::oauth::restore"
@@ -922,7 +967,15 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
         assert!(!accepts(&deleted, prefix, &guard, count)?, "deleted {name}");
         let mut delayed = block.clone();
         let check = delayed.stmts.remove(index);
+        let last=delayed.stmts.pop().ok_or_else(||anyhow::anyhow!("guard_tail_missing"))?;
+        let syn::Stmt::Expr(value, None)=last else {anyhow::bail!("guard_tail_shape")};
+        let mut saved:syn::Stmt=syn::parse_str("let restore_guard_delayed_result=();")?;
+        let syn::Stmt::Local(local)=&mut saved else {unreachable!()};
+        local.init.as_mut().unwrap().expr=Box::new(value);
+        delayed.stmts.push(saved);
         delayed.stmts.push(check);
+        let tail:syn::Block=syn::parse_str("{restore_guard_delayed_result}")?;
+        delayed.stmts.extend(tail.stmts);
         assert!(!accepts(&delayed, prefix, &guard, count)?, "delayed {name}");
         let mut duplicate = block.clone();
         duplicate.stmts.insert(index, expected.stmts[index].clone());
