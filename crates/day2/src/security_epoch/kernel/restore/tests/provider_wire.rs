@@ -401,7 +401,7 @@ fn five_wire_write_cuts_and_unknown_completion_reopen_against_independent_expect
                 drop(db);
                 let mut db = Connection::open(&path)?;
                 let committed = cut >= 6;
-                let count: u64 = db.query_row("SELECT count(*) FROM records", [], |r| r.get(0))?;
+                let count: i64 = db.query_row("SELECT count(*) FROM records", [], |r| r.get(0))?;
                 assert_eq!(count, if committed { 7 } else { 4 });
                 let bytes = read_back(&db, &names)?;
                 let observed = wire::Names::new(&selection, &plan)?.strong(&bytes)?;
@@ -515,7 +515,21 @@ fn canonical_receipt_envelopes_refuse_mutation_after_known_commit() -> Result<()
             "cut={cut}"
         );
     }
-    static_assertions::assert_not_impl_any!(wire::Transaction: Clone, Copy, Default, Send, Sync, serde::Serialize, serde::de::DeserializeOwned);
+    macro_rules! opaque {
+        ($bound:path) => {{
+            trait Ambiguous<A> { fn check() {} }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <wire::Transaction as Ambiguous<_>>::check;
+        }};
+    }
+    opaque!(Clone);
+    opaque!(Copy);
+    opaque!(Default);
+    opaque!(Send);
+    opaque!(Sync);
+    opaque!(serde::Serialize);
+    opaque!(serde::Deserialize<'static>);
     Ok(())
 }
 
