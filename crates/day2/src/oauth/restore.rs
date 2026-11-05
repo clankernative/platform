@@ -59,10 +59,16 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
              BEGIN SELECT RAISE(ABORT,'immutable restore cut'); END;
          CREATE TRIGGER IF NOT EXISTS oauth_restore_cut_no_delete BEFORE DELETE ON oauth_restore_cuts
              BEGIN SELECT RAISE(ABORT,'restore cut retained'); END;
+         CREATE TRIGGER IF NOT EXISTS oauth_restore_cut_no_replace BEFORE INSERT ON oauth_restore_cuts
+             WHEN EXISTS(SELECT 1 FROM oauth_restore_cuts WHERE digest=NEW.digest)
+             BEGIN SELECT RAISE(ABORT,'immutable restore cut'); END;
          CREATE TRIGGER IF NOT EXISTS oauth_restore_closed_no_update BEFORE UPDATE ON oauth_restore_closed
              BEGIN SELECT RAISE(ABORT,'immutable restore closure'); END;
          CREATE TRIGGER IF NOT EXISTS oauth_restore_closed_no_delete BEFORE DELETE ON oauth_restore_closed
-             BEGIN SELECT RAISE(ABORT,'restore closure retained'); END;",
+             BEGIN SELECT RAISE(ABORT,'restore closure retained'); END;
+         CREATE TRIGGER IF NOT EXISTS oauth_restore_closed_no_replace BEFORE INSERT ON oauth_restore_closed
+             WHEN EXISTS(SELECT 1 FROM oauth_restore_closed WHERE kind=NEW.kind AND id=NEW.id)
+             BEGIN SELECT RAISE(ABORT,'immutable restore closure'); END;",
         &[super::schema::Invariant { table: "oauth_restore_slot_floors", predicate:
             "length(slot) BETWEEN 1 AND 160 AND generation>0 AND generation<9223372036854775807
              AND length(cut)=71 AND EXISTS(SELECT 1 FROM oauth_restore_cuts c WHERE c.digest=cut)" },
@@ -118,7 +124,8 @@ pub(crate) fn generation_floor(db: &Connection, slot: &str) -> Result<Option<i64
 /// Arithmetic DATA only, shared by captured views and actual SQL row checks.
 pub(super) fn next_generation(current: Option<i64>, floor: i64) -> Result<i64> {
     ensure!(current.is_none_or(|generation|generation>0) && floor>=0 && floor<i64::MAX,"invalid_connect_generation");
-    current.unwrap_or(0).max(floor).checked_add(1).ok_or_else(||anyhow::anyhow!("connect_generation_exhausted"))
+    current.unwrap_or(0).max(floor).checked_add(1).filter(|next|*next<i64::MAX)
+        .ok_or_else(||anyhow::anyhow!("connect_generation_exhausted"))
 }
 
 /// Absence in a CURRENT installed unit is only absence of this denial. All
@@ -677,7 +684,8 @@ pub(crate) fn close_in(
         // ordinary retry. Both exact old originals remain permanently closed.
         let unsupported:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_management_dispatch_slots d
             WHERE NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='management' AND c.id=d.attempt AND c.cut=?1)
-               OR NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='connect' AND c.id=d.attempt AND c.cut=?1))",
+               OR NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='connect' AND c.id=d.attempt AND c.cut=?1)
+               OR NOT EXISTS(SELECT 1 FROM main.oauth_connect_attempts a WHERE a.attempt=d.attempt AND a.slot=d.slot))",
             [cut.digest().as_str()],|row|row.get(0))?;
         ensure!(!unsupported,"restore_dispatch_claim_not_closed");
         savepoint.execute("DELETE FROM main.oauth_management_dispatch_slots WHERE attempt IN
