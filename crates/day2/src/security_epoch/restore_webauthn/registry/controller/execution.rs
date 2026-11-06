@@ -40,7 +40,13 @@ fn approval_record(
     statement.validate()?;
     let scope = &statement.request.target.scope;
     ensure!(
-        context.scope == format!("{}/{}/{}", scope.installation, scope.environment, scope.app),
+        context.scope
+            == format!(
+                "{}/{}/{}",
+                scope.installation.as_str(),
+                scope.environment.as_str(),
+                scope.app.as_str()
+            ),
         "restore_approval_current_scope_changed"
     );
     let control = instance
