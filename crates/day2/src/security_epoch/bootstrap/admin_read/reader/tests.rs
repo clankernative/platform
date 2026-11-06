@@ -180,13 +180,19 @@ fn production_reader_never_releases_peer_from_autocommit_or_unclosed_sql() {
             "let closed = Ok(());",
         ),
     ] {
-        let changed = reader.replace(old, new);
+        // Change the first actual constructor statement, not the substring
+        // inside a later self.loan call (which would leave invalid `self.`).
+        let changed = reader.replacen(old, new, 1);
         assert_ne!(reader, changed, "actual owner target {old}");
+        syn::parse_file(&changed).expect("valid owner counterexample");
         assert!(!wired(&changed, resource, loan), "must reject {old}");
     }
     for (old, new) in [
         ("loan.retain_reader(&connection)?;", ""),
-        ("loan.begin_retained_sql(", "loan.end_retained_sql("),
+        (
+            "loan.begin_retained_sql(\n            self.connection\n                .as_ref()\n                .context(\"controller_admin_reader_closed\")?,\n        )?;",
+            "loan.begin_sql()?;",
+        ),
         ("loan.check_database(&tx)?;", ""),
         (
             "loan.end_retained_sql(db, &completed)",
@@ -194,8 +200,9 @@ fn production_reader_never_releases_peer_from_autocommit_or_unclosed_sql() {
         ),
         ("loan.close_reader(connection)", "loan.end_sql(&Ok(()))"),
     ] {
-        let changed = resource.replace(old, new);
+        let changed = resource.replacen(old, new, 1);
         assert_ne!(resource, changed, "actual SQL target {old}");
+        syn::parse_file(&changed).expect("valid SQL counterexample");
         assert!(!wired(reader, &changed, loan), "must reject {old}");
     }
     let changed = loan.replace(
