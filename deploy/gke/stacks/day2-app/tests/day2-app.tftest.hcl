@@ -430,6 +430,13 @@ run "infrastructure_preserves_software_after_release_handoff" {
     condition     = output.release_deployment.credentials == null
     error_message = "An app without provider credentials releases no registration metadata."
   }
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" &&
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.config_map[0].name if volume.name == "instance"]) == "day2-release-two"
+    )
+    error_message = "Scheduled backups must load the released artifact and instance instead of the bootstrap selection."
+  }
 }
 
 # A directly deployed app (release_managed = false) between `day2 platform
@@ -1641,6 +1648,46 @@ run "rolling_refuses_implicit_statefulset_replacement" {
     values = { objects = [{ metadata = { name = "day2-example-app" } }] }
   }
   expect_failures = [terraform_data.rolling_admission]
+}
+
+run "rolling_handoff_keeps_backups_with_the_released_workload" {
+  command = plan
+  variables {
+    rolling_deploys = true
+    release_managed = true
+  }
+  override_data {
+    target = data.kubernetes_resources.exclusive_workload
+    values = { objects = [] }
+  }
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = { "day2.dev/rollout" = "release-two" } }
+      spec = { replicas = 1, template = {
+        metadata = {
+          labels = { "day2.dev/rollout" = "release-two" }
+          annotations = {
+            "day2.dev/installation"    = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+            "day2.dev/artifact"        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "day2.dev/instance-sha256" = "released-instance"
+          }
+        }
+        spec = {
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
+        }
+      } }
+    }] }
+  }
+  assert {
+    condition = (
+      kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].container[0].image &&
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.config_map[0].name if volume.name == "instance"]) == "day2-release-two"
+    )
+    error_message = "A rolling release must keep its image and provide that image and instance to scheduled backups."
+  }
 }
 
 run "rolling_refuses_unadmitted_direct_image_change" {

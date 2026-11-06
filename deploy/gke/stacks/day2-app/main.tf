@@ -1087,11 +1087,11 @@ resource "kubernetes_cron_job_v1" "backup" {
               }
             }
 
-            # The app's own image (the same digest as the StatefulSet), so the
+            # The app's released image (the same digest as its workload), so the
             # active artifact the database names is present at the same path.
             container {
               name              = "backup"
-              image             = var.image
+              image             = local.release_image
               image_pull_policy = "IfNotPresent"
               command           = ["/usr/local/bin/day2-backup"]
               args              = local.backup_args
@@ -1157,7 +1157,7 @@ resource "kubernetes_cron_job_v1" "backup" {
               name = "instance"
 
               config_map {
-                name         = kubernetes_config_map_v1.instance.metadata[0].name
+                name         = local.release_instance
                 default_mode = "0444"
 
                 items {
