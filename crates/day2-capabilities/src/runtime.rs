@@ -8,13 +8,20 @@ use std::num::{NonZeroU16, NonZeroU32};
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeProfile {
     LinuxSqliteSingleV1 { resources: Resources },
+    LinuxSqliteRwoV1 { resources: Resources },
 }
 
 impl RuntimeProfile {
     pub fn resources(&self) -> &Resources {
         match self {
-            Self::LinuxSqliteSingleV1 { resources } => resources,
+            Self::LinuxSqliteSingleV1 { resources } | Self::LinuxSqliteRwoV1 { resources } => {
+                resources
+            }
         }
+    }
+
+    pub fn rolling(&self) -> bool {
+        matches!(self, Self::LinuxSqliteRwoV1 { .. })
     }
 
     pub fn replicas(&self) -> u8 {

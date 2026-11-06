@@ -75,7 +75,12 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         include_str!("registration_tests.rs"),
     ),
     ("schema.rs", include_str!("schema.rs")),
+    ("security_shell", ""),
     ("security_shell.rs", include_str!("security_shell.rs")),
+    (
+        "security_shell/passkey_export.rs",
+        include_str!("security_shell/passkey_export.rs"),
+    ),
     ("shell_oidc.rs", include_str!("shell_oidc.rs")),
     ("shell_transport.rs", include_str!("shell_transport.rs")),
     (
@@ -438,6 +443,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         ),
         ("native_http", &["response_io.rs"][..]),
         ("native_management", &["request.rs", "response.rs"][..]),
+        ("security_shell", &["passkey_export.rs"][..]),
     ] {
         let mut children = std::fs::read_dir(directory.join(name))?
             .map(|entry| {

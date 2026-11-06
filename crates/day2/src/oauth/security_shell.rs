@@ -38,6 +38,7 @@ use tokio::sync::Semaphore;
 use tokio::{net::TcpListener, sync::OwnedSemaphorePermit};
 
 const COOKIE: &str = "__Host-day2_security_shell";
+mod passkey_export;
 const PREFIX: &str = "/oauth/approvals/";
 const SESSION_SECONDS: i64 = 300;
 const MAX_SESSIONS: usize = 1024;
@@ -758,6 +759,11 @@ impl SecurityShell {
                     error
                 }
             })?;
+        }
+        if let Some(response) =
+            passkey_export::dispatch(method, path, query, body, &identity, &self.origin)?
+        {
+            return Ok(response);
         }
         if let Some(management) = &self.management {
             if let Some(response) = management.provider_callback(
@@ -1726,6 +1732,7 @@ fn protected(mut response: Response) -> Response {
             .headers_mut()
             .insert(name, value.parse().expect("static security header"));
     }
+    passkey_export::protect_document(&mut response);
     response
 }
 
@@ -1907,6 +1914,125 @@ mod tests {
             approvals,
             Arc::new(BrowserIdentity { fresh: false }),
         )
+    }
+
+    #[tokio::test]
+    async fn passkey_export_is_get_only_and_keeps_shell_guards_and_existing_csp() -> Result<()> {
+        let shell = isolated_shell()?;
+        let headers = HeaderMap::from_iter([(header::HOST, "security.example.com".parse()?)]);
+        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+            let response = protected(shell.dispatch(&Method::GET, path, None, &headers, &[], 5)?);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+            if path == passkey_export::PAGE {
+                let csp = response.headers()[header::CONTENT_SECURITY_POLICY].to_str()?;
+                assert!(
+                    csp.contains(
+                        "script-src https://security.example.com/restore/passkeys/export.js;"
+                    ) && csp.contains("connect-src 'none'")
+                        && csp.contains("form-action 'none'")
+                        && !csp.contains("unsafe")
+                );
+                assert!(
+                    response.headers()["permissions-policy"].to_str()?.contains(
+                        "publickey-credentials-create=(self), publickey-credentials-get=()"
+                    )
+                );
+                let html = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+                assert!(
+                    html.contains("does not enroll a key")
+                        && html.contains("data-subject=\"accounts.google.com:google-alice\"")
+                );
+                assert!(!html.contains("<form") && !html.contains("fetch("));
+            } else {
+                assert_eq!(
+                    response.headers()[header::CONTENT_SECURITY_POLICY],
+                    "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+                );
+                assert!(
+                    to_bytes(response.into_body(), 16384)
+                        .await?
+                        .starts_with(b"// Browser presentation")
+                );
+            }
+            assert!(
+                shell
+                    .dispatch(&Method::POST, path, None, &headers, &[], 5)
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(&Method::GET, path, Some("key=untrusted"), &headers, &[], 5)
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(&Method::GET, path, None, &headers, b"untrusted", 5)
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(&Method::GET, path, None, &HeaderMap::new(), &[], 5)
+                    .is_err()
+            );
+        }
+        assert!(shell.sessions.lock().unwrap().is_empty());
+        assert_eq!(
+            protected(StatusCode::OK.into_response()).headers()[header::CONTENT_SECURITY_POLICY],
+            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passkey_export_never_bypasses_identity_or_native_shell_guard() -> Result<()> {
+        struct DenyIdentity;
+        impl FreshAuthenticator for DenyIdentity {
+            fn identify(&self, _: &HeaderMap, _: i64) -> Result<iap::Verified> {
+                anyhow::bail!("fixture_identity_refused")
+            }
+            fn begin(
+                &self,
+                _: &iap::Verified,
+                _: FreshIntent,
+                _: &HeaderMap,
+                _: i64,
+            ) -> Result<ReauthStart> {
+                panic!("export never reauthenticates")
+            }
+        }
+        struct DenyGuard;
+        impl ShellGuard for DenyGuard {
+            fn check(&self, _: i64) -> Result<()> {
+                anyhow::bail!("fixture_native_guard_refused")
+            }
+        }
+        let headers = HeaderMap::from_iter([(header::HOST, "security.example.com".parse()?)]);
+        let mut shell = isolated_shell()?;
+        Arc::get_mut(&mut shell).unwrap().guard = Some(Arc::new(DenyGuard));
+        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+            assert_eq!(
+                shell
+                    .dispatch(&Method::GET, path, None, &headers, &[], 5)
+                    .unwrap_err()
+                    .to_string(),
+                "fixture_native_guard_refused"
+            );
+        }
+        let shell_mut = Arc::get_mut(&mut shell).unwrap();
+        shell_mut.guard = None;
+        shell_mut.authenticator = Arc::new(DenyIdentity);
+        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+            assert_eq!(
+                shell
+                    .dispatch(&Method::GET, path, None, &headers, &[], 5)
+                    .unwrap_err()
+                    .to_string(),
+                "fixture_identity_refused"
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -3824,6 +3950,30 @@ mod tests {
             }
         }
 
+        impl crate::managed_credentials::effects::Hooks for CredentialClock {
+            fn domain(&self) -> u64 {
+                effects::Hooks::domain(self.0.as_ref())
+            }
+
+            fn wall_time(&self) -> Result<i64> {
+                effects::Hooks::wall_time(self.0.as_ref())
+            }
+
+            fn monotonic(&self) -> Duration {
+                effects::Hooks::monotonic(self.0.as_ref())
+            }
+
+            fn fill_id(&self, bytes: &mut [u8]) -> Result<()> {
+                getrandom::fill(bytes)?;
+                Ok(())
+            }
+
+            fn fill_secret(&self, bytes: &mut [u8]) -> Result<()> {
+                getrandom::fill(bytes)?;
+                Ok(())
+            }
+        }
+
         let mut world = browser_world(1)?;
         let clock = super::super::simulation::World::new(904);
         clock.advance(u64::try_from(
@@ -3835,7 +3985,7 @@ mod tests {
         world.runtime = world
             .runtime
             .with_host(Arc::new(CredentialClock(clock.clone())), clock.clone());
-        effects::scope(clock.clone(), || {
+        let run = || {
             let identity = iap::Verified {
                 email: "alice@example.com".into(),
                 subject: "accounts.google.com:google-alice".into(),
@@ -3922,7 +4072,12 @@ mod tests {
                 iap::ASSERTION_HEADER,
                 assertions[iap::ASSERTION_HEADER].clone(),
             );
+            let credential_started = crate::managed_credentials::effects::Instant::now();
             clock.advance(1);
+            assert_eq!(
+                credential_started.checked_elapsed(),
+                Some(Duration::from_secs(1))
+            );
             assert_eq!(effects::wall_time()?, world.now + 1);
             assert_eq!(
                 world.runtime.host().now_ms()?.div_euclid(1000),
@@ -4051,6 +4206,7 @@ mod tests {
             );
             let at = world.now + 1;
             assert_eq!(effects::wall_time()?, at);
+            assert_eq!(crate::managed_credentials::effects::wall_time()?, at);
             assert_eq!(
                 world.runtime.host().now_ms()?.div_euclid(1000),
                 effects::wall_time()?
@@ -4173,6 +4329,12 @@ mod tests {
                 assert_eq!(world.keys.0.load(Ordering::SeqCst), keys_before);
             }
             Ok(())
+        };
+        effects::scope(clock.clone(), || {
+            crate::managed_credentials::effects::scope(
+                Arc::new(CredentialClock(clock.clone())),
+                run,
+            )
         })
     }
 
@@ -4391,6 +4553,300 @@ mod tests {
             })?,
             0
         );
+        assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+        credential_navigation_owned_sql_preserves_exact_idempotency_and_pending_lookup()?;
+        credential_navigation_postcommit_owner_loss_withholds_url_and_latches_refusal()?;
+        credential_pending_lookup_postcommit_owner_loss_withholds_runtime_and_pending()?;
+        credential_navigation_and_lookup_metadata_cannot_supply_a_native_sql_owner()?;
+        Ok(())
+    }
+
+    /// Controlled owner checks observe committed state through a separate real
+    /// SQLite connection. They cannot see the unit's uncommitted writes.
+    struct NavigationSqlOwner {
+        clock: Arc<super::super::simulation::World>,
+        database: PathBuf,
+        refuse_when_committed: Option<&'static str>,
+        enabled: AtomicBool,
+        checks: AtomicUsize,
+    }
+
+    impl effects::Hooks for NavigationSqlOwner {
+        fn domain(&self) -> u64 {
+            effects::Hooks::domain(self.clock.as_ref())
+        }
+
+        fn wall_time(&self) -> Result<i64> {
+            effects::Hooks::wall_time(self.clock.as_ref())
+        }
+
+        fn monotonic(&self) -> Duration {
+            effects::Hooks::monotonic(self.clock.as_ref())
+        }
+
+        fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+            effects::Hooks::fill(self.clock.as_ref(), bytes)
+        }
+
+        fn send(&self, _: reqwest::blocking::Request) -> Result<effects::Response> {
+            anyhow::bail!("navigation owner fixture forbids HTTP")
+        }
+
+        fn provider_observation(&self, _: shell_oidc::ProviderObservationData) -> Result<()> {
+            anyhow::bail!("navigation owner fixture forbids provider observations")
+        }
+
+        fn simulate_runtime_owner(&self) -> bool {
+            true
+        }
+
+        fn native_check(
+            &self,
+            role: day2_capabilities::security_epoch::bootstrap::NativeRole,
+            _: Option<&day2_capabilities::security_epoch::AuthorityScope>,
+        ) -> Result<()> {
+            ensure!(
+                role == day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
+                "navigation requires App owner"
+            );
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            if self.enabled.load(Ordering::SeqCst)
+                && let Some(query) = self.refuse_when_committed
+            {
+                let db = rusqlite::Connection::open(&self.database)?;
+                let committed: bool = db.query_row(query, [], |row| row.get(0))?;
+                ensure!(!committed, "navigation owner lost after commit");
+            }
+            Ok(())
+        }
+    }
+
+    fn navigation_owner(
+        world: &BrowserWorld,
+        query: Option<&'static str>,
+    ) -> Arc<NavigationSqlOwner> {
+        Arc::new(NavigationSqlOwner {
+            clock: super::super::simulation::World::new(9173),
+            database: world.runtime.db().to_owned(),
+            refuse_when_committed: query,
+            enabled: AtomicBool::new(true),
+            checks: AtomicUsize::new(0),
+        })
+    }
+
+    fn with_navigation_owner<T>(
+        world: &BrowserWorld,
+        owner: Arc<NavigationSqlOwner>,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let scope = day2_capabilities::security_epoch::AuthorityScope {
+            installation: world.instance.installation.clone().try_into()?,
+            environment: world.instance.environment.clone().try_into()?,
+            app: world.runtime.app().to_owned().try_into()?,
+        };
+        effects::scope(owner, || {
+            crate::oauth::native_management::fixtures::select_app_scope(&scope)?;
+            operation()
+        })
+    }
+
+    fn navigation_registry(world: &BrowserWorld) -> Result<credentials::Registry> {
+        credentials::Registry::new(
+            &world.instance,
+            vec![world.runtime.clone()],
+            world.authority.clone(),
+        )
+    }
+
+    fn navigation_identity() -> iap::Verified {
+        iap::Verified {
+            email: "alice@example.com".into(),
+            subject: "accounts.google.com:google-alice".into(),
+        }
+    }
+
+    fn credential_navigation_owned_sql_preserves_exact_idempotency_and_pending_lookup() -> Result<()>
+    {
+        let world = browser_world(10)?;
+        let owner = navigation_owner(&world, None);
+        let registry = navigation_registry(&world)?;
+        with_navigation_owner(&world, owner.clone(), || {
+            let input = serde_json::json!({"label":"Owned navigation"});
+            let first = credentials::start(
+                &world.runtime,
+                "credential_metadata.create_client",
+                "alice@example.com",
+                "owned-navigation",
+                &input,
+                Some("keys"),
+                world.now - 1,
+            )?;
+            let second = credentials::start(
+                &world.runtime,
+                "credential_metadata.create_client",
+                "alice@example.com",
+                "owned-navigation",
+                &input,
+                Some("keys"),
+                world.now - 1,
+            )?;
+            assert_eq!(first, second);
+            let url = url::Url::parse(&first)?;
+            let attempt = url
+                .path()
+                .strip_prefix(credentials::PREFIX)
+                .context("navigation path")?;
+            let (_, pending) = registry
+                .resolve(attempt, &navigation_identity(), world.now)?
+                .context("owned pending missing")?;
+            assert_eq!(pending.invocation, "owned-navigation");
+            assert_eq!(pending.input, input);
+            assert_eq!(pending.created_at, world.now - 1);
+            assert_eq!(pending.expires_at, world.now + 299);
+            assert!(owner.checks.load(Ordering::SeqCst) > 0);
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    fn credential_navigation_postcommit_owner_loss_withholds_url_and_latches_refusal() -> Result<()>
+    {
+        let world = browser_world(10)?;
+        let owner = navigation_owner(
+            &world,
+            Some(
+                "SELECT EXISTS(SELECT 1 FROM day2_credential_browser WHERE invocation='owned-navigation')",
+            ),
+        );
+        with_navigation_owner(&world, owner.clone(), || {
+            let input = serde_json::json!({"label":"Owned navigation"});
+            let result = credentials::start(
+                &world.runtime,
+                "credential_metadata.create_client",
+                "alice@example.com",
+                "owned-navigation",
+                &input,
+                None,
+                world.now - 1,
+            );
+            assert!(
+                result.is_err(),
+                "postcommit refusal must withhold navigation"
+            );
+            let db = open(world.runtime.db())?;
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_credential_browser", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                1
+            );
+            owner.enabled.store(false, Ordering::SeqCst);
+            assert!(
+                credentials::start(
+                    &world.runtime,
+                    "credential_metadata.create_client",
+                    "alice@example.com",
+                    "later-navigation",
+                    &input,
+                    None,
+                    world.now
+                )
+                .is_err()
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_credential_browser", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                1
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    fn credential_pending_lookup_postcommit_owner_loss_withholds_runtime_and_pending() -> Result<()>
+    {
+        let world = browser_world(10)?;
+        let location = credentials::start(
+            &world.runtime,
+            "credential_metadata.create_client",
+            "alice@example.com",
+            "owned-lookup",
+            &serde_json::json!({"label":"Owned lookup"}),
+            None,
+            world.now - 1,
+        )?;
+        let url = url::Url::parse(&location)?;
+        let attempt = url
+            .path()
+            .strip_prefix(credentials::PREFIX)
+            .context("navigation path")?;
+        let registry = navigation_registry(&world)?;
+        let db = open(world.runtime.db())?;
+        db.execute(
+            "DELETE FROM day2_principals WHERE email='alice@example.com'",
+            [],
+        )?;
+        let owner = navigation_owner(
+            &world,
+            Some(
+                "SELECT EXISTS(SELECT 1 FROM day2_principals WHERE email='alice@example.com' AND subject='accounts.google.com:google-alice')",
+            ),
+        );
+        with_navigation_owner(&world, owner.clone(), || {
+            assert!(
+                registry
+                    .resolve(attempt, &navigation_identity(), world.now)
+                    .is_err(),
+                "postcommit refusal must withhold Pending and Runtime"
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM day2_principals WHERE email='alice@example.com'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            owner.enabled.store(false, Ordering::SeqCst);
+            assert!(
+                registry
+                    .resolve(attempt, &navigation_identity(), world.now)
+                    .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    fn credential_navigation_and_lookup_metadata_cannot_supply_a_native_sql_owner() -> Result<()> {
+        let world = browser_world(10)?;
+        let native = crate::store::Runtime::from_artifact_for_tests(
+            world.runtime.instance_path().to_owned(),
+            world.runtime.app().into(),
+            PathBuf::from("/state/day2-native/day2-initial.sqlite"),
+            world.runtime.artifact().clone(),
+        )?
+        .with_credential_authority(world.authority.clone());
+        let error = credentials::start(
+            &native,
+            "credential_metadata.create_client",
+            "alice@example.com",
+            "unowned-navigation",
+            &serde_json::json!({"label":"Unowned"}),
+            None,
+            world.now,
+        )
+        .err()
+        .context("native navigation unexpectedly admitted")?;
+        assert_eq!(error.to_string(), "native runtime executor missing");
+        let registry =
+            credentials::Registry::new(&world.instance, vec![native], world.authority.clone())?;
+        let error = registry
+            .resolve("credential-unowned", &navigation_identity(), world.now)
+            .err()
+            .context("native lookup unexpectedly admitted")?;
+        assert_eq!(error.to_string(), "native runtime executor missing");
         assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
         Ok(())
     }

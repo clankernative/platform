@@ -17,18 +17,38 @@ those entries cannot seed main or another PR. Existing repository storage limits
 and eviction apply. No paid cache allowance is enabled.
 
 Main publishes the Linux bootstrap actions it already compiled. Its queue-proof
-fast path skips native preparation, so a separate Mac publisher downloads only
-the compiler-action archive from the exact origin run and attempt admitted by
+fast path skips native preparation, so separate Linux and Mac publishers download only
+the compiler-action archives from the exact origin run and attempt admitted by
 the existing full-proof guard. The origin identifiers are emitted only after
 source, latest-attempt, checks and receipt admission succeed. On ordinary full
 runs the publisher uses that same run after verification succeeds. It does not
 compile again or publish runtime, fixture, documentation or installation
 outcomes. All existing verification and native admission remain mandatory.
 
-Mac actions retain their OS/architecture partition and source/run/attempt keys.
+Linux test preparation retains its completed compiler-action archive after the
+ordinary recipe succeeds. The Linux publisher uses the existing test-action keys,
+avoiding duplicate snapshots within a branch. All Linux consumers prefer those
+keys over older bootstrap-only fallbacks; exact-source keys still take precedence.
+A missing archive, including on a
+failed-jobs-only rerun with an earlier producer attempt, merely loses this optional
+acceleration. It cannot supply a receipt or skip the current verification gate.
+
+The final verification join also restores that retained compiler-action archive
+before compiling its current admission guard. It uses its own preparation run and
+attempt, or the exact queue origin already admitted by the reuse guard. This
+keeps a cache entry evicted during a long runtime campaign from forcing a cold
+verifier rebuild inside the join's unchanged twenty-minute budget. Artifact
+transport has the same two-minute deadline and one retry; failures leave the
+ordinary compilation path in place. The archive contains only content-addressed
+compiler data, never a verifier to install directly or a reusable test outcome.
+Bazel still builds the current source verifier, and native-output selection,
+source/byte/mode admission and complete receipt composition still follow it.
+The other Linux consumers retain their existing same-run cache restore.
+
+Both platforms retain their OS/architecture partition and source/run/attempt keys.
 The publisher runs in the caller's GitHub cache scope: PRs still cannot write
 main's cache. The trusted main push is what makes its snapshot available to
-later PRs. Artifact download has a two-minute deadline and one automatic retry;
+later PRs and merge groups. Artifact download has a two-minute deadline and one automatic retry;
 cache-only transport/extraction/save failures fall back to normal compilation.
 No new server, cloud resource, permission to write repository contents, or paid
 storage setting is introduced.

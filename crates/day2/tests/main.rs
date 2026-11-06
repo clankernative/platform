@@ -51,6 +51,7 @@ mod reports_http;
 mod request_identity;
 mod resource_admin;
 mod retention;
+mod rolling;
 mod routing;
 mod runtime;
 mod schedule_hold_gate;

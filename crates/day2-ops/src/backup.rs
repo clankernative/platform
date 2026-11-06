@@ -57,6 +57,8 @@ pub struct Manifest {
     /// Reviewed local provider stores. Older format-2 backups predate this field.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_databases: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollout_artifacts: Option<String>,
     /// Additional durable companion state, keyed by its path beneath `.state`.
     pub companion_state: BTreeMap<String, String>,
     pub app: String,
@@ -701,6 +703,17 @@ pub fn take_with_companion_state(
     // quiesced provider work, as the managed local checkpoint does before take.
     // This is not an atomic distributed snapshot of arbitrary active executors.
     let provider_databases = snapshot_providers(runtime.db(), output)?;
+    // Artifact publication is append-only and precedes the business release
+    // record. A later snapshot therefore contains every bundle referenced by
+    // the already captured app snapshot, without stopping the writer.
+    let artifact_database = runtime.db().with_extension("artifacts.sqlite");
+    let rollout_artifacts = if artifact_database.exists() {
+        let destination = output.join("rollout-artifacts.sqlite");
+        snapshot_database(&artifact_database, &destination)?;
+        Some(database_digest(&destination)?)
+    } else {
+        None
+    };
     let companion_state = snapshot_companion_state(
         runtime.db().parent().context("app state directory")?,
         output,
@@ -727,6 +740,7 @@ pub fn take_with_companion_state(
         artifact: active.artifact_id,
         database: database_digest(&database)?,
         provider_databases,
+        rollout_artifacts,
         companion_state,
         app: app.into(),
         authority: active.stamp,
@@ -764,6 +778,14 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
         "backup database digest mismatch"
     );
     verify_providers(backup, &manifest.provider_databases)?;
+    if let Some(expected) = &manifest.rollout_artifacts {
+        let path = backup.join("rollout-artifacts.sqlite");
+        ensure!(
+            database_digest(&path)? == *expected,
+            "rollout_artifact_backup_changed"
+        );
+        integrity(&path)?;
+    }
     verify_companion_state(backup, &manifest.companion_state)?;
     let artifact = day2::artifact::LoadedArtifact::load(&backup.join(&artifact_relative))?;
     ensure!(
@@ -846,6 +868,14 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
         fs::copy(
             backup.join("providers").join(name),
             output.join(".state").join(name),
+        )?;
+    }
+    if manifest.rollout_artifacts.is_some() {
+        fs::copy(
+            backup.join("rollout-artifacts.sqlite"),
+            output
+                .join(".state")
+                .join(format!("{}.artifacts.sqlite", manifest.app)),
         )?;
     }
     let mut companion_budget = CompanionBudget::default();
@@ -1083,6 +1113,7 @@ mod tests {
                 artifact: day2::digest(b"historical artifact"),
                 database: day2::digest(b"historical database"),
                 provider_databases: BTreeMap::new(),
+                rollout_artifacts: None,
                 companion_state: BTreeMap::new(),
                 app: app.into(),
                 authority: authority_state::AuthorityStamp {
@@ -1253,6 +1284,7 @@ mod tests {
             artifact: day2::digest(b"artifact"),
             database: day2::digest(b"database"),
             provider_databases: BTreeMap::new(),
+            rollout_artifacts: None,
             companion_state: BTreeMap::new(),
             app: "primary".into(),
             authority: authority_state::AuthorityStamp {

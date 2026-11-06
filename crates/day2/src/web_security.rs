@@ -199,7 +199,12 @@ impl Ticket {
     pub fn verify(&self, runtime: &Runtime, session: &Session, now: i64) -> Result<()> {
         ensure!(
             self.scope == runtime.scope()
-                && self.artifact == runtime.artifact().id()
+                && (self.artifact == runtime.artifact().id()
+                    || runtime.sql_read(|db| crate::rollout::compatible_ticket(
+                        db,
+                        runtime,
+                        &self.artifact
+                    ))?)
                 && self.session == session.hash
                 && self.actor == session.actor,
             crate::error::Failure::TicketScopeMismatch

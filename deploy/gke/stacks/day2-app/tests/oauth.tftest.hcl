@@ -76,8 +76,8 @@ run "renders_the_native_selected_instance_without_rewriting_pins" {
   }
   assert {
     condition = (
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "--edge"]) &&
-      kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/instance-sha256"] == sha256(kubernetes_config_map_v1.instance.data["instance.json"]) &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "--edge"]) &&
+      kubernetes_stateful_set_v1.day2[0].spec[0].template[0].metadata[0].annotations["day2.dev/instance-sha256"] == sha256(kubernetes_config_map_v1.instance.data["instance.json"]) &&
       length(kubernetes_manifest.credentials) == 0 &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].service_account_name == "backup"
     )

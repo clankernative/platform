@@ -251,6 +251,67 @@ impl Operations {
                     _ => anyhow::bail!("unknown resource administration operation"),
                 }
             }
+            "app-owners" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    action: String,
+                    instance: PathBuf,
+                    app_name: String,
+                    operator: String,
+                    input_json: String,
+                }
+                let parameters: Input = input(&request)?;
+                ensure!(
+                    parameters.input_json.len() <= 4096,
+                    "owner_input_byte_budget"
+                );
+                let runtime =
+                    day2::store::Runtime::load(&parameters.instance, &parameters.app_name)?;
+                let operator =
+                    day2::authority_state::LocalOperator::assert_local(&parameters.operator)?;
+                let result = match parameters.action.as_str() {
+                    "list" => {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct Empty {}
+                        let _: Empty = day2::json::decode(parameters.input_json.as_bytes())?;
+                        serde_json::to_value(day2::owners::inspect(&runtime, &operator)?)?
+                    }
+                    "check" => {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct Check {
+                            actor: String,
+                            permission: day2::owners::Permission,
+                        }
+                        let check: Check = day2::json::decode(parameters.input_json.as_bytes())?;
+                        let allowed = day2::owners::check(
+                            &runtime,
+                            &operator,
+                            &check.actor,
+                            check.permission,
+                        )?;
+                        json!({"actor":check.actor,"permission":check.permission,"allowed":allowed})
+                    }
+                    "add" | "remove" => {
+                        let change: day2::owners::Change =
+                            day2::json::decode(parameters.input_json.as_bytes())?;
+                        let operation = if parameters.action == "add" {
+                            day2::owners::Operation::Add
+                        } else {
+                            day2::owners::Operation::Remove
+                        };
+                        let receipt =
+                            day2::owners::change(&runtime, &operator, operation, &change)?;
+                        json!({"owner":change.owner,"request_id":change.request_id,"expected":change.expected,"receipt":receipt,"desired_config_changed":false})
+                    }
+                    _ => anyhow::bail!("unknown_owner_operation"),
+                };
+                Ok(
+                    json!({"protocol":1,"kind":"app-owners","scope":runtime.scope(),"app":parameters.app_name,"action":parameters.action,"mode":"local-operator-only","result":result}),
+                )
+            }
             "authority-inspect" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -320,6 +381,7 @@ impl Operations {
                     &operator,
                     &expected,
                     &parameters.request_id,
+                    &parameters.instance,
                 )?;
                 Ok(json!({"artifact":target.id(),"receipt":receipt,"mode":"local-operator-only"}))
             }
@@ -579,6 +641,17 @@ impl Operations {
                 self.maintenance()?.migration(&step)
             }
             "maintenance-admission" => self.maintenance()?.admission(),
+            "maintenance-store-admission" => self.maintenance()?.store_admission(),
+            "maintenance-rollout-resume" => self.maintenance()?.rollout_resume(),
+            "maintenance-rollout" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    step: String,
+                }
+                let step = input::<Input>(&request)?.step;
+                self.maintenance()?.rollout(&step)
+            }
             "maintenance-confirm" => self.maintenance()?.confirm(),
             "maintenance-fence" => self.maintenance()?.fence(),
             "maintenance-mark-activated" => self.maintenance()?.mark_activated(),

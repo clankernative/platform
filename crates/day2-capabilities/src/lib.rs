@@ -13,6 +13,7 @@ pub mod integrations;
 pub mod oauth;
 pub mod registry;
 pub mod resources;
+pub mod restore_passkeys;
 pub mod runtime;
 pub mod security_epoch;
 
@@ -266,6 +267,9 @@ pub struct InstallationControl {
     /// Explicit operator-owned initial bootstrap intents; never startup authority.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub security_bootstraps: BTreeMap<Name, security_epoch::bootstrap::InitialBootstrapPolicy>,
+    /// Reviewed public admin passkeys; metadata alone is never authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_passkeys: Option<restore_passkeys::Registry>,
 }
 
 impl InstallationControl {
@@ -301,7 +305,8 @@ impl InstallationControl {
                     && self.runtimes.is_empty()
                     && self.secrets.is_empty()
                     && self.security_epochs.is_empty()
-                    && self.security_bootstraps.is_empty()),
+                    && self.security_bootstraps.is_empty()
+                    && self.restore_passkeys.is_none()),
             "operator_only_control_cannot_have_provider_bindings"
         );
         for provider in self.builders.values() {
@@ -331,6 +336,9 @@ impl InstallationControl {
             Name::try_from(task_queue.clone())?;
         }
         let installed: BTreeSet<_> = installed_apps.into_iter().collect();
+        if let Some(registry) = &self.restore_passkeys {
+            registry.validate()?;
+        }
         let mut epoch_scopes = BTreeSet::new();
         let mut epoch_authorities = BTreeSet::new();
         for store in self.security_epochs.values() {

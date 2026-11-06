@@ -14,6 +14,9 @@ Maintain :: [].{
 		# The pod's scratch is sized from the store on the stopped volume.
 		_ = Capability.call!("maintenance-measure", "{}", host!)?
 		_ = Capability.call!("maintenance-pod", "{}", host!)?
+		if operation == "rollout" {
+			return rolling!(host!)
+		}
 		_ = match operation {
 			"inspect" => workflow!("authority-inspect", host!)?
 			"backup" => backup!(host!)?
@@ -35,6 +38,7 @@ Maintain :: [].{
 				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "apply" }), host!)?
 				_ = workflow!("authority-inspect", host!)?
 				_ = workflow!("authority-activate", host!)?
+				_ = Capability.call!("maintenance-store-admission", "{}", host!)?
 				# Only now may a release or an apply roll the app to the target image.
 				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}
@@ -46,6 +50,29 @@ Maintain :: [].{
 			}
 			_ => return Err("maintain operation must be inspect, backup, authority-apply, activate or mark-activated")
 		}
+		Capability.call!("maintenance-finish", "{}", host!)
+	}
+
+	rolling! : (Str => Try(Str, Str)) => Try(Str, Str)
+	rolling! = |host!| {
+		raw = Capability.call!("maintenance-rollout-resume", "{}", host!)?
+		previous : { resuming : Bool }
+		previous = Json.parse(raw).map_err(|_| "invalid rollout resume observation")?
+		if !previous.resuming {
+			_ = backup!(host!)?
+			_ = Capability.call!("maintenance-migration", Json.to_str({ step: "plan" }), host!)?
+			_ = Capability.call!("maintenance-admission", "{}", host!)?
+			_ = Capability.call!("maintenance-confirm", "{}", host!)?
+		}
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "prepare" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "bind" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "admit" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "deploy" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "observe" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "probe" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "promote" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "wait" }), host!)?
+		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "complete" }), host!)?
 		Capability.call!("maintenance-finish", "{}", host!)
 	}
 

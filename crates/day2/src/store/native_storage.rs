@@ -75,6 +75,7 @@ impl Runtime {
                 app_calls: None,
                 credentials: None,
                 connections: None,
+                rolling: false,
                 scope: metadata.scope,
                 hosted_domain: desired.hosted_domain().map(str::to_owned),
                 instance_path: metadata.instance_path,
