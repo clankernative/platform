@@ -173,8 +173,9 @@ impl ControllerAdminReader<'_, '_, '_> {
     /// SQL-safe retained-resource check for the short closed TrustedKey loan.
     /// No provider/configuration read, policy SQL, new stage or clock is added.
     pub(crate) fn check_registry_local(&mut self) -> Result<()> {
-        let requested = self.loan.check_local();
-        let checked = self.sqlite.check_handles();
+        self.loan.check_local()?;
+        let requested = self.sqlite.check_handles();
+        let checked = self.loan.check_local();
         if requested.is_err() || checked.is_err() {
             self.refuse();
         }

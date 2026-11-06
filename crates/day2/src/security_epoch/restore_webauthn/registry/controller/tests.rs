@@ -165,12 +165,17 @@ fn actual_controller_key_loan_keeps_the_native_reader_and_postchecks() {
     }
 }
 
-#[test]
-fn actual_registry_local_loan_does_not_open_sql_or_reobserve_a_provider() {
-    let file = syn::parse_file(include_str!("../../../bootstrap/admin_read/reader.rs")).unwrap();
+fn registry_local(source: &str) -> bool {
+    let file = syn::parse_file(source).unwrap();
     let local = method(&file, "ControllerAdminReader", "check_registry_local");
     let trace = calls(&local.block);
-    assert!(before(&trace, "check_local", "check_handles"));
+    if trace.iter().filter(|call| *call == "check_local").count() != 2
+        || !before(&trace, "check_local", "check_handles")
+        || trace.iter().rposition(|call| call == "check_local")
+            <= trace.iter().position(|call| call == "check_handles")
+    {
+        return false;
+    }
     for forbidden in [
         "registry_data",
         "check_action",
@@ -180,10 +185,29 @@ fn actual_registry_local_loan_does_not_open_sql_or_reobserve_a_provider() {
         "transaction",
         "begin_current_stage",
     ] {
-        assert!(!trace.iter().any(|call| call == forbidden));
+        if trace.iter().any(|call| call == forbidden) {
+            return false;
+        }
     }
     let captured = method(&file, "ControllerAdminReader", "registry_data")
         .to_token_stream()
         .to_string();
-    assert!(captured.contains("self . check (self . metadata"));
+    captured.contains("self . check (self . metadata")
+}
+
+#[test]
+fn actual_registry_local_loan_brackets_handles_without_sql_or_provider_work() {
+    let source = include_str!("../../../bootstrap/admin_read/reader.rs");
+    assert!(registry_local(source));
+    let omitted = source.replacen(
+        "let checked = self.loan.check_local();",
+        "let checked = Ok(());",
+        1,
+    );
+    assert_ne!(omitted, source);
+    assert!(!registry_local(&omitted));
+    let old = "let requested = self.sqlite.check_handles();\n        let checked = self.loan.check_local();";
+    let early = "let checked = self.loan.check_local();\n        let requested = self.sqlite.check_handles();";
+    assert_eq!(source.matches(old).count(), 1);
+    assert!(!registry_local(&source.replacen(old, early, 1)));
 }
