@@ -13,13 +13,13 @@ holder. It never relabels the initial seed or adopts the old first holder. The
 existing initial bootstrap reader explicitly refuses the new restored phase.
 Ordinary serving is not enabled by this change.
 
-The transaction captures all eight versioned records: root, sentinel, initial
+The transaction captures all nine versioned records: root, sentinel, initial
 creation, initial activation, epoch advance, restore reservation, terminal
-settlement and consumed grant. It also requires the writer-operation name to be
+settlement, consumed grant and the exact signed approval publication. It also requires the writer-operation name to be
 absent. Equal-value rewrites are changes. Current approval, keys, epoch and
 exclusive deadlines are rechecked when preparing the write body.
 
-One Firestore read-write transaction reads those nine names. It updates root and
+One Firestore read-write transaction reads those ten names. It updates root and
 sentinel with explicit version preconditions and creates one writer record. The
 other captured records remain in the transaction read set. The three ordered
 write results and commit time are checked against a fresh strong read, including
