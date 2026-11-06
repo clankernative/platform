@@ -286,7 +286,7 @@ fn freeze(
     selection: protocol::FreezeSelection,
     request: day2_capabilities::Digest,
 ) -> Result<()> {
-    use super::{NativeRole, protocol::StagePurpose};
+    use super::NativeRole;
     ensure!(!*issuance_closed, "native_enrollment_issuance_closed");
     let controller = &selection.controller;
     let app = &selection.app;
@@ -302,15 +302,7 @@ fn freeze(
                 && statement.stage.data.role == role,
             "native_restore_issuer_selection_changed"
         );
-        statement
-            .original
-            .validate_request(now, StagePurpose::CurrentRole)?;
-        protocol::verify(
-            &issuer.certificate.data.public_key,
-            "role-stage",
-            &statement.stage.data,
-            &statement.stage.signature,
-        )?;
+        statement.validate_issuer_stage_data(&issuer.policy, &issuer.certificate, role, now)?;
         let key = (
             statement.stage.data.process.process,
             statement.stage.data.process.start_ticks,
@@ -384,6 +376,15 @@ fn freeze(
         challenge,
     };
     let signature = issuer.key.sign("restore-issuer-frozen", &statement)?;
+    // Recheck the signed CurrentRole bounds after nonce/bind IO on the same
+    // clock. This remains enrollment DATA validation, not App liveness/Stop.
+    let now = acquisition.sample()?.elapsed;
+    for (statement, role) in [
+        (&statement.selection.app, NativeRole::AppHost),
+        (&statement.selection.controller, NativeRole::EpochController),
+    ] {
+        statement.validate_issuer_stage_data(&issuer.policy, &issuer.certificate, role, now)?;
+    }
     // Same publication guards as enrollment, on the actual entry snapshot and
     // original request acquisition; freezing is not an issuer-check exemption.
     issuer.certificate.verify(&issuer.policy)?;

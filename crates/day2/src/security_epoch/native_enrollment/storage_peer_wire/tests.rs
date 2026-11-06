@@ -3772,3 +3772,48 @@ fn freeze_records_are_map_only_through_both_actual_wire_decoders() -> anyhow::Re
     }
     Ok(())
 }
+
+#[test]
+fn issuer_stage_data_refuses_bootstrap_rebinding_and_signed_deadline_equality() -> anyhow::Result<()>
+{
+    let (policy, app, _, issuer) = fixture_with_issuer(NativeRole::AppHost);
+    let now = Duration::from_secs(102);
+    app.validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)?;
+    assert!(
+        app.validate_issuer_stage_data(&policy, &app.certificate, NativeRole::EpochController, now)
+            .is_err()
+    );
+    assert!(
+        app.validate_issuer_stage_data(
+            &policy,
+            &app.certificate,
+            NativeRole::AppHost,
+            Duration::from_secs(105)
+        )
+        .is_err()
+    );
+    let mut bootstrap = app.clone();
+    bootstrap.stage.data.purpose = StagePurpose::StorageBootstrap;
+    bootstrap.stage.signature = issuer.sign("role-stage", &bootstrap.stage.data)?;
+    // Even validly signed bootstrap cannot borrow a Current-only envelope.
+    assert!(
+        bootstrap
+            .validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)
+            .is_err()
+    );
+    let mut extension = app.clone();
+    extension.original.deadline_ns += 1;
+    assert!(
+        extension
+            .validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)
+            .is_err()
+    );
+    let mut later_origin = app.clone();
+    later_origin.original.origin_ns += 1;
+    assert!(
+        later_origin
+            .validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)
+            .is_err()
+    );
+    Ok(())
+}
