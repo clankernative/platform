@@ -39,7 +39,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
       "scope": "const",
-      "fingerprint": "sha256:053d8528c554666043a3ca2e51cba2133a81f486494ea01925fa4cefc21b8bad"
+      "fingerprint": "sha256:aaba537978858c171020af93083641207ce44e1282fb759a9344fc3e7b518433"
     },
     {
       "source": "crates/day2/src/security_epoch/credential_material.rs",
