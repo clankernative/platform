@@ -27,6 +27,7 @@ use std::{
 mod request;
 mod response;
 mod response_tickets;
+pub(crate) use response_tickets::AppAuthorityStop;
 
 type Role = response::Role<EnrolledProcessRoleOwner>;
 
@@ -209,6 +210,10 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
             }
             storage => storage,
         };
+        // Bind the actual cohort before its first business grant. The index
+        // retains only a Weak denial link, never a replacement native owner.
+        let response_rights = response_tickets::ResponseRights::new();
+        response_rights.install_issuance(selection.scope())?;
         ensure!(
             selected
                 .insert(
@@ -219,7 +224,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                         selection: selection.clone(),
                         originals: BTreeMap::new(),
                         storage,
-                        response_rights: response_tickets::ResponseRights::new(),
+                        response_rights,
                     }
                 )
                 .is_none(),
@@ -729,6 +734,10 @@ impl PendingWriter<'_, '_> {
 
 fn capture(owners: &mut Owners, expected: NativeRole) -> Result<Original<EnrolledClock>> {
     ensure!(owners.kind == expected, "native original role changed");
+    // Human originals can mint reveal, exchange and signature rights which
+    // outlive their SQL/response. This first restore profile cannot fence them.
+    // Mark BEFORE capture, never clear the debt after a local completion.
+    owners.response_rights.mark_unfenced()?;
     let clock = owners
         .role
         .try_borrow_mut()?
@@ -1406,6 +1415,10 @@ impl RuntimeConsumer<'_, '_> {
     pub(super) fn send<T>(&mut self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         let result = (|| {
             self.check()?;
+            if let RuntimeSource::Native { .. } = &self.source {
+                let runtime = self.runtime.context("native_authority_runtime_missing")?;
+                record_unfenced_runtime(runtime)?;
+            }
             let value = operation()?;
             self.check()?;
             Ok(value)
@@ -1449,6 +1462,16 @@ impl RuntimeConsumer<'_, '_> {
         }
         result
     }
+}
+
+/// Sticky refusal accounting, not native authority. Unsupported detached
+/// provider/observation/delegation/reveal rights keep restore closed even after
+/// a locally known response. The actual original guards still authorize work.
+pub(crate) fn record_unfenced_runtime(runtime: &crate::store::Runtime) -> Result<()> {
+    if runtime.uses_native_storage() {
+        response_tickets::record_unfenced(&sql_runtime_scope(runtime)?)?;
+    }
+    Ok(())
 }
 
 /// Closed App endpoint for the corresponding Controller admin loan. No
@@ -1528,7 +1551,14 @@ pub(super) fn with_runtime_consumer<T>(
                     runtime: Some(runtime),
                     phase: Some(phase),
                 }
-                .run(operation)
+                .run(|current| {
+                    // Actual admission/check precedes this mark. Material may
+                    // escape the callback before a provider send permit exists.
+                    if !matches!(phase, RuntimePhase::SqlRead | RuntimePhase::SqlWrite) {
+                        record_unfenced_runtime(runtime)?;
+                    }
+                    operation(current)
+                })
             },
         )
     })

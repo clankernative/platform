@@ -6,7 +6,8 @@ use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
 use std::{
     cell::{Cell, RefCell},
-    rc::Rc,
+    collections::BTreeMap,
+    rc::{Rc, Weak},
 };
 
 const MAX_OUTSTANDING: usize = 1024;
@@ -27,6 +28,9 @@ struct Record {
 struct Ledger {
     closed: Cell<bool>,
     issuance_sealed: Cell<bool>,
+    // Sticky negative debt: unsupported escaped authority is never inferred
+    // complete from response publication, elapsed time, cancellation or death.
+    unfenced_authority: Cell<bool>,
     records: RefCell<Vec<Rc<Record>>>,
 }
 
@@ -42,9 +46,31 @@ impl ResponseRights {
             ledger: Rc::new(Ledger {
                 closed: Cell::new(false),
                 issuance_sealed: Cell::new(false),
+                unfenced_authority: Cell::new(false),
                 records: RefCell::new(Vec::new()),
             }),
         }
+    }
+
+    // A nonowning denial index, installed once with the ACTUAL owner before
+    // any business admission. It remains usable while that owner is leased.
+    // Its presence/absence can never construct Stop or replace the owner.
+    pub(super) fn install_issuance(&self, scope: &AuthorityScope) -> Result<()> {
+        ISSUANCE.with(|entries| {
+            let mut entries = entries.try_borrow_mut()?;
+            let key = scope_key(scope);
+            ensure!(
+                !entries.contains_key(&key),
+                "native_authority_cohort_already_installed"
+            );
+            ensure!(entries.len() < 128, "native_authority_cohort_capacity");
+            entries.insert(key, Rc::downgrade(&self.ledger));
+            Ok(())
+        })
+    }
+
+    pub(super) fn mark_unfenced(&self) -> Result<()> {
+        mark_unfenced(&self.ledger)
     }
 
     /// Terminal exclusion of NEW response issuance on this same retained owner.
@@ -56,7 +82,13 @@ impl ResponseRights {
             !self.ledger.issuance_sealed.get(),
             "response_rights_already_sealed"
         );
+        // Exclusion precedes observation even on refusal. Never unseal when
+        // this profile cannot prove an escaped right has stopped.
         self.ledger.issuance_sealed.set(true);
+        ensure!(
+            !self.ledger.unfenced_authority.get(),
+            "native_restore_unfenced_authority"
+        );
         Ok(())
     }
 
@@ -67,6 +99,10 @@ impl ResponseRights {
         ensure!(
             !self.ledger.closed.get() && self.ledger.issuance_sealed.get(),
             "response_rights_not_sealed"
+        );
+        ensure!(
+            !self.ledger.unfenced_authority.get(),
+            "native_restore_unfenced_authority"
         );
         let records = self.ledger.records.try_borrow()?;
         ensure!(
@@ -101,6 +137,75 @@ impl ResponseRights {
             ledger: self.ledger.clone(),
             record,
         })
+    }
+}
+
+thread_local! {
+    static ISSUANCE: RefCell<BTreeMap<(String, String, String), Weak<Ledger>>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+fn scope_key(scope: &AuthorityScope) -> (String, String, String) {
+    (
+        scope.installation.as_str().into(),
+        scope.environment.as_str().into(),
+        scope.app.as_str().into(),
+    )
+}
+
+fn mark_unfenced(ledger: &Ledger) -> Result<()> {
+    ensure!(
+        !ledger.closed.get() && !ledger.issuance_sealed.get(),
+        "native_authority_issuance_closed"
+    );
+    ledger.unfenced_authority.set(true);
+    Ok(())
+}
+
+// Negative registration only. Actual SQL/native authorization is still
+// mandatory. A missing, dead, foreign-executor or sealed entry refuses BEFORE
+// the caller can issue an unsupported capability or start provider work.
+pub(super) fn record_unfenced(scope: &AuthorityScope) -> Result<()> {
+    ISSUANCE.with(|entries| {
+        let entries = entries.try_borrow()?;
+        let ledger = entries
+            .get(&scope_key(scope))
+            .and_then(Weak::upgrade)
+            .context("native_authority_cohort_missing")?;
+        mark_unfenced(&ledger)
+    })
+}
+
+/// A nonescaping borrow of the ACTUAL installed owner's cohort. No scope,
+/// count, receipt, fresh ledger or parsed message can construct this borrow.
+/// Even this is only one part of Stop: native peer/issuer/root checks remain.
+pub(crate) struct AppAuthorityStop<'owner> {
+    rights: &'owner mut ResponseRights,
+}
+
+impl ResponseRights {
+    pub(super) fn borrow_stop(&mut self, scope: &AuthorityScope) -> Result<AppAuthorityStop<'_>> {
+        ISSUANCE.with(|entries| {
+            let entries = entries.try_borrow()?;
+            let installed = entries
+                .get(&scope_key(scope))
+                .and_then(Weak::upgrade)
+                .context("native_authority_cohort_missing")?;
+            ensure!(
+                Rc::ptr_eq(&installed, &self.ledger) && !installed.closed.get(),
+                "native_authority_cohort_substituted"
+            );
+            Ok(())
+        })?;
+        Ok(AppAuthorityStop { rights: self })
+    }
+}
+
+impl AppAuthorityStop<'_> {
+    pub(crate) fn seal(&mut self) -> Result<()> {
+        self.rights.seal_issuance()
+    }
+    pub(crate) fn check_drained(&self) -> Result<()> {
+        self.rights.require_drained()
     }
 }
 
@@ -298,6 +403,7 @@ const _: () = {
     closed!(ResponseRights);
     closed!(ResponseTickets);
     closed!(Terminal);
+    closed!(AppAuthorityStop<'static>);
 };
 
 #[cfg(test)]
@@ -413,6 +519,67 @@ mod tests {
         drop(rights);
         terminal.complete();
         assert!(ledger.records.borrow()[0].state.get() == State::Unknown);
+        Ok(())
+    }
+
+    fn stop_scope(app: &str) -> AuthorityScope {
+        AuthorityScope {
+            installation: "fixture".to_owned().try_into().unwrap(),
+            environment: "test".to_owned().try_into().unwrap(),
+            app: app.to_owned().try_into().unwrap(),
+        }
+    }
+
+    #[test]
+    fn stopped_cohort_requires_the_actual_installed_owner_not_a_fresh_sealed_ledger() -> Result<()>
+    {
+        let scope = stop_scope("stop-installed");
+        let mut actual = ResponseRights::new();
+        actual.install_issuance(&scope)?;
+        let mut replacement = ResponseRights::new();
+        replacement.seal_issuance()?;
+        replacement.require_drained()?; // Local empty-set DATA only.
+        assert!(replacement.borrow_stop(&scope).is_err());
+        assert!(replacement.install_issuance(&scope).is_err());
+        let mut stop = actual.borrow_stop(&scope)?;
+        stop.seal()?;
+        stop.check_drained()?;
+        assert!(record_unfenced(&scope).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn escaping_authority_debt_survives_known_response_and_seals_even_when_refused() -> Result<()> {
+        let scope = stop_scope("stop-debt");
+        let (mut actual, response, tickets) = fixture();
+        actual.install_issuance(&scope)?;
+        record_unfenced(&scope)?;
+        tickets.prepare_native(&response, &actual)?.complete();
+        assert!(states(&actual) == [State::Complete]);
+        assert!(actual.seal_issuance().is_err());
+        assert!(actual.ledger.issuance_sealed.get());
+        assert!(actual.ledger.unfenced_authority.get());
+        assert!(actual.require_drained().is_err());
+        assert!(actual.register(&ResponseIdentity::new()).is_err());
+        assert!(record_unfenced(&scope).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_dead_and_foreign_executor_cohorts_cannot_issue_or_replace_history() -> Result<()> {
+        let scope = stop_scope("stop-dead");
+        assert!(record_unfenced(&scope).is_err());
+        let actual = ResponseRights::new();
+        actual.install_issuance(&scope)?;
+        let foreign = scope.clone();
+        assert!(
+            std::thread::spawn(move || record_unfenced(&foreign).is_err())
+                .join()
+                .unwrap()
+        );
+        drop(actual);
+        assert!(record_unfenced(&scope).is_err());
+        assert!(ResponseRights::new().install_issuance(&scope).is_err());
         Ok(())
     }
 
@@ -919,6 +1086,7 @@ mod tests {
         Abort,
         SealIssuance,
         LateCapture,
+        UnfencedAdmission,
     }
 
     // Independent expectation: retirement needs the original's completion AND
@@ -928,6 +1096,7 @@ mod tests {
         let (mut rights, response, tickets) = fixture();
         let mut terminal = None;
         let mut sealed = false;
+        let mut unfenced = false;
         let mut original_finished = false;
         let mut prepared = false;
         let mut uncertain = false;
@@ -935,9 +1104,18 @@ mod tests {
         let mut observations = Vec::new();
         for event in history {
             match event {
+                Event::UnfencedAdmission => {
+                    ensure!(
+                        rights.mark_unfenced().is_ok() == !sealed,
+                        "response_history_unfenced_admission"
+                    );
+                    if !sealed {
+                        unfenced = true;
+                    }
+                }
                 Event::SealIssuance => {
                     ensure!(
-                        rights.seal_issuance().is_ok() == !sealed,
+                        rights.seal_issuance().is_ok() == (!sealed && !unfenced),
                         "response_history_seal"
                     );
                     sealed = true;
@@ -994,7 +1172,7 @@ mod tests {
             let actual = states(&rights) == [State::Complete];
             ensure!(actual == completed, "response_history_terminal");
             ensure!(
-                rights.require_drained().is_ok() == (sealed && completed),
+                rights.require_drained().is_ok() == (sealed && completed && !unfenced),
                 "response_history_drain"
             );
             observations.push(actual);
@@ -1005,7 +1183,7 @@ mod tests {
     #[test]
     fn generated_response_histories_match_independent_expectations_and_replay_twice() -> Result<()>
     {
-        const EVENTS: [Event; 9] = [
+        const EVENTS: [Event; 10] = [
             Event::PeerKnown,
             Event::OriginalFinished,
             Event::Prepare,
@@ -1015,6 +1193,7 @@ mod tests {
             Event::Abort,
             Event::SealIssuance,
             Event::LateCapture,
+            Event::UnfencedAdmission,
         ];
         for seed in 0..256_u64 {
             let mut random = seed + 1;
