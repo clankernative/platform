@@ -122,4 +122,49 @@ mod tests {
         assert!(auth.is_autocommit());
         Ok(())
     }
+    #[test]
+    fn actual_adapter_forwards_actual_vfs_fd_and_file_identity_for_every_member() {
+        use quote::ToTokens;
+        fn wired(source: &str) -> bool {
+            let Ok(file) = syn::parse_file(source) else {
+                return false;
+            };
+            let Some(compare) = file.items.iter().find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "compare" => Some(item),
+                _ => None,
+            }) else {
+                return false;
+            };
+            let expected: syn::Block = syn::parse_quote!({
+                let actual = opened_files::held(connection)?;
+                files.require_opened(
+                    (actual.main.fd, actual.main.device, actual.main.inode),
+                    actual
+                        .journal
+                        .map(|file| (file.fd, file.device, file.inode)),
+                    actual.shm.map(|file| (file.fd, file.device, file.inode)),
+                    complete,
+                )
+            });
+            compare.block.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        }
+        let source = include_str!("authentication_store.rs");
+        assert!(wired(source));
+        let normalized = syn::parse_file(source)
+            .unwrap()
+            .to_token_stream()
+            .to_string();
+        for (old, new) in [
+            ("actual . main . fd", "0"),
+            ("file . fd", "0"),
+            (
+                "opened_files :: held (connection)",
+                "unobserved (connection)",
+            ),
+        ] {
+            let mutant = normalized.replacen(old, new, 1);
+            assert_ne!(normalized, mutant);
+            assert!(!wired(&mutant));
+        }
+    }
 }

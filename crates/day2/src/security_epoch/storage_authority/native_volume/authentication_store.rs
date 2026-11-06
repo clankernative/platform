@@ -492,6 +492,87 @@ mod tests {
 mod descriptor_tests {
     use super::*;
 
+    // Actual VFS observation DATA for the comparison control only. No native
+    // File/Stage/Action is constructed by a temporary SQLite fixture.
+    fn sqlite_observation(db: &rusqlite::Connection) -> Result<OpenedCohort> {
+        let _: i64 = db.query_row("SELECT count(*) FROM main.sqlite_schema", [], |row| {
+            row.get(0)
+        })?;
+        let text: String =
+            db.query_row("SELECT substr(sqlite_filestat('main'),1,8193)", [], |row| {
+                row.get(0)
+            })?;
+        let value: serde_json::Value = crate::json::decode(text.as_bytes())?;
+        fn member(value: &serde_json::Value) -> Result<(i32, u64, u64)> {
+            Ok((
+                i32::try_from(
+                    value["h"]
+                        .as_i64()
+                        .ok_or_else(|| anyhow::anyhow!("fixture_fd"))?,
+                )?,
+                value["identity"]["device"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("fixture_device"))?,
+                value["identity"]["inode"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("fixture_inode"))?,
+            ))
+        }
+        Ok(OpenedCohort {
+            main: member(&value["db"])?,
+            wal: value.get("journal").map(member).transpose()?,
+            shm: value["db"].get("shm").map(member).transpose()?,
+        })
+    }
+
+    #[test]
+    fn actual_sqlite_fd_replacement_and_restored_named_path_never_replace_the_observed_connection()
+    -> Result<()> {
+        use rusqlite::{Connection, OpenFlags};
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().canonicalize()?.join("auth.sqlite");
+        let original = Connection::open(&path)?;
+        original.pragma_update(None, "journal_mode", "WAL")?;
+        original.execute_batch("CREATE TABLE fixture(value INTEGER)")?;
+        let expected = sqlite_observation(&original)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let other = Connection::open_with_flags(&path, flags)?;
+        let same_file = sqlite_observation(&other)?;
+        assert_eq!(
+            (expected.main.1, expected.main.2),
+            (same_file.main.1, same_file.main.2)
+        );
+        assert_ne!(expected.main.0, same_file.main.0);
+        assert!(expected.require_continuation(&same_file).is_err());
+        drop(other);
+        let aba_path = directory.path().join("aba.sqlite");
+        let aba_original = Connection::open(&aba_path)?;
+        aba_original.execute_batch("CREATE TABLE fixture(value INTEGER)")?;
+        let expected_aba = sqlite_observation(&aba_original)?;
+        let foreign_path = directory.path().join("foreign.sqlite");
+        let foreign = Connection::open(&foreign_path)?;
+        foreign.execute_batch("CREATE TABLE fixture(value INTEGER)")?;
+        // Keep both genuine fixture connections alive while the fixed name is
+        // exchanged. Opening an alias is not evidence for the original owner.
+        let saved = directory.path().join("saved.sqlite");
+        std::fs::rename(&aba_path, &saved)?;
+        std::fs::rename(&foreign_path, &aba_path)?;
+        let replaced = Connection::open_with_flags(&aba_path, flags)?;
+        let observed = sqlite_observation(&replaced)?;
+        std::fs::rename(&aba_path, &foreign_path)?;
+        std::fs::rename(&saved, &aba_path)?;
+        assert_ne!(
+            (expected_aba.main.1, expected_aba.main.2),
+            (observed.main.1, observed.main.2)
+        );
+        assert!(expected_aba.require_continuation(&observed).is_err());
+        expected_aba.require_continuation(&sqlite_observation(&aba_original)?)?;
+        expected.require_continuation(&sqlite_observation(&original)?)?;
+        Ok(())
+    }
+
     #[test]
     fn actual_stage_cap_meets_reader_before_provider_io_and_again_before_file_admission() {
         use quote::ToTokens;

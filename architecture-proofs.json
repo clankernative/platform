@@ -6401,6 +6401,13 @@
       "type_name": "NativeSqliteKeeper",
       "owning_children": [
         {
+          "source": "crates/day2/src/store/native_storage/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
           "source": "crates/day2/src/store/native_storage/controller_admins.rs",
           "registration": {
             "source": "crates/day2/src/store/native_storage.rs",
@@ -6526,6 +6533,13 @@
       ],
       "proof_uses": [],
       "owning_children": [
+        {
+          "source": "crates/day2/src/store/native_storage/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "authentication_store"
+          }
+        },
         {
           "source": "crates/day2/src/store/native_storage/controller_admins.rs",
           "registration": {
