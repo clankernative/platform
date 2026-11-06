@@ -14,6 +14,8 @@
     "crates/day2-capabilities/src/resources_tests.rs",
     "crates/day2-capabilities/src/restore_passkeys.rs",
     "crates/day2-capabilities/src/restore_passkeys/tests.rs",
+    "crates/day2-capabilities/src/restore_signing.rs",
+    "crates/day2-capabilities/src/restore_signing/tests.rs",
     "crates/day2-capabilities/src/runtime.rs",
     "crates/day2-capabilities/src/security_epoch.rs",
     "crates/day2-capabilities/src/security_epoch/bootstrap.rs",
