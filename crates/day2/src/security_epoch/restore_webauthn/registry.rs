@@ -14,7 +14,7 @@ use std::{
     rc::Rc,
 };
 mod controller;
-pub(super) use controller::ControllerCeremony;
+pub(in crate::security_epoch) use controller::ControllerCeremony;
 mod file;
 
 // Not a public extension point. The fixed production implementors retain an
