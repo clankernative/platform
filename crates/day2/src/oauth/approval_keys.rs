@@ -303,11 +303,12 @@ pub(crate) fn decode_secret_access_response(
     );
     let mut response: AccessResponse =
         crate::json::decode(body).map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
+    // Own the parsed secret copy before any fallible response check.
+    let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
     ensure!(
         response.name == version.resource_name(),
         "OAuth secret version changed"
     );
-    let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
     let mut decoded = Zeroizing::new(
         STANDARD
             .decode(data.as_bytes())
@@ -735,6 +736,52 @@ mod tests {
     #[test]
     fn pure_secret_decoder_keeps_exact_version_and_its_own_transport_independent_bound()
     -> Result<()> {
+        use quote::ToTokens as _;
+        fn guarded(file: &syn::File) -> Result<bool> {
+            let functions: Vec<_> = file.items.iter().filter_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == "decode_secret_access_response" => Some(function),
+                _ => None,
+            }).collect();
+            let [function] = functions.as_slice() else { return Ok(false); };
+            let decoded: syn::Stmt = syn::parse_quote! {
+                let mut response: AccessResponse = crate::json::decode(body)
+                    .map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
+            };
+            let owned: syn::Stmt = syn::parse_quote! {
+                let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
+            };
+            let named: syn::Stmt = syn::parse_quote! {
+                ensure!(response.name == version.resource_name(), "OAuth secret version changed");
+            };
+            let indices = |expected: &syn::Stmt| function.block.stmts.iter().enumerate()
+                .filter(|(_, stmt)| stmt.to_token_stream().to_string() == expected.to_token_stream().to_string())
+                .map(|(index, _)| index).collect::<Vec<_>>();
+            let (decoded, owned, named) = (indices(&decoded), indices(&owned), indices(&named));
+            Ok(matches!((decoded.as_slice(), owned.as_slice(), named.as_slice()), ([decoded], [owned], [named]) if *owned == decoded + 1 && owned < named))
+        }
+        let file = syn::parse_file(include_str!("approval_keys.rs"))?;
+        assert!(guarded(&file)?, "parsed payload is owned before every response check");
+        for remove in [false, true] {
+            let mut changed = file.clone();
+            let mut targets = 0;
+            for item in &mut changed.items {
+                let syn::Item::Fn(function) = item else { continue; };
+                if function.sig.ident != "decode_secret_access_response" { continue; }
+                targets += 1;
+                let owned: syn::Stmt = syn::parse_quote! {
+                    let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
+                };
+                let indices: Vec<_> = function.block.stmts.iter().enumerate()
+                    .filter(|(_, stmt)| stmt.to_token_stream().to_string() == owned.to_token_stream().to_string())
+                    .map(|(index, _)| index).collect();
+                assert_eq!(indices.len(), 1, "actual parsed payload owner");
+                let index = indices[0];
+                let owner = function.block.stmts.remove(index);
+                if !remove { function.block.stmts.insert(index + 1, owner); }
+            }
+            assert_eq!(targets, 1, "actual response decoder");
+            assert!(!guarded(&changed)?, "removed/late secret owner must refuse");
+        }
         let (_, version) = fixture();
         let body = serde_json::to_vec(&response(
             &version.resource_name(),

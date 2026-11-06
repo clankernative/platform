@@ -118,6 +118,9 @@ fn peer_many(replies: Vec<(u16, Vec<u8>)>) -> (KeyHttp, thread::JoinHandle<Vec<S
                     Err(error) => panic!("key fixture accept: {:?}", error.kind()),
                 }
             };
+            // Accepted sockets may retain the listener's nonblocking mode.
+            // This fixture's synchronous bounded read must block explicitly.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
