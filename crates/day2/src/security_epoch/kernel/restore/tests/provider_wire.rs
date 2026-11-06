@@ -601,14 +601,15 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
     let (selection, before) = initial();
     let (_, plan) = approval_use::plan(&selection, &before, 47)?;
     let initial = initial_reply(&selection, &plan)?;
+    let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+        .transaction(&serde_json::to_vec(&initial)?)?;
     let strong: Vec<_> = initial.into_iter().skip(1).collect();
     let observed = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
         .strong(&serde_json::to_vec(&strong)?)?;
     let reply =
         json!({"writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)});
     let record = wire::restore_commit_reply(&serde_json::to_vec(&reply)?)?;
-    let publication_before = observed.publication.clone();
-    observed.after_commit(&record, &publication_before)?;
+    transaction.check_commit(&record, &observed)?;
     assert!(matches!(
         model::reconcile(
             &selection,
@@ -643,7 +644,7 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
     }
     let future = json!({"writeResults":vec![json!({"updateTime":"2026-11-05T00:00:00Z"});5],"commitTime":"2026-11-05T00:00:00Z"});
     let record = wire::restore_commit_reply(&serde_json::to_vec(&future)?)?;
-    assert!(observed.after_commit(&record, &publication_before).is_err());
+    assert!(transaction.check_commit(&record, &observed).is_err());
     Ok(())
 }
 
@@ -743,19 +744,15 @@ fn full_signed_publication_and_original_provider_version_are_required() -> Resul
     }
     let tx = names()?.transaction(&serde_json::to_vec(&original)?)?;
     let captured = tx.observed()?.publication;
+    assert_eq!(captured.value, expected);
     let ack = wire::restore_commit_reply(&serde_json::to_vec(&json!({
         "writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)
     }))?)?;
     let mut strong: Vec<_> = original.into_iter().skip(1).collect();
-    names()?
-        .strong(&serde_json::to_vec(&strong)?)?
-        .after_commit(&ack, &captured)?;
+    tx.check_commit(&ack, &names()?.strong(&serde_json::to_vec(&strong)?)?)?;
     strong[7]["found"]["updateTime"] = json!(version(4));
     assert!(
-        names()?
-            .strong(&serde_json::to_vec(&strong)?)?
-            .after_commit(&ack, &captured)
-            .is_err()
+        tx.check_commit(&ack, &names()?.strong(&serde_json::to_vec(&strong)?)?).is_err()
     );
     Ok(())
 }

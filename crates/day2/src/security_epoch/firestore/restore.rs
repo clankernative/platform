@@ -440,7 +440,7 @@ pub(in crate::security_epoch) struct Observed {
 impl Observed {
     /// Provider-time ordering only, not a local clock, freshness original or
     /// permission. The real sender must also keep its native postchecks.
-    pub(in crate::security_epoch) fn after_commit(
+    fn after_commit(
         &self,
         commit: &CommitRecord,
         before_publication: &Versioned<Publication>,
@@ -511,6 +511,17 @@ pub(in crate::security_epoch) struct Transaction {
 }
 
 impl Transaction {
+    /// Bind the post-read to the publication captured by THIS retained
+    /// read-write transaction. Callers cannot substitute the post-read itself
+    /// as its own before-version. This is still DATA, never consumption.
+    pub(in crate::security_epoch) fn check_commit(
+        &self,
+        commit: &CommitRecord,
+        after: &Observed,
+    ) -> Result<()> {
+        after.after_commit(commit, &self.observed()?.publication)
+    }
+
     pub(in crate::security_epoch) fn observed(&self) -> Result<Observed> {
         // Keep ownership of the header for bounded cleanup even on a semantic
         // failure. Copy bounded DATA only, without another network read or
