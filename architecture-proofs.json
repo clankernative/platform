@@ -2153,7 +2153,7 @@
         },
         {
           "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
-          "signature": "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
+          "signature": "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >"
         }
       ],
       "proof_uses": [],
