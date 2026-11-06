@@ -27,7 +27,6 @@ use std::{
 mod request;
 mod response;
 mod response_tickets;
-pub(crate) use response_tickets::AppAuthorityStop;
 
 type Role = response::Role<EnrolledProcessRoleOwner>;
 
