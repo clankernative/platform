@@ -856,6 +856,7 @@ fn apply_in<'scope, 'database, 'cut>(
 }
 
 /// Counts only; this is not image admission, maintenance or writer authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ApplicationResetSummary {
     pub(crate) credentials: crate::managed_credentials::store::restore::ResetSummary,
     pub(crate) closed_oauth_originals: usize,

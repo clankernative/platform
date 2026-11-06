@@ -80,6 +80,7 @@ use syn::visit::{self, Visit};
 
 pub(super) struct Fixture {
     state: State,
+    application: application::tests::Fixture,
     refused: bool,
     calls: usize,
     fail_after_directory: bool,
@@ -106,11 +107,11 @@ impl Checks for Fixture {
     fn local_sql(&mut self) -> Result<()> {
         self.current()
     }
-    fn application(&mut self, tx: &Transaction<'_>) -> Result<()> {
+    fn application(&mut self, tx: &Transaction<'_>) -> Result<application::Selection<'_>> {
         ensure!(!self.reject_application, "fixture_unsupported_application");
         let value: String = tx.query_row("SELECT value FROM fixture_business", [], |r| r.get(0))?;
         ensure!(value == "keep-data", "fixture_business_changed");
-        Ok(())
+        Ok(self.application.selection())
     }
     fn refuse(&mut self) {
         self.refused = true;
@@ -124,16 +125,16 @@ pub(super) struct World {
     source_digest: Digest,
 }
 pub(super) fn world() -> Result<World> {
-    let (source, mut db) = fixture::database()?;
-    fixture::committed_issue(&mut db)?;
-    db.execute_batch("CREATE TABLE fixture_business(value TEXT) STRICT; INSERT INTO fixture_business VALUES('keep-data'); CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
-    drop(db);
+    let source = tempfile::tempdir()?;
+    let application = application::tests::Fixture::new()?;
+    application.db.execute_batch("CREATE TABLE fixture_business(value TEXT) STRICT; INSERT INTO fixture_business VALUES('keep-data'); CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
+    std::fs::write(source.path().join("app.sqlite"), &*application.db.serialize(MAIN_DB)?)?;
     let path = source.path().join("app.sqlite").canonicalize()?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let source_digest = Digest::new(&std::fs::read(&path)?);
     let target = tempfile::tempdir()?;
     let root_path = target.path().canonicalize()?;
-    let owner = fixture_owner(path, root_path, source_digest.clone())?;
+    let owner = fixture_owner_with_application(path, root_path, source_digest.clone(), application)?;
     Ok(World {
         source,
         target,
@@ -146,6 +147,15 @@ pub(super) fn fixture_owner(
     root_path: PathBuf,
     database: Digest,
 ) -> Result<Fixture> {
+    fixture_owner_with_application(source, root_path, database, application::tests::Fixture::new()?)
+}
+
+fn fixture_owner_with_application(
+    source: PathBuf,
+    root_path: PathBuf,
+    database: Digest,
+    application: application::tests::Fixture,
+) -> Result<Fixture> {
     // The fixture supplies the private-root precondition explicitly, independent
     // of the process umask. Production admission must still refuse public roots.
     std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700))?;
@@ -156,7 +166,7 @@ pub(super) fn fixture_owner(
             source,
             operation: Digest::new(b"one-staging-op"),
             namespace: fixture::namespace(),
-            source_epoch: 7,
+            source_epoch: 1,
             database,
             target_incarnation: Digest::new(b"fresh-target"),
         },
@@ -181,6 +191,7 @@ pub(super) fn fixture_owner(
     };
     Ok(Fixture {
         state,
+        application,
         refused: false,
         calls: 0,
         fail_after_directory: false,
@@ -194,7 +205,8 @@ fn same_io_body_copies_resets_syncs_and_retains_the_actual_creator() -> Result<(
     effects::scope(simulation::World::new(2001), || {
         let mut w = world()?;
         let result = execute(&mut w.owner)?;
-        assert_eq!(result.reset.newly_revoked, 1);
+        assert_eq!(result.reset.credentials.newly_revoked, 1);
+        assert_eq!(result.reset.closed_oauth_originals, 1);
         assert_ne!(result.image, w.source_digest);
         assert!(w.owner.state.complete && !w.owner.refused);
         assert!(w.owner.state.creator.is_some() && w.owner.state.directory.is_some());
@@ -212,6 +224,7 @@ fn same_io_body_copies_resets_syncs_and_retains_the_actual_creator() -> Result<(
             w.owner.state.target_path()?,
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
+        w.owner.application.require_image(&db, true)?;
         assert_eq!(
             db.query_row("SELECT value FROM fixture_business", [], |r| r
                 .get::<_, String>(0))?,
@@ -230,7 +243,7 @@ fn same_io_body_copies_resets_syncs_and_retains_the_actual_creator() -> Result<(
                 [],
                 |r| r.get::<_, i64>(0)
             )?,
-            7
+            1
         );
         assert!(execute(&mut w.owner).is_err());
         assert!(w.owner.refused);
@@ -439,13 +452,30 @@ fn observe(owner: &mut Fixture, source_length: u64) -> Result<Observation> {
                 [],
                 |r| r.get::<_, i64>(0)
             )?,
-            7
+            1
         );
         match states {
-            (1, 0) => ImageState::Original,
-            (0, 1) => ImageState::Revoked,
+            (1, 0) => {
+                owner.application.require_image(&db, false)?;
+                ImageState::Original
+            }
+            (0, 1) => {
+                owner.application.require_image(&db, true)?;
+                ImageState::Revoked
+            }
             _ => anyhow::bail!("unexpected_staging_state"),
         }
+    };
+    let memory_revoked = if let Some(db) = owner.state.sql.as_ref() {
+        let revoked = db.query_row(
+            "SELECT state='revoked' FROM day2_credential_lineages",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?;
+        owner.application.require_image(db, revoked)?;
+        Some(revoked)
+    } else {
+        None
     };
     Ok(Observation {
         image,
@@ -453,19 +483,99 @@ fn observe(owner: &mut Fixture, source_length: u64) -> Result<Observation> {
         refused: owner.refused,
         creator: owner.state.creator.is_some(),
         sql_held: owner.state.sql.is_some(),
-        memory_revoked: owner
-            .state
-            .sql
-            .as_ref()
-            .map(|db| {
-                db.query_row(
-                    "SELECT state='revoked' FROM day2_credential_lineages",
-                    [],
-                    |r| r.get::<_, bool>(0),
-                )
-            })
-            .transpose()?,
+        memory_revoked,
     })
+}
+
+#[test]
+fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_whole_image() -> Result<()> {
+    for fault in 0..3 {
+        effects::scope(simulation::World::new(2110 + fault), || -> Result<()> {
+            let mut w = world()?;
+            let db = Connection::open(&w.owner.state.input.source)?;
+            match fault {
+                0 => { db.execute("UPDATE day2_meta SET value=?1 WHERE key='schema'", [Digest::new(b"foreign-schema").as_str()])?; }
+                1 => { db.execute("UPDATE day2_authority SET artifact_id=?1", [Digest::new(b"foreign-artifact").as_str()])?; }
+                _ => { db.execute("UPDATE oauth_connection_slots SET account='foreign-account' WHERE slot='old-slot'", [])?; }
+            }
+            drop(db);
+            let bytes = std::fs::read(&w.owner.state.input.source)?;
+            let changed = Digest::new(&bytes);
+            // Bind the changed image itself. Digest refusal cannot substitute
+            // for comparing its actual schema, authority and OAuth inventory.
+            w.owner.state.input.database = changed.clone();
+            assert!(execute(&mut w.owner).is_err());
+            assert!(w.owner.refused && !w.owner.state.complete);
+            assert!(!w.owner.state.directory_may_exist && w.owner.state.creator.is_none());
+            assert!(!w.owner.state.target_dir()?.try_exists()?);
+            {
+                let sql = w.owner.state.sql.as_ref().context("failed_reset_scratch_missing")?;
+                assert!(sql.is_autocommit());
+                assert_eq!(sql.query_row("SELECT state FROM day2_credential_lineages", [], |r| r.get::<_,String>(0))?, "active");
+                assert_eq!(sql.query_row("SELECT status FROM oauth_connection_slots WHERE slot='old-slot'", [], |r| r.get::<_,String>(0))?, "active");
+                assert!(crate::authority_state::current(sql)?.document.enabled);
+                assert_eq!(sql.query_row("SELECT count(*) FROM day2_web_sessions", [], |r| r.get::<_, i64>(0))?,1);
+            }
+            assert_eq!(Digest::new(&std::fs::read(&w.owner.state.input.source)?), changed);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_postcheck() {
+    use quote::ToTokens as _;
+    struct Calls(Vec<String>);
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            self.0.push(call.to_token_stream().to_string());
+            visit::visit_expr_call(self,call);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.0.push(call.to_token_stream().to_string());
+            visit::visit_expr_method_call(self,call);
+        }
+    }
+    fn valid(source:&str) -> bool {
+        let file=syn::parse_file(source).unwrap();
+        let functions:Vec<_>=file.items.iter().filter_map(|i|match i {syn::Item::Fn(f) if f.sig.ident=="prepare_image"=>Some(f),_=>None}).collect();
+        if functions.len()!=1 {return false;}
+        let tail:syn::Block=syn::parse_quote!({
+            drop(loan);
+            let post=owner.local_sql();
+            let reset=reset?;
+            post?;
+            close_sql(owner)?;
+            Ok(reset)
+        });
+        if functions[0].block.stmts.len()<tail.stmts.len() || !functions[0].block.stmts.iter().rev().take(tail.stmts.len()).zip(tail.stmts.iter().rev()).all(|(actual,expected)|actual.to_token_stream().to_string()==expected.to_token_stream().to_string()) {return false;}
+        let mut calls=Calls(Vec::new());
+        calls.visit_block(&functions[0].block);
+        let ordered=["db . transaction_with_behavior (TransactionBehavior :: Immediate)","current . application (& tx)","application :: reset_in (& tx , & selected , & ns , epoch)","tx . commit ()","db . serialize (MAIN_DB)","drop (loan)","owner . local_sql ()","close_sql (owner)"];
+        let mut previous=None;
+        for expected in ordered {
+            let positions:Vec<_>=calls.0.iter().enumerate().filter(|(i,c)|c.as_str()==expected && previous.is_none_or(|last|last<*i)).map(|(i,_)|i).collect();
+            if positions.len()!=1 || previous.is_some_and(|last|last>=positions[0]) {return false;}
+            previous=Some(positions[0]);
+        }
+        calls.0.iter().filter(|c|c.as_str()=="owner . local_sql ()").count()==2
+            && !calls.0.iter().any(|c|c.contains("stage_reset") || c.contains("inspect_source") || c.contains("Transaction :: new_unchecked"))
+    }
+    let source=include_str!("../restore_staging.rs");
+    assert!(valid(source));
+    for (from,to) in [
+        ("application::reset_in(&tx, &selected, &ns, epoch)?", "restore::stage_reset(&tx, &ns, epoch)?"),
+        ("application::reset_in(&tx, &selected, &ns, epoch)?", "{ tx.commit()?; application::reset_in(&tx, &selected, &ns, epoch)? }"),
+        ("let selected = current.application(&tx)?;", "let selected = current.foreign_application(&tx)?;"),
+        ("let post = owner.local_sql();", "let post = Ok(());"),
+        ("let post = owner.local_sql();", "let post = if reset.is_ok() { owner.local_sql() } else { Ok(()) };"),
+        ("drop(loan);", "drop(unrelated);"),
+        ("drop(loan);", "drop(loan); let reset=reset?;"),
+    ] {
+        assert_eq!(source.matches(from).count(),1);
+        assert!(!valid(&source.replacen(from,to,1)),"{from}");
+    }
 }
 #[test]
 fn independent_failure_frontiers_replay_twice_without_regrant_or_source_mutation() -> Result<()> {
@@ -626,6 +736,7 @@ fn real_process_loss_never_publishes_memory_commit_or_adopts_partial_or_reset_ta
                         r.get(0)
                     })?;
                 assert_eq!(state, "revoked");
+                w.owner.application.require_image(&db, true)?;
                 assert!(crate::store::require_no_managed_credential_restore_state(&db).is_err());
             }
             if point == Point::FirstWrite {
@@ -697,7 +808,7 @@ fn swapped_source_and_target_paths_cannot_redirect_sql_admission_reset_or_file_w
         SOURCE_SWAP.with(|s| *s.borrow_mut() = Some(w.owner.state.input.source.clone()));
         TARGET_SWAP.with(|s| s.set(true));
         let result = execute(&mut w.owner)?;
-        assert_eq!(result.reset.newly_revoked, 1);
+        assert_eq!(result.reset.credentials.newly_revoked, 1);
         assert_eq!(
             Digest::new(&std::fs::read(&w.owner.state.input.source)?),
             w.source_digest
@@ -710,6 +821,7 @@ fn swapped_source_and_target_paths_cannot_redirect_sql_admission_reset_or_file_w
             w.owner.state.target_path()?,
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
+        w.owner.application.require_image(&target, true)?;
         assert_eq!(
             target.query_row("SELECT state FROM day2_credential_lineages", [], |r| r
                 .get::<_, String>(
