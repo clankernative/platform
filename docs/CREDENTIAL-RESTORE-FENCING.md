@@ -37,3 +37,31 @@ publication or serving constructor is added by this foundation. The next
 mechanical step must retain the actual staged creator and freshly verify its
 private frozen reset image plus genuinely current settled/fenced root and real
 P3/writer/peer admission under this same original.
+
+## Native final-response tickets
+
+Each actual installed App or Shell owner now retains its response-rights ledger.
+App capture registers with that exact owner before attempting the native request
+original. Unselected Shell capture conservatively registers every actual installed
+Shell scope before the attempt and refuses if a scope is currently leased out.
+Routing clones share the same ticket set. A per-poll Current completion, peer ACK,
+SQLite close, cleared response binding or request-original finish retires nothing.
+
+The retained App driver validates exact creator/owner/registration bindings and
+prepares the terminal continuation before consuming the original. It keeps that
+continuation outstanding through the actual fallible `transport.complete`. Only
+after result publication and both known dispositions does infallible local Cell
+bookkeeping retire the tickets. No new terminal RPC, clock, callback, allocation
+or fallible borrow is appended. The ordinary connection-completion and autonomous
+request paths use the same retained terminal bookkeeping at their actual endpoint.
+Abort, lost publication, cancellation, owner loss and unfinished Drop leave rights
+unresolved. Unknown records are never pruned or cleared by a guessed timeout.
+
+This is the real response-right hook, not a complete cohort Stop supplier. No
+complete-stop constructor, restart adoption or accepting restored writer is
+added. Dispatch/observation/provider child rights, persistent keepers, remote
+bearers, Controller issuance and the full historical cohort still need their
+actual hooks or explicit supported-profile refusal before creation. Completing a
+parent response cannot establish that those separate rights have terminated.
+The closed restore-authentication owner remains administrative; no arbitrary
+`AdminRead` or `CurrentRole` callback is exempted from business accounting.
