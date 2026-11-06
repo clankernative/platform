@@ -229,14 +229,22 @@ fn deadline_equality_and_abandoned_key_attempt_remain_refused() -> Result<()> {
             .is_err()
     );
     assert!(expired.remaining().is_err());
-    let mut clock = original(Duration::from_secs(5));
-    {
+    for unwind in [false, true] {
+        let mut clock = original(Duration::from_secs(5));
         let attempt = KeyBirth {
             original: Some(clock.narrow(5, Duration::MAX)?),
         };
-        drop(attempt);
+        if unwind {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _held = attempt;
+                panic!("lost key acquisition fixture");
+            }));
+            assert!(caught.is_err());
+        } else {
+            drop(attempt);
+        }
+        assert!(clock.remaining().is_err());
     }
-    assert!(clock.remaining().is_err());
     Ok(())
 }
 
