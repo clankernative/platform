@@ -97,8 +97,13 @@ with the expected ignored status; zero matches cannot qualify compatibility.
 The lane compiles the ordinary default graph and executes its focused campaign
 rather than substituting a Linux result. Neither real native campaign is cached.
 
-Linux jobs keep the pinned OCI image, private 6 GiB cgroup without swap, four CPU
-allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Trusted
+Linux jobs keep the pinned OCI image, private cgroup without swap, four CPU
+allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Test
+preparation alone gets 8 GiB on the existing standard 16 GB Linux runner; the
+other preparation parts and runtime shards retain 6 GiB. Setup accepts only
+the explicit workflow purposes `standard` and `test-preparation`, checks their
+fixed finite ceilings, and records the selected purpose and actual allowance.
+This uses existing runner RAM, with no larger-runner allocation. Trusted
 setup preserves and rechecks the checked-in ABI seed. Inner compiler/worker
 confinement and ELF/glibc/loader admission remain mandatory. This is separate
 from the production Mac private builder; no Linux production builder is added.
