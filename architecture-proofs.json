@@ -2214,8 +2214,10 @@
       "methods": [
         "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
+        "pub (crate) fn check_registry_local (& mut self) -> Result < () >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn registry_data (& mut self) -> Result < ControllerRegistryData >"
       ],
       "factories": [
         {
@@ -2234,11 +2236,19 @@
         },
         {
           "owner": "ControllerAdminReader < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_registry_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
           "signature": "pub (crate) fn finish_checked (mut self) -> Result < () >"
         },
         {
           "owner": "ControllerAdminReader < '_ , '_ , '_ >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn registry_data (& mut self) -> Result < ControllerRegistryData >"
         }
       ],
       "proof_uses": [],
@@ -4597,6 +4607,10 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
+          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        },
+        {
+          "owner": "RegistryCeremony",
           "signature": "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
         }
       ],
@@ -4624,6 +4638,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+            "module": "controller"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
@@ -4643,6 +4664,10 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
+          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        },
+        {
+          "owner": "RegistryCeremony",
           "signature": "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
         }
       ],
@@ -4654,6 +4679,13 @@
       ],
       "proof_uses": [],
       "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+            "module": "controller"
+          }
+        },
         {
           "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
           "registration": {
@@ -4671,12 +4703,19 @@
       "methods": [
         "fn begin_attempt (& self) -> Result < () >",
         "pub (super) fn capture (runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >",
+        "pub (in crate :: security_epoch :: restore_webauthn) fn capture_controller (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >",
         "fn challenge (& self) -> Result < Challenge >",
         "pub (super) fn encoded_challenge (& self) -> Result < String >",
         "fn observe (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ >) -> Result < () >",
-        "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ >) -> Result < () >",
+        "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >",
+        "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
       ],
       "factories": [
+        {
+          "owner": "RegistryCeremony",
+          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn capture_controller (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >"
+        },
         {
           "owner": "RegistryCeremony",
           "signature": "pub (super) fn capture (runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >"
@@ -4697,6 +4736,14 @@
         },
         {
           "owner": "RegistryCeremony",
+          "signature": "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RegistryCeremony",
+          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        },
+        {
+          "owner": "RegistryCeremony",
           "signature": "pub (super) fn encoded_challenge (& self) -> Result < String >"
         },
         {
@@ -4706,6 +4753,13 @@
       ],
       "proof_uses": [],
       "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+            "module": "controller"
+          }
+        },
         {
           "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
           "registration": {

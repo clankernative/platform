@@ -15,6 +15,7 @@ use anyhow::{Context, Result, ensure};
 use std::{marker::PhantomData, rc::Rc};
 
 mod reader;
+pub(crate) use reader::{ControllerAdminReader, ControllerRegistryData};
 
 pub(crate) struct ControllerAdminReadLoan<'storage, 'role> {
     physical: Option<CurrentControllerStoragePhase<'storage, 'role>>,

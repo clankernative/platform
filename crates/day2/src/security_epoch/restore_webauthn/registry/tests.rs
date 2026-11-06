@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn configuration() -> Instance {
+pub(super) fn configuration() -> Instance {
     let public = day2_capabilities::restore_passkeys::PublicCoseKey::try_from(
         [
             vec![0xa5, 1, 2, 3, 0x26, 0x20, 1, 0x21, 0x58, 0x20],
