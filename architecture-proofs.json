@@ -1154,7 +1154,7 @@
         }
       ],
       "proof_uses": [],
-      "destructor_fingerprint": "sha256:6dd056894ff7c80f414d16df3571721333dfbf28f12e2c692fd99908f7585495"
+      "destructor": "sha256:6dd056894ff7c80f414d16df3571721333dfbf28f12e2c692fd99908f7585495"
     },
     {
       "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
@@ -1232,7 +1232,7 @@
         }
       ],
       "proof_uses": [],
-      "destructor_fingerprint": "sha256:09f8db611ac045e008b4585a39ea5caca657571c7f654dfd5f4a7376cf104724"
+      "destructor": "sha256:09f8db611ac045e008b4585a39ea5caca657571c7f654dfd5f4a7376cf104724"
     },
     {
       "source": "crates/day2/src/oauth/refresh.rs",
