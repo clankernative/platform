@@ -285,9 +285,27 @@ fn read_secret(
         body.len() <= MAX_RESPONSE_BYTES,
         "OAuth secret response too large"
     );
+    decode_secret_access_response(version, &body)
+}
+
+/// Bounded response DATA only. Neither these bytes nor an exact resource name
+/// authenticates a native caller, proves current key availability, or supplies
+/// a transport/original. Each caller must guard its own actual I/O.
+pub(crate) fn decode_secret_access_response(
+    version: &GcpSecretVersion,
+    body: &[u8],
+) -> Result<Vec<u8>> {
+    version.validate()?;
+    ensure!(
+        body.len() <= MAX_RESPONSE_BYTES,
+        "OAuth secret response too large"
+    );
     let response: AccessResponse =
-        crate::json::decode(&body).map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
-    ensure!(response.name == name, "OAuth secret version changed");
+        crate::json::decode(body).map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
+    ensure!(
+        response.name == version.resource_name(),
+        "OAuth secret version changed"
+    );
     let decoded = STANDARD
         .decode(response.payload.data)
         .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?;
@@ -708,5 +726,25 @@ mod tests {
             assert!(keys.load(&reference, purpose).is_err());
             worker.join().unwrap();
         }
+    }
+
+    #[test]
+    fn pure_secret_decoder_keeps_exact_version_and_its_own_transport_independent_bound()
+    -> Result<()> {
+        let (_, version) = fixture();
+        let body = serde_json::to_vec(&response(
+            &version.resource_name(),
+            crc32c::crc32c(&[9; 32]),
+        ))?;
+        assert_eq!(decode_secret_access_response(&version, &body)?, [9; 32]);
+        let mut other = version.clone();
+        other.version += 1;
+        assert!(decode_secret_access_response(&other, &body).is_err());
+        // JSON permits trailing whitespace. This otherwise-valid response must
+        // not borrow a future caller's transport bound as decoder permission.
+        let mut oversized = body;
+        oversized.resize(MAX_RESPONSE_BYTES + 1, b' ');
+        assert!(decode_secret_access_response(&version, &oversized).is_err());
+        Ok(())
     }
 }

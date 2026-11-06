@@ -250,40 +250,7 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
     /// Fresh current registry, exact signer and executor, qualified original
     /// time/floor and physical checks; no renewal, reauthentication or replay.
     pub(in crate::security_epoch) fn check(&mut self) -> Result<RestoreObservation> {
-        let requested = (|| {
-            ensure!(!self.refused, "restore_executor_refused");
-            self.action.check_execution_original(
-                &mut self.original,
-                &self.record,
-                &self.operation,
-            )?;
-            self.completion.check_current(
-                &mut self.action.reader,
-                (
-                    self.action
-                        .sqlite
-                        .as_mut()
-                        .context("restore_auth_sqlite_closed")?,
-                    &mut self.action.files,
-                ),
-                &self.record,
-                &self.operation,
-            )?;
-            self.source.require_qualified(&self.time_operation)?;
-            let time = self.source.current_time(&mut self.action)?;
-            approval_window(&self.record, &time)?;
-            Ok(())
-        })();
-        // A primary verification/time failure does not bypass this SAME held
-        // original's mandatory postcheck. Preserve the first failure.
-        let checked =
-            self.action
-                .check_execution_original(&mut self.original, &self.record, &self.operation);
-        if requested.is_err() || checked.is_err() {
-            self.refuse();
-        }
-        requested?;
-        checked
+        self.check_source()
     }
 
     pub(in crate::security_epoch) fn refuse(&mut self) {
