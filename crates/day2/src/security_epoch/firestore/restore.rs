@@ -4,6 +4,7 @@
 use super::{Entry, Names as InitialNames, decode_snapshot, encode_fields};
 use crate::security_epoch::{
     journal::snapshot_digest,
+    restore_approval::publication::{self, Publication},
     kernel::{
         Snapshot, UpdateTime, Versioned, advance,
         restore::{self, approval_use},
@@ -28,6 +29,8 @@ pub(in crate::security_epoch) struct Names {
     reservation: String,
     grant: String,
     plan: Digest,
+    publication: String,
+    expected_publication: Publication,
 }
 
 fn plan_digest(plan: &approval_use::Plan) -> Result<Digest> {
@@ -43,12 +46,20 @@ impl Names {
     pub(in crate::security_epoch) fn new(
         selection: &EpochStore,
         plan: &approval_use::Plan,
+        publication: &Publication,
     ) -> Result<Self> {
+        plan.require_publication_data(selection, publication)?;
         let selectors = plan.selectors(selection)?;
         let initial =
             InitialNames::new(selection, &selectors.bootstrap, Some(&selectors.activation))?;
         let key = |value: &Digest| value.as_str()[7..].to_owned();
         let names = Self {
+            publication: format!(
+                "{}/documents/day2_restore_approval_publications_v1/{}",
+                initial.database,
+                key(&publication::key(selection, &plan.approval_use.grant_id_data())?),
+            ),
+            expected_publication: publication.clone(),
             selection: selection.clone(),
             advance: format!("{}/operations/{}", initial.root, key(&selectors.advance)),
             reservation: format!(
@@ -61,7 +72,7 @@ impl Names {
             plan: plan_digest(plan)?,
         };
         ensure!(
-            names.documents().into_iter().collect::<BTreeSet<_>>().len() == 7,
+            names.documents().into_iter().collect::<BTreeSet<_>>().len() == 8,
             "restore_provider_document_alias"
         );
         Ok(names)
@@ -73,12 +84,15 @@ impl Names {
             self.advance.as_str(),
             self.reservation.as_str(),
             self.grant.as_str(),
+            self.publication.as_str(),
         ]);
         names
     }
 
     /// Starts one read-write transaction and reads ALL four original records
-    /// and three create-only names. No field mask or retryTransaction is used.
+    /// and three create-only names plus the exact signed publication. The
+    /// provider validates this complete read set at the same atomic commit.
+    /// No field mask, extra ledger, no-op write or retryTransaction is used.
     pub(in crate::security_epoch) fn begin_body(&self) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(
             &json!({"documents":self.documents(),"newTransaction":{"readWrite":{}}}),
@@ -121,7 +135,7 @@ impl Names {
         let mut previous = None;
         let mut first = None;
         let mut initial = Vec::new();
-        let (mut advance, mut reservation, mut grant) = (None, None, None);
+        let (mut advance, mut reservation, mut grant, mut publication) = (None, None, None, None);
         for value in entries {
             ensure!(value.is_object(), "restore_provider_entry_object");
             let entry: RawEntry = serde_json::from_value(value)
@@ -183,8 +197,14 @@ impl Names {
                 advance = record(entry.found, "day2-restore-advance-document-v1", at)?;
             } else if name == self.reservation {
                 reservation = record(entry.found, "day2-restore-reservation-document-v1", at)?;
-            } else {
+            } else if name == self.grant {
                 grant = record(entry.found, "day2-restore-grant-document-v1", at)?;
+            } else {
+                publication = Some(publication_record(
+                    entry.found.context("restore_provider_publication_missing")?,
+                    &self.selection,
+                    &self.expected_publication,
+                )?);
             }
         }
         ensure!(
@@ -197,6 +217,7 @@ impl Names {
             advance,
             reservation,
             grant,
+            publication: publication.context("restore_provider_publication_missing")?,
             first_read: first.context("restore_provider_read_time")?,
         })
     }
@@ -248,8 +269,8 @@ fn entries(bytes: &[u8], stream: Stream) -> Result<Vec<Value>> {
     let values: Vec<Value> = crate::json::decode(bytes)
         .map_err(|_| anyhow::anyhow!("restore_provider_reply_encoding"))?;
     let limit = match stream {
-        Stream::Reservation => 8,
-        Stream::Writer => 10,
+        Stream::Reservation => 9,
+        Stream::Writer => 11,
     };
     ensure!(
         !values.is_empty() && values.len() <= limit,
@@ -360,19 +381,70 @@ fn record<T: DeserializeOwned + Serialize>(
         .transpose()
 }
 
+// Exact414 publication envelope, not the restore receipt envelope. Both the
+// full signed record and actual provider version survive the consuming read.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublicationDocument {
+    name: String,
+    fields: PublicationFields,
+    create_time: UpdateTime,
+    update_time: UpdateTime,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationFields {
+    payload: Text,
+    commitment: Text,
+}
+
+fn publication_record(
+    found: Value,
+    selected: &EpochStore,
+    expected: &Publication,
+) -> Result<Versioned<Publication>> {
+    let document: PublicationDocument = serde_json::from_value(found)
+        .map_err(|_| anyhow::anyhow!("restore_provider_publication_shape"))?;
+    // The complete stream already checked exact name and ordered timestamps.
+    let _ = (document.name, document.create_time);
+    let payload = document.fields.payload.string_value;
+    let value = Publication::decode(
+        payload.as_bytes(),
+        selected,
+        &expected.grant_id_data(),
+    )?;
+    ensure!(
+        &value == expected
+            && value.encode(selected)? == payload.as_bytes()
+            && document.fields.commitment.string_value
+                == Digest::of(&("day2-restore-approval-publication-document-v1", &value))?.as_str(),
+        "restore_provider_publication_changed"
+    );
+    Ok(Versioned { value, version: document.update_time })
+}
+
 /// Historical provider DATA only, including an occupied grant-use record.
 pub(in crate::security_epoch) struct Observed {
     pub snapshot: Snapshot,
     pub advance: Option<Versioned<advance::Receipt>>,
     pub reservation: Option<Versioned<restore::Receipt>>,
     pub grant: Option<Versioned<approval_use::UseRecord>>,
+    pub publication: Versioned<Publication>,
     first_read: time::OffsetDateTime,
 }
 
 impl Observed {
     /// Provider-time ordering only, not a local clock, freshness original or
     /// permission. The real sender must also keep its native postchecks.
-    pub(in crate::security_epoch) fn after_commit(&self, commit: &CommitRecord) -> Result<()> {
+    pub(in crate::security_epoch) fn after_commit(
+        &self,
+        commit: &CommitRecord,
+        before_publication: &Versioned<Publication>,
+    ) -> Result<()> {
+        ensure!(
+            self.publication == *before_publication,
+            "restore_provider_publication_version_changed"
+        );
         ensure!(
             self.first_read >= commit.committed,
             "restore_provider_read_before_commit"

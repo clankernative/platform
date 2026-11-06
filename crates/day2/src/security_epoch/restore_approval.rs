@@ -153,3 +153,17 @@ pub(in crate::security_epoch) fn fixture_publication_data() -> Result<(
 )> {
     publication::tests::fixture()
 }
+
+#[cfg(test)]
+pub(in crate::security_epoch) fn fixture_publication_for_request_data(
+    selected: &day2_capabilities::security_epoch::EpochStore,
+    request: &ApprovalRequest,
+) -> Result<publication::Publication> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ring::signature::Ed25519KeyPair;
+    let (_, mut record) = fixture_publication_data()?;
+    record.statement.request = request.clone();
+    let pair = Ed25519KeyPair::from_seed_unchecked(&[31; 32]).unwrap();
+    record.signature = URL_SAFE_NO_PAD.encode(pair.sign(&record.statement.signature_input_data()?).as_ref());
+    publication::Publication::record_data(selected, record)
+}

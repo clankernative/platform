@@ -42,8 +42,27 @@ fn doc<T: Serialize>(name: &str, value: &T, token: u64, domain: Option<&str>) ->
         "createTime":version(1),"updateTime":version(token)}}))
 }
 
+fn publication(f: &Fixture) -> Result<Versioned<crate::security_epoch::restore_approval::publication::Publication>> {
+    Ok(Versioned {
+        value: crate::security_epoch::restore_approval::fixture_publication_for_request_data(
+            &f.selected, &f.authority.grant.approval,
+        )?,
+        version: version(2),
+    })
+}
+
+fn publication_entry(f: &Fixture, name: &str) -> Result<Value> {
+    let value = publication(f)?;
+    Ok(json!({"readTime":READ,"found":{"name":name,
+        "createTime":version(1),"updateTime":value.version,
+        "fields":{
+            "payload":{"stringValue":String::from_utf8(value.value.encode(&f.selected)?)?},
+            "commitment":{"stringValue":Digest::of(&("day2-restore-approval-publication-document-v1",&value.value))?}
+        }}}))
+}
+
 fn reply(f: &Fixture, p: &kernel::Plan, after: bool, header: bool) -> Result<Vec<Value>> {
-    let names = Names::new(&f.selected, &f.request, p)?;
+    let names = Names::new(&f.selected, &f.request, p, &publication(f)?)?;
     let n = names.documents();
     let s = &f.before.settled;
     let mut values = vec![
@@ -87,17 +106,18 @@ fn reply(f: &Fixture, p: &kernel::Plan, after: bool, header: bool) -> Result<Vec
             3,
             Some("day2-restore-grant-document-v1"),
         )?,
+        publication_entry(f, n[7])?,
         doc(
-            n[7],
+            n[8],
             &f.before.terminal.value,
             4,
             Some("day2-restore-settlement-document-v1"),
         )?,
     ];
     values.push(if after {
-        doc(n[8], &p.receipt, 5, Some("day2-restore-writer-document-v1"))?
+        doc(n[9], &p.receipt, 5, Some("day2-restore-writer-document-v1"))?
     } else {
-        json!({"readTime":READ,"missing":n[8]})
+        json!({"readTime":READ,"missing":n[9]})
     });
     if header {
         values.insert(0, json!({"transaction":TX}));
@@ -114,13 +134,13 @@ fn plan(f: &Fixture) -> Result<kernel::Plan> {
 fn writer_transaction_reads_all_nine_and_cas_updates_two_creates_one() -> Result<()> {
     let f = fixture(80, true)?;
     let p = plan(&f)?;
-    let names = Names::new(&f.selected, &f.request, &p)?;
+    let names = Names::new(&f.selected, &f.request, &p, &publication(&f)?)?;
     let begin: Value = crate::json::decode(&names.begin_body()?)?;
     assert_eq!(
         begin,
         json!({"documents":names.documents(),"newTransaction":{"readWrite":{}}})
     );
-    assert_eq!(names.documents().len(), 9);
+    assert_eq!(names.documents().len(), 10);
     let strong: Value = crate::json::decode(&names.strong_body()?)?;
     assert_eq!(strong, json!({"documents":names.documents()}));
     assert!(names.endpoint("beginTransaction").is_err());
@@ -164,18 +184,18 @@ fn writer_transaction_reads_all_nine_and_cas_updates_two_creates_one() -> Result
 fn every_observed_record_version_and_occupied_writer_refuses_before_commit_body() -> Result<()> {
     let f = fixture(81, true)?;
     let p = plan(&f)?;
-    for index in 0..8 {
+    for index in 0..9 {
         let mut values = reply(&f, &p, false, true)?;
         values[index + 1]["found"]["updateTime"] = json!(version(90));
         let tx =
-            Names::new(&f.selected, &f.request, &p)?.transaction(&serde_json::to_vec(&values)?)?;
+            Names::new(&f.selected, &f.request, &p, &publication(&f)?)?.transaction(&serde_json::to_vec(&values)?)?;
         assert!(
             tx.commit_body(&f.selected, &f.request, &p, &f.authority, 1002)
                 .is_err()
         );
         assert!(!tx.rollback_body()?.is_empty());
     }
-    let tx = Names::new(&f.selected, &f.request, &p)?
+    let tx = Names::new(&f.selected, &f.request, &p, &publication(&f)?)?
         .transaction(&serde_json::to_vec(&reply(&f, &p, true, true)?)?)?;
     assert!(
         tx.commit_body(&f.selected, &f.request, &p, &f.authority, 1002)
@@ -183,7 +203,7 @@ fn every_observed_record_version_and_occupied_writer_refuses_before_commit_body(
     );
     let mut current = f.authority.clone();
     current.enabled = false;
-    let tx = Names::new(&f.selected, &f.request, &p)?
+    let tx = Names::new(&f.selected, &f.request, &p, &publication(&f)?)?
         .transaction(&serde_json::to_vec(&reply(&f, &p, false, true)?)?)?;
     assert!(
         tx.commit_body(&f.selected, &f.request, &p, &current, 1002)
@@ -219,14 +239,14 @@ fn malformed_streams_keep_known_header_but_never_become_valid_observations() -> 
             }
             3 => values[7]["transaction"] = json!(TX),
             4 => {
-                values[8]["found"]["fields"]["restore_digest"]["stringValue"] =
+                values[9]["found"]["fields"]["restore_digest"]["stringValue"] =
                     json!(Digest::new(b"wrong"))
             }
-            5 => values[8]["readTime"] = json!("2026-11-03T00:00:00Z"),
-            _ => values[8]["found"]["fields"]["unexpected"] = json!({"stringValue":"not-admitted"}),
+            5 => values[9]["readTime"] = json!("2026-11-03T00:00:00Z"),
+            _ => values[9]["found"]["fields"]["unexpected"] = json!({"stringValue":"not-admitted"}),
         }
         let tx =
-            Names::new(&f.selected, &f.request, &p)?.transaction(&serde_json::to_vec(&values)?)?;
+            Names::new(&f.selected, &f.request, &p, &publication(&f)?)?.transaction(&serde_json::to_vec(&values)?)?;
         assert!(tx.observed().is_err());
         assert!(!tx.rollback_body()?.is_empty());
     }
@@ -238,12 +258,12 @@ fn malformed_streams_keep_known_header_but_never_become_valid_observations() -> 
     );
     assert_ne!(raw, duplicate);
     assert!(
-        Names::new(&f.selected, &f.request, &p)?
+        Names::new(&f.selected, &f.request, &p, &publication(&f)?)?
             .transaction(duplicate.as_bytes())
             .is_err()
     );
     assert!(
-        Names::new(&f.selected, &f.request, &p)?
+        Names::new(&f.selected, &f.request, &p, &publication(&f)?)?
             .transaction(&vec![b' '; 65_537])
             .is_err()
     );
@@ -256,7 +276,7 @@ fn exact_three_result_ack_and_strong_read_join_actual_versions() -> Result<()> {
     let p = plan(&f)?;
     let ack = json!({"writeResults":[{"updateTime":version(5)},{"updateTime":version(5)},{"updateTime":version(5)}],"commitTime":version(5)});
     let commit = commit_reply(&serde_json::to_vec(&ack)?)?;
-    let names = Names::new(&f.selected, &f.request, &p)?;
+    let names = Names::new(&f.selected, &f.request, &p, &publication(&f)?)?;
     let observed = names.strong(&serde_json::to_vec(&reply(&f, &p, true, false)?)?)?;
     observed.after_commit(&commit)?;
     assert!(matches!(
@@ -269,7 +289,7 @@ fn exact_three_result_ack_and_strong_read_join_actual_versions() -> Result<()> {
         )?,
         kernel::Outcome::Applied(_)
     ));
-    for index in [1, 2, 9] {
+    for index in [1, 2, 10] {
         let mut values = reply(&f, &p, true, true)?;
         values.remove(0);
         values[index - 1]["found"]["updateTime"] = json!(version(6));
@@ -292,5 +312,28 @@ fn exact_three_result_ack_and_strong_read_join_actual_versions() -> Result<()> {
         }
         assert!(commit_reply(&serde_json::to_vec(&wrong)?).is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn writer_never_substitutes_or_refreshes_the_consumed_publication_version() -> Result<()> {
+    let f = fixture(84, true)?;
+    let p = plan(&f)?;
+    let expected = publication(&f)?;
+    for after in [false, true] {
+        let mut values = reply(&f, &p, after, true)?;
+        // Same canonical signed bytes at a new updateTime still lose the
+        // exact version captured by the consuming transaction.
+        values[8]["found"]["updateTime"] = json!(version(3));
+        let tx = Names::new(&f.selected, &f.request, &p, &expected)?
+            .transaction(&serde_json::to_vec(&values)?)?;
+        assert!(tx.observed().is_err());
+        assert!(!tx.rollback_body()?.is_empty());
+        values.remove(0);
+        assert!(Names::new(&f.selected, &f.request, &p, &expected)?
+            .strong(&serde_json::to_vec(&values)?).is_err());
+    }
+    let other = fixture(85, true)?;
+    assert!(Names::new(&f.selected, &f.request, &p, &publication(&other)?).is_err());
     Ok(())
 }

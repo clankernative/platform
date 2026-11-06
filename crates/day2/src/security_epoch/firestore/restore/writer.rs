@@ -18,6 +18,7 @@ pub(in crate::security_epoch) struct Names {
     terminal: String,
     writer: String,
     plan: Digest,
+    publication: Versioned<crate::security_epoch::restore_approval::publication::Publication>,
 }
 
 impl Names {
@@ -25,17 +26,19 @@ impl Names {
         selected: &EpochStore,
         request: &kernel::Request,
         plan: &kernel::Plan,
+        publication: &Versioned<crate::security_epoch::restore_approval::publication::Publication>,
     ) -> Result<Self> {
-        let base = super::Names::new(selected, request.reservation_data())?;
+        let base = super::Names::new(selected, request.reservation_data(), &publication.value)?;
         let operation = &request.operation().as_str()[7..];
         let names = Self {
             terminal: format!("{}/restore_settlements/{operation}", base.initial.root),
             writer: format!("{}/restore_writers/{operation}", base.initial.root),
             base,
             plan: plan.commitment()?,
+            publication: publication.clone(),
         };
         ensure!(
-            names.documents().into_iter().collect::<BTreeSet<_>>().len() == 9,
+            names.documents().into_iter().collect::<BTreeSet<_>>().len() == 10,
             "restore_writer_provider_document_alias"
         );
         Ok(names)
@@ -132,8 +135,12 @@ impl Names {
                 }
             }
         }
-        ensure!(seen.len() == 9, "restore_writer_provider_incomplete");
+        ensure!(seen.len() == 10, "restore_writer_provider_incomplete");
         let base = self.base.decode(base)?;
+        ensure!(
+            base.publication == self.publication,
+            "restore_writer_provider_publication_version_changed"
+        );
         Ok(Observed {
             state: kernel::State {
                 settled: crate::security_epoch::kernel::restore::completion::State {
@@ -213,8 +220,8 @@ impl Transaction {
             .sentinel
             .as_ref()
             .context("restore_writer_provider_sentinel_missing")?;
-        // All nine names were read in THIS read-write transaction. Firestore
-        // validates the read set atomically, including all six unchanged
+        // All ten names were read in THIS read-write transaction. Firestore
+        // validates the read set atomically, including all seven unchanged
         // records and writer absence; neither extra no-op writes nor a second
         // ledger are introduced. Root/sentinel retain explicit version CAS.
         let bytes = serde_json::to_vec(&json!({"transaction":self.token,"writes":[

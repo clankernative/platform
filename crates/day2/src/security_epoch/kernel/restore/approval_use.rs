@@ -22,6 +22,10 @@ pub(in crate::security_epoch) struct UseRecord {
 }
 
 impl UseRecord {
+    pub(in crate::security_epoch) fn grant_id_data(&self) -> &Digest {
+        &self.approval.grant_id
+    }
+
     pub(in crate::security_epoch) fn key(&self, selected: &EpochStore) -> Result<Digest> {
         selected.validate()?;
         self.approval.validate()?;
@@ -56,6 +60,16 @@ pub(in crate::security_epoch) struct Selectors {
 }
 
 impl Plan {
+    /// Request DATA to join the immutable signed publication to this exact
+    /// reservation. Neither side supplies signature verification or authority.
+    pub(in crate::security_epoch) fn require_publication_data(
+        &self,
+        selected: &EpochStore,
+        publication: &crate::security_epoch::restore_approval::publication::Publication,
+    ) -> Result<()> {
+        publication.require_request_data(selected, &self.approval_use.approval)
+    }
+
     pub(in crate::security_epoch) fn selectors(&self, selected: &EpochStore) -> Result<Selectors> {
         let request = &self.reservation.receipt.request;
         self.revalidate(
