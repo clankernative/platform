@@ -379,6 +379,18 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
 }
 
 impl RestoreWriteLoan<'_, '_, '_, '_> {
+    /// Bind the actual retained plan/approval and namespace generation before
+    /// the first source read or creator effect. Neither caller DATA nor root
+    /// identity is a substitute for this same-original owner check.
+    pub(in crate::security_epoch) fn require_staging_input(
+        &mut self,
+        _intent: &kernel::restore::Intent,
+        _namespace: &day2_capabilities::credentials::Namespace,
+    ) -> Result<()> {
+        self.refuse();
+        anyhow::bail!("native_restore_staging_input_supplier_unavailable")
+    }
+
     /// Admission precedes Parent construction and its first mkdir/create.
     /// The accepting implementation must bind the target from this actual
     /// owner's Fenced plan, never from a caller flag or a directory identity.
