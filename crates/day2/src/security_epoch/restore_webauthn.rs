@@ -325,7 +325,5 @@ pub(super) fn verify(
 mod registry;
 pub(super) use registry::ControllerCeremony;
 pub(super) use registry::SigningUnit;
-mod store;
-pub(super) use store::require_existing_schema;
 #[cfg(test)]
 mod tests;

@@ -82,7 +82,7 @@ impl CurrentVolumePhase<'_, '_> {
         clock: UnfencedControllerClock,
     ) -> Result<NativeApprovalSource> {
         let requested = (|| {
-            self.check_current()?;
+            self.resources.check_current(&mut self.reader)?;
             self.reader
                 .stage
                 .require_purpose(StagePurpose::CurrentRole)?;
@@ -101,7 +101,7 @@ impl CurrentVolumePhase<'_, '_> {
             let material = self.reader.acquire_material()?;
             self.reader.authentication = ProviderAuthentication::Acquired(Box::new(material));
             self.check_durability_profile()?;
-            self.check_current()?;
+            self.resources.check_current(&mut self.reader)?;
             let same = self.reader.stage.capture_same_owner()?;
             let mut original = self
                 .reader

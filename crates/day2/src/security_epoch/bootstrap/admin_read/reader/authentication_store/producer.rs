@@ -203,8 +203,9 @@ impl PendingApproval {
         assertion: &Assertion,
     ) -> Result<Option<SignedApprovalRecord>> {
         self.intent.require_exact(&action.intent)?;
-        let mut source = action.capture_source()?;
-        let Some(mut completed) = CompletedCeremony::prepare(self, action, assertion, &mut source)?
+        let source = action.capture_source()?;
+        let Some((mut completed, mut source)) =
+            CompletedCeremony::prepare(self, action, assertion, source)?
         else {
             return Ok(None);
         };
@@ -231,8 +232,8 @@ impl<'metadata, 'storage, 'role> CompletedCeremony<'metadata, 'storage, 'role> {
         pending: PendingApproval,
         mut action: AuthenticationStoreAction<'metadata, 'storage, 'role>,
         assertion: &Assertion,
-        source: &mut NativeApprovalSource,
-    ) -> Result<Option<Self>> {
+        mut source: NativeApprovalSource,
+    ) -> Result<Option<(Self, NativeApprovalSource)>> {
         action.check(&pending.intent)?;
         let before = source.current_time(&mut action)?;
         let at = seconds_ceiling(before.upper)?;
@@ -291,16 +292,19 @@ impl<'metadata, 'storage, 'role> CompletedCeremony<'metadata, 'storage, 'role> {
         let checked = action.check(&pending.intent);
         requested?;
         checked?;
-        Ok(Some(Self {
-            action: Some(action),
-            ceremony: pending.ceremony,
-            assertion: assertion.clone(),
-            challenge: pending.challenge,
-            time_operation,
-            statement,
-            signing,
-            state: SigningState::Prepared,
-        }))
+        Ok(Some((
+            Self {
+                action: Some(action),
+                ceremony: pending.ceremony,
+                assertion: assertion.clone(),
+                challenge: pending.challenge,
+                time_operation,
+                statement,
+                signing,
+                state: SigningState::Prepared,
+            },
+            source,
+        )))
     }
 
     fn mark_may(&mut self) -> Result<()> {

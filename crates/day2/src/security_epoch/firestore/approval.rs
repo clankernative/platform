@@ -171,9 +171,9 @@ fn read(
             let name = match (&entry.found, &entry.missing) {
                 (Some(document), None) => {
                     ensure!(
-                        parse_time(&document.create_time.0)?
-                            <= parse_time(&document.update_time.0)?
-                            && parse_time(&document.update_time.0)? <= read_at,
+                        parse_version(&document.create_time)?
+                            <= parse_version(&document.update_time)?
+                            && parse_version(&document.update_time)? <= read_at,
                         "restore_time_document_time_order"
                     );
                     document.name.clone()
@@ -222,6 +222,10 @@ fn read(
     // A read-only transaction holds no locks. Its fixed snapshot is the read
     // proof; rollback would supply no coherence/freshness evidence.
     observed
+}
+
+fn parse_version(value: &UpdateTime) -> Result<time::OffsetDateTime> {
+    parse_time(&String::from(value.clone()))
 }
 
 fn parse_time(value: &str) -> Result<time::OffsetDateTime> {
@@ -299,7 +303,7 @@ pub(in crate::security_epoch) fn advance(
     let first = &committed.write_results[0].update_time;
     ensure!(
         committed.write_results[1].update_time == *first
-            && parse_time(&first.0)? <= parse_time(&committed.commit_time.0)?,
+            && parse_version(&first)? <= parse_version(&committed.commit_time)?,
         "restore_time_commit_versions"
     );
     let after = read(port, &mut budget, &names, false)?;
@@ -388,7 +392,7 @@ pub(in crate::security_epoch) fn publish(
     );
     let version = &committed.write_results[0].update_time;
     ensure!(
-        parse_time(&version.0)? <= parse_time(&committed.commit_time.0)?,
+        parse_version(&version)? <= parse_version(&committed.commit_time)?,
         "restore_approval_publication_time_order"
     );
     let after = read(port, &mut budget, &names, false)?;
