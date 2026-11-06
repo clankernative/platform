@@ -17,15 +17,22 @@ fn archive_resolution_uses_exact_admitted_versions_and_never_aliases() -> Result
     let admitted = admitted()?;
     let selected = admitted.iter().find(|key| key.purpose == SecurityKeyPurpose::OauthCustodyEncryption).unwrap();
     let exact = requirement(selected, KeyPurpose::CustodyEncryption);
-    let resolved = resolve(std::slice::from_ref(&exact), &admitted)?;
+    let complete = complete_requirements(&admitted)?;
+    let resolved = resolve(&complete, &admitted)?;
     let SecretProvider::GcpVersion { project_number, secret, version } = &selected.provider;
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].provider.project_number, project_number.get());
-    assert_eq!(resolved[0].provider.secret, secret.as_str());
-    assert_eq!(resolved[0].provider.version, version.get());
+    assert_eq!(resolved.len(), complete.len());
+    let selected_resource = resolved.iter().find(|key| key.archive == exact).unwrap();
+    assert_eq!(selected_resource.provider.project_number, project_number.get());
+    assert_eq!(selected_resource.provider.secret, secret.as_str());
+    assert_eq!(selected_resource.provider.version, version.get());
+    for index in 0..complete.len() {
+        let mut missing = complete.clone(); missing.remove(index);
+        assert!(resolve(&missing, &admitted).is_err(), "every admitted archive key is required");
+    }
     for value in ["latest".into(), "current".into(), format!("0{}", exact.version), format!("version-{}", exact.version), (version.get()+1).to_string()] {
-        let mut wrong = exact.clone(); wrong.version = value;
-        assert!(resolve(&[wrong], &admitted).is_err());
+        let mut wrong = complete.clone();
+        wrong.iter_mut().find(|key| **key == exact).unwrap().version = value;
+        assert!(resolve(&wrong, &admitted).is_err());
     }
     let mut wrong = exact.clone(); wrong.binding.revision = Digest::new(b"changed binding revision");
     assert!(resolve(&[wrong], &admitted).is_err());
@@ -44,7 +51,10 @@ fn archive_resolution_uses_exact_admitted_versions_and_never_aliases() -> Result
 fn selected() -> Result<Vec<SelectedKey>> {
     let admitted = admitted()?;
     let selected = admitted.iter().find(|key| key.purpose == SecurityKeyPurpose::OauthCustodyEncryption).unwrap();
-    resolve(&[requirement(selected, KeyPurpose::CustodyEncryption)], &admitted)
+    let mut all = resolve(&complete_requirements(&admitted)?, &admitted)?;
+    let exact = requirement(selected, KeyPurpose::CustodyEncryption);
+    all.retain(|key| key.archive == exact);
+    Ok(all)
 }
 
 fn body(version: &GcpSecretVersion, material: &[u8]) -> Vec<u8> {
@@ -189,7 +199,9 @@ fn complete_set_matches_independent_seeded_partial_failure_expectations() -> Res
     ] {
         required.push(requirement(admitted.iter().find(|key| key.purpose == selected_purpose).unwrap(), purpose));
     }
-    let selected = resolve(&required, &admitted)?;
+    let mut selected = resolve(&complete_requirements(&admitted)?, &admitted)?;
+    selected.retain(|key| required.contains(&key.archive));
+    assert_eq!(selected.len(), 2);
     for seed in 0..12u64 {
         let case = seed.wrapping_mul(6364136223846793005).wrapping_add(1) % 4;
         // Independent expectation: only two exact 32-byte successful replies
