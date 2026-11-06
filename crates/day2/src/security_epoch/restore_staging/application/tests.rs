@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::Context;
 use day2_capabilities::{Digest, resources::{BudgetDefinition, BudgetLimits, BudgetScope}};
-use rusqlite::{Connection, TransactionBehavior, types::Value};
+use rusqlite::{Connection, MAIN_DB, TransactionBehavior, types::Value};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
