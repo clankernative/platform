@@ -539,7 +539,7 @@ mod tests {
         assert!(!guarded_owner_check(&changed));
         let mut changed = actual.clone();
         changed.stmts[3] = syn::parse_quote! { checked?; };
-        changed.stmts[4] = syn::parse_quote! { requested };
+        changed.stmts[4] = syn::Stmt::Expr(syn::parse_quote! { requested }, None);
         assert!(!guarded_owner_check(&changed));
         Ok(())
     }
