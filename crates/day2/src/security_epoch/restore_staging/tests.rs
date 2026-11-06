@@ -109,8 +109,8 @@ impl Checks for Fixture {
     }
     fn application(&mut self, tx: &Transaction<'_>) -> Result<application::Selection<'_>> {
         ensure!(!self.reject_application, "fixture_unsupported_application");
-        let value: String = tx.query_row("SELECT value FROM fixture_business", [], |r| r.get(0))?;
-        ensure!(value == "keep-data", "fixture_business_changed");
+        let present: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM fixture_business)", [], |r| r.get(0))?;
+        ensure!(present, "fixture_business_missing");
         Ok(self.application.selection())
     }
     fn refuse(&mut self) {
@@ -127,7 +127,7 @@ pub(super) struct World {
 pub(super) fn world() -> Result<World> {
     let source = tempfile::tempdir()?;
     let application = application::tests::Fixture::new()?;
-    application.db.execute_batch("CREATE TABLE fixture_business(value TEXT) STRICT; INSERT INTO fixture_business VALUES('keep-data'); CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
+    application.db.execute_batch("CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
     std::fs::write(source.path().join("app.sqlite"), &*application.db.serialize(MAIN_DB)?)?;
     let path = source.path().join("app.sqlite").canonicalize()?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -517,6 +517,33 @@ fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_w
                 assert_eq!(sql.query_row("SELECT count(*) FROM day2_web_sessions", [], |r| r.get::<_, i64>(0))?,1);
             }
             assert_eq!(Digest::new(&std::fs::read(&w.owner.state.input.source)?), changed);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_live_and_tombstoned_model_rows_refuse_before_reset_or_creator() -> Result<()> {
+    for deleted_at in [0,101] {
+        effects::scope(simulation::World::new(2120), || -> Result<()> {
+            let mut w=world()?;
+            let db=Connection::open(&w.owner.state.input.source)?;
+            db.execute("UPDATE fixture_business SET value=?1,deleted_at=?2",rusqlite::params!["x".repeat(16385),deleted_at])?;
+            assert_eq!(db.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0))?,"ok");
+            drop(db);
+            let expected=Digest::new(&std::fs::read(&w.owner.state.input.source)?);
+            w.owner.state.input.database=expected.clone();
+            let error=execute(&mut w.owner).unwrap_err();
+            assert_eq!(error.root_cause().to_string(),"invalid field: value");
+            assert!(w.owner.refused && !w.owner.state.complete && !w.owner.state.directory_may_exist && w.owner.state.creator.is_none());
+            let scratch=w.owner.state.sql.as_ref().context("model_refusal_scratch_missing")?;
+            assert!(scratch.is_autocommit() && crate::authority_state::current(scratch)?.document.enabled);
+            assert_eq!(scratch.query_row("SELECT state FROM day2_credential_lineages",[],|r|r.get::<_,String>(0))?,"active");
+            assert_eq!(scratch.query_row("SELECT status FROM oauth_connection_slots WHERE slot='old-slot'",[],|r|r.get::<_,String>(0))?,"active");
+            assert_eq!(scratch.query_row("SELECT count(*) FROM day2_web_sessions",[],|r|r.get::<_,i64>(0))?,1);
+            assert_eq!(Digest::new(&std::fs::read(&w.owner.state.input.source)?),expected);
+            assert!(execute(&mut w.owner).is_err());
             Ok(())
         })?;
     }

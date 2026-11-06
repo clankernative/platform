@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 pub(in crate::security_epoch::restore_staging) struct Fixture {
     pub(in crate::security_epoch::restore_staging) db: Connection,
     namespace: Namespace,
+    artifact: crate::artifact::LoadedArtifact,
     previous: authority_state::ActiveAuthority,
     fence: restore_authority::PreparedRestoreFence,
     authority_schema: restore_authority::RestoreFenceSchema,
@@ -22,11 +23,24 @@ pub(in crate::security_epoch::restore_staging) struct Fixture {
 
 impl Fixture {
     pub(in crate::security_epoch::restore_staging) fn new() -> Result<Self> {
+        let schema:crate::schema::Schema=serde_json::from_value(serde_json::json!({"models":{"fixture_business":{"fields":{"value":"text"}}},"inputs":{},"foreign_keys":[]}))?;
+        let schema_digest=schema.hash()?;
+        // Actual host tests lend a typed immutable contract without running a
+        // compiler. This cfg(test) constructor is not native artifact admission.
+        let contract:crate::artifact::Artifact=serde_json::from_value(serde_json::json!({
+            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"restore-model-fixture",
+            "verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+            "worker_digest":"restore-model-fixture","schema_digest":schema_digest,"schema":schema,
+            "operations":[],"sources":{},"admission":"local-spike-only"
+        }))?;
+        let artifact=crate::artifact::LoadedArtifact::from_contract_for_tests(Digest::new(b"artifact").as_str().into(),PathBuf::new(),contract);
         let mut db = Connection::open_in_memory()?;
         db.pragma_update(None, "temp_store", "MEMORY")?;
         db.pragma_update(None, "journal_mode", "MEMORY")?;
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch(crate::store::PLATFORM_DDL)?;
+        for ddl in artifact.contract().schema.ddl()? {db.execute_batch(&ddl)?;}
+        db.execute("INSERT INTO fixture_business(id,version,created_at,value) VALUES(1,1,100,'keep-data')",[])?;
         let namespace = credentials::tests::namespace();
         let scope = format!(
             "{}/{}/{}",
@@ -37,7 +51,7 @@ impl Fixture {
         db.execute("INSERT INTO day2_meta VALUES('scope',?1)", [&scope])?;
         db.execute(
             "INSERT INTO day2_meta VALUES('schema',?1)",
-            [Digest::new(b"schema").as_str()],
+            [&artifact.contract().schema_digest],
         )?;
         let previous = authority_state::ActiveAuthority {
             stamp: authority_state::AuthorityStamp {
@@ -154,7 +168,7 @@ impl Fixture {
                 snapshot.digest().clone(),
                 909,
                 &scope,
-                Digest::new(b"schema"),
+                artifact.contract().schema_digest.clone().try_into()?,
                 1,
             )?;
             tx.rollback()?;
@@ -169,6 +183,7 @@ impl Fixture {
         Ok(Self {
             db,
             namespace,
+            artifact,
             previous,
             fence,
             authority_schema,
@@ -183,6 +198,7 @@ impl Fixture {
         Selection {
             namespace: &self.namespace,
             source_epoch: 1,
+            artifact: &self.artifact,
             fence: &self.fence,
             authority_schema: &self.authority_schema,
             oauth_schema: &self.oauth_schema,
@@ -385,6 +401,54 @@ fn reset_selection_cannot_substitute_the_staging_namespace_or_source_epoch() -> 
 }
 
 #[test]
+fn cut_rejects_a_foreign_artifact_or_schema_before_any_denial_write() -> Result<()> {
+    effects::scope(simulation::World::new(98315), || {
+        for wrong_schema in [false,true] {
+            let fixture=Fixture::new()?;
+            let mut contract=fixture.artifact.contract().clone();
+            let id=if wrong_schema {
+                contract.schema_digest=Digest::new(b"foreign-contract-schema").as_str().into();
+                fixture.artifact.id().to_owned()
+            } else {Digest::new(b"foreign-artifact").as_str().into()};
+            let foreign=crate::artifact::LoadedArtifact::from_contract_for_tests(id,PathBuf::new(),contract);
+            fixture.cut.require_artifact(&fixture.artifact)?;
+            assert!(fixture.cut.require_artifact(&foreign).is_err());
+            let selected=Selection{artifact:&foreign,..fixture.selection()};
+            let before=snapshot(&fixture.db)?;
+            let tx=Transaction::new_unchecked(&fixture.db,TransactionBehavior::Immediate)?;
+            assert!(reset_in(&tx,&selected,&fixture.namespace,1).is_err());
+            tx.commit()?;
+            assert!(before==snapshot(&fixture.db)?);
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_before_cuts() {
+    use quote::ToTokens as _;
+    let file=syn::parse_file(include_str!("../application.rs")).unwrap();
+    let functions:Vec<_>=file.items.into_iter().filter_map(|i|match i {syn::Item::Fn(f) if f.sig.ident=="reset_in"=>Some(f),_=>None}).collect();
+    assert_eq!(functions.len(),1);
+    let actual=&functions[0];
+    let tail:syn::Block=syn::parse_quote!({
+        selected.cut.require_artifact(selected.artifact)?;
+        ensure!(crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),"complete_restore_source_artifact_changed");
+        let scope=format!("{}/{}/{}",namespace.installation.as_str(),namespace.environment.as_str(),namespace.app.as_str());
+        crate::store::validate_storage_in(tx,selected.artifact,&scope)?;
+        crate::oauth::restore::reset_application_in(tx,selected.fence,selected.authority_schema,selected.oauth_schema,selected.cut,selected.namespace,selected.source_epoch)
+    });
+    let valid=|f:&syn::ItemFn| f.block.stmts.len()>=tail.stmts.len() && f.block.stmts.iter().rev().take(tail.stmts.len()).zip(tail.stmts.iter().rev()).all(|(a,b)|a.to_token_stream().to_string()==b.to_token_stream().to_string());
+    assert!(valid(actual));
+    let start=actual.block.stmts.len()-tail.stmts.len();
+    for index in 0..tail.stmts.len() {
+        let mut removed=actual.clone();removed.block.stmts.remove(start+index);assert!(!valid(&removed));
+    }
+    let mut late_validation=actual.clone();late_validation.block.stmts.swap(start+3,start+4);assert!(!valid(&late_validation));
+    let mut foreign=actual.clone();foreign.block.stmts[start+3]=syn::parse_quote!(crate::store::validate_storage_in(tx,foreign_artifact,&scope)?;);assert!(!valid(&foreign));
+}
+
+#[test]
 fn cut_binding_failure_after_fence_rolls_back_even_when_caller_catches_and_commits() -> Result<()> {
     effects::scope(simulation::World::new(98312), || {
         for after_cut in [false, true] {
@@ -394,7 +458,7 @@ fn cut_binding_failure_after_fence_rolls_back_even_when_caller_catches_and_commi
                 Digest::new(b"wrong-inventory"),
                 910,
                 "wonderly/dev/transcriber",
-                Digest::new(b"schema"),
+                fixture.artifact.contract().schema_digest.clone().try_into()?,
                 1,
             )?;
             let tx = Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;

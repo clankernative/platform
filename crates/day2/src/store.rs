@@ -2584,7 +2584,7 @@ pub fn require_no_managed_credential_restore_state(connection: &Connection) -> R
     crate::managed_credentials::store::require_no_restore_state(connection)
 }
 
-fn validate_storage_in(
+pub(crate) fn validate_storage_in(
     snapshot: &Connection,
     artifact: &LoadedArtifact,
     scope: &str,

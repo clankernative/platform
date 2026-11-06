@@ -6,6 +6,14 @@ application denial reset in a fresh memory-only database. The staging owner
 opens the sole outer transaction; the prepared application selection supplies
 the same fence, canonical schema references and inventory cut to the existing
 SQL-only reset. The cut must match the staging namespace and source epoch.
+The selection also lends its actual immutable loaded artifact. Exact artifact
+and schema identity must match the cut and the source authority; an ordinary
+rollout admission is not an alternative. The existing canonical storage reader
+validates all model rows, including tombstones, codecs, IDs/versions, foreign
+relationships and rollups on this same scratch transaction before any denial
+write. Loading the artifact and checking the complete archive graph remain
+outside this unit. This structural storage check does not run app properties
+or establish native backup provenance or artifact admission by itself.
 There is no second autocommit reset path or transaction held over provider,
 artifact, entropy or filesystem work. It freezes the resulting bytes before creating
 a new target, using directory-relative creation under the held root and private
