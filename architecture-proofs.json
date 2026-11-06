@@ -14,6 +14,11 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f25d8487eaa3149173adb4ed2d4698ef6435823224dd3985bf430ba3bbbf97cd"
+    },
+    {
       "source": "crates/day2/src/security_epoch/authenticated_reads/connection.rs",
       "scope": "const",
       "fingerprint": "sha256:d720145b2ad5b62d1f97db043deb84a47ede7efdf0984b906ac6f498ffe44df7",
@@ -468,6 +473,13 @@
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
           }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
         }
       ],
       "methods": [
@@ -512,6 +524,13 @@
           "registration": {
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
           }
         }
       ],
@@ -633,6 +652,13 @@
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
           }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
         }
       ],
       "methods": [
@@ -707,6 +733,13 @@
           "registration": {
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
           }
         }
       ],
@@ -799,6 +832,13 @@
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
           }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
         }
       ],
       "methods": [
@@ -875,6 +915,13 @@
           "registration": {
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
           }
         }
       ],
@@ -1040,6 +1087,13 @@
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
           }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
         }
       ]
     },
@@ -1072,6 +1126,113 @@
       "consuming_methods": [
         "finish"
       ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+      "type_name": "ResponseRights",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn new () -> Self",
+        "fn register (& self , response : & ResponseIdentity) -> Result < Ticket >"
+      ],
+      "factories": [
+        {
+          "owner": "ResponseRights",
+          "signature": "pub (super) fn new () -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ResponseRights",
+          "signature": "fn register (& self , response : & ResponseIdentity) -> Result < Ticket >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn prepare_native (& self , response : & ResponseIdentity , owner : & ResponseRights) -> Result < Terminal >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor_fingerprint": "sha256:6dd056894ff7c80f414d16df3571721333dfbf28f12e2c692fd99908f7585495"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+      "type_name": "ResponseTickets",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn capture_app (& self , scope : & AuthorityScope , response : & ResponseIdentity) -> Result < () >",
+        "pub (super) fn capture_shell (& self , response : & ResponseIdentity) -> Result < () >",
+        "pub (super) fn new () -> Self",
+        "pub (super) fn prepare (& self , response : & ResponseIdentity) -> Result < Terminal >",
+        "pub (super) fn prepare_native (& self , response : & ResponseIdentity , owner : & ResponseRights) -> Result < Terminal >",
+        "pub (super) fn refuse (& self)"
+      ],
+      "factories": [
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn new () -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn capture_app (& self , scope : & AuthorityScope , response : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn capture_shell (& self , response : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn prepare (& self , response : & ResponseIdentity) -> Result < Terminal >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn prepare_native (& self , response : & ResponseIdentity , owner : & ResponseRights) -> Result < Terminal >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn refuse (& self)"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+      "type_name": "Terminal",
+      "kind": "private_material",
+      "consuming_methods": [
+        "complete"
+      ],
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn complete (mut self)"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn prepare (tickets : & [Ticket] , response : & ResponseIdentity) -> Result < Terminal >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn prepare (& self , response : & ResponseIdentity) -> Result < Terminal >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn prepare_native (& self , response : & ResponseIdentity , owner : & ResponseRights) -> Result < Terminal >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Terminal",
+          "signature": "pub (super) fn complete (mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "destructor_fingerprint": "sha256:09f8db611ac045e008b4585a39ea5caca657571c7f654dfd5f4a7376cf104724"
     },
     {
       "source": "crates/day2/src/oauth/refresh.rs",
