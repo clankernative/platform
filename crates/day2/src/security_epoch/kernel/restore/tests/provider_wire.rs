@@ -436,6 +436,229 @@ fn read_back(db: &Connection, names: &[String]) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&reply)?)
 }
 
+// This is an independent conditional provider interpreter, not a native port
+// or a source of approval/Stop authority. It exercises the actual consuming
+// transaction, wire parser and budget, with persistent SQLite outcomes.
+struct ReservationPort {
+    db: Connection,
+    reads: BTreeMap<String, Option<(String, String)>>,
+    names: Vec<String>,
+    initial_root: Value,
+    fault: usize,
+    refused: bool,
+    calls: Vec<&'static str>,
+    elapsed: std::time::Duration,
+    domain: Digest,
+    read_decodings: usize,
+}
+
+impl wire::Port for ReservationPort {
+    fn sample(&mut self) -> Result<wire::Sample> {
+        ensure!(!self.refused, "controlled_reservation_refused");
+        Ok(wire::Sample {
+            domain: self.domain.clone(),
+            elapsed: self.elapsed,
+        })
+    }
+
+    fn decoding_sample(&mut self) -> Result<wire::Sample> {
+        if self.calls.last() == Some(&"batchGet") {
+            self.read_decodings += 1;
+            ensure!(
+                self.fault != 26 || self.read_decodings < 2,
+                "controlled_final_budget_check"
+            );
+        }
+        self.sample()
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut wire::Budget,
+        max_bytes: usize,
+    ) -> Result<wire::EpochReply> {
+        let requested = (|| {
+            budget.remaining(self)?;
+            ensure!(max_bytes == 65_536, "controlled_reply_bound");
+            let body: Value = crate::json::decode(body)?;
+            let bytes = if url.ends_with("/documents:rollback") {
+                self.calls.push("rollback");
+                ensure!(body == json!({"transaction": TX}), "controlled_cleanup");
+                ensure!(self.fault != 0, "controlled_cleanup_unavailable");
+                b"{}".to_vec()
+            } else if url.ends_with("/documents:commit") {
+                self.calls.push("commit");
+                apply_wire(
+                    &mut self.db,
+                    &self.reads,
+                    &body,
+                    if self.fault <= 6 { self.fault } else { 7 },
+                )?;
+                ensure!(self.fault != 9, "controlled_commit_postcheck");
+                match self.fault {
+                    22 => self.elapsed = std::time::Duration::from_secs(15),
+                    23 => self.elapsed = std::time::Duration::from_secs(9),
+                    24 => self.domain = Digest::new(b"changed-clock-domain"),
+                    _ => {}
+                }
+                if self.fault == 7 {
+                    b"{}".to_vec()
+                } else {
+                    serde_json::to_vec(&json!({
+                        "writeResults":vec![json!({"updateTime":version(3)});5],
+                        "commitTime":version(3)
+                    }))?
+                }
+            } else {
+                ensure!(url.ends_with("/documents:batchGet"), "controlled_route");
+                self.calls.push("batchGet");
+                // The read must be strong, with exactly these names and no
+                // transaction, readTime, mask or other consistency selector.
+                ensure!(body == json!({"documents":self.names}), "controlled_strong_read");
+                ensure!(self.fault != 10, "controlled_read_unavailable");
+                if self.fault == 11 {
+                    return Ok(wire::EpochReply { status: 200, body: b"{}".to_vec() });
+                }
+                let mut rows: Vec<Value> = crate::json::decode(&read_back(&self.db, &self.names)?)?;
+                match self.fault {
+                    12 => rows[0]["readTime"] = json!(version(2)),
+                    13..=17 => rows[[0, 1, 4, 5, 6][self.fault - 13]]["found"]["updateTime"] = json!(version(4)),
+                    18..=19 => rows[[2, 3][self.fault - 18]]["found"]["updateTime"] = json!(version(4)),
+                    20 => rows[7]["found"]["updateTime"] = json!(version(4)),
+                    21 => rows[0]["found"]["fields"] = self.initial_root.clone(),
+                    _ => {}
+                }
+                ensure!(self.fault != 25, "controlled_read_postcheck");
+                serde_json::to_vec(&rows)?
+            };
+            Ok(wire::EpochReply {
+                status: if self.fault == 8 { 503 } else { 200 },
+                body: bytes,
+            })
+        })();
+        // Mandatory postwork is evaluated even when the exchange itself failed.
+        let checked = budget.remaining(self);
+        if requested.is_err() || checked.is_err() {
+            self.refused = true;
+        }
+        let reply = requested?;
+        checked?;
+        Ok(reply)
+    }
+
+    fn refuse(&mut self) {
+        self.refused = true;
+    }
+}
+
+fn reservation_budget() -> Result<wire::Budget> {
+    wire::Budget::from_native_origin(
+        wire::Sample {
+            domain: Digest::new(b"controlled-reservation-clock"),
+            elapsed: std::time::Duration::from_millis(10_001),
+        },
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(15),
+    )
+}
+
+fn reservation_port(db: Connection, reply: &[Value], names: Vec<String>, fault: usize) -> Result<ReservationPort> {
+    Ok(ReservationPort {
+        db,
+        reads: captured(reply)?,
+        names,
+        initial_root: reply[1]["found"]["fields"].clone(),
+        fault,
+        refused: false,
+        calls: Vec::new(),
+        elapsed: std::time::Duration::from_millis(10_001),
+        domain: Digest::new(b"controlled-reservation-clock"),
+        read_decodings: 0,
+    })
+}
+
+#[test]
+fn consuming_reservation_send_replays_durable_cuts_without_reconstructing_permission() -> Result<()> {
+    for seed_value in 0..3 {
+        let (selection, before) = initial();
+        let (current, plan) = approval_use::plan(&selection, &before, seed_value)?;
+        let reply = initial_reply(&selection, &plan)?;
+        let expected = publication(&selection, &plan)?;
+        let mut runs = Vec::new();
+        for _ in 0..2 {
+            let mut outcomes = Vec::new();
+            for fault in 0..=27 {
+                let dir = tempfile::tempdir()?;
+                let path = dir.path().join("reservation.sqlite");
+                let db = Connection::open(&path)?;
+                seed(&db, &reply)?;
+                let mut port = reservation_port(db, &reply, names(&selection, &plan)?, fault)?;
+                let tx = || wire::RestoreNames::new(&selection, &plan, &expected)?.transaction(&serde_json::to_vec(&reply)?);
+                let result = tx()?.commit_and_readback(&mut port, reservation_budget()?, &selection, &plan, &current, 1000);
+                // Independent control schedule: only the no-fault case is
+                // known. A committed use is deliberately NOT a positive result.
+                assert_eq!(result.is_ok(), fault == 27, "seed={seed_value} fault={fault}");
+                assert_eq!(port.refused, fault != 27);
+                let expected_calls = if fault <= 9 || (22..=24).contains(&fault) {
+                    vec!["commit"]
+                } else {
+                    vec!["commit", "batchGet"]
+                };
+                assert_eq!(port.calls, expected_calls, "fault={fault}");
+                if fault != 27 {
+                    let calls = port.calls.clone();
+                    port.fault = 27;
+                    port.elapsed = std::time::Duration::from_millis(10_001);
+                    port.domain = Digest::new(b"controlled-reservation-clock");
+                    // Repairing clock/transport and reparsing historical DATA
+                    // cannot reuse the permanently refused same source.
+                    assert!(tx()?.commit_and_readback(&mut port, reservation_budget()?, &selection, &plan, &current, 1000).is_err());
+                    assert_eq!(port.calls, calls);
+                }
+                let calls = port.calls;
+                drop(port.db);
+                let reopened = Connection::open(&path)?;
+                let count: i64 = reopened.query_row("SELECT count(*) FROM records", [], |row| row.get(0))?;
+                let committed = fault >= 6;
+                assert_eq!(count, if committed { 8 } else { 5 }, "fault={fault}");
+                let raw = read_back(&reopened, &names(&selection, &plan)?)?;
+                let rows: Vec<Value> = crate::json::decode(&raw)?;
+                assert_eq!(rows[0]["found"]["fields"]["epoch"]["stringValue"], if committed { "2" } else { "1" });
+                assert_eq!(rows[6].get("found").is_some(), committed);
+                outcomes.push((raw, calls));
+            }
+            runs.push(outcomes);
+        }
+        assert_eq!(runs[0], runs[1]);
+    }
+    Ok(())
+}
+
+#[test]
+fn consuming_reservation_semantic_refusal_only_cleans_up_and_keeps_primary_error() -> Result<()> {
+    let (selection, before) = initial();
+    let (mut current, plan) = approval_use::plan(&selection, &before, 61)?;
+    current.enabled = false;
+    let reply = initial_reply(&selection, &plan)?;
+    for fault in [0, 27] {
+        let db = Connection::open_in_memory()?;
+        seed(&db, &reply)?;
+        let mut port = reservation_port(db, &reply, names(&selection, &plan)?, fault)?;
+        let tx = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+            .transaction(&serde_json::to_vec(&reply)?)?;
+        let result = tx.commit_and_readback(&mut port, reservation_budget()?, &selection, &plan, &current, 1000);
+        let error = match result { Ok(_) => anyhow::bail!("unexpected_semantic_admission"), Err(error) => error };
+        assert_eq!(error.to_string(), "restore_current_authority_or_exact_keys_changed");
+        assert_eq!(port.calls, ["rollback"]);
+        assert!(port.refused);
+        let count: i64 = port.db.query_row("SELECT count(*) FROM records", [], |row| row.get(0))?;
+        assert_eq!(count, 5);
+    }
+    Ok(())
+}
+
 #[test]
 fn five_wire_write_cuts_and_unknown_completion_reopen_against_independent_expectations_twice()
 -> Result<()> {

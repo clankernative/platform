@@ -1,13 +1,15 @@
 # Exact restore provider messages
 
 The private Firestore restore codec binds one original conditional reservation
-to the admitted external epoch selection. It has no HTTP sender, approval
+to the admitted external epoch selection. Its consuming transaction can perform
+one guarded commit and strong readback, but supplies no native port, approval
 constructor, consumed-grant factory or retry path. The existing read-only
 counter connection and purpose-bound bootstrap writer are unchanged.
 
-One `batchGet` with a new **read-write** transaction reads seven exact documents:
+One `batchGet` with a new **read-write** transaction reads eight exact documents:
 root, bootstrap sentinel, initial create and activation receipts, the proposed
-advance and restore receipts, and the grant-ID use row. The token is bounded,
+advance and restore receipts, the grant-ID use row and the exact signed approval
+publication. The token is bounded,
 canonical base64 and belongs only to that parsed transaction. Semantic document
 failure retains it for pre-send rollback; malformed bytes do not invent a token.
 No mask, historical read time or retry transaction is accepted.
@@ -30,10 +32,20 @@ protects records not rewritten by this commit. Local SQLite interpretation of
 these conditions is conformance evidence, not live Firestore qualification.
 
 A five-result acknowledgement is only historical DATA. Fresh default-strong
-readback must cover the complete same seven-document set, with provider read
+readback must cover the complete same eight-document set, with provider read
 times no earlier than the acknowledgement and full kernel reconciliation. It
 cannot reuse the transaction's old snapshot. Neither readback nor a matching
 receipt reconstructs a consumed approval owner after loss, ambiguity or expiry.
+
+`Transaction::commit_and_readback` consumes the actual parsed transaction into
+at most one send under the caller's existing budget. A semantic preparation
+failure permits only bounded pre-send rollback, retaining the original error.
+Any commit error, invalid acknowledgement, postcheck failure or ambiguous result
+refuses the port without retry, rollback or readback adoption. Success requires
+the complete strong readback, unchanged publication and initial history, all
+five exact update versions from the acknowledgement, full applied-plan
+reconciliation, and the final original-budget check. This remains provider
+DATA; the real accepting native port and complete stop owner remain separate.
 
 The accepting native consumer still must retain the genuine passkey approval,
 actual current executor and native storage owners; compare every approved field;

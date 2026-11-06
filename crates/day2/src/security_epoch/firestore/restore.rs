@@ -1,6 +1,6 @@
-//! Exact restore provider messages. These are bounded DATA codecs, not an
-//! approval verifier, native dispatch permit, retry policy or consumed owner.
-//! The future native sender must retain both genuine approval and storage owners.
+//! Exact restore provider messages and one consuming guarded reservation send.
+//! Results remain DATA, not an approval verifier, native dispatch permit or
+//! consumed owner. The native caller must retain its real owners and original.
 use super::{Entry, Names as InitialNames, decode_snapshot, encode_fields};
 use crate::security_epoch::{
     journal::snapshot_digest,
@@ -461,6 +461,7 @@ impl Observed {
 /// approval: actual native postchecks and complete current readback remain owed.
 pub(in crate::security_epoch) struct CommitRecord {
     committed: time::OffsetDateTime,
+    versions: [UpdateTime; 5],
 }
 
 pub(in crate::security_epoch) fn commit_reply(bytes: &[u8]) -> Result<CommitRecord> {
@@ -492,13 +493,14 @@ pub(in crate::security_epoch) fn commit_reply(bytes: &[u8]) -> Result<CommitReco
     let reply: Reply = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("restore_provider_commit_encoding"))?;
     let committed = timestamp(&String::from(reply.commit_time))?;
-    for write in reply.write_results {
+    let versions = reply.write_results.map(|write| write.update_time);
+    for version in &versions {
         ensure!(
-            timestamp(&String::from(write.update_time))? <= committed,
+            timestamp(&String::from(version.clone()))? <= committed,
             "restore_provider_commit_time_order"
         );
     }
-    Ok(CommitRecord { committed })
+    Ok(CommitRecord { committed, versions })
 }
 
 /// Transient provider transaction, not native approval or counter permission.
@@ -511,6 +513,87 @@ pub(in crate::security_epoch) struct Transaction {
 }
 
 impl Transaction {
+    /// Consume THIS transaction into at most one commit, then a default-strong
+    /// read of all eight original names. There is no retry or readback adoption
+    /// after an unknown/invalid send. Returned observations remain DATA: the
+    /// actual port must keep authority, original and mandatory postchecks live,
+    /// and the caller must mark its actual approval May before this method.
+    pub(in crate::security_epoch) fn commit_and_readback(
+        self,
+        port: &mut impl super::Port,
+        mut budget: super::Budget,
+        selection: &EpochStore,
+        plan: &approval_use::Plan,
+        current: &restore::Current,
+        at: i64,
+    ) -> Result<Observed> {
+        let body = match self.commit_body(selection, plan, current, at) {
+            Ok(body) => body,
+            Err(primary) => {
+                // Cleanup only before any commit attempt. Keep the semantic
+                // refusal primary even if the same bounded port also refuses.
+                let cleanup = (|| {
+                    let endpoint = self.names.endpoint("rollback")?;
+                    let body = self.rollback_body()?;
+                    budget.call(port, &endpoint, &body)
+                })();
+                let _closed = cleanup;
+                port.refuse();
+                return Err(primary);
+            }
+        };
+        let requested = (|| {
+            let bytes = budget.call(port, &self.names.endpoint("commit")?, &body)?;
+            let committed = commit_reply(&bytes)?;
+            let bytes = budget.call(
+                port,
+                &self.names.endpoint("batchGet")?,
+                &self.names.strong_body()?,
+            )?;
+            let after = self.names.strong(&bytes)?;
+            self.check_commit(&committed, &after)?;
+            ensure!(
+                after.snapshot.create == plan.reservation.before.create
+                    && after.snapshot.activate == plan.reservation.before.activate,
+                "restore_provider_immutable_history_changed"
+            );
+            let versions = [
+                after.snapshot.root.as_ref().map(|row| &row.version),
+                after.snapshot.sentinel.as_ref().map(|row| &row.version),
+                after.advance.as_ref().map(|row| &row.version),
+                after.reservation.as_ref().map(|row| &row.version),
+                after.grant.as_ref().map(|row| &row.version),
+            ];
+            ensure!(
+                versions
+                    .iter()
+                    .zip(&committed.versions)
+                    .all(|(actual, written)| *actual == Some(written)),
+                "restore_provider_written_versions_changed"
+            );
+            ensure!(
+                matches!(
+                    approval_use::reconcile(
+                        selection,
+                        plan,
+                        &after.snapshot,
+                        after.advance.as_ref(),
+                        after.reservation.as_ref(),
+                        after.grant.as_ref(),
+                    )?,
+                    restore::Outcome::Applied(_)
+                ),
+                "restore_provider_reservation_not_applied"
+            );
+            budget.remaining_decoding(port)?;
+            Ok(after)
+        })();
+        if requested.is_err() {
+            port.refuse();
+        }
+        requested
+    }
+
     /// Bind the post-read to the publication captured by THIS retained
     /// read-write transaction. Callers cannot substitute the post-read itself
     /// as its own before-version. This is still DATA, never consumption.
