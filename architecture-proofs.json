@@ -2546,6 +2546,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
             "module": "producer"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
         }
       ],
       "methods": [
@@ -2793,7 +2800,15 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
       "type_name": "CompletedCeremony",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
+        }
+      ],
       "methods": [
         "pub (in crate :: security_epoch) fn check_publication_source (& mut self , source : & mut NativeApprovalSource) -> Result < (EpochStore , Snapshot) >",
         "pub (in crate :: security_epoch) fn check_signing_source (& mut self , source : & mut NativeApprovalSource) -> Result < () >",
@@ -2837,7 +2852,15 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
       "type_name": "PendingApproval",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
+        }
+      ],
       "methods": [
         "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >",
         "pub (in crate :: security_epoch) fn challenge_data (& self) -> Result < String >"
