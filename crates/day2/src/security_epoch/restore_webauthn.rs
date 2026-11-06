@@ -160,6 +160,33 @@ pub(super) struct AssertionFacts {
     backed_up: bool,
 }
 
+/// Closed rejection of untrusted assertion bytes. Native/source failures and
+/// server challenge/enrollment mismatches deliberately never use this type.
+#[derive(Debug)]
+enum AssertionDenied {
+    ShapeOrIdentity,
+    ClientData,
+    ClientBinding,
+    RelyingParty,
+    UserVerification,
+    Counter,
+}
+
+impl std::fmt::Display for AssertionDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ShapeOrIdentity => "restore_passkey_assertion_shape_or_identity",
+            Self::ClientData => "restore_passkey_invalid_client_data",
+            Self::ClientBinding => "restore_passkey_client_binding_changed",
+            Self::RelyingParty => "restore_passkey_rp_changed",
+            Self::UserVerification => "restore_passkey_flags_or_verification_changed",
+            Self::Counter => "restore_passkey_counter_not_advanced",
+        })
+    }
+}
+
+impl std::error::Error for AssertionDenied {}
+
 pub(super) fn verify(
     key: &TrustedKey<'_>,
     challenge: &Challenge,
@@ -181,24 +208,24 @@ pub(super) fn verify(
             && (1..=MAX_CLIENT_DATA).contains(&assertion.client_data_json.len())
             && assertion.authenticator_data.len() == 37
             && (8..=72).contains(&assertion.signature.len()),
-        "restore_passkey_assertion_shape_or_identity"
+        AssertionDenied::ShapeOrIdentity
     );
     let value: serde_json::Value = crate::json::decode(&assertion.client_data_json)
-        .map_err(|_| anyhow::anyhow!("restore_passkey_invalid_client_data"))?;
-    ensure!(value.is_object(), "restore_passkey_invalid_client_data");
-    let client: ClientData = serde_json::from_value(value)
-        .map_err(|_| anyhow::anyhow!("restore_passkey_invalid_client_data"))?;
+        .map_err(|_| anyhow::anyhow!(AssertionDenied::ClientData))?;
+    ensure!(value.is_object(), AssertionDenied::ClientData);
+    let client: ClientData =
+        serde_json::from_value(value).map_err(|_| anyhow::anyhow!(AssertionDenied::ClientData))?;
     ensure!(
         client.kind == "webauthn.get"
             && client.challenge == challenge.encoded()?
             && client.origin == row.origin
             && !client.cross_origin,
-        "restore_passkey_client_binding_changed"
+        AssertionDenied::ClientBinding
     );
     let auth = &assertion.authenticator_data;
     ensure!(
         &auth[..32] == digest(&SHA256, row.rp_id.as_bytes()).as_ref(),
-        "restore_passkey_rp_changed"
+        AssertionDenied::RelyingParty
     );
     let flags = auth[32];
     let backup_eligible = flags & BACKUP_ELIGIBLE != 0;
@@ -208,25 +235,28 @@ pub(super) fn verify(
             && flags & !SUPPORTED_FLAGS == 0
             && backup_eligible == row.backup_eligible
             && (!backed_up || backup_eligible),
-        "restore_passkey_flags_or_verification_changed"
+        AssertionDenied::UserVerification
     );
     let counter = u32::from_be_bytes(auth[33..37].try_into()?);
     // Synced passkeys may have no counter. The durable one-use challenge is
     // their replay barrier. A positive counter can never be reset or repeated.
     ensure!(
         (stored_counter == 0 && counter == 0) || counter > stored_counter,
-        "restore_passkey_counter_not_advanced"
+        AssertionDenied::Counter
     );
     let mut signed = Vec::with_capacity(69);
     signed.extend_from_slice(auth);
     signed.extend_from_slice(digest(&SHA256, &assertion.client_data_json).as_ref());
     UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &row.public_key)
         .verify(&signed, &assertion.signature)
+        // Ring does not distinguish a bad signature from an invalid configured
+        // curve point. Keep that ambiguous cryptographic failure terminal.
         .map_err(|_| anyhow::anyhow!("restore_passkey_signature_invalid"))?;
     Ok(AssertionFacts { counter, backed_up })
 }
 
 mod registry;
 pub(super) use registry::ControllerCeremony;
+mod store;
 #[cfg(test)]
 mod tests;

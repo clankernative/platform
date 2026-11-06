@@ -22,6 +22,18 @@ impl ApprovalIntent {
         self.target.validate()
     }
 
+    /// Bounded transport DATA only; decoding supplies no current authority.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            bytes.len() <= super::MAX_REQUEST_BYTES,
+            "restore_approval_intent_bound"
+        );
+        let value: Self = crate::json::decode(bytes)
+            .map_err(|_| anyhow::anyhow!("restore_approval_intent_encoding"))?;
+        value.validate()?;
+        Ok(value)
+    }
+
     /// Every known request field is committed, with a domain distinct from the
     /// finalized signed request. The registry key binding separately commits
     /// the genuine approver selection; this digest authenticates no principal.

@@ -72,6 +72,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f4d51c1c125dcf357b0e49ffe996d4cf4b8d1bd83534b00076e8bc76be2cc3d7",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
       "scope": "const",
       "fingerprint": "sha256:0c9b68ebb6eafc44c1610d2fd60011968daa08d673c327b4a3c4d759c530f28e",
@@ -4702,6 +4708,69 @@
       ]
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
+      "type_name": "UnfencedControllerClock",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn capture (phase : & mut CurrentControllerStoragePhase < '_ , '_ > , scope : & AuthorityScope) -> Result < Self >",
+        "pub (super) fn observe (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >",
+        "pub (super) fn refuse (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >)"
+      ],
+      "factories": [
+        {
+          "owner": "UnfencedControllerClock",
+          "signature": "pub (super) fn capture (phase : & mut CurrentControllerStoragePhase < '_ , '_ > , scope : & AuthorityScope) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "UnfencedControllerClock",
+          "signature": "pub (super) fn observe (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >"
+        },
+        {
+          "owner": "UnfencedControllerClock",
+          "signature": "pub (super) fn refuse (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
+      "type_name": "UnfencedHostClock",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >",
+        "fn capture_checked_current (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (super) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < HostTimeData >",
+        "pub (super) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "fn capture_checked_current (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        },
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < HostTimeData >"
+        },
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_webauthn.rs",
       "type_name": "TrustedKey",
       "kind": "private_material",
@@ -4713,7 +4782,7 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
-          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4748,6 +4817,22 @@
         {
           "owner": "TrustedKey < '_ >",
           "signature": "fn validate (& self) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "fn claim (db : & mut Connection , key : & TrustedKey , id : & Digest , expected : & Digest) -> Result < Claimed >"
+        },
+        {
+          "owner": null,
+          "signature": "fn current (tx : & Transaction < '_ > , key : & TrustedKey) -> Result < (i64 , u32) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn complete (db : & mut Connection , key : & TrustedKey , id : & Digest , expected_request : & Digest , at : i64 , assertion : & Assertion) -> Result < AssertionFacts >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn issue (tx : & Transaction < '_ > , key : & TrustedKey , challenge : & Challenge , created_at : i64 , expires_at : i64) -> Result < Digest >"
         }
       ],
       "proof_uses": [],
@@ -4793,7 +4878,7 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
-          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4838,7 +4923,7 @@
         "fn observe (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ >) -> Result < () >",
         "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str) -> Result < () >",
         "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >",
-        "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
       ],
       "factories": [
         {
@@ -4869,7 +4954,7 @@
         },
         {
           "owner": "RegistryCeremony",
-          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4905,7 +4990,7 @@
       "methods": [
         "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , intent : ApprovalIntent) -> Result < Self >",
         "pub (in crate :: security_epoch) fn encoded_challenge (& self) -> Result < String >",
-        "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
       ],
       "factories": [
         {
@@ -4920,7 +5005,7 @@
         },
         {
           "owner": "ControllerCeremony",
-          "signature": "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         }
       ],
       "proof_uses": [],
