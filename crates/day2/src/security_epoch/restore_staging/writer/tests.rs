@@ -1,6 +1,6 @@
 use super::*;
 use crate::security_epoch::restore_fencing::tests as drain;
-use std::fs::OpenOptions;
+use std::{fs::OpenOptions, io::Write};
 use std::sync::Arc;
 
 #[derive(Debug)]
