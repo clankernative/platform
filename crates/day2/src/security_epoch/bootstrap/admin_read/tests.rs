@@ -158,7 +158,13 @@ fn retained_reader_units_match_independent_connection_and_transaction_histories(
             };
             let observed = match action {
                 0 => actual.retain_reader().is_ok(),
-                1 => actual.begin_sql().is_ok(),
+                1 => {
+                    if connection {
+                        actual.begin_retained_sql().is_ok()
+                    } else {
+                        actual.begin_sql().is_ok()
+                    }
+                }
                 2 => actual.end_retained_sql(true).is_ok(),
                 3 => actual.close_reader().is_ok(),
                 4 => actual.end_sql(true).is_ok(),
@@ -178,7 +184,7 @@ fn retained_reader_units_match_independent_connection_and_transaction_histories(
 fn successful_reader_unit_is_not_connection_close_or_peer_release() {
     let mut state = ReadDisposition::new();
     state.retain_reader().unwrap();
-    state.begin_sql().unwrap();
+    state.begin_retained_sql().unwrap();
     assert!(state.require_closed().is_err());
     state.end_retained_sql(true).unwrap();
     state.require_closed().unwrap();
@@ -188,7 +194,7 @@ fn successful_reader_unit_is_not_connection_close_or_peer_release() {
 
     let mut state = ReadDisposition::new();
     state.retain_reader().unwrap();
-    state.begin_sql().unwrap();
+    state.begin_retained_sql().unwrap();
     assert!(state.end_sql(true).is_err());
     assert!(state.end_retained_sql(true).is_err());
     assert!(state.close_reader().is_err());
@@ -196,11 +202,18 @@ fn successful_reader_unit_is_not_connection_close_or_peer_release() {
 
     let mut state = ReadDisposition::new();
     state.retain_reader().unwrap();
-    state.begin_sql().unwrap();
+    state.begin_retained_sql().unwrap();
     assert!(state.end_retained_sql(false).is_err());
     assert!(state.end_retained_sql(true).is_err());
     assert!(state.close_reader().is_err());
     assert!(state.finish().is_err());
+
+    // The one-shot projection cannot open a second connection inside the
+    // retained session. It refuses BEFORE the fixed adapter's SQLite open.
+    let mut state = ReadDisposition::new();
+    state.retain_reader().unwrap();
+    assert!(state.begin_sql().is_err());
+    assert!(state.begin_retained_sql().is_err());
 }
 
 fn method(source: &str, owner: &str, name: &str) -> syn::ImplItemFn {

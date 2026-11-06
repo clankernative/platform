@@ -235,7 +235,7 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
                 self.reader == Some(std::ptr::from_ref(db)) && db.is_autocommit(),
                 "controller_admin_reader_substituted_or_unit_open"
             );
-            self.disposition.begin_sql()
+            self.disposition.begin_retained_sql()
         })();
         if result.is_err() {
             self.refuse();
@@ -554,14 +554,11 @@ impl ReadDisposition {
         Ok(())
     }
     fn begin_sql(&mut self) -> Result<()> {
-        self.phase = match self.phase {
-            ReadPhase::Reading => ReadPhase::Sql,
-            ReadPhase::Reader => ReadPhase::ReaderSql,
-            _ => {
-                self.refuse();
-                anyhow::bail!("controller_admin_sql_already_open");
-            }
-        };
+        if self.phase != ReadPhase::Reading {
+            self.refuse();
+            anyhow::bail!("controller_admin_sql_already_open_or_reader_held");
+        }
+        self.phase = ReadPhase::Sql;
         Ok(())
     }
     fn end_sql(&mut self, known: bool) -> Result<()> {
@@ -612,6 +609,15 @@ impl ReadDisposition {
             anyhow::bail!("controller_admin_reader_sql_completion_unknown");
         }
         self.phase = ReadPhase::Reader;
+        Ok(())
+    }
+
+    fn begin_retained_sql(&mut self) -> Result<()> {
+        if self.phase != ReadPhase::Reader {
+            self.refuse();
+            anyhow::bail!("controller_admin_reader_sql_already_open_or_missing");
+        }
+        self.phase = ReadPhase::ReaderSql;
         Ok(())
     }
 
