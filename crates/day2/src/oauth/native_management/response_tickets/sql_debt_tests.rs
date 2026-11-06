@@ -172,10 +172,14 @@ mod tests {
             let fixture = Granted::for_issuance()?;
             let rights = ResponseRights::new();
             rights.install_issuance(&scope())?;
+            // Schema birth belongs to fixture setup. RuntimeSql correctly
+            // refuses DDL; the guarded business unit performs only the INSERT.
+            crate::store::open(fixture.ordinary_runtime().db())?
+                .execute_batch("CREATE TABLE local_only(value INTEGER) STRICT")?;
             fixture.ordinary_runtime().sql_write(|connection| {
-            connection.execute_batch("CREATE TABLE local_only(value INTEGER) STRICT; INSERT INTO local_only VALUES(7)")?;
-            Ok(())
-        })?;
+                connection.execute("INSERT INTO local_only VALUES(7)", [])?;
+                Ok(())
+            })?;
             assert_eq!(
                 fixture
                     .ordinary_runtime()
