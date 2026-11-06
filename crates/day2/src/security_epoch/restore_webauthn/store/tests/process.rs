@@ -5,6 +5,7 @@ use ring::{
     rand::SystemRandom,
     signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair as _},
 };
+use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read as _, Write as _},
