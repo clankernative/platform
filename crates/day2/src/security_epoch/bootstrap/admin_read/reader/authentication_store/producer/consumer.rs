@@ -443,4 +443,94 @@ mod tests {
         }
         Ok(())
     }
+
+    fn actual_owner_check(file: &syn::File) -> Result<&syn::Block> {
+        let methods: Vec<_> = file.items.iter().filter_map(|item| match item {
+            syn::Item::Impl(item) if item.trait_.is_none()
+                && matches!(&*item.self_ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|p|p.ident=="AuthenticatedRestoreExecution")) => Some(item),
+            _ => None,
+        }).flat_map(|item|item.items.iter()).filter_map(|item|match item {
+            syn::ImplItem::Fn(item) if item.sig.ident=="check" => Some(&item.block),
+            _ => None,
+        }).collect();
+        ensure!(methods.len()==1,"actual_executor_check_count");
+        Ok(methods[0])
+    }
+
+    fn guarded_owner_check(block: &syn::Block) -> bool {
+        // The complete production method is closed, including the mandatory
+        // post on Err and primary-before-post propagation. The pending/UV
+        // oracle alone cannot establish these later consumer boundaries.
+        let expected: syn::Block = syn::parse_quote! {{
+            let requested = (|| {
+                ensure!(!self.refused, "restore_executor_refused");
+                self.action.check_execution_original(
+                    &mut self.original, &self.record, &self.operation,
+                )?;
+                self.completion.check_current(
+                    &mut self.action.reader,
+                    (
+                        self.action.sqlite.as_mut().context("restore_auth_sqlite_closed")?,
+                        &mut self.action.files,
+                    ),
+                    &self.record,
+                    &self.operation,
+                )?;
+                self.source.require_qualified(&self.time_operation)?;
+                let time = self.source.current_time(&mut self.action)?;
+                approval_window(&self.record, &time)?;
+                Ok(())
+            })();
+            let checked = self.action.check_execution_original(
+                &mut self.original, &self.record, &self.operation,
+            );
+            if requested.is_err() || checked.is_err() { self.refuse(); }
+            requested?;
+            checked
+        }};
+        block.to_token_stream().to_string()==expected.to_token_stream().to_string()
+    }
+
+    fn requested_body(block: &mut syn::Block) -> &mut syn::Block {
+        let syn::Stmt::Local(local)=&mut block.stmts[0] else {panic!("actual requested local")};
+        let syn::Expr::Call(call)=&mut *local.init.as_mut().unwrap().expr else {panic!("actual requested call")};
+        let syn::Expr::Paren(paren)=&mut *call.func else {panic!("actual closure parentheses")};
+        let syn::Expr::Closure(closure)=&mut *paren.expr else {panic!("actual requested closure")};
+        let syn::Expr::Block(body)=&mut *closure.body else {panic!("actual requested body")};
+        &mut body.block
+    }
+
+    #[test]
+    fn actual_consumer_rechecks_completion_utc_and_original_even_on_primary_error() -> Result<()> {
+        let file=syn::parse_file(include_str!("consumer.rs"))?;
+        let actual=actual_owner_check(&file)?;
+        assert!(guarded_owner_check(actual));
+        for cut in [2,3,4,5] {
+            let mut changed=actual.clone();
+            requested_body(&mut changed).stmts.remove(cut);
+            assert!(!guarded_owner_check(&changed),"remove actual boundary {cut}");
+        }
+        let mut changed=actual.clone();
+        requested_body(&mut changed).stmts.swap(2,3);
+        assert!(!guarded_owner_check(&changed));
+        let mut changed=actual.clone();
+        changed.stmts.remove(1);
+        assert!(!guarded_owner_check(&changed));
+        let mut changed=actual.clone();
+        changed.stmts[1]=syn::parse_quote! {
+            let checked=if requested.is_ok() {
+                self.action.check_execution_original(&mut self.original,&self.record,&self.operation)
+            } else { Err(anyhow::anyhow!("fixture_post_bypassed")) };
+        };
+        assert!(!guarded_owner_check(&changed));
+        let mut changed=actual.clone();
+        changed.stmts[2]=syn::parse_quote! { if requested.is_err() { self.refuse(); } };
+        assert!(!guarded_owner_check(&changed));
+        let mut changed=actual.clone();
+        changed.stmts[3]=syn::parse_quote! { checked?; };
+        changed.stmts[4]=syn::parse_quote! { requested };
+        assert!(!guarded_owner_check(&changed));
+        Ok(())
+    }
+
 }
