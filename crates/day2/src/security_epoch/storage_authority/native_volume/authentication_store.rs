@@ -189,10 +189,11 @@ impl CurrentVolumePhase<'_, '_> {
             self.check_durability_profile()?;
             self.check_directory(app, anchor)?;
             let key = self.reader.store.authority_key()?;
-            let original = self.reader.acquisition.narrow(
-                self.reader.store.max_lease_seconds,
-                std::time::Duration::MAX,
-            )?;
+            let current = self
+                .reader
+                .stage
+                .narrow_io_acquisition(self.reader.store.max_lease_seconds)?;
+            let original = meet_authentication_original(current, &mut self.reader.acquisition)?;
             let root = self.resources.directory.try_clone()?;
             let app = pin(&root, super::PRIVATE_DIRECTORY, true)?;
             ensure!(
@@ -241,6 +242,16 @@ impl CurrentVolumePhase<'_, '_> {
         }
         result
     }
+}
+
+// Deadlines are per actual view. Join the post-peer stage and retained
+// volume-reader ceilings, preserving their shared original and the smaller cap.
+fn meet_authentication_original(
+    mut current: NativeAcquisition,
+    retained: &mut NativeAcquisition,
+) -> Result<NativeAcquisition> {
+    current.exchange_current_views(retained)?;
+    Ok(current)
 }
 
 fn key_hex(key: &Digest) -> Result<&str> {
@@ -417,7 +428,8 @@ const _: () = {
     assert_not_impl!(serde::Deserialize<'static>);
 };
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -472,6 +484,30 @@ mod tests {
 #[cfg(test)]
 mod descriptor_tests {
     use super::*;
+    #[test]
+    fn auth_files_meet_both_actual_clock_views_without_discarding_an_earlier_cap() -> Result<()> {
+        use std::time::Duration;
+        for (stage_cap, reader_cap) in [(1, 5), (5, 1), (2, 3)] {
+            let origin = Duration::from_secs(100);
+            let mut original = NativeAcquisition::fixture(
+                Digest::new(b"auth-original"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            let current = original.narrow(5, origin + Duration::from_secs(stage_cap))?;
+            let mut retained = original.narrow(5, origin + Duration::from_secs(reader_cap))?;
+            let mut joined = meet_authentication_original(current, &mut retained)?;
+            let expected = Duration::from_secs(stage_cap.min(reader_cap));
+            assert_eq!(joined.remaining()?, expected);
+            assert_eq!(retained.remaining()?, expected);
+            joined.refuse();
+            assert!(retained.remaining().is_err());
+            assert!(original.remaining().is_err());
+        }
+        Ok(())
+    }
+
     #[test]
     fn opened_cohort_keeps_every_actual_descriptor_even_for_same_file_identity() -> Result<()> {
         let actual = OpenedCohort {
