@@ -3589,3 +3589,37 @@ fn admin_read_is_signed_distinct_and_exact_with_a_mandatory_cohort() {
         assert!(decode(duplicate.as_bytes()).is_err());
     }
 }
+
+#[test]
+fn authentication_cohort_comparison_rejects_every_app_alias_and_candidate_alias()
+-> anyhow::Result<()> {
+    let app = SqliteCohort::from_identities((9, 10), (9, 11), (9, 12))?;
+    let valid = [(9, 20), (9, 21), (9, 22)];
+    app.require_disjoint_members(valid[0], Some(valid[1]), Some(valid[2]))?;
+    app.require_disjoint_members(valid[0], None, None)?;
+    // Same inode on another device is distinct DATA; native placement is a
+    // separate actual mount/profile check, not invented by this comparator.
+    app.require_disjoint_members((19, 10), Some((19, 11)), Some((19, 12)))?;
+    for slot in 0..3 {
+        for member in [(9, 10), (9, 11), (9, 12)] {
+            let mut candidate = valid;
+            candidate[slot] = member;
+            assert!(
+                app.require_disjoint_members(candidate[0], Some(candidate[1]), Some(candidate[2]))
+                    .is_err()
+            );
+        }
+    }
+    for (main, wal, shm) in [
+        ((9, 0), None, None),
+        ((9, 20), Some((9, 0)), None),
+        ((9, 20), None, Some((9, 0))),
+        ((9, 20), Some((9, 20)), None),
+        ((9, 20), None, Some((9, 20))),
+        ((9, 20), Some((9, 21)), Some((9, 21))),
+        ((9, 20), Some((10, 21)), None),
+    ] {
+        assert!(app.require_disjoint_members(main, wal, shm).is_err());
+    }
+    Ok(())
+}

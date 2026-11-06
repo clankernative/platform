@@ -1028,6 +1028,21 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         self.file.controller_stage_after_check()
     }
 
+    pub(in crate::security_epoch) fn admit_authentication_store(
+        &mut self,
+    ) -> Result<super::native_volume::AuthenticationStoreFiles> {
+        self.check()?;
+        let cohort = self.app_request()?.admin_cohort()?.clone();
+        let requested = self.file.admit_authentication_store(&cohort);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let files = requested?;
+        checked?;
+        Ok(files)
+    }
+
     pub(in crate::security_epoch) fn check_opened_admin_database(
         &mut self,
         db: &rusqlite::Connection,

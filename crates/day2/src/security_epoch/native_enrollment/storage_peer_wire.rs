@@ -343,6 +343,35 @@ impl SqliteCohort {
         Ok(())
     }
 
+    /// Comparison DATA only. Every present candidate must be distinct from
+    /// every authenticated App member, including cross-role aliases.
+    pub(crate) fn require_disjoint_members(
+        &self,
+        main: (u64, u64),
+        wal: Option<(u64, u64)>,
+        shm: Option<(u64, u64)>,
+    ) -> Result<()> {
+        self.validate()?;
+        let candidates = [Some(main), wal, shm];
+        for (index, candidate) in candidates.iter().enumerate() {
+            if let Some(candidate) = candidate {
+                ensure!(
+                    candidate.1 > 0 && candidate.0 == main.0,
+                    "restore_auth_sqlite_candidate_shape"
+                );
+                ensure!(
+                    ![self.main, self.wal, self.shm].contains(candidate),
+                    "restore_auth_sqlite_app_alias"
+                );
+                ensure!(
+                    !candidates[..index].contains(&Some(*candidate)),
+                    "restore_auth_sqlite_candidate_alias"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn from_identities(
         main: (u64, u64),
         wal: (u64, u64),

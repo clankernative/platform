@@ -22,6 +22,9 @@ use day2_capabilities::security_epoch::{EpochStore, bootstrap::InitialBootstrapP
 use serde_json::Value;
 use std::{fs::File, io::Read};
 
+mod authentication_store;
+pub(crate) use authentication_store::AuthenticationStoreFiles;
+
 const ROOT: &str = "/state";
 const PROFILE: &str = "/etc/day2-native/storage.json";
 const MAX_PROFILE: usize = 16_384;
@@ -371,27 +374,49 @@ impl<'role> ProviderReader<'role> {
             .validate(policy)
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let ca = cluster_ca(&mut acquisition)
+        let mut reader = Self {
+            stage,
+            policy: policy.clone(),
+            store: store.clone(),
+            profile: selected,
+            profile_file,
+            authentication: ProviderAuthentication::ConnectionRequest,
+            acquisition,
+            timings,
+            bootstrap: BootstrapTiming::disabled(),
+        };
+        reader.authentication =
+            ProviderAuthentication::Acquired(Box::new(reader.acquire_material()?));
+        Ok(reader)
+    }
+
+    // Both the original admission and the closed auth-ledger operation obtain
+    // real material here. A warm ConnectionRequest never supplies provider I/O.
+    fn acquire_material(&mut self) -> Result<AcquiredProviderAuthentication> {
+        let ca = cluster_ca(&mut self.acquisition)
             .map_err(|error| PreparationFailure::at(PreparationStep::ClusterCa, error))?;
-        let mut http = NativeHttp::new(store, &policy.cluster, &ca)
+        let mut http = NativeHttp::new(&self.store, &self.policy.cluster, &ca)
             .map_err(|error| PreparationFailure::at(PreparationStep::TransportSetup, error))?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let source = timings
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        let source = self
+            .timings
             .measure(Operation::MetadataToken, || {
-                CredentialMaterial::metadata_source(&mut acquisition)
+                CredentialMaterial::metadata_source(&mut self.acquisition)
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::MetadataCredential, error))?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        timings
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        self.timings
             .measure(Operation::Project, || {
                 identity_protocol::project(
-                    store,
+                    &self.store,
                     &http
                         .request(
                             Route::Project,
                             &source.authorization()?,
                             None,
-                            &mut acquisition,
+                            &mut self.acquisition,
                         )
                         .map_err(|error| {
                             PreparationFailure::at(PreparationStep::ProjectIdentity, error)
@@ -399,24 +424,26 @@ impl<'role> ProviderReader<'role> {
                 )
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::ProjectIdentity, error))?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        timings
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        self.timings
             .measure(Operation::Cluster, || {
-                http.verify_cluster(&ca, &source.authorization()?, &mut acquisition)
+                http.verify_cluster(&ca, &source.authorization()?, &mut self.acquisition)
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::ClusterIdentity, error))?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        timings
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        self.timings
             .measure(Operation::ControllerIdentity, || {
                 identity_protocol::google_service_account(
-                    &policy.controller.google_service_account,
-                    &policy.cluster.project,
+                    &self.policy.controller.google_service_account,
+                    &self.policy.cluster.project,
                     &http
                         .request(
-                            Route::GoogleAccount(&policy.controller.google_service_account),
+                            Route::GoogleAccount(&self.policy.controller.google_service_account),
                             &source.authorization()?,
                             None,
-                            &mut acquisition,
+                            &mut self.acquisition,
                         )
                         .map_err(|error| {
                             PreparationFailure::at(PreparationStep::ControllerIdentity, error)
@@ -424,30 +451,33 @@ impl<'role> ProviderReader<'role> {
                 )
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::ControllerIdentity, error))?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let controller = timings
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        let controller = self
+            .timings
             .measure(Operation::ControllerToken, || {
                 CredentialMaterial::mint_target(
                     &source,
-                    &policy.controller.google_service_account,
+                    &self.policy.controller.google_service_account,
                     &http,
-                    &mut acquisition,
+                    &mut self.acquisition,
                 )
             })
             .map_err(|error| {
                 PreparationFailure::at(PreparationStep::ControllerCredential, error)
             })?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        timings
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        self.timings
             .measure(Operation::Database, || {
                 identity_protocol::database(
-                    store,
+                    &self.store,
                     &http
                         .request(
                             Route::Database,
                             &controller.authorization()?,
                             None,
-                            &mut acquisition,
+                            &mut self.acquisition,
                         )
                         .map_err(|error| {
                             PreparationFailure::at(PreparationStep::EpochDatabase, error)
@@ -455,28 +485,19 @@ impl<'role> ProviderReader<'role> {
                 )
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::EpochDatabase, error))?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let kubernetes = CredentialMaterial::kubernetes_api(&mut acquisition).map_err(|error| {
-            PreparationFailure::at(PreparationStep::KubernetesCredential, error)
-        })?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        Ok(Self {
-            stage,
-            policy: policy.clone(),
-            store: store.clone(),
-            profile: selected,
-            profile_file,
-            authentication: ProviderAuthentication::Acquired(Box::new(
-                AcquiredProviderAuthentication {
-                    http,
-                    source,
-                    controller,
-                    kubernetes,
-                },
-            )),
-            acquisition,
-            timings,
-            bootstrap: BootstrapTiming::disabled(),
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        let kubernetes =
+            CredentialMaterial::kubernetes_api(&mut self.acquisition).map_err(|error| {
+                PreparationFailure::at(PreparationStep::KubernetesCredential, error)
+            })?;
+        self.stage
+            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        Ok(AcquiredProviderAuthentication {
+            http,
+            source,
+            controller,
+            kubernetes,
         })
     }
 

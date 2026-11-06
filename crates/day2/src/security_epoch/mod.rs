@@ -35,6 +35,7 @@ mod self_check_profile;
 pub(crate) mod serving;
 pub(crate) use serving::ServingParticipant;
 mod storage_authority;
+pub(crate) use storage_authority::AuthenticationStoreFiles;
 mod transport;
 
 /// Desired schema metadata only; this creates no native original or authority.

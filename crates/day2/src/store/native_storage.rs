@@ -20,6 +20,8 @@ use std::{
 
 const DATABASE: &str = "/state/day2-native/day2-initial.sqlite";
 
+mod authentication_store;
+pub(crate) use authentication_store::{check_authentication_sqlite, open_authentication_sqlite};
 mod controller_admins;
 mod keeper;
 pub(crate) use controller_admins::check_controller_sqlite_files;

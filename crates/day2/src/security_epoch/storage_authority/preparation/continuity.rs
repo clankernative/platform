@@ -592,6 +592,26 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
         result
     }
 
+    pub(in crate::security_epoch::storage_authority) fn admit_authentication_store(
+        &mut self,
+        cohort: &crate::security_epoch::native_enrollment::SqliteCohort,
+    ) -> Result<crate::security_epoch::storage_authority::native_volume::AuthenticationStoreFiles>
+    {
+        self.check()?;
+        let requested = self.inner.phase.admit_authentication_store(
+            self.inner.directory,
+            self.inner.anchor,
+            cohort,
+        );
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let files = requested?;
+        checked?;
+        Ok(files)
+    }
+
     pub(in crate::security_epoch::storage_authority) fn check_opened_admin_database(
         &mut self,
         db: &rusqlite::Connection,
