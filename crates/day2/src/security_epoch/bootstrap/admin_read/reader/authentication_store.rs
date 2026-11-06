@@ -21,7 +21,7 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
     pub(in crate::security_epoch) fn admit_authentication_store(
         mut self,
         expected: &ApprovalIntent,
-    ) -> Result<super::AuthenticationStoreAction<'metadata, 'storage, 'role>> {
+    ) -> Result<AuthenticationStoreAction<'metadata, 'storage, 'role>> {
         let requested = (|| {
             expected.validate()?;
             ensure!(
@@ -47,6 +47,18 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
             let checked = self.check_registry_local();
             let sqlite = opened?;
             checked?;
+            // Admission never initializes an empty or unknown ledger. Use the
+            // producer's ONE canonical schema validator inside the same actual
+            // native/file lifetime; no shadow DDL or supplied success exists.
+            self.check_registry_local()?;
+            crate::store::check_authentication_sqlite(&mut files, &sqlite)?;
+            let schema =
+                crate::security_epoch::restore_webauthn::store::require_existing_schema(&sqlite);
+            let held = crate::store::check_authentication_sqlite(&mut files, &sqlite);
+            let native = self.check_registry_local();
+            schema?;
+            held?;
+            native?;
             Ok((sqlite, files))
         })();
         let (sqlite, files) = match requested {

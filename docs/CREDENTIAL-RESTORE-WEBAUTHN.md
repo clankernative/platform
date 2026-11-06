@@ -111,3 +111,31 @@ SQL unit, and withhold results on any failure. It proves neither outside-archive
 placement nor durable storage, current key trust, qualified time, single-use
 approval publication or restore authority. Native store admission and explicit
 store birth remain separate work.
+
+### Existing native authentication-ledger admission
+
+The current-reader admission consumes the actual accepting admin reader and keeps
+its unchanged original, App exclusion, native volume and counter/peer lifetime.
+It performs genuine provider/attachment and WAL/FULL filesystem qualification
+for the fixed authority-keyed sibling ledger, then compares SQLite's actual MAIN
+before configuration and retains the complete actual MAIN/WAL/SHM descriptor
+identities. The producer's canonical schema validator refuses missing, unknown
+or changed state; this path never creates or repairs a ledger.
+
+Full checks first inspect the actual authentication connection's autocommit
+state. Checks inside its SQL units are local owned-resource/original checks;
+policy/config/provider work happens only outside the unit. Completion closes the
+actual connection, runs native/file postchecks even on a close failure, releases
+the file pins, and only then settles the same reader. A later failed postcheck
+withholds results and makes no rollback promise.
+
+The first Linux profile uses O_PATH pins, so dropping a metadata pin does not
+close a regular alias that could release another connection's POSIX locks.
+Last-connection SQLite close may unlink WAL/SHM; that case refuses the retained
+postclose cohort check. This does not supply a standalone persistent keeper,
+PERSIST_WAL support, ledger birth, whole-volume rollback protection, approval,
+complete old-rights fencing or a new App writer. Genuine initialization with an
+external create-only birth record remains a separate operation. Target binding
+generation is committed DATA here; this admission does not invent a current
+namespace-generation producer or equate proposed target epoch/incarnation with
+the incumbent.

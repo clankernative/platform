@@ -3,7 +3,8 @@
 
 use super::preparation::PendingPhysicalFilePhase;
 use super::{
-    AppFileContinuity, CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
+    AppFileContinuity, AuthenticationStoreFiles, CurrentPhysicalFilePhase,
+    CurrentPreparedFilePhase, PreparedFileContinuity,
 };
 use crate::security_epoch::{
     authenticated_reads::{
@@ -1030,7 +1031,7 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
 
     pub(in crate::security_epoch) fn admit_authentication_store(
         &mut self,
-    ) -> Result<super::native_volume::AuthenticationStoreFiles> {
+    ) -> Result<AuthenticationStoreFiles> {
         self.check()?;
         let cohort = self.app_request()?.admin_cohort()?.clone();
         let requested = self.file.admit_authentication_store(&cohort);
