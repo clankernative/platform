@@ -8,7 +8,7 @@ use crate::security_epoch::{
     restore_approval::signed::SignedApprovalRecord,
     restore_host_clock::HostTimeData,
     restore_original::{RestoreObservation, RestoreOriginalGuard},
-    restore_webauthn::{Assertion, ControllerExecutionCeremony},
+    restore_webauthn::{Assertion, ControllerExecutionCeremony, ExecutionCompletion},
     storage_authority::NativeApprovalSource,
 };
 use anyhow::{Context as _, Result, ensure};
@@ -33,7 +33,7 @@ pub(in crate::security_epoch) struct AuthenticatedRestoreExecution<'metadata, 's
     action: RestoreAuthenticationAction<'metadata, 'storage, 'role>,
     source: NativeApprovalSource,
     original: RestoreOriginalGuard,
-    ceremony: ControllerExecutionCeremony,
+    completion: ExecutionCompletion,
     record: SignedApprovalRecord,
     operation: Digest,
     time_operation: Digest,
@@ -204,7 +204,7 @@ impl PendingRestoreExecution {
             action.check_execution_original(&mut input.original, &self.record, &self.operation);
         let verified = verified?;
         checked?;
-        let Some(_) = verified else {
+        let Some(completion) = verified else {
             source.finish_checked(&mut action)?;
             action.finish_checked()?;
             return Ok(None);
@@ -225,7 +225,7 @@ impl PendingRestoreExecution {
             action,
             source,
             original: input.original,
-            ceremony: self.ceremony,
+            completion,
             record: self.record,
             operation: self.operation,
             time_operation,
@@ -247,7 +247,7 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
                 &self.record,
                 &self.operation,
             )?;
-            self.ceremony.check_current(
+            self.completion.check_current(
                 &mut self.action.reader,
                 (
                     self.action.sqlite.as_mut().context("restore_auth_sqlite_closed")?,
@@ -403,7 +403,7 @@ mod tests {
                 "check",
             ]
             && body.contains("let verified = verified ? ; checked ? ;")
-            && body.contains("let Some (_) = verified else")
+            && body.contains("let Some (completion) = verified else")
             && body.contains("return Ok (None)"))
     }
 
@@ -423,8 +423,8 @@ mod tests {
             ),
             ("let verified = verified?;", "let verified = Some(());"),
             (
-                "        checked?;\n        let Some(_) = verified",
-                "        let Some(_) = verified",
+                "        checked?;\n        let Some(completion) = verified",
+                "        let Some(completion) = verified",
             ),
             (
                 "source.qualify_time(&mut action, time_operation.clone())?",
