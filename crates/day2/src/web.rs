@@ -1354,18 +1354,30 @@ impl Host {
                     response.headers_mut().insert(header::ALLOW, "GET".parse()?);
                     return Ok(response);
                 }
-                ensure!(
-                    body.is_empty() && uri.query().is_none(),
-                    crate::error::Failure::InvalidInput
-                );
+                ensure!(body.is_empty(), crate::error::Failure::InvalidInput);
                 if uri.path() == crate::openapi::SESSION_PATH {
-                    return Ok(crate::web_api::json_response(
-                        StatusCode::OK,
-                        serde_json::json!({
-                            "actor":session.actor,"csrf_token":security::csrf(&self.secret, session)?
-                        }),
-                    ));
+                    let mut fields = crate::routing::query_fields(uri.query().unwrap_or(""))
+                        .map_err(|_| crate::error::Failure::InvalidInput)?;
+                    let operation = fields.remove("operation");
+                    ensure!(fields.is_empty(), crate::error::Failure::InvalidInput);
+                    let mut value = serde_json::json!({
+                        "actor":session.actor,"csrf_token":security::csrf(&self.secret, session)?
+                    });
+                    if let Some(operation) = operation {
+                        let now_ms = i64::try_from(self.clock.wall_time()?.as_millis())?;
+                        value["cache_token"] = crate::web_api::query_cache_token(
+                            &self.runtime,
+                            &self.api,
+                            &session.actor,
+                            &operation,
+                            now_ms,
+                        )?
+                        .into();
+                        value["server_time_ms"] = now_ms.into();
+                    }
+                    return Ok(crate::web_api::json_response(StatusCode::OK, value));
                 }
+                ensure!(uri.query().is_none(), crate::error::Failure::InvalidInput);
                 let spec = self.api.document(
                     self.runtime.artifact().contract(),
                     self.runtime.app(),
@@ -1428,7 +1440,7 @@ impl Host {
         if matches!(*method, Method::GET | Method::HEAD) && uri.path().starts_with("/assets/") {
             let mut response =
                 self.appearance
-                    .serve(&self.runtime, uri.path(), session, headers)?;
+                    .serve(&self.runtime, uri.path(), uri.query(), session, headers)?;
             if method == Method::HEAD {
                 *response.body_mut() = Body::empty();
             }
@@ -1949,9 +1961,10 @@ impl Host {
                         title { (title) " | " (self.appearance.name()) }
                         @if let Some(theme) = theme { link rel="stylesheet" href=(theme); }
                         @if let Some(stylesheet) = stylesheet { link rel="stylesheet" href=(stylesheet); }
-                        script type="module" src="/assets/platform/datastar-1.0.1.js" {}
-                        script type="module" src="/assets/platform/forms.js" {}
-                        script type="module" src="/assets/platform/reactive-queries.js" {}
+                        @for module in self.appearance.module_preload_urls() { link rel="modulepreload" href=(module); }
+                        script type="module" src=(crate::web_assets::platform_url("/assets/platform/datastar-1.0.1.js")?) {}
+                        script type="module" src=(crate::web_assets::platform_url("/assets/platform/forms.js")?) {}
+                        script type="module" src=(crate::web_assets::platform_url("/assets/platform/reactive-queries.js")?) {}
                         @if let Some(script) = script { script type="module" src=(script) {} }
                         // Component behavior has a separate admitted entrypoint.
                         @if let Some(script) = component_script { script type="module" src=(script) {} }
@@ -1976,13 +1989,19 @@ impl Host {
         expected: &[(String, crate::authority_state::AuthorityStamp)],
         actor: &str,
     ) -> Result<()> {
-        for (operation, stamp) in expected {
-            ensure!(
-                self.runtime.authority_snapshot(operation, actor)?.stamp == *stamp,
-                crate::error::Failure::Forbidden
-            );
-        }
-        Ok(())
+        // Keep every boundary check, but read the grants together under one
+        // current native storage/epoch scope and one consistent SQL snapshot.
+        self.runtime.sql_read(|tx| {
+            for (operation, stamp) in expected {
+                ensure!(
+                    crate::authority_state::authorize_in(tx, &self.runtime, operation, actor)?
+                        .stamp
+                        == *stamp,
+                    crate::error::Failure::Forbidden
+                );
+            }
+            Ok(())
+        })
     }
 
     fn check_page_delivery(
@@ -2031,10 +2050,25 @@ impl Host {
         session: &Session,
         at: i64,
     ) -> Result<Response> {
+        let proof = headers
+            .get_all("x-day2-query-cache")
+            .iter()
+            .collect::<Vec<_>>();
+        ensure!(
+            proof.is_empty() || (proof.len() == 1 && proof[0] == "true"),
+            crate::error::Failure::InvalidInput
+        );
         let page = self.runtime.artifact().page(name)?;
         if page.preparation.is_empty() {
-            let content = self.page(name, input, session, at, None, None)?;
-            return self.app_response(StatusCode::OK, name, input, session, content);
+            return self.with_query_cache_proof(
+                &page.operation,
+                session,
+                !proof.is_empty(),
+                || {
+                    let content = self.page(name, input, session, at, None, None)?;
+                    self.app_response(StatusCode::OK, name, input, session, content)
+                },
+            );
         }
         if let Some(status) = page_preparation_refusal(headers) {
             let message = if status == StatusCode::SERVICE_UNAVAILABLE {
@@ -2044,6 +2078,7 @@ impl Host {
             };
             return Ok(error_page(status, message));
         }
+        let preparing_since = self.clock.monotonic();
         let input_record = &self.runtime.artifact().contract().schema.inputs[&self
             .runtime
             .artifact()
@@ -2052,30 +2087,25 @@ impl Host {
         input_record.validate_input(input)?;
         // Admission is an all-or-nothing preflight: no preparation command may
         // run until every operation needed by this page is authorized.
-        let primary = self
-            .runtime
-            .authority_snapshot(&page.operation, &session.actor)?;
-        let mut expected = Vec::with_capacity(
-            page.preparation.len() + 1 + usize::from(!page.prepare_failure_operation.is_empty()),
-        );
-        expected.push((page.operation.clone(), primary.stamp.clone()));
-        for operation in &page.preparation {
-            expected.push((
-                operation.clone(),
-                self.runtime
-                    .authority_snapshot(operation, &session.actor)?
-                    .stamp,
-            ));
-        }
-        if !page.prepare_failure_operation.is_empty() {
-            let fallback = &page.prepare_failure_operation;
-            expected.push((
-                fallback.clone(),
-                self.runtime
-                    .authority_snapshot(fallback, &session.actor)?
-                    .stamp,
-            ));
-        }
+        let expected = self.runtime.sql_read(|tx| {
+            std::iter::once(&page.operation)
+                .chain(page.preparation.iter())
+                .chain(
+                    (!page.prepare_failure_operation.is_empty())
+                        .then_some(&page.prepare_failure_operation),
+                )
+                .map(|operation| {
+                    let active = crate::authority_state::authorize_in(
+                        tx,
+                        &self.runtime,
+                        operation,
+                        &session.actor,
+                    )?;
+                    Ok((operation.clone(), active.stamp))
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        let primary = &expected[0].1;
         self.check_preparation_authority(&expected, &session.actor)?;
 
         for (index, operation) in page.preparation.iter().enumerate() {
@@ -2149,12 +2179,7 @@ impl Host {
                         content,
                     )?;
                     self.check_preparation_authority(&expected, &session.actor)?;
-                    self.check_page_delivery(
-                        &page.operation,
-                        &primary.stamp,
-                        &session.actor,
-                        session,
-                    )?;
+                    self.check_page_delivery(&page.operation, primary, &session.actor, session)?;
                     return Ok(response);
                 }
                 return Ok(error_page(
@@ -2165,10 +2190,61 @@ impl Host {
             self.check_preparation_authority(&expected, &session.actor)?;
         }
         self.check_preparation_authority(&expected, &session.actor)?;
-        let content = self.page(name, input, session, at, None, None)?;
-        let response = self.app_response(StatusCode::OK, name, input, session, content)?;
-        self.check_preparation_authority(&expected, &session.actor)?;
-        self.check_page_delivery(&page.operation, &primary.stamp, &session.actor, session)?;
+        let rendering_since = self.clock.monotonic();
+        let mut response =
+            self.with_query_cache_proof(&page.operation, session, !proof.is_empty(), || {
+                let content = self.page(name, input, session, at, None, None)?;
+                let response = self.app_response(StatusCode::OK, name, input, session, content)?;
+                self.check_preparation_authority(&expected, &session.actor)?;
+                self.check_page_delivery(&page.operation, primary, &session.actor, session)?;
+                Ok(response)
+            })?;
+        let finished = self.clock.monotonic();
+        response.headers_mut().insert(
+            "server-timing",
+            format!(
+                "prepare;dur={:.1}, render;dur={:.1}",
+                rendering_since
+                    .saturating_sub(preparing_since)
+                    .as_secs_f64()
+                    * 1000.0,
+                finished.saturating_sub(rendering_since).as_secs_f64() * 1000.0,
+            )
+            .parse()?,
+        );
+        Ok(response)
+    }
+
+    fn with_query_cache_proof(
+        &self,
+        operation: &str,
+        session: &Session,
+        requested: bool,
+        render: impl FnOnce() -> Result<Response>,
+    ) -> Result<Response> {
+        if !requested {
+            return render();
+        }
+        let before = crate::web_api::query_cache_token(
+            &self.runtime,
+            &self.api,
+            &session.actor,
+            operation,
+            i64::try_from(self.clock.wall_time()?.as_millis())?,
+        )?;
+        let mut response = render()?;
+        let after = crate::web_api::query_cache_token(
+            &self.runtime,
+            &self.api,
+            &session.actor,
+            operation,
+            i64::try_from(self.clock.wall_time()?.as_millis())?,
+        )?;
+        if response.status() == StatusCode::OK && before == after {
+            response
+                .headers_mut()
+                .insert("x-day2-query-cache", before.parse()?);
+        }
         Ok(response)
     }
 
@@ -2234,6 +2310,7 @@ impl Host {
                 .validate_value(&outcome.result)?;
             let context = serde_json::json!({
                 name: &outcome.result,
+                "view": &outcome.result,
                 "company": { "name": self.appearance.name() },
             });
             let asset_urls = self
