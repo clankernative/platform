@@ -455,10 +455,10 @@ mod tests {
         }
 
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if let Expr::Path(path) = node.func.as_ref() {
-                if let Some(last) = path.path.segments.last() {
-                    self.0.push(last.ident.to_string());
-                }
+            if let Expr::Path(path) = node.func.as_ref()
+                && let Some(last) = path.path.segments.last()
+            {
+                self.0.push(last.ident.to_string());
             }
             visit::visit_expr_call(self, node);
         }
