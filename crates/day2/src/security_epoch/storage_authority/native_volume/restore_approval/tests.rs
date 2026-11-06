@@ -18,7 +18,7 @@ fn fixture() -> Result<(KeySelection, ApprovalStatement, Vec<Value>)> {
         public_key: key.public_key().as_ref().try_into()?,
     };
     let statement = ApprovalStatement {
-        request: super::super::tests::request()?,
+        request: crate::security_epoch::restore_approval::fixture_request_data()?,
         approver: AdminIdentity {
             email: "approver@example.org".into(),
             subject: "approver-subject".into(),
@@ -63,6 +63,22 @@ fn authorization() -> HeaderValue {
     let mut value = HeaderValue::from_static("Bearer fixture-token");
     value.set_sensitive(true);
     value
+}
+
+impl Kms {
+    fn sign_fixture(
+        &mut self,
+        selected: &KeySelection,
+        statement: &ApprovalStatement,
+        authorization: HeaderValue,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<SignedApprovalRecord> {
+        let mut context = RequestContext::Fixture {
+            authorization,
+            acquisition,
+        };
+        self.sign(selected, statement, &mut context)
+    }
 }
 
 type Calls = Vec<(String, Value)>;
@@ -177,7 +193,7 @@ fn actual_http_signs_only_complete_restore_frame_on_the_exact_version_once() -> 
     let (selected, statement, replies) = fixture()?;
     let (mut kms, server) = peer(encoded(replies));
     let mut original = acquisition(Duration::from_secs(2));
-    let signed = kms.sign(&selected, &statement, authorization(), &mut original)?;
+    let signed = kms.sign_fixture(&selected, &statement, authorization(), &mut original)?;
     let calls = server.join().unwrap();
     assert_eq!(calls.len(), 4);
     assert_eq!(
@@ -210,7 +226,7 @@ fn actual_http_signs_only_complete_restore_frame_on_the_exact_version_once() -> 
     );
     assert!(original.remaining().is_ok());
     assert!(
-        kms.sign(&selected, &statement, authorization(), &mut original)
+        kms.sign_fixture(&selected, &statement, authorization(), &mut original)
             .is_err()
     );
     assert!(original.remaining().is_err());
@@ -271,14 +287,14 @@ fn each_actual_resource_integrity_or_crypto_failure_is_terminal_and_never_retrie
         let (mut kms, server) = peer(encoded(replies));
         let mut original = acquisition(Duration::from_secs(2));
         assert!(
-            kms.sign(&selected, &statement, authorization(), &mut original)
+            kms.sign_fixture(&selected, &statement, authorization(), &mut original)
                 .is_err(),
             "{index}/{field}"
         );
         assert_eq!(server.join().unwrap().len(), index + 1);
         assert!(original.remaining().is_err());
         assert!(
-            kms.sign(
+            kms.sign_fixture(
                 &selected,
                 &statement,
                 authorization(),
@@ -305,7 +321,7 @@ fn well_checksummed_foreign_key_or_wrong_purpose_signature_still_refuses() -> Re
         let (mut kms, server) = peer(encoded(replies));
         let mut original = acquisition(Duration::from_secs(2));
         assert!(
-            kms.sign(&selected, &statement, authorization(), &mut original)
+            kms.sign_fixture(&selected, &statement, authorization(), &mut original)
                 .is_err()
         );
         assert_eq!(server.join().unwrap().len(), 3);
@@ -326,7 +342,7 @@ fn well_checksummed_foreign_key_or_wrong_purpose_signature_still_refuses() -> Re
     let (mut kms, server) = peer(encoded(replies));
     let mut original = acquisition(Duration::from_secs(2));
     assert!(
-        kms.sign(&selected, &statement, authorization(), &mut original)
+        kms.sign_fixture(&selected, &statement, authorization(), &mut original)
             .is_err()
     );
     assert_eq!(server.join().unwrap().len(), 2);
@@ -357,7 +373,7 @@ fn changed_selection_and_spent_original_refuse_before_any_network_attempt() -> R
         };
         let mut original = acquisition(limit);
         let error = kms
-            .sign(selection, &statement, authorization(), &mut original)
+            .sign_fixture(selection, &statement, authorization(), &mut original)
             .expect_err("must refuse");
         if limit.is_zero() {
             assert!(original.remaining().is_err());
@@ -408,13 +424,13 @@ fn rejected_status_oversize_duplicate_json_and_timeout_do_not_retry() -> Result<
         let (mut kms, server) = peer(vec![reply(status, body, delay)]);
         let mut original = acquisition(limit);
         let error = kms
-            .sign(&selected, &statement, authorization(), &mut original)
+            .sign_fixture(&selected, &statement, authorization(), &mut original)
             .expect_err("must refuse");
         assert!(!error.to_string().contains("provider-private"));
         assert_eq!(server.join().unwrap().len(), 1);
         assert!(original.remaining().is_err());
         assert!(
-            kms.sign(
+            kms.sign_fixture(
                 &selected,
                 &statement,
                 authorization(),
@@ -447,13 +463,13 @@ fn unknown_length_oversize_and_truncated_actual_bodies_refuse_without_retry() ->
         let (mut kms, server) = peer(vec![received]);
         let mut original = acquisition(Duration::from_secs(2));
         assert!(
-            kms.sign(&selected, &statement, authorization(), &mut original)
+            kms.sign_fixture(&selected, &statement, authorization(), &mut original)
                 .is_err()
         );
         assert_eq!(server.join().unwrap().len(), 1);
         assert!(original.remaining().is_err());
         assert!(
-            kms.sign(
+            kms.sign_fixture(
                 &selected,
                 &statement,
                 authorization(),
@@ -475,7 +491,7 @@ fn actual_default_client_requires_https_and_refusal_reaches_the_parent_original(
     let mut parent = acquisition(Duration::from_secs(2));
     let mut child = parent.narrow(1, Duration::from_secs(12))?;
     let error = kms
-        .sign(&selected, &statement, authorization(), &mut child)
+        .sign_fixture(&selected, &statement, authorization(), &mut child)
         .expect_err("HTTP origin refused by actual production client");
     assert_eq!(error.to_string(), "restore_kms_transport");
     assert!(

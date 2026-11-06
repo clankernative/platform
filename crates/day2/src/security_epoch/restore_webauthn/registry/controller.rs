@@ -16,6 +16,54 @@ use std::{
     marker::PhantomData,
 };
 
+struct AuthenticationBorrow<'borrow, 'metadata, 'storage, 'role> {
+    reader: &'borrow mut ControllerAdminReader<'metadata, 'storage, 'role>,
+    held: &'borrow file::Held,
+    files: &'borrow mut crate::security_epoch::AuthenticationStoreFiles,
+}
+
+pub(in crate::security_epoch) enum SigningUnit<'a> {
+    Prepare {
+        statement: &'a crate::security_epoch::restore_approval::signed::ApprovalStatement,
+        counter: u32,
+    },
+    MaySign {
+        statement: &'a crate::security_epoch::restore_approval::signed::ApprovalStatement,
+    },
+    Published {
+        record: &'a crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+    },
+}
+
+impl NativeBorrow for AuthenticationBorrow<'_, '_, '_, '_> {
+    fn check_local(&mut self) -> Result<()> {
+        let before = self.reader.check_registry_local();
+        let files = self.files.check();
+        let registry = self.held.check_local();
+        let after = self.reader.check_registry_local();
+        if before.is_err() || files.is_err() || registry.is_err() || after.is_err() {
+            self.files.refuse();
+            self.reader.refuse();
+        }
+        before?;
+        files?;
+        registry?;
+        after
+    }
+
+    fn check_sqlite(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        self.check_local()?;
+        let requested = crate::store::check_authentication_sqlite(self.files, db);
+        let checked = self.check_local();
+        if requested.is_err() || checked.is_err() {
+            self.files.refuse();
+            self.reader.refuse();
+        }
+        requested?;
+        checked
+    }
+}
+
 struct ControllerBorrow<'borrow, 'metadata, 'storage, 'role> {
     reader: &'borrow mut ControllerAdminReader<'metadata, 'storage, 'role>,
     held: &'borrow file::Held,
@@ -29,6 +77,278 @@ pub(in crate::security_epoch) struct ControllerCeremony {
 }
 
 impl ControllerCeremony {
+    /// Fixed complete journal unit only. It lends no connection, transaction,
+    /// generic callback or signing permission to its caller.
+    pub(in crate::security_epoch) fn signing_unit(
+        &self,
+        reader: &mut ControllerAdminReader<'_, '_, '_>,
+        sql: (
+            &mut rusqlite::Connection,
+            &mut crate::security_epoch::AuthenticationStoreFiles,
+        ),
+        id: &Digest,
+        unit: SigningUnit<'_>,
+    ) -> Result<()> {
+        let (db, files) = sql;
+        let requested = (|| {
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.ceremony
+                .observe_controller(reader, &self.intent.executor.email)?;
+            let statement = match &unit {
+                SigningUnit::Prepare { statement, .. } | SigningUnit::MaySign { statement } => {
+                    *statement
+                }
+                SigningUnit::Published { record } => &record.statement,
+            };
+            self.intent.require_request(&statement.request)?;
+            let mut borrow = AuthenticationBorrow {
+                reader: &mut *reader,
+                held: &self.ceremony.held,
+                files: &mut *files,
+            };
+            let key = TrustedKey {
+                record: self.ceremony.record.clone(),
+                source: KeySource::Registry(Origin {
+                    owner: RefCell::new(&mut borrow),
+                }),
+            };
+            key.check_sqlite(db)?;
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            match unit {
+                SigningUnit::Prepare { statement, counter } => {
+                    super::super::store::prepare_signing(&tx, &key, id, statement, counter)?
+                }
+                SigningUnit::MaySign { statement } => {
+                    super::super::store::mark_may_sign(&tx, &key, id, statement)?
+                }
+                SigningUnit::Published { record } => {
+                    super::super::store::record_publication(&tx, &key, id, record)?
+                }
+            }
+            key.check_sqlite(&tx)?;
+            let committed = tx.commit();
+            let checked = key.check_sqlite(db);
+            committed?;
+            checked
+        })();
+        let held = crate::store::check_authentication_sqlite(files, db);
+        let native = reader.check_registry_local();
+        let checked = (|| {
+            held?;
+            native?;
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.ceremony
+                .observe_controller(reader, &self.intent.executor.email)
+        })();
+        if requested.is_err() || checked.is_err() {
+            self.ceremony.refused.set(true);
+            files.refuse();
+            reader.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    /// Current selection and assertion commitment DATA only. This cannot
+    /// replace the actual durable completion or qualified clock held by the
+    /// producer's private completed owner.
+    pub(in crate::security_epoch) fn statement_data(
+        &self,
+        reader: &mut ControllerAdminReader<'_, '_, '_>,
+        request: &crate::security_epoch::restore_approval::ApprovalRequest,
+        assertion: &Assertion,
+    ) -> Result<(
+        crate::security_epoch::restore_approval::signed::ApprovalStatement,
+        day2_capabilities::restore_signing::KeySelection,
+    )> {
+        let requested = (|| {
+            self.intent.require_request(request)?;
+            self.ceremony
+                .observe_controller(reader, &request.executor.email)?;
+            let context = reader.registry_data()?;
+            self.ceremony.held.require_path(&context.selector)?;
+            let bytes = self.ceremony.held.read()?;
+            let instance = Instance::from_bytes(&bytes)
+                .map_err(|_| anyhow::anyhow!("restore_registry_config_invalid"))?;
+            let active = controller_record(
+                &instance,
+                &context,
+                self.ceremony.held.binding()?,
+                &self.ceremony.record.credential_id,
+                &self.ceremony.request,
+                &request.executor.email,
+            )?;
+            ensure!(
+                active == self.ceremony.record,
+                "restore_registry_selection_changed"
+            );
+            let control = instance
+                .control
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("restore_registry_missing"))?;
+            let key = control
+                .restore_passkeys
+                .as_ref()
+                .and_then(|registry| {
+                    registry
+                        .keys
+                        .values()
+                        .find(|key| key.credential_id == active.credential_id)
+                })
+                .ok_or_else(|| anyhow::anyhow!("restore_registry_credential_not_current"))?;
+            let signing = control
+                .restore_approval_signing
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("restore_approval_signing_key_missing"))?;
+            signing.validate()?;
+            let statement = crate::security_epoch::restore_approval::signed::ApprovalStatement {
+                request: request.clone(),
+                approver: crate::security_epoch::restore_approval::AdminIdentity {
+                    email: key.email.clone(),
+                    subject: key.subject.clone(),
+                },
+                registry: active.registry.clone(),
+                credential: Digest::new(&active.credential_id),
+                assertion: Digest::of(&(
+                    "day2-restore-verified-assertion-v1",
+                    self.ceremony.challenge()?.encoded()?,
+                    &assertion.credential_id,
+                    &assertion.client_data_json,
+                    &assertion.authenticator_data,
+                    &assertion.signature,
+                    &assertion.user_handle,
+                ))?,
+                signing_key: signing.commitment()?,
+            };
+            statement.validate()?;
+            Ok((statement, signing))
+        })();
+        let checked = self
+            .ceremony
+            .observe_controller(reader, &request.executor.email);
+        if requested.is_err() || checked.is_err() {
+            self.ceremony.refused.set(true);
+            reader.refuse();
+        }
+        let data = requested?;
+        checked?;
+        Ok(data)
+    }
+
+    /// Fixed native producer operation. The pair is the owning action's actual
+    /// SQLite connection and retained file lease, never a caller-chosen path.
+    /// Commit is followed by an actual handle check before any full policy read.
+    pub(in crate::security_epoch) fn issue_durable(
+        &self,
+        reader: &mut ControllerAdminReader<'_, '_, '_>,
+        sql: (
+            &mut rusqlite::Connection,
+            &mut crate::security_epoch::AuthenticationStoreFiles,
+        ),
+        expected: &ApprovalIntent,
+        window: (i64, i64),
+    ) -> Result<Digest> {
+        let (db, files) = sql;
+        let requested = (|| {
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.intent.require_exact(expected)?;
+            self.ceremony
+                .observe_controller(reader, &expected.executor.email)?;
+            let challenge = self.ceremony.challenge()?;
+            let mut borrow = AuthenticationBorrow {
+                reader: &mut *reader,
+                held: &self.ceremony.held,
+                files: &mut *files,
+            };
+            let key = TrustedKey {
+                record: self.ceremony.record.clone(),
+                source: KeySource::Registry(Origin {
+                    owner: RefCell::new(&mut borrow),
+                }),
+            };
+            key.check_sqlite(db)?;
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let id = super::super::store::issue(&tx, &key, &challenge, window.0, window.1)?;
+            key.check_sqlite(&tx)?;
+            let committed = tx.commit();
+            let checked = key.check_sqlite(db);
+            committed?;
+            checked?;
+            Ok(id)
+        })();
+        let held = crate::store::check_authentication_sqlite(files, db);
+        let native = reader.check_registry_local();
+        let checked = (|| {
+            held?;
+            native?;
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.ceremony
+                .observe_controller(reader, &expected.executor.email)
+        })();
+        if requested.is_err() || checked.is_err() {
+            self.ceremony.refused.set(true);
+            files.refuse();
+            reader.refuse();
+        }
+        let id = requested?;
+        checked?;
+        Ok(id)
+    }
+
+    /// A durable claim is spent before verification. Known assertion denials
+    /// become DATA only after the actual current registry/native postcheck.
+    /// Unknown or native errors retain their underlying identity and refuse.
+    pub(in crate::security_epoch) fn complete_durable(
+        &self,
+        reader: &mut ControllerAdminReader<'_, '_, '_>,
+        sql: (
+            &mut rusqlite::Connection,
+            &mut crate::security_epoch::AuthenticationStoreFiles,
+        ),
+        id: &Digest,
+        completion: (&ApprovalIntent, i64, &Assertion),
+    ) -> Result<Option<AssertionFacts>> {
+        let (db, files) = sql;
+        let (expected, at, assertion) = completion;
+        let requested = (|| {
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.intent.require_exact(expected)?;
+            self.ceremony.begin_attempt()?;
+            self.ceremony
+                .observe_controller(reader, &expected.executor.email)?;
+            let mut borrow = AuthenticationBorrow {
+                reader: &mut *reader,
+                held: &self.ceremony.held,
+                files: &mut *files,
+            };
+            let key = TrustedKey {
+                record: self.ceremony.record.clone(),
+                source: KeySource::Registry(Origin {
+                    owner: RefCell::new(&mut borrow),
+                }),
+            };
+            super::super::store::complete(db, &key, id, &expected.commitment()?, at, assertion)
+        })();
+        let held = crate::store::check_authentication_sqlite(files, db);
+        let native = reader.check_registry_local();
+        let checked = (|| {
+            held?;
+            native?;
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.ceremony
+                .observe_controller(reader, &expected.executor.email)
+        })();
+        let result = settle_verification(requested, checked);
+        if result.is_err() || matches!(&result, Ok(None)) {
+            self.ceremony.refused.set(true);
+        }
+        if result.is_err() {
+            files.refuse();
+            reader.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn capture(
         reader: &mut ControllerAdminReader<'_, '_, '_>,
         credential_id: &[u8],

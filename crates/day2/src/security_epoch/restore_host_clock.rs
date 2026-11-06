@@ -1,6 +1,6 @@
 //! Actual enrolled-owner-bound observations of trusted host time. This sampler
-//! is deliberately UNFENCED: only the future actual outside-archive high-water
-//! commit can qualify its interval for approval. It creates no grant or signer.
+//! is deliberately UNFENCED: only the native approval source's actual external
+//! high-water commit can qualify its interval. It creates no grant or signer.
 use crate::security_epoch::{
     CurrentControllerStoragePhase, NativeAcquisition,
     native_enrollment::{EnrolledRoleStage, NativeRole, SameEnrolledOwner},

@@ -15,17 +15,29 @@ use std::{
 };
 mod controller;
 pub(in crate::security_epoch) use controller::ControllerCeremony;
+pub(in crate::security_epoch) use controller::SigningUnit;
 mod file;
 
 // Not a public extension point. The fixed production implementors retain an
 // actual native RuntimeSql or Controller admin reader; DATA cannot supply one.
 trait NativeBorrow {
     fn check_local(&mut self) -> Result<()>;
+
+    fn check_sqlite(&mut self, _: &rusqlite::Connection) -> Result<()> {
+        anyhow::bail!("restore_registry_authentication_store_required")
+    }
 }
 pub(super) struct Origin<'owner> {
     owner: RefCell<&'owner mut dyn NativeBorrow>,
 }
 impl Origin<'_> {
+    pub(super) fn check_sqlite(&self, db: &rusqlite::Connection) -> Result<()> {
+        self.owner
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("restore_registry_borrow_busy"))?
+            .check_sqlite(db)
+    }
+
     pub(super) fn check_local(&self) -> Result<()> {
         self.owner
             .try_borrow_mut()

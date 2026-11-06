@@ -50,6 +50,14 @@ struct KeyRecord {
 }
 
 impl TrustedKey<'_> {
+    fn check_sqlite(&self, db: &rusqlite::Connection) -> Result<()> {
+        match &self.source {
+            KeySource::Registry(source) => source.check_sqlite(db),
+            #[cfg(test)]
+            KeySource::Fixture => Ok(()),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         // The source is not a bool, public trait, deserializable proof or
         // production default. Reading record DATA never supplies that source.
@@ -143,6 +151,59 @@ pub(super) struct Assertion {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AssertionWire {
+    format: AssertionFormat,
+    credential_id: String,
+    client_data_json: String,
+    authenticator_data: String,
+    signature: String,
+    user_handle: Option<String>,
+}
+
+#[derive(Deserialize)]
+enum AssertionFormat {
+    #[serde(rename = "day2_restore_passkey_assertion_v1")]
+    V1,
+}
+
+impl Assertion {
+    /// Bounded browser transport DATA only; no key selection, UV, signature or
+    /// current owner is accepted by parsing these untrusted fields.
+    pub(in crate::security_epoch) fn decode(bytes: &[u8]) -> Result<Self> {
+        ensure!(bytes.len() <= 16_384, "restore_passkey_assertion_bound");
+        let wire: AssertionWire = crate::json::decode(bytes)
+            .map_err(|_| anyhow::anyhow!("restore_passkey_assertion_encoding"))?;
+        let AssertionFormat::V1 = wire.format;
+        fn field(value: &str, max: usize) -> Result<Vec<u8>> {
+            ensure!(
+                value.len() <= max.div_ceil(3) * 4,
+                "restore_passkey_assertion_bound"
+            );
+            let bytes = URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| anyhow::anyhow!("restore_passkey_assertion_encoding"))?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() <= max && URL_SAFE_NO_PAD.encode(&bytes) == value,
+                "restore_passkey_assertion_encoding"
+            );
+            Ok(bytes)
+        }
+        Ok(Self {
+            credential_id: field(&wire.credential_id, MAX_CREDENTIAL_ID)?,
+            client_data_json: field(&wire.client_data_json, MAX_CLIENT_DATA)?,
+            authenticator_data: field(&wire.authenticator_data, 37)?,
+            signature: field(&wire.signature, 72)?,
+            user_handle: wire
+                .user_handle
+                .as_deref()
+                .map(|v| field(v, 64))
+                .transpose()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClientData {
     #[serde(rename = "type")]
     kind: String,
@@ -158,6 +219,12 @@ struct ClientData {
 pub(super) struct AssertionFacts {
     counter: u32,
     backed_up: bool,
+}
+
+impl AssertionFacts {
+    pub(in crate::security_epoch) fn counter_data(&self) -> u32 {
+        self.counter
+    }
 }
 
 /// Closed rejection of untrusted assertion bytes. Native/source failures and
@@ -257,6 +324,8 @@ pub(super) fn verify(
 
 mod registry;
 pub(super) use registry::ControllerCeremony;
+pub(super) use registry::SigningUnit;
 mod store;
+pub(super) use store::require_existing_schema;
 #[cfg(test)]
 mod tests;

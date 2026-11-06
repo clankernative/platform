@@ -55,6 +55,17 @@ pub(crate) struct SignedApprovalRecord {
 }
 
 impl SignedApprovalRecord {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+        self.statement.signature_input_data()?;
+        self.signature_bytes()?;
+        let bytes = serde_json::to_vec(self)?;
+        ensure!(
+            bytes.len() <= MAX_RECORD_BYTES,
+            "restore_approval_signed_record_bound"
+        );
+        Ok(bytes)
+    }
+
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_RECORD_BYTES,

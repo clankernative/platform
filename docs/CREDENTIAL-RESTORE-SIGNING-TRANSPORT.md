@@ -1,6 +1,6 @@
 # Restore approval signing transport
 
-The private `security_epoch::restore_approval::kms` module implements the fixed
+The private `security_epoch::storage_authority::native_volume::restore_approval` module implements the fixed
 Google KMS Ed25519 request. Its fields, constructor and methods are private even
 to the parent module. It has no production caller, route, credential acquisition
 or accepting approval factory. Tests exercise the actual HTTP implementation

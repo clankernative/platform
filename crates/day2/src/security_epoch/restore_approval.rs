@@ -12,7 +12,7 @@ pub(crate) const RESTORE_APPROVAL_LIFETIME_SECONDS: u64 = 3600;
 const MAX_REQUEST_BYTES: usize = 16_384;
 
 mod intent;
-mod kms;
+pub(in crate::security_epoch) mod publication;
 pub(crate) mod signed;
 pub(crate) use intent::ApprovalIntent;
 
@@ -139,3 +139,8 @@ impl ApprovalRequest {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::security_epoch) fn fixture_request_data() -> Result<ApprovalRequest> {
+    tests::request()
+}
