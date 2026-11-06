@@ -44,6 +44,7 @@ pub(crate) struct NativeApprovalSource {
     qualified: Option<QualifiedTime>,
     signed: Option<Digest>,
     publication_attempted: bool,
+    historical_keys_attempted: bool,
     kms: Option<Kms>,
     valid: bool,
     finished: bool,
@@ -54,6 +55,9 @@ struct QualifiedTime {
     upper: Duration,
     plan: Plan,
 }
+
+mod keys;
+pub(in crate::security_epoch) use keys::HistoricalKeyAvailability;
 
 const _: () = {
     macro_rules! assert_not_impl {
@@ -125,6 +129,7 @@ impl CurrentVolumePhase<'_, '_> {
                 qualified: None,
                 signed: None,
                 publication_attempted: false,
+                historical_keys_attempted: false,
                 kms: Some(Kms::new()?),
                 valid: true,
                 finished: false,

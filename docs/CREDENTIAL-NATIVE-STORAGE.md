@@ -699,3 +699,33 @@ They exist so the consuming composition can bind to concrete signatures while
 the genuine suppliers are implemented. Files, target reports and holder records
 are inputs, never authority. Successful implementations and their proof-policy,
 test and native qualification evidence remain pending.
+
+### Historical restore-key availability supplier
+
+The private authenticated executor has a fixed whole-set key acquisition. It
+resolves the archive requirements against the same admitted instance collector
+used for the external epoch key-set digest, comparing the signed archive, target,
+operation, custody, exact binding revision and canonical numeric provider version.
+An archive reference supplies no provider path. A historical version absent from
+the current admitted configuration refuses; no alias, latest-version fallback,
+new retention catalog or custody migration is supported.
+
+The genuine native source mints its separate fixed key-reader credential and
+performs bounded exact-version reads under the same original. It validates the
+resource name, checksum and 32-byte material, evaluates actual I/O postchecks even
+on failure, and preserves the first error. Only the complete successful set is
+installed. Partial acquisition, abandonment, expired authority or substitution
+refuses permanently. Secret buffers are zeroized and no raw-key/header getter or
+serialization is exposed.
+
+The executor retains those bytes and the shared original; the Fenced owner
+retains the executor. Local retained-material checks do not replace the parent's
+current registry, original, file, peer or fence checks. This proves possession of
+the fetched exact material for this bounded operation, not indefinite provider
+retention or permission after authority changes. The actual stop/Fenced supplier
+must require this owner before its conditional write and carry it through writer
+handoff; that accepting composition and native qualification remain separate.
+
+The resolver and loopback tests are controlled evidence only. Neither model
+`Current.available_keys` equality nor a fixture reply constructs native key
+availability.

@@ -32,7 +32,7 @@ impl<'metadata, 'storage, 'role> AuthenticatedRestoreExecution<'metadata, 'stora
 /// A closed borrow of the actual authenticated executor's fields, keeping its
 /// native source separately borrowable. No factory accepts replacement fields
 /// or returns a source, stage, clock, descriptor or callback permission.
-struct ExecutionSourceLoan<'borrow, 'metadata, 'storage, 'role> {
+pub(in crate::security_epoch) struct ExecutionSourceLoan<'borrow, 'metadata, 'storage, 'role> {
     action: &'borrow mut RestoreAuthenticationAction<'metadata, 'storage, 'role>,
     original: &'borrow mut RestoreOriginalGuard,
     completion: &'borrow mut ExecutionCompletion,
@@ -57,8 +57,104 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
     }
 }
 
+impl AuthenticatedRestoreExecution<'_, '_, '_> {
+    /// One native acquisition of the whole exact archive key set, before the
+    /// Fenced CAS. The actual executor owns the material across the handoff.
+    pub(in crate::security_epoch) fn retain_historical_keys(
+        &mut self,
+        intent: &kernel::restore::Intent,
+    ) -> Result<()> {
+        let requested = (|| {
+            ensure!(self.historical_keys.is_none(), "restore_keys_already_retained");
+            let mut loan = ExecutionSourceLoan {
+                action: &mut self.action,
+                original: &mut self.original,
+                completion: &mut self.completion,
+                record: &self.record,
+                operation: &self.operation,
+                time_operation: &self.time_operation,
+                refused: &mut self.refused,
+            };
+            let keys = self.source.retain_historical_keys(&mut loan, intent)?;
+            loan.check(&mut self.source)?;
+            self.historical_keys = Some(keys);
+            Ok(())
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    /// This supplies no list/permission to a caller. Current authority and the
+    /// unchanged original are checked before the actual retained material.
+    pub(in crate::security_epoch) fn require_historical_keys(
+        &mut self,
+        intent: &kernel::restore::Intent,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check()?;
+            self.historical_keys.as_mut().context("restore_keys_not_retained")?
+                .require(intent, &self.record, &self.operation)
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked.map(|_| ())
+    }
+}
+
 impl ExecutionSourceLoan<'_, '_, '_, '_> {
-    fn check(
+    pub(in crate::security_epoch) fn request_commitment_data(&self) -> Result<Digest> {
+        self.record.statement.request.commitment()
+    }
+
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        *self.refused = true;
+        self.original.refuse();
+        self.action.refuse();
+    }
+
+    /// Selection DATA from the actual reader's admitted metadata, with the
+    /// exact signed archive/target/operation and unchanged custody. No key or
+    /// provider authority is returned by resolving this configuration.
+    pub(in crate::security_epoch) fn historical_key_data(
+        &mut self,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        intent: &kernel::restore::Intent,
+    ) -> Result<Vec<crate::artifact::SecurityKeySelection>> {
+        let requested = (|| {
+            let request = &self.record.statement.request;
+            intent.commitment(selected)?;
+            ensure!(
+                intent.operation == *self.operation
+                    && intent.archive.full_archive_digest == request.full_archive_digest
+                    && intent.target_incarnation == request.target.incarnation
+                    && intent.archive.artifact == request.target.artifact
+                    && intent.archive.schema == request.target.schema
+                    && request.target.selection == Digest::of(selected)?
+                    && request.target.authority == selected.authority_key()?
+                    && request.target.scope == selected.scope
+                    && request.target.security_epoch == 2
+                    && intent.archive.required_keys.iter().filter(|key| key.purpose == kernel::restore::KeyPurpose::CustodyEncryption)
+                        .all(|key| key.binding == request.custody),
+                "restore_keys_approval_binding_changed"
+            );
+            let instance = self.action.reader.metadata.require_native_selection(
+                selected, &request.target.artifact, policy,
+            )?;
+            ensure!(instance.security_key_set(selected.scope.app.as_str())? == selected.key_set,
+                "restore_keys_current_key_set_changed");
+            instance.security_key_selections(selected.scope.app.as_str())
+        })();
+        if requested.is_err() { self.refuse(); }
+        requested
+    }
+
+    pub(in crate::security_epoch) fn check(
         &mut self,
         source: &mut crate::security_epoch::storage_authority::NativeApprovalSource,
     ) -> Result<RestoreObservation> {
@@ -322,6 +418,8 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
     fn check_local_inner(&mut self) -> Result<()> {
         let requested = (|| {
             self.auth.action.check_local()?;
+            self.auth.historical_keys.as_mut().context("restore_keys_not_retained")?
+                .check_retained(&self.auth.record, &self.auth.operation)?;
             let physical = self
                 .auth
                 .action
@@ -529,6 +627,9 @@ const _: () = {
             let _ = <crate::security_epoch::storage_authority::RestoreCreatorRoot as Ambiguous<
                 _,
             >>::check;
+
+            let _ = <ExecutionSourceLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <crate::security_epoch::storage_authority::HistoricalKeyAvailability as Ambiguous<_>>::check;
             let _ =
                 <ExecutionSourceLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <FencedRestoreContinuation<'static, 'static, 'static> as Ambiguous<_>>::check;

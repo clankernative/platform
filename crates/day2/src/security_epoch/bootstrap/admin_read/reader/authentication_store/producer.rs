@@ -19,7 +19,7 @@ use std::time::Duration;
 mod consumer;
 pub(crate) use consumer::FencedReadUnit;
 pub(in crate::security_epoch) use consumer::{
-    FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
+    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
 };
 
 pub(in crate::security_epoch) struct PendingApproval {
