@@ -250,7 +250,10 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
             self.completion.check_current(
                 &mut self.action.reader,
                 (
-                    self.action.sqlite.as_mut().context("restore_auth_sqlite_closed")?,
+                    self.action
+                        .sqlite
+                        .as_mut()
+                        .context("restore_auth_sqlite_closed")?,
                     &mut self.action.files,
                 ),
                 &self.record,
@@ -263,9 +266,9 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
         })();
         // A primary verification/time failure does not bypass this SAME held
         // original's mandatory postcheck. Preserve the first failure.
-        let checked = self.action.check_execution_original(
-            &mut self.original, &self.record, &self.operation,
-        );
+        let checked =
+            self.action
+                .check_execution_original(&mut self.original, &self.record, &self.operation);
         if requested.is_err() || checked.is_err() {
             self.refuse();
         }
