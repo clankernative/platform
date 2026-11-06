@@ -73,7 +73,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
       "scope": "const",
-      "fingerprint": "sha256:f8eb9a96aaf8206b66b21681ed27120601d885cb888b387313e20f646b46f8e6",
+      "fingerprint": "sha256:8a7890ea2c9bf4a5785b3d12b740e950a5920b9b638469a3e4fed73b452f3294",
       "registration": null
     },
     {
@@ -3089,7 +3089,8 @@
       ],
       "methods": [
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < RestoreObservation >",
-        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
       ],
       "factories": [
         {
@@ -3105,6 +3106,10 @@
         {
           "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
         }
       ],
       "proof_uses": []
@@ -3251,7 +3256,12 @@
         "fn check_local_inner (& mut self) -> Result < () >",
         "fn refuse (& mut self)"
       ],
-      "factories": [],
+      "factories": [
+        {
+          "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+        }
+      ],
       "material_uses": [
         {
           "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
@@ -3304,9 +3314,13 @@
       "kind": "private_material",
       "consuming_methods": [],
       "methods": [
+        "pub (in crate :: security_epoch) fn activate_writer (& mut self , _held_creator : & std :: fs :: File , _holder : & kernel :: Holder) -> Result < kernel :: restore :: writer :: Receipt >",
+        "pub (in crate :: security_epoch) fn admit_creator_root (& mut self , _held_root : & std :: fs :: File) -> Result < crate :: security_epoch :: storage_authority :: RestoreCreatorRoot >",
         "pub (in crate :: security_epoch) fn check_current (& mut self) -> Result < RestoreObservation >",
         "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn require_staging_input (& mut self , _intent : & kernel :: restore :: Intent , _namespace : & day2_capabilities :: credentials :: Namespace) -> Result < () >",
+        "pub (in crate :: security_epoch) fn settle_target (& mut self , _held_creator : & std :: fs :: File , _report : & kernel :: restore :: completion :: TargetReport) -> Result < kernel :: restore :: completion :: Receipt >"
       ],
       "factories": [
         {
@@ -3315,6 +3329,14 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn activate_writer (& mut self , _held_creator : & std :: fs :: File , _holder : & kernel :: Holder) -> Result < kernel :: restore :: writer :: Receipt >"
+        },
+        {
+          "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn admit_creator_root (& mut self , _held_root : & std :: fs :: File) -> Result < crate :: security_epoch :: storage_authority :: RestoreCreatorRoot >"
+        },
         {
           "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn check_current (& mut self) -> Result < RestoreObservation >"
@@ -3326,6 +3348,14 @@
         {
           "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_staging_input (& mut self , _intent : & kernel :: restore :: Intent , _namespace : & day2_capabilities :: credentials :: Namespace) -> Result < () >"
+        },
+        {
+          "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn settle_target (& mut self , _held_creator : & std :: fs :: File , _report : & kernel :: restore :: completion :: TargetReport) -> Result < kernel :: restore :: completion :: Receipt >"
         }
       ],
       "proof_uses": [],
@@ -7650,6 +7680,40 @@
       "consuming_methods": [
         "retain_resources"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "RestoreCreatorRoot",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "restore_approval"
+          }
+        }
+      ],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& mut self , _held_root : & File) -> Result < () >"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "RestoreCreatorRoot",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , _held_root : & File) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:d3de64a9cf1d3e0e6602165764d9a5d2f94010aa3864549b755ab685f459cdd4"
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
