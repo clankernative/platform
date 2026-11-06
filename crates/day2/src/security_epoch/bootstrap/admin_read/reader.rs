@@ -126,7 +126,9 @@ impl ActiveControllerStorageContinuity {
         operation: &Digest,
         trace: &'storage ServingTiming,
     ) -> Result<Option<RestoreExecutionReader<'metadata, 'storage, 'role>>> {
-        record.statement.validate()?;
+        // Complete bounded wire shape only; signature and current trust are
+        // verified later under this same genuine accepting owner.
+        record.encode()?;
         let mut original = crate::security_epoch::restore_original::RestoreOriginalGuard::capture(
             &mut stage,
             &self.policy,
@@ -356,8 +358,6 @@ const _: () = {
     closed_execution_reader!(serde::Serialize);
     closed_execution_reader!(serde::Deserialize<'static>);
 };
-
-
 
 #[cfg(test)]
 mod tests;

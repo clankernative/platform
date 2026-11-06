@@ -330,7 +330,7 @@ fn execution_reader_interval(source: &str) -> Result<bool> {
     if methods.len() != 1
         || methods[0].block.stmts.len() != 6
         || methods[0].block.stmts[0].to_token_stream().to_string()
-            != "record . statement . validate () ? ;"
+            != "record . encode () ? ;"
     {
         return Ok(false);
     }
@@ -382,8 +382,8 @@ fn restore_execution_original_precedes_the_actual_accepting_reader() -> Result<(
     syn::parse_file(&moved)?;
     assert!(!execution_reader_interval(&moved)?);
     let waited = source.replacen(
-        "        record.statement.validate()?;",
-        "        std::thread::yield_now();\n        record.statement.validate()?;",
+        "        record.encode()?;",
+        "        std::thread::yield_now();\n        record.encode()?;",
         1,
     );
     assert_ne!(source, waited);
