@@ -236,6 +236,34 @@ impl Drop for Terminal {
     }
 }
 
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($owner:ty, $bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
+        }};
+    }
+    macro_rules! closed {
+        ($owner:ty) => {
+            assert_not_impl!($owner, Clone);
+            assert_not_impl!($owner, Copy);
+            assert_not_impl!($owner, Default);
+            assert_not_impl!($owner, std::fmt::Debug);
+            assert_not_impl!($owner, Send);
+            assert_not_impl!($owner, Sync);
+            assert_not_impl!($owner, serde::Serialize);
+            assert_not_impl!($owner, serde::Deserialize<'static>);
+        };
+    }
+    closed!(ResponseRights);
+    closed!(ResponseTickets);
+    closed!(Terminal);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +556,141 @@ mod tests {
             let mutant = source.replacen(old, new, 1);
             assert_ne!(source, mutant, "actual request registration");
             assert!(!registration_precedes_request(&mutant));
+        }
+    }
+
+    fn other_terminal_tail(source: &str, autonomous: bool) -> bool {
+        use quote::ToTokens;
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let body = if autonomous {
+            file.items.iter().find_map(|item| {
+                let syn::Item::Fn(function) = item else {
+                    return None;
+                };
+                if function.sig.ident != "with_app_request" {
+                    return None;
+                }
+                let syn::Stmt::Expr(syn::Expr::Match(branches), _) = function.block.stmts.last()?
+                else {
+                    return None;
+                };
+                branches.arms.iter().find_map(|arm| {
+                    if arm.pat.to_token_stream().to_string() != "Ok (Ok (value))" {
+                        return None;
+                    }
+                    let syn::Expr::Block(block) = &*arm.body else {
+                        return None;
+                    };
+                    Some(&block.block)
+                })
+            })
+        } else {
+            file.items.iter().find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if item.self_ty.to_token_stream().to_string() != "Sink" {
+                    return None;
+                }
+                item.items.iter().find_map(|member| match member {
+                    syn::ImplItem::Fn(function) if function.sig.ident == "finish" => {
+                        Some(&function.block)
+                    }
+                    _ => None,
+                })
+            })
+        };
+        let Some(body) = body else { return false };
+        let expected: syn::Block = if autonomous {
+            syn::parse_quote!({
+                let terminal = sink.response_tickets.prepare(&sink.identity)?;
+                sink.request.finish()?;
+                sink.state.set(SinkState::Complete);
+                terminal.complete();
+                Ok(value)
+            })
+        } else {
+            syn::parse_quote!({
+                let terminal = self.response_tickets.prepare(&self.identity)?;
+                #[cfg(test)]
+                if !fixtures::active() || self.request.has_started()? {
+                    self.request.finish()?;
+                }
+                #[cfg(not(test))]
+                self.request.finish()?;
+                self.state.set(SinkState::Complete);
+                terminal.complete();
+                Ok(())
+            })
+        };
+        body.stmts.len() >= expected.stmts.len()
+            && body.stmts[body.stmts.len() - expected.stmts.len()..]
+                .iter()
+                .zip(&expected.stmts)
+                .all(|(a, b)| a.to_token_stream().to_string() == b.to_token_stream().to_string())
+            && body
+                .to_token_stream()
+                .to_string()
+                .matches("terminal . complete ()")
+                .count()
+                == 1
+    }
+
+    fn terminal_mutant(source: &str, autonomous: bool, old: &str, new: &str) -> String {
+        use quote::ToTokens;
+        let mut file = syn::parse_file(source).unwrap();
+        let mut changed = 0;
+        for item in &mut file.items {
+            let body = match item {
+                syn::Item::Fn(function)
+                    if autonomous && function.sig.ident == "with_app_request" =>
+                {
+                    Some(function.block.as_mut())
+                }
+                syn::Item::Impl(item)
+                    if !autonomous && item.self_ty.to_token_stream().to_string() == "Sink" =>
+                {
+                    item.items.iter_mut().find_map(|member| match member {
+                        syn::ImplItem::Fn(function) if function.sig.ident == "finish" => {
+                            Some(&mut function.block)
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(body) = body {
+                let before = body.to_token_stream().to_string();
+                let after = before.replacen(old, new, 1);
+                assert_ne!(before, after, "actual scoped terminal mutation");
+                *body = syn::parse_str(&after).unwrap();
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 1);
+        file.to_token_stream().to_string()
+    }
+
+    #[test]
+    fn actual_autonomous_and_ordinary_response_tails_cannot_retire_early_or_omit_completion() {
+        let source = include_str!("../native_management.rs");
+        for autonomous in [true, false] {
+            assert!(other_terminal_tail(source, autonomous));
+            let finish = if autonomous {
+                "sink . request . finish () ? ;"
+            } else {
+                "self . request . finish () ? ;"
+            };
+            for (old, new) in [
+                (finish, format!("terminal.complete(); {finish}")),
+                ("terminal . complete () ;", String::new()),
+                ("terminal . complete () ;", "terminal.complete()?;".into()),
+            ] {
+                let mutant = terminal_mutant(source, autonomous, old, &new);
+                assert!(!other_terminal_tail(&mutant, autonomous));
+            }
         }
     }
 
