@@ -3658,6 +3658,7 @@
         "pub (super) fn metadata_source (acquisition : & mut NativeAcquisition) -> Result < Self >",
         "fn mint_body (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition , body : & [u8]) -> Result < Self >",
         "fn mint_reply (bytes : & [u8]) -> Result < Self >",
+        "pub (super) fn mint_restore_key_reader (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "pub (super) fn mint_restore_signer (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "pub (super) fn mint_target (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "fn projection (path : & str , acquisition : & mut NativeAcquisition) -> Result < Self >",
@@ -3695,6 +3696,10 @@
         },
         {
           "owner": "CredentialMaterial",
+          "signature": "pub (super) fn mint_restore_key_reader (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
           "signature": "pub (super) fn mint_restore_signer (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
         },
         {
@@ -3718,6 +3723,10 @@
         {
           "owner": "CredentialMaterial",
           "signature": "pub (super) fn authorization (& self) -> Result < HeaderValue >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn mint_restore_key_reader (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
         },
         {
           "owner": "CredentialMaterial",
