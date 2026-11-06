@@ -454,7 +454,9 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <LostRestoreLoan as Ambiguous<_>>::check;
-            let _ = <crate::security_epoch::storage_authority::RestoreCreatorRoot as Ambiguous<_>>::check;
+            let _ = <crate::security_epoch::storage_authority::RestoreCreatorRoot as Ambiguous<
+                _,
+            >>::check;
             let _ = <FencedRestoreContinuation<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <RestoreWriteLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <FencedReadUnit<'static, 'static, 'static> as Ambiguous<_>>::check;
