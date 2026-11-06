@@ -74,6 +74,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_original.rs",
+      "scope": "const",
+      "fingerprint": "sha256:2a7374146dbf1f28483a721fbf47c49c28e13fcd2e6d9372d2741ee323c5a818",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
       "scope": "const",
       "fingerprint": "sha256:f2499f9eb70a64af334461b4f9646c6eca2f78fbf54dd2c6370f27e78d04dc8f",
@@ -4447,6 +4453,36 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_original.rs",
+      "type_name": "RestoreOriginalGuard",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn capture (stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : ApprovalRequest , operation : Digest) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn check_join (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & ApprovalRequest , operation : & Digest) -> Result < RestoreObservation >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "RestoreOriginalGuard",
+          "signature": "pub (in crate :: security_epoch) fn capture (stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : ApprovalRequest , operation : Digest) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoreOriginalGuard",
+          "signature": "pub (in crate :: security_epoch) fn check_join (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & ApprovalRequest , operation : & Digest) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "RestoreOriginalGuard",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:d334117fb813e2e0a6ba440e32f0edaf7c68be77720068ff9ec85507ec536c37",
+      "owning_children": []
     },
     {
       "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
