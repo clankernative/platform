@@ -706,6 +706,9 @@ The private authenticated executor has a fixed whole-set key acquisition. It
 resolves the archive requirements against the same admitted instance collector
 used for the external epoch key-set digest, comparing the signed archive, target,
 operation, custody, exact binding revision and canonical numeric provider version.
+The required set must equal the complete custody/verifier/shell projection of
+that admitted collector; caller omissions refuse before any key read. The native
+contract already requires the archive key-set digest to equal the selected one.
 An archive reference supplies no provider path. A historical version absent from
 the current admitted configuration refuses; no alias, latest-version fallback,
 new retention catalog or custody migration is supported.

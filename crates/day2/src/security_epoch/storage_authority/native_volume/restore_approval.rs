@@ -801,22 +801,36 @@ struct SelectedKey {
     provider: GcpSecretVersion,
 }
 
-fn purpose_matches(archive: &KeyPurpose, current: SecurityKeyPurpose) -> bool {
-    matches!(
-        (archive, current),
-        (KeyPurpose::CustodyEncryption, SecurityKeyPurpose::CredentialEncryption
-            | SecurityKeyPurpose::OauthCustodyEncryption)
-            | (KeyPurpose::CustodyVerifier, SecurityKeyPurpose::CredentialVerifier
-                | SecurityKeyPurpose::OauthCustodyVerifier)
-            | (KeyPurpose::ShellAttestation, SecurityKeyPurpose::CredentialShellAttestation
-                | SecurityKeyPurpose::OauthShellAttestation)
-    )
+fn archive_purpose(current: SecurityKeyPurpose) -> Option<KeyPurpose> {
+    match current {
+        SecurityKeyPurpose::CredentialEncryption | SecurityKeyPurpose::OauthCustodyEncryption => Some(KeyPurpose::CustodyEncryption),
+        SecurityKeyPurpose::CredentialVerifier | SecurityKeyPurpose::OauthCustodyVerifier => Some(KeyPurpose::CustodyVerifier),
+        SecurityKeyPurpose::CredentialShellAttestation | SecurityKeyPurpose::OauthShellAttestation => Some(KeyPurpose::ShellAttestation),
+        SecurityKeyPurpose::OauthProviderClient | SecurityKeyPurpose::OauthReauthenticationClient => None,
+    }
+}
+
+fn complete_requirements(admitted: &[SecurityKeySelection]) -> Result<Vec<ExactKey>> {
+    let mut required = Vec::new();
+    for key in admitted {
+        let Some(purpose) = archive_purpose(key.purpose) else { continue; };
+        let SecretProvider::GcpVersion { version, .. } = &key.provider;
+        required.push(ExactKey { binding: key.binding.clone(), version: version.to_string(), purpose });
+    }
+    required.sort_by(|a,b| (&a.purpose, a.binding.id.as_str(), a.binding.revision.as_str(), a.version.as_str())
+        .cmp(&(&b.purpose, b.binding.id.as_str(), b.binding.revision.as_str(), b.version.as_str())));
+    required.dedup();
+    ensure!((1..=32).contains(&required.len()), "restore_keys_manifest_bound");
+    Ok(required)
 }
 
 // Pure resolution DATA. Archive strings cannot supply a project, secret name
 // or alias. Each requirement must resolve to one exact admitted resource.
 fn resolve(required: &[ExactKey], admitted: &[SecurityKeySelection]) -> Result<Vec<SelectedKey>> {
     ensure!((1..=32).contains(&required.len()), "restore_keys_manifest_bound");
+    // Archive key-set equality with current selection is already required.
+    // A caller cannot omit a referenced member by supplying a smaller list.
+    ensure!(required == complete_requirements(admitted)?, "restore_keys_incomplete_manifest");
     let mut result = Vec::new();
     let mut resources = std::collections::BTreeSet::new();
     let mut previous = None;
@@ -826,7 +840,7 @@ fn resolve(required: &[ExactKey], admitted: &[SecurityKeySelection]) -> Result<V
         previous = Some(identity);
         let mut found = None;
         for selected in admitted {
-            if selected.binding != key.binding || !purpose_matches(&key.purpose, selected.purpose) {
+            if selected.binding != key.binding || archive_purpose(selected.purpose).as_ref() != Some(&key.purpose) {
                 continue;
             }
             let SecretProvider::GcpVersion { project_number, secret, version } = &selected.provider;
