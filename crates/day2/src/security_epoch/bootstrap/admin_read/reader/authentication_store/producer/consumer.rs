@@ -2,9 +2,10 @@
 //! ceremony DATA; the authenticated result retains its actual reader, auth-store
 //! handles, qualified time and original. It is NOT a consumed grant, complete
 //! rights stop, Fenced completion, staged creator or restored writer.
-use super::{RestoreAuthenticationAction, seconds_ceiling};
+use super::seconds_ceiling;
+use super::super::RestoreAuthenticationAction;
+use super::super::super::RestoreExecutionReader;
 use crate::security_epoch::{
-    RestoreExecutionReader,
     restore_approval::signed::SignedApprovalRecord,
     restore_host_clock::HostTimeData,
     restore_original::{RestoreObservation, RestoreOriginalGuard},

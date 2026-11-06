@@ -23,7 +23,7 @@ use std::{cell::RefCell, rc::Rc};
 
 mod admin_read;
 pub(in crate::security_epoch) use admin_read::{
-    CompletedCeremony, RestoreAuthenticationAction, RestoreExecutionReader,
+    CompletedCeremony, RestoreAuthenticationAction,
 };
 mod app_serving;
 pub(crate) use admin_read::{

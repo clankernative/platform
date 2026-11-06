@@ -10,7 +10,7 @@
 mod admission_work;
 mod authenticated_reads;
 mod bootstrap;
-use bootstrap::{CompletedCeremony, RestoreAuthenticationAction, RestoreExecutionReader};
+use bootstrap::{CompletedCeremony, RestoreAuthenticationAction};
 mod control_slot;
 mod control_slot_firestore;
 pub(crate) mod control_slot_io;
