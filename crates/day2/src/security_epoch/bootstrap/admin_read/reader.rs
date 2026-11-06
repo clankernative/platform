@@ -6,7 +6,7 @@ use crate::{
     security_epoch::controller::serving_timing::ServingTiming,
     store::{ControllerAdminData, InitialStoreMetadata},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 
 mod authentication_store;
@@ -22,6 +22,16 @@ pub(crate) struct ControllerAdminReader<'metadata, 'storage, 'role> {
     loan: ControllerAdminReadLoan<'storage, 'role>,
     metadata: &'metadata InitialStoreMetadata,
     selected: AdminSelection,
+}
+
+/// A real accepting reader with its original captured BEFORE any reader work.
+/// This does not authenticate the executor, consume approval or admit a writer.
+/// The fixed execution-ceremony child consumes it; no reader/stage getter exists.
+pub(in crate::security_epoch) struct RestoreExecutionReader<'metadata, 'storage, 'role> {
+    reader: ControllerAdminReader<'metadata, 'storage, 'role>,
+    original: crate::security_epoch::restore_original::RestoreOriginalGuard,
+    record: crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+    operation: Digest,
 }
 
 // Selection DATA only, not a permission or authentication proof.
@@ -104,7 +114,74 @@ impl ActiveControllerStorageContinuity {
     }
 }
 
+impl ActiveControllerStorageContinuity {
+    /// Signature/identity fields are still untrusted DATA at this entry. Both
+    /// current principals are selected by the actual accepting reader; the
+    /// separate fixed execution ceremony authenticates the executor afterwards.
+    pub(in crate::security_epoch) fn begin_restore_execution_reader<'metadata, 'storage, 'role>(
+        &'storage mut self,
+        metadata: &'metadata crate::store::InitialStoreMetadata,
+        mut stage: EnrolledRoleStage<'role>,
+        record: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+        operation: &Digest,
+        trace: &'storage ServingTiming,
+    ) -> Result<Option<RestoreExecutionReader<'metadata, 'storage, 'role>>> {
+        record.statement.validate()?;
+        let mut original = crate::security_epoch::restore_original::RestoreOriginalGuard::capture(
+            &mut stage,
+            &self.policy,
+            &self.store,
+            record.statement.request.clone(),
+            operation.clone(),
+        )?;
+        let intent = record.statement.request.intent();
+        let Some(mut reader) = self.begin_accepting_admin_reader(
+            metadata,
+            stage,
+            &intent.commitment()?,
+            [&record.statement.approver.email, &intent.executor.email],
+            trace,
+        )? else {
+            return Ok(None);
+        };
+        reader.check_execution_original(&mut original, record, operation)?;
+        Ok(Some(RestoreExecutionReader {
+            reader,
+            original,
+            record: record.clone(),
+            operation: operation.clone(),
+        }))
+    }
+}
+
 impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'role> {
+    // Fixed mutual check, not an owner/stage/SQL getter. The captured guard
+    // meets only the physical phase already held by this exact reader.
+    fn check_execution_original(
+        &mut self,
+        original: &mut crate::security_epoch::restore_original::RestoreOriginalGuard,
+        record: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+        operation: &Digest,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check_registry_local()?;
+            original.check_join(
+                self.loan.physical.as_mut().context("restore_execution_reader_closed")?
+                    .controller_stage()?,
+                &record.statement.request,
+                operation,
+            )?;
+            Ok(())
+        })();
+        let checked = self.check_registry_local();
+        if requested.is_err() || checked.is_err() {
+            original.refuse();
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     /// Actual loan by value, never a historical admin projection or Runtime.
     /// The loan must precede the FIRST SQLite activation of this reader.
     fn capture(
@@ -256,6 +333,25 @@ const _: () = {
     assert_not_impl!(Sync);
     assert_not_impl!(serde::Serialize);
     assert_not_impl!(serde::Deserialize<'static>);
+};
+
+const _: () = {
+    macro_rules! closed_execution_reader {
+        ($bound:path) => {{
+            trait Ambiguous<T> { fn check() {} }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <RestoreExecutionReader<'static, 'static, 'static> as Ambiguous<_>>::check;
+        }};
+    }
+    closed_execution_reader!(Clone);
+    closed_execution_reader!(Copy);
+    closed_execution_reader!(Default);
+    closed_execution_reader!(std::fmt::Debug);
+    closed_execution_reader!(Send);
+    closed_execution_reader!(Sync);
+    closed_execution_reader!(serde::Serialize);
+    closed_execution_reader!(serde::Deserialize<'static>);
 };
 
 #[cfg(test)]
