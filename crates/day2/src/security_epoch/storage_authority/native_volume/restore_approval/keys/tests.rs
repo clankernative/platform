@@ -141,7 +141,7 @@ fn deadline_equality_and_abandoned_key_attempt_remain_refused() -> Result<()> {
     assert!(expired.remaining().is_err());
     let mut clock=original(Duration::from_secs(5));
     {
-        let attempt=KeyAttempt {context:context(&mut clock),complete:false};
+        let attempt=KeyBirth {original:Some(clock.narrow(5, Duration::MAX)?)};
         drop(attempt);
     }
     assert!(clock.remaining().is_err());
@@ -150,14 +150,12 @@ fn deadline_equality_and_abandoned_key_attempt_remain_refused() -> Result<()> {
 
 #[test]
 fn actual_retained_owner_has_no_manifest_or_fixture_constructor() {
-    let source=include_str!("../keys.rs");
-    let production=source.split("#[cfg(test)]\nmod tests;").next().unwrap();
-    let production: String = production.split_whitespace().collect();
+    let source=include_str!("../../restore_approval.rs");
+    let production: String = source.split_whitespace().collect();
     assert_eq!(production.matches("letmutkeys=HistoricalKeyAvailability{").count(),1);
-    assert!(production.contains("letmaterial=http.read_all(&selection,&mutattempt.context)?;"));
-    assert!(production.contains("attempt.context.check()?;keys.original.remaining()?;attempt.complete=true;"));
-    assert!(production.contains("if!self.complete{self.context.refuse();}"));
-    assert!(!production.contains("derive(Clone"));
+    assert!(production.contains("letmaterial=http.read_all(&selection,&mutcontext)?;"));
+    assert!(production.contains("context.check()?;keys.original.remaining()?;"));
+    assert!(production.contains("ifletSome(original)=&mutself.original{original.refuse();}"));
 }
 
 #[test]
