@@ -1067,7 +1067,7 @@ fn implementation() -> Result<Digest> {
             include_str!("../../../../BUILD.bazel"),
             include_str!("../../../../../day2-capabilities/Cargo.toml"),
             include_str!("../../../../../day2-capabilities/BUILD.bazel"),
-        ],
+        ].as_slice(),
     ))
 }
 
