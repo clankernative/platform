@@ -4607,7 +4607,7 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
-          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4664,7 +4664,7 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
-          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4709,7 +4709,7 @@
         "fn observe (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ >) -> Result < () >",
         "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str) -> Result < () >",
         "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >",
-        "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
       ],
       "factories": [
         {
@@ -4740,7 +4740,7 @@
         },
         {
           "owner": "RegistryCeremony",
-          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4776,7 +4776,7 @@
       "methods": [
         "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , intent : ApprovalIntent) -> Result < Self >",
         "pub (in crate :: security_epoch) fn encoded_challenge (& self) -> Result < String >",
-        "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
       ],
       "factories": [
         {
@@ -4791,7 +4791,7 @@
         },
         {
           "owner": "ControllerCeremony",
-          "signature": "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         }
       ],
       "proof_uses": [],

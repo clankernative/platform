@@ -305,3 +305,108 @@ fn actual_controller_entry_requires_complete_intent_before_crypto_and_hides_dige
         assert!(!typed_intent_wiring(&mutant));
     }
 }
+
+#[derive(Debug)]
+struct NativePostFailure;
+impl std::fmt::Display for NativePostFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("test native postcheck")
+    }
+}
+impl std::error::Error for NativePostFailure {}
+
+#[test]
+fn known_assertion_denial_requires_successful_postcheck_and_unknown_errors_remain_errors() {
+    use super::super::super::AssertionDenied;
+    let denial = || anyhow::Error::new(AssertionDenied::Signature).context("opaque context");
+    assert_eq!(settle_verification(Err(denial()), Ok(())).unwrap(), None);
+    let post = settle_verification(Err(denial()), Err(NativePostFailure.into())).unwrap_err();
+    assert!(post.is::<NativePostFailure>());
+    assert!(!post.is::<AssertionDenied>());
+    let unknown = settle_verification(
+        Err(anyhow::anyhow!("restore_passkey_signature_invalid")),
+        Ok(()),
+    )
+    .unwrap_err();
+    assert!(!unknown.is::<AssertionDenied>());
+    // Two actual source failures retain the original source cause, while the
+    // caller's error branch still refuses the reader. No native owner is faked.
+    let primary = settle_verification(
+        Err(NativePostFailure.into()),
+        Err(anyhow::anyhow!("second source fault")),
+    )
+    .unwrap_err();
+    assert!(primary.is::<NativePostFailure>());
+    let facts = || AssertionFacts {
+        counter: 8,
+        backed_up: false,
+    };
+    assert_eq!(
+        settle_verification(Ok(facts()), Ok(())).unwrap(),
+        Some(facts())
+    );
+    assert!(
+        settle_verification(Ok(facts()), Err(NativePostFailure.into()))
+            .unwrap_err()
+            .is::<NativePostFailure>()
+    );
+}
+
+fn denial_wiring(source: &str) -> bool {
+    let file = syn::parse_file(source).unwrap();
+    let verify = method(&file, "RegistryCeremony", "verify_current_controller");
+    let locals = verify.block.to_token_stream().to_string();
+    let trace = calls(&verify.block);
+    let helper = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "settle_verification" => Some(item),
+            _ => None,
+        })
+        .unwrap()
+        .block
+        .to_token_stream()
+        .to_string();
+    before(&trace, "verify", "settle_verification")
+        && trace.iter().rposition(|c| c == "observe_controller") < trace.iter().position(|c| c == "settle_verification")
+        && locals.contains("let checked = self . observe_controller (reader , executor) ;")
+        && locals.contains("settle_verification (requested , checked)")
+        && !locals.contains("} ? ; let checked")
+        && locals.contains("self . refused . set (true)")
+        && locals.contains("reader . refuse ()")
+        && locals.contains("else if matches ! (& result , Ok (None)) { self . refused . set (true) ; }")
+        && helper.contains("Err (error) if error . is :: < super :: super :: AssertionDenied > () => { checked ? ; Ok (None) }")
+        && helper.contains("Err (error) => Err (error)")
+        && !helper.contains("to_string")
+}
+
+#[test]
+fn actual_controller_denial_conversion_happens_only_after_the_mandatory_postcheck() {
+    let source = include_str!("../controller.rs");
+    assert!(denial_wiring(source));
+    for (old, new) in [
+        (
+            "let checked = self.observe_controller(reader, executor);",
+            "let checked = Ok(());",
+        ),
+        (
+            "settle_verification(requested, checked)",
+            "settle_verification(requested, Ok(()))",
+        ),
+        ("checked?;\n            Ok(None)", "Ok(None)"),
+        (
+            "error.is::<super::super::AssertionDenied>()",
+            "error.to_string() == \"restore_passkey_signature_invalid\"",
+        ),
+        (
+            "} else if matches!(&result, Ok(None)) {",
+            "} else if false {",
+        ),
+    ] {
+        assert_eq!(source.matches(old).count(), 1);
+        let mutant = source.replace(old, new);
+        syn::parse_file(&mutant).unwrap();
+        assert!(!denial_wiring(&mutant));
+    }
+}
