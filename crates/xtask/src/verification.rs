@@ -141,10 +141,7 @@ fn validate_linux_context(
     let expected_job = match purpose {
         LinuxContext::Standard => matches!(
             job,
-            "verify-prepare-parts"
-                | "verify-prepare"
-                | "verify-shards"
-                | "verification-diagnostics"
+            "verify-prepare-parts" | "verify-prepare" | "verify-shards" | "verify"
         ),
         LinuxContext::TestPreparation => job == "verify-prepare-parts",
     };
@@ -2831,6 +2828,7 @@ mod tests {
         let standard = LinuxContext::Standard;
         let preparation = LinuxContext::TestPreparation;
         validate_linux_context(standard, "verify-shards", "0::/\n", "6442450944\n", "0")?;
+        validate_linux_context(standard, "verify", "0::/\n", "6442450944\n", "0")?;
         validate_linux_context(
             preparation,
             "verify-prepare-parts",
@@ -2844,6 +2842,9 @@ mod tests {
             (preparation, "verify-prepare-parts", "8589934593"),
             (preparation, "verify-shards", "6442450944"),
             (standard, "unknown", "6442450944"),
+            (standard, "verification-diagnostics", "6442450944"),
+            (standard, "verify", "8589934592"),
+            (preparation, "verify", "6442450944"),
         ] {
             assert!(validate_linux_context(purpose, job, "0::/", memory, "0").is_err());
         }
@@ -2887,11 +2888,7 @@ mod tests {
         assert!(preparation.contains(
             "verify-linux-context ${{ matrix.part == 'tests' && 'test-preparation' || 'standard' }}"
         ));
-        for name in [
-            "verify-prepare",
-            "verify-shards",
-            "verification-diagnostics",
-        ] {
+        for name in ["verify-prepare", "verify-shards", "verify"] {
             let job = ci_job(name);
             assert!(job.contains("--memory=6g --memory-swap=6g"));
             assert!(job.contains("verify-linux-context standard"));
