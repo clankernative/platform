@@ -409,9 +409,14 @@ fn main() -> Result<()> {
         }
         "verify-linux-context" => {
             let purpose = verification::LinuxContext::parse(
-                &args.next().context("CI context requires one fixed purpose")?,
+                &args
+                    .next()
+                    .context("CI context requires one fixed purpose")?,
             )?;
-            ensure!(args.next().is_none(), "CI context accepts one fixed purpose");
+            ensure!(
+                args.next().is_none(),
+                "CI context accepts one fixed purpose"
+            );
             verification::linux_context(&root, purpose)?;
         }
         "architecture-check" => {

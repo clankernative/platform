@@ -141,12 +141,21 @@ fn validate_linux_context(
     let expected_job = match purpose {
         LinuxContext::Standard => matches!(
             job,
-            "verify-prepare-parts" | "verify-prepare" | "verify-shards" | "verification-diagnostics"
+            "verify-prepare-parts"
+                | "verify-prepare"
+                | "verify-shards"
+                | "verification-diagnostics"
         ),
         LinuxContext::TestPreparation => job == "verify-prepare-parts",
     };
-    ensure!(expected_job, "CI compiler purpose does not match its workflow job");
-    ensure!(swap.trim() == "0", "Linux CI compiler swap must remain disabled");
+    ensure!(
+        expected_job,
+        "CI compiler purpose does not match its workflow job"
+    );
+    ensure!(
+        swap.trim() == "0",
+        "Linux CI compiler swap must remain disabled"
+    );
     ensure!(
         cgroup.trim() == "0::/",
         "private cgroup v2 namespace required"
@@ -2822,7 +2831,13 @@ mod tests {
         let standard = LinuxContext::Standard;
         let preparation = LinuxContext::TestPreparation;
         validate_linux_context(standard, "verify-shards", "0::/\n", "6442450944\n", "0")?;
-        validate_linux_context(preparation, "verify-prepare-parts", "0::/\n", "8589934592\n", "0")?;
+        validate_linux_context(
+            preparation,
+            "verify-prepare-parts",
+            "0::/\n",
+            "8589934592\n",
+            "0",
+        )?;
         for (purpose, job, memory) in [
             (standard, "verify-shards", "8589934592"),
             (standard, "verify-prepare-parts", "6442450945"),
@@ -2866,9 +2881,17 @@ mod tests {
     fn only_test_preparation_uses_existing_runner_memory_headroom() {
         let preparation = ci_job("verify-prepare-parts");
         assert!(preparation.contains("--memory=${{ matrix.part == 'tests' && '8g' || '6g' }}"));
-        assert!(preparation.contains("--memory-swap=${{ matrix.part == 'tests' && '8g' || '6g' }}"));
-        assert!(preparation.contains("verify-linux-context ${{ matrix.part == 'tests' && 'test-preparation' || 'standard' }}"));
-        for name in ["verify-prepare", "verify-shards", "verification-diagnostics"] {
+        assert!(
+            preparation.contains("--memory-swap=${{ matrix.part == 'tests' && '8g' || '6g' }}")
+        );
+        assert!(preparation.contains(
+            "verify-linux-context ${{ matrix.part == 'tests' && 'test-preparation' || 'standard' }}"
+        ));
+        for name in [
+            "verify-prepare",
+            "verify-shards",
+            "verification-diagnostics",
+        ] {
             let job = ci_job(name);
             assert!(job.contains("--memory=6g --memory-swap=6g"));
             assert!(job.contains("verify-linux-context standard"));
