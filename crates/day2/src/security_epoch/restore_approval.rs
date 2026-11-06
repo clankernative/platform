@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const RESTORE_APPROVAL_LIFETIME_SECONDS: u64 = 3600;
 const MAX_REQUEST_BYTES: usize = 16_384;
 
+pub(crate) mod signed;
 mod intent;
 pub(crate) use intent::ApprovalIntent;
 
@@ -84,6 +85,16 @@ pub(crate) struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
+    pub(crate) fn intent(&self) -> ApprovalIntent {
+        ApprovalIntent {
+            grant_id: self.grant_id.clone(),
+            full_archive_digest: self.full_archive_digest.clone(),
+            target: self.target.clone(),
+            executor: self.executor.clone(),
+            custody: self.custody.clone(),
+        }
+    }
+
     /// Shape checks only. No clock is sampled and no current permission follows.
     pub(crate) fn validate(&self) -> Result<()> {
         self.executor.validate()?;
