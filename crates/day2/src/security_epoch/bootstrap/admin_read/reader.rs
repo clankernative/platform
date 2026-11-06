@@ -164,7 +164,7 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
         record: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
         operation: &Digest,
     ) -> Result<()> {
-        let requested = (|| {
+        let requested: Result<()> = (|| {
             self.check_registry_local()?;
             original.check_join(
                 self.loan
