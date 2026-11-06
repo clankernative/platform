@@ -206,6 +206,7 @@ info_json = |is_help| {
 				"platform.local-dev",
 				"platform.backup",
 				"platform.restore",
+				"platform.restore.inspect",
 				"platform.infra.plan",
 				"platform.authority.inspect",
 				"platform.authority.admin",

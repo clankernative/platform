@@ -76,6 +76,45 @@ impl Manifest {
     }
 }
 
+/// Allowlisted historical DATA for selecting an archive in the restore command.
+/// No local JSON, successful inspection or stored digest is approval, a current
+/// epoch observation, incumbent exclusion or permission to create a writer.
+#[derive(Serialize)]
+pub struct RestoreArchiveInspection {
+    kind: &'static str,
+    manifest_commitment: day2_capabilities::Digest,
+    scope: String,
+    app: String,
+    artifact: String,
+    database: String,
+}
+
+const MAX_RESTORE_INSPECTION_BYTES: usize = 2048;
+
+impl RestoreArchiveInspection {
+    fn from_verified(manifest: &Manifest) -> Result<Self> {
+        let record = Self {
+            kind: "restore_archive_inspection_v1",
+            manifest_commitment: manifest.security_restore_digest()?,
+            scope: manifest.scope.clone(),
+            app: manifest.app.clone(),
+            artifact: manifest.artifact.clone(),
+            database: manifest.database.clone(),
+        };
+        ensure!(
+            serde_json::to_vec(&record)?.len() <= MAX_RESTORE_INSPECTION_BYTES,
+            "restore_archive_inspection_bound"
+        );
+        Ok(record)
+    }
+}
+
+pub fn inspect(backup: &Path) -> Result<RestoreArchiveInspection> {
+    // Keep the same complete graph, artifact, SQLite and historical-authority
+    // validation as backup/restore; projection never accepts a supplied manifest.
+    RestoreArchiveInspection::from_verified(&verify(backup)?)
+}
+
 fn has_security_selection(instance: &Instance, app: &str) -> bool {
     instance.apps.get(app).is_some_and(|binding| {
         !binding.credential_families.is_empty() || !binding.oauth_connections.is_empty()
@@ -930,6 +969,94 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_inspection_exports_only_metadata_and_commits_unexported_archive_graph() -> Result<()>
+    {
+        let all = multi_source_security_projection_fixture()?;
+        let projected =
+            historical_projection(all.clone(), "example_app", all.apps["example_app"].clone());
+        let manifest = Manifest {
+            format: 3,
+            scope: projected.scope("example_app")?,
+            app: "example_app".into(),
+            artifact: day2::digest(b"historical artifact"),
+            database: day2::digest(b"historical database"),
+            provider_databases: BTreeMap::from([(
+                "notifications.sqlite".into(),
+                day2::digest(b"old provider"),
+            )]),
+            rollout_artifacts: Some(day2::digest(b"old rollout")),
+            companion_state: BTreeMap::from([(
+                "companions/example".into(),
+                day2::digest(b"old companion"),
+            )]),
+            authority: authority_state::AuthorityStamp {
+                epoch: "historical-authority-not-current".into(),
+                revision: 1,
+            },
+            resources: Default::default(),
+            instance: projected,
+        };
+        // This tests the projection, not admission of a real archive or owner.
+        // The Reports integration case verifies actual backup files first.
+        let record = serde_json::to_value(RestoreArchiveInspection::from_verified(&manifest)?)?;
+        assert_eq!(
+            record,
+            serde_json::json!({
+                "kind":"restore_archive_inspection_v1",
+                "manifest_commitment":day2_capabilities::Digest::of(&("day2-security-backup-v1", &manifest))?,
+                "scope":manifest.scope,
+                "app":manifest.app,
+                "artifact":manifest.artifact,
+                "database":manifest.database
+            })
+        );
+        for (pointer, value) in [
+            (
+                "/provider_databases",
+                serde_json::json!({"notifications.sqlite":day2::digest(b"provider")}),
+            ),
+            (
+                "/rollout_artifacts",
+                serde_json::json!(day2::digest(b"rollout")),
+            ),
+            (
+                "/companion_state",
+                serde_json::json!({"companions/example":day2::digest(b"companion")}),
+            ),
+            ("/authority/revision", serde_json::json!(2)),
+            (
+                "/instance/installation",
+                serde_json::json!("different-company"),
+            ),
+        ] {
+            let mut changed = serde_json::to_value(&manifest)?;
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let changed: Manifest = serde_json::from_value(changed)?;
+            let projection =
+                serde_json::to_value(RestoreArchiveInspection::from_verified(&changed)?)?;
+            assert_ne!(
+                projection["manifest_commitment"], record["manifest_commitment"],
+                "{pointer}"
+            );
+            assert_eq!(projection["scope"], record["scope"]);
+            assert_eq!(projection["artifact"], record["artifact"]);
+            assert_eq!(projection["database"], record["database"]);
+        }
+        let mut oversized = manifest;
+        oversized.scope = "é".repeat(MAX_RESTORE_INSPECTION_BYTES / 2);
+        assert!(RestoreArchiveInspection::from_verified(&oversized).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn restore_inspection_refuses_missing_archive_without_creating_any_output() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        assert!(inspect(directory.path()).is_err());
+        assert_eq!(fs::read_dir(directory.path())?.count(), 0);
+        Ok(())
+    }
 
     #[test]
     fn database_digest_matches_known_answers_across_read_boundaries() -> Result<()> {
