@@ -133,6 +133,9 @@ fn peer(replies: Vec<Reply>) -> (Kms, thread::JoinHandle<Calls>) {
                     Err(_) => panic!("expected bounded fixture HTTP request missing"),
                 }
             };
+            // The accept loop is nonblocking; the bounded fixture reader must
+            // explicitly select blocking reads on the accepted socket too.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
