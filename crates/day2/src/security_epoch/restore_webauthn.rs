@@ -167,7 +167,6 @@ enum AssertionDenied {
     RelyingParty,
     UserVerification,
     Counter,
-    Signature,
 }
 
 impl std::fmt::Display for AssertionDenied {
@@ -179,7 +178,6 @@ impl std::fmt::Display for AssertionDenied {
             Self::RelyingParty => "restore_passkey_rp_changed",
             Self::UserVerification => "restore_passkey_flags_or_verification_changed",
             Self::Counter => "restore_passkey_counter_not_advanced",
-            Self::Signature => "restore_passkey_signature_invalid",
         })
     }
 }
@@ -248,7 +246,9 @@ pub(super) fn verify(
     signed.extend_from_slice(digest(&SHA256, &assertion.client_data_json).as_ref());
     UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &row.public_key)
         .verify(&signed, &assertion.signature)
-        .map_err(|_| anyhow::anyhow!(AssertionDenied::Signature))?;
+        // Ring does not distinguish a bad signature from an invalid configured
+        // curve point. Keep that ambiguous cryptographic failure terminal.
+        .map_err(|_| anyhow::anyhow!("restore_passkey_signature_invalid"))?;
     Ok(AssertionFacts { counter, backed_up })
 }
 

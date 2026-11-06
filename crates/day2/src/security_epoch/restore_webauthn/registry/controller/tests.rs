@@ -318,7 +318,7 @@ impl std::error::Error for NativePostFailure {}
 #[test]
 fn known_assertion_denial_requires_successful_postcheck_and_unknown_errors_remain_errors() {
     use super::super::super::AssertionDenied;
-    let denial = || anyhow::Error::new(AssertionDenied::Signature).context("opaque context");
+    let denial = || anyhow::Error::new(AssertionDenied::UserVerification).context("opaque context");
     assert_eq!(settle_verification(Err(denial()), Ok(())).unwrap(), None);
     let post = settle_verification(Err(denial()), Err(NativePostFailure.into())).unwrap_err();
     assert!(post.is::<NativePostFailure>());
