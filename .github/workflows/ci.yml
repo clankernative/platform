@@ -192,7 +192,7 @@ jobs:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
       # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
       # worker Landlock/seccomp, memory and launcher admission remain mandatory.
-      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      options: --memory=${{ matrix.part == 'tests' && '8g' || '6g' }} --memory-swap=${{ matrix.part == 'tests' && '8g' || '6g' }} --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
       volumes:
         - /usr/bin/gh:/usr/local/bin/gh:ro
     defaults:
@@ -204,9 +204,9 @@ jobs:
       matrix:
         part: [inputs, fixtures, tests]
     env:
-      # Do not compile the largest test targets concurrently inside 6 GiB.
+      # Do not compile the largest test targets concurrently inside the selected fixed compiler allowance.
       # Partition optimized tests into smaller LLVM units without local LTO.
-      # Keep debug assertions and the complete runtime campaigns inside 6 GiB.
+      # Keep debug assertions and the complete runtime campaigns inside the selected fixed compiler allowance.
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
@@ -295,7 +295,7 @@ jobs:
           node-version: '22.23.3'
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: build-out/bin/xtask verify-linux-context
+        run: build-out/bin/xtask verify-linux-context ${{ matrix.part == 'tests' && 'test-preparation' || 'standard' }}
       - name: Retain current native Linux preparation context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -995,7 +995,7 @@ jobs:
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: build-out/bin/xtask verify-linux-context
+        run: build-out/bin/xtask verify-linux-context standard
       - name: Retain current native Linux preparation join context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1257,7 +1257,7 @@ jobs:
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: build-out/bin/xtask verify-linux-context
+        run: build-out/bin/xtask verify-linux-context standard
       - name: Select authenticated artifacts from successful producer attempts
         id: artifact_plan
         run: build-out/bin/xtask verify-artifact-plan ${{ matrix.shard }}
@@ -1665,7 +1665,7 @@ jobs:
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: build-out/bin/xtask verify-linux-context
+        run: build-out/bin/xtask verify-linux-context standard
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Retain current native Linux final context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
