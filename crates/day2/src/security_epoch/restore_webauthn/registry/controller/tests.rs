@@ -2,6 +2,7 @@
 use super::super::tests::configuration;
 use super::*;
 use quote::ToTokens;
+use syn::parse::Parser;
 use syn::visit::Visit;
 
 fn context(instance: &Instance) -> Result<ControllerRegistryData> {
@@ -98,6 +99,21 @@ fn method<'a>(file: &'a syn::File, owner: &str, name: &str) -> &'a syn::ImplItem
 fn calls(block: &syn::Block) -> Vec<String> {
     struct Calls(Vec<String>);
     impl<'ast> Visit<'ast> for Calls {
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if node.path.is_ident("ensure") {
+                let arguments =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                        .parse2(node.tokens.clone())
+                        .expect("actual ensure arguments must parse");
+                let mut nested = Calls(Vec::new());
+                for expression in &arguments {
+                    nested.visit_expr(expression);
+                }
+                self.0.extend(nested.0);
+            }
+            syn::visit::visit_macro(self, node);
+        }
+
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             syn::visit::visit_expr_method_call(self, node);
             self.0.push(node.method.to_string());
@@ -113,6 +129,20 @@ fn calls(block: &syn::Block) -> Vec<String> {
     let mut visitor = Calls(Vec::new());
     visitor.visit_block(block);
     visitor.0
+}
+
+#[test]
+fn call_collector_visits_statement_and_expression_ensure_exactly_once() {
+    let block: syn::Block = syn::parse_str(
+        r#"{
+            ensure!(statement_check()?, "statement");
+            let _value = ensure!(expression_check()?, "expression");
+        }"#,
+    )
+    .unwrap();
+    assert!(matches!(&block.stmts[0], syn::Stmt::Macro(_)));
+    assert!(matches!(&block.stmts[1], syn::Stmt::Local(_)));
+    assert_eq!(calls(&block), ["statement_check", "expression_check"]);
 }
 fn before(calls: &[String], a: &str, b: &str) -> bool {
     matches!((calls.iter().position(|c|c==a),calls.iter().position(|c|c==b)),(Some(a),Some(b)) if a<b)
