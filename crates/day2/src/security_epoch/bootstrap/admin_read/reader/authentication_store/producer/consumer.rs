@@ -290,7 +290,7 @@ impl Drop for AuthenticatedRestoreExecution<'_, '_, '_> {
 }
 
 const _: () = {
-    macro_rules! closed {
+    macro_rules! assert_not_impl {
         ($bound:path) => {{
             trait Ambiguous<T> {
                 fn check() {}
@@ -302,14 +302,14 @@ const _: () = {
             let _ = <PendingRestoreExecution as Ambiguous<_>>::check;
         }};
     }
-    closed!(Clone);
-    closed!(Copy);
-    closed!(Default);
-    closed!(std::fmt::Debug);
-    closed!(Send);
-    closed!(Sync);
-    closed!(serde::Serialize);
-    closed!(serde::Deserialize<'static>);
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
 };
 
 #[cfg(test)]

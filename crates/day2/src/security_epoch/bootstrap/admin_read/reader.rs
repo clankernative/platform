@@ -337,9 +337,6 @@ const _: () = {
     assert_not_impl!(Sync);
     assert_not_impl!(serde::Serialize);
     assert_not_impl!(serde::Deserialize<'static>);
-};
-
-const _: () = {
     macro_rules! closed_execution_reader {
         ($bound:path) => {{
             trait Ambiguous<T> {
@@ -359,6 +356,8 @@ const _: () = {
     closed_execution_reader!(serde::Serialize);
     closed_execution_reader!(serde::Deserialize<'static>);
 };
+
+
 
 #[cfg(test)]
 mod tests;
