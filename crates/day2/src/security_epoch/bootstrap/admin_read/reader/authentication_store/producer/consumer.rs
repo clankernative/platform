@@ -259,13 +259,18 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
             self.source.require_qualified(&self.time_operation)?;
             let time = self.source.current_time(&mut self.action)?;
             approval_window(&self.record, &time)?;
-            self.action
-                .check_execution_original(&mut self.original, &self.record, &self.operation)
+            Ok(())
         })();
-        if requested.is_err() {
+        // A primary verification/time failure does not bypass this SAME held
+        // original's mandatory postcheck. Preserve the first failure.
+        let checked = self.action.check_execution_original(
+            &mut self.original, &self.record, &self.operation,
+        );
+        if requested.is_err() || checked.is_err() {
             self.refuse();
         }
-        requested
+        requested?;
+        checked
     }
 
     pub(in crate::security_epoch) fn refuse(&mut self) {
