@@ -619,6 +619,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                         "crates/day2/tests/chart_live_navigation.test.mjs",
                         "crates/day2/tests/reactive_queries.test.mjs",
                         "crates/day2/tests/reactive_query_forms.test.mjs",
+                        "crates/day2/tests/restore_passkey_export.test.mjs",
                     ]),
                     Duration::from_secs(60),
                 )?;
@@ -2144,10 +2145,11 @@ mod tests {
         let context = ci_step(&shards, "Retain current native Linux shard context");
         assert!(context.contains("always() && steps.linux_context.outcome == 'success'"));
         assert!(
-            context.contains("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
+            context.contains("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9")
         );
         assert!(context.contains("name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}"));
         assert!(context.contains("path: /tmp/day2-ci-linux-context.json"));
+        assert!(context.contains("archive: true"));
         assert!(
             context.contains("if-no-files-found: error") && context.contains("retention-days: 14")
         );
@@ -2233,6 +2235,8 @@ mod tests {
             "crates/day2/tests/reactive_queries.test.mjs",
             "crates/day2/tests/reactive_query_forms.test.mjs",
             "assets/reactive-queries.js",
+            "crates/day2/tests/restore_passkey_export.test.mjs",
+            "assets/restore-passkey-export.js",
         ] {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap())?;

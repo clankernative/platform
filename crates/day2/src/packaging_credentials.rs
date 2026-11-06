@@ -247,6 +247,8 @@ fn prepare_connections(
         secrets: BTreeMap::new(),
         security_epochs: BTreeMap::new(),
         security_bootstraps: BTreeMap::new(),
+        restore_passkeys: None,
+        restore_approval_signing: None,
     });
     let operator = serde_json::to_vec_pretty(&operator)?;
     Instance::from_bytes(&operator)?;

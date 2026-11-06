@@ -69,6 +69,11 @@ stamp and request ID; desired file edits alone never authorize running work.
 Restores rotate the authority epoch and disable grants until current policy is
 explicitly activated. See [transactional authority](../docs/TRANSACTIONAL-AUTHORITY.md).
 
+`platform owners list|check|add|remove` provides the versioned local operator
+entry point for Rust CLI ownership management. It changes only active policy
+admins and uses the existing authority stamp, history and idempotency receipts.
+See [app owners](../docs/APP-OWNERS.md) for permissions and the JSON contract.
+
 `platform authority admin INSTANCE LOCAL_OPERATOR` starts the separate local
 resource administration service. Reusable policies, scoped handles, durable
 approvals, allocations and recovery are described in
