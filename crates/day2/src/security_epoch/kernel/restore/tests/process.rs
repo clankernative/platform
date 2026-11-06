@@ -589,6 +589,10 @@ async fn checkpoint_stdin_eof_emits_refusal_and_cannot_impersonate_process_loss(
         tokio::time::timeout(WAIT, pipe.read_exact(&mut refusal)).await??;
         ensure!(refusal == [0xFF; 16], "restore_child_eof_refusal_missing");
         let status = tokio::time::timeout(WAIT, child.wait()).await??;
+        ensure!(
+            status.signal().is_none() && status.code().is_some_and(|code| code != 0),
+            "restore_child_eof_exit_not_known"
+        );
         let exit = Exit {
             checkpoint,
             code: status.code(),
@@ -596,7 +600,6 @@ async fn checkpoint_stdin_eof_emits_refusal_and_cannot_impersonate_process_loss(
             eof: false,
             kill_requested: false,
         };
-        ensure!(!status.success(), "restore_child_eof_not_refused");
         ensure!(
             require_death(&exit, config.cut).is_err(),
             "restore_child_eof_accepted_as_death"
