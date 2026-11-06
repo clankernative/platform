@@ -34,14 +34,14 @@ pub(in crate::security_epoch::restore_webauthn) fn prepare_signing(
     let (body, digest) = statement_data(statement)?;
     ensure!(tx.execute(
         "INSERT INTO main.restore_approval_issuance
-         (grant_id,challenge_id,statement,statement_digest,approved_at,expires_at,state,signed_record)
-         SELECT ?1,c.id,?2,?3,?4,?5,'prepared',NULL
+         (grant_id,challenge_id,statement,statement_digest,key_version,counter,approved_at,expires_at,state,signed_record)
+         SELECT ?1,c.id,?2,?3,?9,?10,?4,?5,'prepared',NULL
          FROM main.restore_passkey_challenges c
          WHERE c.id=?6 AND c.state='verified' AND c.request=?7
            AND c.binding=?8 AND c.key_version+1=?9",
         params![statement.request.grant_id.as_str(),body,digest.as_str(),
             statement.request.approved_at,statement.request.expires_at,challenge.as_str(),
-            statement.request.intent().commitment()?.as_str(),key.binding()?.as_str(),version],
+            statement.request.intent().commitment()?.as_str(),key.binding()?.as_str(),version,verified_counter],
     )?==1,"restore_issuance_verified_challenge_required");
     key.check_sqlite(tx)
 }
@@ -54,7 +54,7 @@ pub(in crate::security_epoch::restore_webauthn) fn mark_may_sign(
     challenge: &Digest,
     statement: &ApprovalStatement,
 ) -> Result<()> {
-    current(tx, key)?;
+    check_journal(tx, key, challenge, statement, "prepared")?;
     let (body, digest) = statement_data(statement)?;
     ensure!(
         tx.execute(
@@ -83,8 +83,8 @@ pub(in crate::security_epoch::restore_webauthn) fn record_publication(
     challenge: &Digest,
     record: &SignedApprovalRecord,
 ) -> Result<()> {
-    current(tx, key)?;
     let statement = &record.statement;
+    check_journal(tx, key, challenge, statement, "may_sign")?;
     let (body, digest) = statement_data(statement)?;
     let signed = String::from_utf8(record.encode()?)?;
     ensure!(
@@ -106,3 +106,48 @@ pub(in crate::security_epoch::restore_webauthn) fn record_publication(
     );
     key.check_sqlite(tx)
 }
+
+fn check_journal(
+    tx: &Transaction<'_>,
+    key: &TrustedKey<'_>,
+    challenge: &Digest,
+    statement: &ApprovalStatement,
+    state: &str,
+) -> Result<()> {
+    let (version, counter) = current(tx, key)?;
+    let (body, digest) = statement_data(statement)?;
+    ensure!(
+        tx.query_row(
+            "SELECT count(*) FROM main.restore_approval_issuance
+         WHERE grant_id=?1 AND challenge_id=?2 AND statement=?3 AND statement_digest=?4
+           AND approved_at=?5 AND expires_at=?6 AND state=?7 AND signed_record IS NULL
+           AND key_version=?8 AND counter=?9",
+            params![
+                statement.request.grant_id.as_str(),
+                challenge.as_str(),
+                body,
+                digest.as_str(),
+                statement.request.approved_at,
+                statement.request.expires_at,
+                state,
+                version,
+                counter
+            ],
+            |row| row.get::<_, i64>(0),
+        )? == 1,
+        "restore_issuance_journal_or_key_changed"
+    );
+    key.check_sqlite(tx)
+}
+
+pub(in crate::security_epoch::restore_webauthn) fn check_may_sign(
+    tx: &Transaction<'_>,
+    key: &TrustedKey<'_>,
+    challenge: &Digest,
+    statement: &ApprovalStatement,
+) -> Result<()> {
+    check_journal(tx, key, challenge, statement, "may_sign")
+}
+
+#[cfg(test)]
+mod tests;

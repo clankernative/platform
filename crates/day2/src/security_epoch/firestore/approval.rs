@@ -303,7 +303,7 @@ pub(in crate::security_epoch) fn advance(
     let first = &committed.write_results[0].update_time;
     ensure!(
         committed.write_results[1].update_time == *first
-            && parse_version(&first)? <= parse_version(&committed.commit_time)?,
+            && parse_version(first)? <= parse_version(&committed.commit_time)?,
         "restore_time_commit_versions"
     );
     let after = read(port, &mut budget, &names, false)?;
@@ -392,7 +392,7 @@ pub(in crate::security_epoch) fn publish(
     );
     let version = &committed.write_results[0].update_time;
     ensure!(
-        parse_version(&version)? <= parse_version(&committed.commit_time)?,
+        parse_version(version)? <= parse_version(&committed.commit_time)?,
         "restore_approval_publication_time_order"
     );
     let after = read(port, &mut budget, &names, false)?;
@@ -420,3 +420,6 @@ pub(in crate::security_epoch) fn publish(
     budget.remaining_decoding(port)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

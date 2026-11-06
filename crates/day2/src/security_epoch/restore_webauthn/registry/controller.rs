@@ -30,6 +30,9 @@ pub(in crate::security_epoch) enum SigningUnit<'a> {
     MaySign {
         statement: &'a crate::security_epoch::restore_approval::signed::ApprovalStatement,
     },
+    CheckMay {
+        statement: &'a crate::security_epoch::restore_approval::signed::ApprovalStatement,
+    },
     Published {
         record: &'a crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
     },
@@ -77,6 +80,14 @@ pub(in crate::security_epoch) struct ControllerCeremony {
 }
 
 impl ControllerCeremony {
+    fn require_challenge_id(&self, id: &Digest) -> Result<()> {
+        ensure!(
+            super::super::store::challenge_id(&self.ceremony.challenge()?)? == *id,
+            "restore_registry_challenge_id_changed"
+        );
+        Ok(())
+    }
+
     /// Fixed complete journal unit only. It lends no connection, transaction,
     /// generic callback or signing permission to its caller.
     pub(in crate::security_epoch) fn signing_unit(
@@ -92,12 +103,13 @@ impl ControllerCeremony {
         let (db, files) = sql;
         let requested = (|| {
             ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.require_challenge_id(id)?;
             self.ceremony
                 .observe_controller(reader, &self.intent.executor.email)?;
             let statement = match &unit {
-                SigningUnit::Prepare { statement, .. } | SigningUnit::MaySign { statement } => {
-                    *statement
-                }
+                SigningUnit::Prepare { statement, .. }
+                | SigningUnit::MaySign { statement }
+                | SigningUnit::CheckMay { statement } => *statement,
                 SigningUnit::Published { record } => &record.statement,
             };
             self.intent.require_request(&statement.request)?;
@@ -120,6 +132,9 @@ impl ControllerCeremony {
                 }
                 SigningUnit::MaySign { statement } => {
                     super::super::store::mark_may_sign(&tx, &key, id, statement)?
+                }
+                SigningUnit::CheckMay { statement } => {
+                    super::super::store::check_may_sign(&tx, &key, id, statement)?
                 }
                 SigningUnit::Published { record } => {
                     super::super::store::record_publication(&tx, &key, id, record)?
@@ -312,6 +327,7 @@ impl ControllerCeremony {
         let (expected, at, assertion) = completion;
         let requested = (|| {
             ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.require_challenge_id(id)?;
             self.intent.require_exact(expected)?;
             self.ceremony.begin_attempt()?;
             self.ceremony

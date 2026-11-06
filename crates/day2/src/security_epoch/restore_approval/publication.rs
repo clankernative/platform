@@ -13,6 +13,116 @@ enum Format {
     V1,
 }
 
+#[cfg(test)]
+pub(super) mod tests {
+    use super::super::{AdminIdentity, signed::ApprovalStatement};
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ring::signature::{Ed25519KeyPair, KeyPair as _};
+
+    pub(in crate::security_epoch::restore_approval) fn fixture()
+    -> Result<(EpochStore, SignedApprovalRecord)> {
+        let selected = crate::security_epoch::tests::selection();
+        let mut request = super::super::fixture_request_data()?;
+        request.target.scope = selected.scope.clone();
+        request.target.authority = selected.authority_key()?;
+        request.target.selection = Digest::of(&selected)?;
+        let pair = Ed25519KeyPair::from_seed_unchecked(&[31; 32]).unwrap();
+        let selection=day2_capabilities::restore_signing::KeySelection{
+            version:"projects/fixture/locations/global/keyRings/restore/cryptoKeys/approval/cryptoKeyVersions/7".to_owned().try_into()?,
+            public_key:pair.public_key().as_ref().try_into()?,
+        };
+        let statement = ApprovalStatement {
+            request,
+            approver: AdminIdentity {
+                email: "approver@example.org".into(),
+                subject: "stable-subject".into(),
+            },
+            registry: Digest::new(b"registry"),
+            credential: Digest::new(b"credential"),
+            assertion: Digest::new(b"actual-fixture-assertion"),
+            signing_key: selection.commitment()?,
+        };
+        let bytes = serde_json::to_vec(&("day2-restore-approval-grant-ed25519-v1", &statement))?;
+        Ok((
+            selected,
+            SignedApprovalRecord {
+                statement,
+                signature: URL_SAFE_NO_PAD.encode(pair.sign(&bytes).as_ref()),
+            },
+        ))
+    }
+
+    #[test]
+    fn publication_binds_full_record_authority_and_grant_in_a_distinct_stable_namespace()
+    -> Result<()> {
+        let (selected, record) = fixture()?;
+        let value = Publication::record_data(&selected, record.clone())?;
+        let encoded = value.encode(&selected)?;
+        Publication::decode(&encoded, &selected, &record.statement.request.grant_id)?
+            .require_exact(&selected, &record)?;
+        let mut changed = record.clone();
+        changed.statement.request.full_archive_digest = Digest::new(b"foreign-archive");
+        assert!(value.require_exact(&selected, &changed).is_err());
+        assert!(Publication::decode(&encoded, &selected, &Digest::new(b"other-grant")).is_err());
+        let mut foreign = selected.clone();
+        foreign.scope.app = "foreign".to_owned().try_into()?;
+        assert!(
+            Publication::decode(&encoded, &foreign, &record.statement.request.grant_id).is_err()
+        );
+        assert_ne!(
+            key(&selected, &record.statement.request.grant_id)?,
+            Digest::of(&(
+                "day2-restore-approval-use-key-v1",
+                selected.authority_key()?,
+                &record.statement.request.grant_id
+            ))?
+        );
+        let mut rotated = selected.clone();
+        rotated.key_set = Digest::new(b"new-key-set");
+        assert_eq!(
+            key(&selected, &record.statement.request.grant_id)?,
+            key(&rotated, &record.statement.request.grant_id)?
+        );
+        assert!(
+            Publication::decode(&encoded, &rotated, &record.statement.request.grant_id).is_err()
+        );
+        let mut unknown = serde_json::to_value(&value)?;
+        unknown["approved"] = true.into();
+        assert!(
+            Publication::decode(
+                &serde_json::to_vec(&unknown)?,
+                &selected,
+                &record.statement.request.grant_id
+            )
+            .is_err()
+        );
+        let text = String::from_utf8(encoded)?;
+        let duplicate = text.replacen(
+            '{',
+            "{\"format\":\"day2_restore_approval_publication_v1\",",
+            1,
+        );
+        assert!(
+            Publication::decode(
+                duplicate.as_bytes(),
+                &selected,
+                &record.statement.request.grant_id
+            )
+            .is_err()
+        );
+        assert!(
+            Publication::decode(
+                &vec![b' '; MAX_BYTES + 1],
+                &selected,
+                &record.statement.request.grant_id
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::security_epoch) struct Publication {

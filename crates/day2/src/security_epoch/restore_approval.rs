@@ -144,3 +144,11 @@ mod tests;
 pub(in crate::security_epoch) fn fixture_request_data() -> Result<ApprovalRequest> {
     tests::request()
 }
+
+#[cfg(test)]
+pub(in crate::security_epoch) fn fixture_publication_data() -> Result<(
+    day2_capabilities::security_epoch::EpochStore,
+    signed::SignedApprovalRecord,
+)> {
+    publication::tests::fixture()
+}

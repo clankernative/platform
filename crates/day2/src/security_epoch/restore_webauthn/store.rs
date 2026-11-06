@@ -10,7 +10,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 const MAX_CEREMONY_SECONDS: i64 = 300;
 
 mod signing;
-pub(super) use signing::{mark_may_sign, prepare_signing, record_publication};
+pub(super) use signing::{check_may_sign, mark_may_sign, prepare_signing, record_publication};
 
 /// The one schema for the independently owned instance authentication store.
 /// Only the fixture installs it today. Existing-store admission derives its
@@ -40,6 +40,8 @@ const DDL: &str = "
         challenge_id TEXT NOT NULL CHECK(length(challenge_id)=71),
         statement TEXT NOT NULL CHECK(length(statement)<=16384),
         statement_digest TEXT NOT NULL CHECK(length(statement_digest)=71),
+        key_version INTEGER NOT NULL CHECK(key_version>0),
+        counter INTEGER NOT NULL CHECK(counter BETWEEN 0 AND 4294967295),
         approved_at INTEGER NOT NULL CHECK(approved_at>=0),
         expires_at INTEGER NOT NULL CHECK(expires_at-approved_at=3600),
         state TEXT NOT NULL CHECK(state IN ('prepared','may_sign','published')),
@@ -115,7 +117,7 @@ pub(in crate::security_epoch) fn require_existing_schema(db: &Connection) -> Res
     Ok(())
 }
 
-fn challenge_id(challenge: &Challenge) -> Result<Digest> {
+pub(super) fn challenge_id(challenge: &Challenge) -> Result<Digest> {
     Digest::of(&("day2-restore-passkey-challenge-id-v1", challenge.encoded()?))
 }
 

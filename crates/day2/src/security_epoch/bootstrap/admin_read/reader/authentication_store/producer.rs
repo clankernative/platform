@@ -367,6 +367,23 @@ impl<'metadata, 'storage, 'role> CompletedCeremony<'metadata, 'storage, 'role> {
             current.0 == self.statement && current.1 == self.signing,
             "restore_approval_current_selection_changed"
         );
+        let requested = self.ceremony.signing_unit(
+            &mut action.reader,
+            (
+                action
+                    .sqlite
+                    .as_mut()
+                    .context("restore_auth_sqlite_closed")?,
+                &mut action.files,
+            ),
+            &self.challenge,
+            SigningUnit::CheckMay {
+                statement: &self.statement,
+            },
+        );
+        let checked = action.check(&self.statement.request.intent());
+        requested?;
+        checked?;
         action.check_approval_source(source)
     }
 
@@ -418,5 +435,172 @@ impl<'metadata, 'storage, 'role> CompletedCeremony<'metadata, 'storage, 'role> {
         checked?;
         self.state = SigningState::Published;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::{
+        Expr, ImplItem, Item,
+        visit::{self, Visit},
+    };
+
+    #[derive(Default)]
+    struct Calls(Vec<String>);
+
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.0.push(node.method.to_string());
+            visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let Expr::Path(path) = node.func.as_ref() {
+                if let Some(last) = path.path.segments.last() {
+                    self.0.push(last.ident.to_string());
+                }
+            }
+            visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            if node.path.is_ident("Self") {
+                self.0.push("construct_self".into());
+            }
+            visit::visit_expr_struct(self, node);
+        }
+    }
+
+    fn calls(source: &str, method: &str) -> Option<Vec<String>> {
+        let file = syn::parse_file(source).ok()?;
+        let functions = file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Impl(item) => Some(item),
+                _ => None,
+            })
+            .flat_map(|i| &i.items)
+            .filter_map(|i| match i {
+                ImplItem::Fn(f) if f.sig.ident == method => Some(f),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if functions.len() != 1 {
+            return None;
+        }
+        let mut collected = Calls::default();
+        collected.visit_block(&functions[0].block);
+        Some(collected.0)
+    }
+
+    fn ordered(actual: &[String], required: &[&str]) -> bool {
+        let mut tail = actual;
+        for name in required {
+            let Some(index) = tail.iter().position(|v| v == name) else {
+                return false;
+            };
+            tail = &tail[index + 1..];
+        }
+        true
+    }
+
+    fn producer_wiring(source: &str) -> bool {
+        let Some(prepare) = calls(source, "prepare") else {
+            return false;
+        };
+        let Some(approve) = calls(source, "approve") else {
+            return false;
+        };
+        let Some(check) = calls(source, "check_signing_source") else {
+            return false;
+        };
+        let Some(issue) = calls(source, "issue_approval") else {
+            return false;
+        };
+        ordered(
+            &prepare,
+            &[
+                "complete_durable",
+                "check",
+                "qualify_time",
+                "request_data",
+                "statement_data",
+                "signing_unit",
+                "check",
+                "construct_self",
+            ],
+        ) && ordered(
+            &approve,
+            &[
+                "prepare",
+                "mark_may",
+                "sign_completed",
+                "publish_completed",
+                "record_publication",
+                "finish_checked",
+                "finish_checked",
+            ],
+        ) && ordered(
+            &check,
+            &[
+                "check_approval_source",
+                "require_qualified",
+                "current_time",
+                "statement_data",
+                "signing_unit",
+                "check",
+                "check_approval_source",
+            ],
+        ) && ordered(
+            &issue,
+            &[
+                "capture_source",
+                "capture",
+                "qualify_time",
+                "issue_durable",
+                "check",
+                "finish_checked",
+                "finish_checked",
+            ],
+        ) && prepare.iter().filter(|v| *v == "construct_self").count() == 1
+            && approve.iter().filter(|v| *v == "sign_completed").count() == 1
+    }
+
+    #[test]
+    fn actual_producer_requires_known_uv_time_and_attempt_commit_before_signing_and_terminal_close()
+    {
+        let source = include_str!("producer.rs");
+        assert!(producer_wiring(source));
+        // Each mutant edits an actual production call, leaving Rust parseable.
+        for (from, to) in [
+            (
+                "pending.ceremony.complete_durable(",
+                "pending.ceremony.verify_without_consumption(",
+            ),
+            (
+                "source.qualify_time(&mut action, time_operation.clone())?",
+                "source.unqualified_time(&mut action, time_operation.clone())?",
+            ),
+            ("completed.mark_may()?", "completed.skip_attempt_commit()?"),
+            (
+                "source.publish_completed(&mut completed, &record)?",
+                "source.skip_publication(&mut completed, &record)?",
+            ),
+            (
+                "source.finish_checked(action)?",
+                "source.skip_final_source(action)?",
+            ),
+            (".statement_data(", ".stale_statement_data("),
+        ] {
+            assert!(source.contains(from), "mutation target {from}");
+            assert!(
+                !producer_wiring(&source.replacen(from, to, 1)),
+                "accepted {from}"
+            );
+        }
+        let prepare = calls(source, "prepare").unwrap();
+        // No read/recovery method can create the only private completed owner.
+        assert_eq!(prepare.iter().filter(|v| *v == "construct_self").count(), 1);
     }
 }
