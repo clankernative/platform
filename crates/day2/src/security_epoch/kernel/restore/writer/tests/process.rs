@@ -436,7 +436,10 @@ async fn checkpoint_stdin_eof_refuses_and_cannot_impersonate_writer_process_loss
     let result = (async {
         let mut checkpoint = [0; 16];
         tokio::time::timeout(WAIT, pipe.read_exact(&mut checkpoint)).await??;
-        ensure!(checkpoint == marker(config.cut), "writer_child_checkpoint_missing");
+        ensure!(
+            checkpoint == marker(config.cut),
+            "writer_child_checkpoint_missing"
+        );
         // Deliberately release this real paused child without killing it. EOF
         // is a refusal, not silent waiting or a successfully sampled crash.
         drop(held_stdin);
@@ -445,7 +448,10 @@ async fn checkpoint_stdin_eof_refuses_and_cannot_impersonate_writer_process_loss
         ensure!(refusal == [0xFF; 16], "writer_child_eof_refusal_missing");
         let status = tokio::time::timeout(WAIT, child.wait()).await??;
         ensure!(status.signal().is_none(), "writer_child_eof_was_signalled");
-        ensure!(status.code().is_some_and(|code| code != 0), "writer_child_eof_not_refused");
+        ensure!(
+            status.code().is_some_and(|code| code != 0),
+            "writer_child_eof_not_refused"
+        );
         // Even forged kill/EOF assertions cannot replace that actual status.
         let claimed = Death {
             checkpoint: Some(checkpoint),
@@ -456,11 +462,18 @@ async fn checkpoint_stdin_eof_refuses_and_cannot_impersonate_writer_process_loss
             code: status.code(),
             eof: true,
         };
-        ensure!(require_death(&claimed, config.cut).is_err(), "writer_child_eof_accepted_as_death");
+        ensure!(
+            require_death(&claimed, config.cut).is_err(),
+            "writer_child_eof_accepted_as_death"
+        );
         let provider = Provider::open(&config.database, &f.before)?;
-        ensure!(Provider::read(&provider.db)? == rows(&f.before)?, "writer_child_eof_committed");
+        ensure!(
+            Provider::read(&provider.db)? == rows(&f.before)?,
+            "writer_child_eof_committed"
+        );
         Ok::<(), anyhow::Error>(())
-    }).await;
+    })
+    .await;
     if result.is_err() {
         let _ = child.start_kill();
         let _ = tokio::time::timeout(WAIT, child.wait()).await;
