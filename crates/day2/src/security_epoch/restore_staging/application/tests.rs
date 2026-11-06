@@ -1036,6 +1036,7 @@ fn implementation() -> Result<Digest> {
         [
             include_str!("../application.rs"),
             include_str!("tests.rs"),
+            include_str!("../../restore_staging.rs"),
             include_str!("../../restore_authority.rs"),
             include_str!("../../restore_cut.rs"),
             include_str!("../../../oauth/restore.rs"),
