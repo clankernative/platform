@@ -12,7 +12,7 @@ fn context(instance: &Instance) -> Result<ControllerRegistryData> {
         app: "app".into(),
         artifact: "artifact".into(),
         authority: crate::authority_state::AuthorityStamp {
-            epoch: Digest::new(b"epoch").to_string(),
+            epoch: Digest::new(b"epoch").as_str().to_owned(),
             revision: 7,
         },
         operation: Digest::new(b"complete restore approval intent"),
