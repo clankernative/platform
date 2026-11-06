@@ -1812,7 +1812,20 @@ fn issuer_freeze_keeps_same_snapshot_publication_guards_and_irreversible_cut() -
                 }
                 assert_eq!(modified, 1);
             }
-            5 => function.block.stmts.swap(count - 3, count - 1),
+            5 => {
+                // Move the actual current check AFTER send, keeping valid Rust
+                // and its returned Result. Merely swapping the semicolon-free
+                // return into the middle would only test a syntax error.
+                let current = function.block.stmts.remove(count - 3);
+                let send = function.block.stmts.pop().unwrap();
+                function.block.stmts.push(syn::parse_str(&format!(
+                    "let sent = {};",
+                    send.to_token_stream()
+                ))?);
+                function.block.stmts.push(current);
+                let mut returned: syn::Block = syn::parse_str("{ sent }")?;
+                function.block.stmts.push(returned.stmts.pop().unwrap());
+            }
             6 => function
                 .block
                 .stmts
