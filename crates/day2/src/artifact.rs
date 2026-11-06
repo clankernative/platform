@@ -1546,7 +1546,7 @@ pub struct Instance {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum SecurityKeyPurpose {
+pub(crate) enum SecurityKeyPurpose {
     CredentialVerifier,
     CredentialEncryption,
     CredentialShellAttestation,
@@ -1557,13 +1557,15 @@ enum SecurityKeyPurpose {
     OauthReauthenticationClient,
 }
 
+/// Desired configuration DATA, not an available key or native authority.
+/// Its collection is shared with the external authority's key-set digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct SecurityKeySelection {
-    namespace: day2_capabilities::credentials::Namespace,
+pub(crate) struct SecurityKeySelection {
+    pub(crate) namespace: day2_capabilities::credentials::Namespace,
     selections: BTreeSet<day2_capabilities::Name>,
-    purpose: SecurityKeyPurpose,
-    binding: day2_capabilities::BindingRef,
-    provider: day2_capabilities::SecretProvider,
+    pub(crate) purpose: SecurityKeyPurpose,
+    pub(crate) binding: day2_capabilities::BindingRef,
+    pub(crate) provider: day2_capabilities::SecretProvider,
 }
 
 type SecurityKeyIdentity = (
@@ -1790,7 +1792,11 @@ impl Instance {
         ))
     }
 
-    fn security_key_selections(&self, app: &str) -> Result<Vec<SecurityKeySelection>> {
+    /// Complete configured key descriptors, from the SAME collector used by
+    /// security_key_set. A native caller must still authenticate this Instance
+    /// and fetch/check actual material under its retained original; these
+    /// descriptors alone prove no key availability or permission.
+    pub(crate) fn security_key_selections(&self, app: &str) -> Result<Vec<SecurityKeySelection>> {
         use day2_capabilities::{Name, credential_runtime::KeyPurpose};
         let binding = self
             .apps
