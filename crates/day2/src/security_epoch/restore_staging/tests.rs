@@ -109,7 +109,10 @@ impl Checks for Fixture {
     }
     fn application(&mut self, tx: &Transaction<'_>) -> Result<application::Selection<'_>> {
         ensure!(!self.reject_application, "fixture_unsupported_application");
-        let present: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM fixture_business)", [], |r| r.get(0))?;
+        let present: bool =
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM fixture_business)", [], |r| {
+                r.get(0)
+            })?;
         ensure!(present, "fixture_business_missing");
         Ok(self.application.selection())
     }
@@ -128,13 +131,17 @@ pub(super) fn world() -> Result<World> {
     let source = tempfile::tempdir()?;
     let application = application::tests::Fixture::new()?;
     application.db.execute_batch("CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
-    std::fs::write(source.path().join("app.sqlite"), &*application.db.serialize(MAIN_DB)?)?;
+    std::fs::write(
+        source.path().join("app.sqlite"),
+        &*application.db.serialize(MAIN_DB)?,
+    )?;
     let path = source.path().join("app.sqlite").canonicalize()?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let source_digest = Digest::new(&std::fs::read(&path)?);
     let target = tempfile::tempdir()?;
     let root_path = target.path().canonicalize()?;
-    let owner = fixture_owner_with_application(path, root_path, source_digest.clone(), application)?;
+    let owner =
+        fixture_owner_with_application(path, root_path, source_digest.clone(), application)?;
     Ok(World {
         source,
         target,
@@ -147,7 +154,12 @@ pub(super) fn fixture_owner(
     root_path: PathBuf,
     database: Digest,
 ) -> Result<Fixture> {
-    fixture_owner_with_application(source, root_path, database, application::tests::Fixture::new()?)
+    fixture_owner_with_application(
+        source,
+        root_path,
+        database,
+        application::tests::Fixture::new()?,
+    )
 }
 
 fn fixture_owner_with_application(
@@ -488,15 +500,28 @@ fn observe(owner: &mut Fixture, source_length: u64) -> Result<Observation> {
 }
 
 #[test]
-fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_whole_image() -> Result<()> {
+fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_whole_image()
+-> Result<()> {
     for fault in 0..3 {
         effects::scope(simulation::World::new(2110 + fault), || -> Result<()> {
             let mut w = world()?;
             let db = Connection::open(&w.owner.state.input.source)?;
             match fault {
-                0 => { db.execute("UPDATE day2_meta SET value=?1 WHERE key='schema'", [Digest::new(b"foreign-schema").as_str()])?; }
-                1 => { db.execute("UPDATE day2_authority SET artifact_id=?1", [Digest::new(b"foreign-artifact").as_str()])?; }
-                _ => { db.execute("UPDATE oauth_connection_slots SET account='foreign-account' WHERE slot='old-slot'", [])?; }
+                0 => {
+                    db.execute(
+                        "UPDATE day2_meta SET value=?1 WHERE key='schema'",
+                        [Digest::new(b"foreign-schema").as_str()],
+                    )?;
+                }
+                1 => {
+                    db.execute(
+                        "UPDATE day2_authority SET artifact_id=?1",
+                        [Digest::new(b"foreign-artifact").as_str()],
+                    )?;
+                }
+                _ => {
+                    db.execute("UPDATE oauth_connection_slots SET account='foreign-account' WHERE slot='old-slot'", [])?;
+                }
             }
             drop(db);
             let bytes = std::fs::read(&w.owner.state.input.source)?;
@@ -509,14 +534,39 @@ fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_w
             assert!(!w.owner.state.directory_may_exist && w.owner.state.creator.is_none());
             assert!(!w.owner.state.target_dir()?.try_exists()?);
             {
-                let sql = w.owner.state.sql.as_ref().context("failed_reset_scratch_missing")?;
+                let sql = w
+                    .owner
+                    .state
+                    .sql
+                    .as_ref()
+                    .context("failed_reset_scratch_missing")?;
                 assert!(sql.is_autocommit());
-                assert_eq!(sql.query_row("SELECT state FROM day2_credential_lineages", [], |r| r.get::<_,String>(0))?, "active");
-                assert_eq!(sql.query_row("SELECT status FROM oauth_connection_slots WHERE slot='old-slot'", [], |r| r.get::<_,String>(0))?, "active");
+                assert_eq!(
+                    sql.query_row("SELECT state FROM day2_credential_lineages", [], |r| r
+                        .get::<_, String>(
+                        0
+                    ))?,
+                    "active"
+                );
+                assert_eq!(
+                    sql.query_row(
+                        "SELECT status FROM oauth_connection_slots WHERE slot='old-slot'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    "active"
+                );
                 assert!(crate::authority_state::current(sql)?.document.enabled);
-                assert_eq!(sql.query_row("SELECT count(*) FROM day2_web_sessions", [], |r| r.get::<_, i64>(0))?,1);
+                assert_eq!(
+                    sql.query_row("SELECT count(*) FROM day2_web_sessions", [], |r| r
+                        .get::<_, i64>(0))?,
+                    1
+                );
             }
-            assert_eq!(Digest::new(&std::fs::read(&w.owner.state.input.source)?), changed);
+            assert_eq!(
+                Digest::new(&std::fs::read(&w.owner.state.input.source)?),
+                changed
+            );
             Ok(())
         })?;
     }
@@ -525,24 +575,63 @@ fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_w
 
 #[test]
 fn malformed_live_and_tombstoned_model_rows_refuse_before_reset_or_creator() -> Result<()> {
-    for deleted_at in [0,101] {
+    for deleted_at in [0, 101] {
         effects::scope(simulation::World::new(2120), || -> Result<()> {
-            let mut w=world()?;
-            let db=Connection::open(&w.owner.state.input.source)?;
-            db.execute("UPDATE fixture_business SET value=?1,deleted_at=?2",rusqlite::params!["x".repeat(16385),deleted_at])?;
-            assert_eq!(db.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0))?,"ok");
+            let mut w = world()?;
+            let db = Connection::open(&w.owner.state.input.source)?;
+            db.execute(
+                "UPDATE fixture_business SET value=?1,deleted_at=?2",
+                rusqlite::params!["x".repeat(16385), deleted_at],
+            )?;
+            assert_eq!(
+                db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?,
+                "ok"
+            );
             drop(db);
-            let expected=Digest::new(&std::fs::read(&w.owner.state.input.source)?);
-            w.owner.state.input.database=expected.clone();
-            let error=execute(&mut w.owner).unwrap_err();
-            assert_eq!(error.root_cause().to_string(),"invalid field: value");
-            assert!(w.owner.refused && !w.owner.state.complete && !w.owner.state.directory_may_exist && w.owner.state.creator.is_none());
-            let scratch=w.owner.state.sql.as_ref().context("model_refusal_scratch_missing")?;
-            assert!(scratch.is_autocommit() && crate::authority_state::current(scratch)?.document.enabled);
-            assert_eq!(scratch.query_row("SELECT state FROM day2_credential_lineages",[],|r|r.get::<_,String>(0))?,"active");
-            assert_eq!(scratch.query_row("SELECT status FROM oauth_connection_slots WHERE slot='old-slot'",[],|r|r.get::<_,String>(0))?,"active");
-            assert_eq!(scratch.query_row("SELECT count(*) FROM day2_web_sessions",[],|r|r.get::<_,i64>(0))?,1);
-            assert_eq!(Digest::new(&std::fs::read(&w.owner.state.input.source)?),expected);
+            let expected = Digest::new(&std::fs::read(&w.owner.state.input.source)?);
+            w.owner.state.input.database = expected.clone();
+            let error = execute(&mut w.owner).unwrap_err();
+            assert_eq!(error.root_cause().to_string(), "invalid field: value");
+            assert!(
+                w.owner.refused
+                    && !w.owner.state.complete
+                    && !w.owner.state.directory_may_exist
+                    && w.owner.state.creator.is_none()
+            );
+            let scratch = w
+                .owner
+                .state
+                .sql
+                .as_ref()
+                .context("model_refusal_scratch_missing")?;
+            assert!(
+                scratch.is_autocommit()
+                    && crate::authority_state::current(scratch)?.document.enabled
+            );
+            assert_eq!(
+                scratch.query_row("SELECT state FROM day2_credential_lineages", [], |r| r
+                    .get::<_, String>(
+                    0
+                ))?,
+                "active"
+            );
+            assert_eq!(
+                scratch.query_row(
+                    "SELECT status FROM oauth_connection_slots WHERE slot='old-slot'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "active"
+            );
+            assert_eq!(
+                scratch.query_row("SELECT count(*) FROM day2_web_sessions", [], |r| r
+                    .get::<_, i64>(0))?,
+                1
+            );
+            assert_eq!(
+                Digest::new(&std::fs::read(&w.owner.state.input.source)?),
+                expected
+            );
             assert!(execute(&mut w.owner).is_err());
             Ok(())
         })?;
@@ -557,51 +646,111 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
     impl<'ast> Visit<'ast> for Calls {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
             self.0.push(call.to_token_stream().to_string());
-            visit::visit_expr_call(self,call);
+            visit::visit_expr_call(self, call);
         }
         fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
             self.0.push(call.to_token_stream().to_string());
-            visit::visit_expr_method_call(self,call);
+            visit::visit_expr_method_call(self, call);
         }
     }
-    fn valid(source:&str) -> bool {
-        let file=syn::parse_file(source).unwrap();
-        let functions:Vec<_>=file.items.iter().filter_map(|i|match i {syn::Item::Fn(f) if f.sig.ident=="prepare_image"=>Some(f),_=>None}).collect();
-        if functions.len()!=1 {return false;}
-        let tail:syn::Block=syn::parse_quote!({
+    fn valid(source: &str) -> bool {
+        let file = syn::parse_file(source).unwrap();
+        let functions: Vec<_> = file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Fn(f) if f.sig.ident == "prepare_image" => Some(f),
+                _ => None,
+            })
+            .collect();
+        if functions.len() != 1 {
+            return false;
+        }
+        let tail: syn::Block = syn::parse_quote!({
             drop(loan);
-            let post=owner.local_sql();
-            let reset=reset?;
+            let post = owner.local_sql();
+            let reset = reset?;
             post?;
             close_sql(owner)?;
             Ok(reset)
         });
-        if functions[0].block.stmts.len()<tail.stmts.len() || !functions[0].block.stmts.iter().rev().take(tail.stmts.len()).zip(tail.stmts.iter().rev()).all(|(actual,expected)|actual.to_token_stream().to_string()==expected.to_token_stream().to_string()) {return false;}
-        let mut calls=Calls(Vec::new());
-        calls.visit_block(&functions[0].block);
-        let ordered=["db . transaction_with_behavior (TransactionBehavior :: Immediate)","current . application (& tx)","application :: reset_in (& tx , & selected , & ns , epoch)","tx . commit ()","db . serialize (MAIN_DB)","drop (loan)","owner . local_sql ()","close_sql (owner)"];
-        let mut previous=None;
-        for expected in ordered {
-            let positions:Vec<_>=calls.0.iter().enumerate().filter(|(i,c)|c.as_str()==expected && previous.is_none_or(|last|last<*i)).map(|(i,_)|i).collect();
-            if positions.len()!=1 || previous.is_some_and(|last|last>=positions[0]) {return false;}
-            previous=Some(positions[0]);
+        if functions[0].block.stmts.len() < tail.stmts.len()
+            || !functions[0]
+                .block
+                .stmts
+                .iter()
+                .rev()
+                .take(tail.stmts.len())
+                .zip(tail.stmts.iter().rev())
+                .all(|(actual, expected)| {
+                    actual.to_token_stream().to_string() == expected.to_token_stream().to_string()
+                })
+        {
+            return false;
         }
-        calls.0.iter().filter(|c|c.as_str()=="owner . local_sql ()").count()==2
-            && !calls.0.iter().any(|c|c.contains("stage_reset") || c.contains("inspect_source") || c.contains("Transaction :: new_unchecked"))
+        let mut calls = Calls(Vec::new());
+        calls.visit_block(&functions[0].block);
+        let ordered = [
+            "db . transaction_with_behavior (TransactionBehavior :: Immediate)",
+            "current . application (& tx)",
+            "application :: reset_in (& tx , & selected , & ns , epoch)",
+            "tx . commit ()",
+            "db . serialize (MAIN_DB)",
+            "drop (loan)",
+            "owner . local_sql ()",
+            "close_sql (owner)",
+        ];
+        let mut previous = None;
+        for expected in ordered {
+            let positions: Vec<_> = calls
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(i, c)| c.as_str() == expected && previous.is_none_or(|last| last < *i))
+                .map(|(i, _)| i)
+                .collect();
+            if positions.len() != 1 || previous.is_some_and(|last| last >= positions[0]) {
+                return false;
+            }
+            previous = Some(positions[0]);
+        }
+        calls
+            .0
+            .iter()
+            .filter(|c| c.as_str() == "owner . local_sql ()")
+            .count()
+            == 2
+            && !calls.0.iter().any(|c| {
+                c.contains("stage_reset")
+                    || c.contains("inspect_source")
+                    || c.contains("Transaction :: new_unchecked")
+            })
     }
-    let source=include_str!("../restore_staging.rs");
+    let source = include_str!("../restore_staging.rs");
     assert!(valid(source));
-    for (from,to) in [
-        ("application::reset_in(&tx, &selected, &ns, epoch)?", "restore::stage_reset(&tx, &ns, epoch)?"),
-        ("application::reset_in(&tx, &selected, &ns, epoch)?", "{ tx.commit()?; application::reset_in(&tx, &selected, &ns, epoch)? }"),
-        ("let selected = current.application(&tx)?;", "let selected = current.foreign_application(&tx)?;"),
+    for (from, to) in [
+        (
+            "application::reset_in(&tx, &selected, &ns, epoch)?",
+            "restore::stage_reset(&tx, &ns, epoch)?",
+        ),
+        (
+            "application::reset_in(&tx, &selected, &ns, epoch)?",
+            "{ tx.commit()?; application::reset_in(&tx, &selected, &ns, epoch)? }",
+        ),
+        (
+            "let selected = current.application(&tx)?;",
+            "let selected = current.foreign_application(&tx)?;",
+        ),
         ("let post = owner.local_sql();", "let post = Ok(());"),
-        ("let post = owner.local_sql();", "let post = if reset.is_ok() { owner.local_sql() } else { Ok(()) };"),
+        (
+            "let post = owner.local_sql();",
+            "let post = if reset.is_ok() { owner.local_sql() } else { Ok(()) };",
+        ),
         ("drop(loan);", "drop(unrelated);"),
         ("drop(loan);", "drop(loan); let reset=reset?;"),
     ] {
-        assert_eq!(source.matches(from).count(),1);
-        assert!(!valid(&source.replacen(from,to,1)),"{from}");
+        assert_eq!(source.matches(from).count(), 1);
+        assert!(!valid(&source.replacen(from, to, 1)), "{from}");
     }
 }
 #[test]
