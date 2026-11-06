@@ -33,11 +33,18 @@ A missing archive, including on a
 failed-jobs-only rerun with an earlier producer attempt, merely loses this optional
 acceleration. It cannot supply a receipt or skip the current verification gate.
 
-The final verification join also restores that retained compiler-action archive
-before compiling its current admission guard. It uses its own preparation run and
-attempt, or the exact queue origin already admitted by the reuse guard. This
-keeps a cache entry evicted during a long runtime campaign from forcing a cold
-verifier rebuild inside the join's unchanged twenty-minute budget. Artifact
+The final verification join restores a separate bootstrap compiler-action snapshot
+captured immediately after tests preparation compiles the current verifier, before
+test compilation grows the cache. Both Linux archives use fast gzip compression;
+the bootstrap no longer depends on the larger post-test archive completing within
+its three-minute deadline. It uses the exact checkout SHA and its own preparation
+run, or the exact queue origin already admitted by the reuse guard. The first
+complete bootstrap snapshot is immutable across attempts of that same run and
+checkout, so a failed-jobs-only rerun does not request a nonexistent new-attempt
+cache artifact. This exception applies only to compiler-cache data, never to
+verification receipts or prepared executables. This keeps cache eviction during
+a long campaign from forcing a cold verifier rebuild inside the join's unchanged
+twenty-minute budget. Artifact
 transport has the same two-minute deadline and one retry; failures leave the
 ordinary compilation path in place. The archive contains only content-addressed
 compiler data, never a verifier to install directly or a reusable test outcome.

@@ -2354,7 +2354,7 @@ mod tests {
                     assert!(inputs.contains("repository: clankernative/platform"));
                     assert!(inputs.contains("github-token: ${{ github.token }}"));
                     assert!(inputs.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-                    assert!(inputs.contains("name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+                    assert!(inputs.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
                     assert!(inputs.contains("path: /tmp/day2-bazel-linux-bootstrap-actions"));
                     continue;
                 }
@@ -2664,7 +2664,7 @@ mod tests {
             let download = ci_step(&final_join, name);
             assert!(download.contains("repository: clankernative/platform"));
             assert!(download.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-            assert!(download.contains("name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+            assert!(download.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
             assert!(download.contains("timeout-minutes: 2"));
             assert!(download.contains("continue-on-error: true"));
         }
@@ -2684,6 +2684,9 @@ mod tests {
         let bootstrap = "Bootstrap the current source artifact admission guard";
         assert!(final_join.find(extract).unwrap() < final_join.find(bootstrap).unwrap());
         assert!(ci_step(&final_join, extract).contains("-C \"$HOME/.cache/bazel-disk\""));
+        assert!(ci_step(&final_join, extract).contains(
+            "/tmp/day2-bazel-linux-bootstrap-actions/day2-bazel-linux-bootstrap-actions.tgz"
+        ));
         assert!(!ci_step(&final_join, bootstrap).contains("        if:"));
         assert!(
             !ci_job("verify-queue-receipt")
@@ -2707,6 +2710,50 @@ mod tests {
         );
         assert!(!job.contains("rust-cache@") && !job.contains("sccache-action@"));
         assert!(include_str!("../../../.bazelrc").contains("test --cache_test_results=no"));
+    }
+
+    #[test]
+    fn admission_bootstrap_cache_is_retained_before_test_work_and_survives_reruns() {
+        let producer = ci_job("verify-prepare-parts");
+        let compile = "Compile and install the current verifier with Bazel";
+        let archive = "Archive current verifier bootstrap compiler actions";
+        let upload = "Retain current verifier bootstrap compiler actions";
+        assert!(producer.find(compile).unwrap() < producer.find(archive).unwrap());
+        assert!(producer.find(archive).unwrap() < producer.find(upload).unwrap());
+        let native_at = producer.find("id: native_preparation").unwrap();
+        assert!(producer.find(upload).unwrap() < native_at);
+        let snapshot = ci_step(&producer, archive);
+        assert!(snapshot.contains("if: ${{ matrix.part == 'tests' }}"));
+        assert!(snapshot.contains("timeout-minutes: 3"));
+        assert!(snapshot.contains("tar -I 'gzip -1'"));
+        assert!(snapshot.contains("-C \"$HOME/.cache/bazel-disk\" ."));
+        assert!(!snapshot.contains("build-out/") && !snapshot.contains("artifacts/"));
+        let retained = ci_step(&producer, upload);
+        assert!(retained.contains("steps.bootstrap_actions_archive.outcome == 'success'"));
+        assert!(retained.contains(
+            "name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ github.run_id }}"
+        ));
+        assert!(!retained.contains("github.run_attempt"));
+        assert!(retained.contains("overwrite: false"));
+        assert!(retained.contains("if-no-files-found: error"));
+        assert!(retained.contains("path: /tmp/day2-bazel-linux-bootstrap-actions.tgz"));
+        assert!(producer.contains(
+            "name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}"
+        ));
+        let full = "Archive completed Linux test compiler actions";
+        assert!(native_at < producer.find(full).unwrap());
+        assert!(ci_step(&producer, full).contains("tar -I 'gzip -1'"));
+        let consumer = ci_job("verify");
+        for step in [
+            "Download retained compiler actions from the admitted preparation",
+            "Retry retained compiler action download once",
+        ] {
+            let download = ci_step(&consumer, step);
+            assert!(download.contains(
+                "name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"
+            ));
+            assert!(!download.contains("DAY2_CACHE_ORIGIN_ATTEMPT"));
+        }
     }
 
     #[test]
