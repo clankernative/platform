@@ -254,5 +254,6 @@ pub(super) fn verify(
 
 mod registry;
 pub(super) use registry::ControllerCeremony;
+mod store;
 #[cfg(test)]
 mod tests;
