@@ -657,6 +657,10 @@ mod tests {
                         "response_rights_already_sealed"
                     );
                     self.ledger.issuance_sealed.set(true);
+                    ensure!(
+                        !self.ledger.unfenced_authority.get(),
+                        "native_restore_unfenced_authority"
+                    );
                     Ok(())
                 }),
             ),
@@ -666,6 +670,10 @@ mod tests {
                     ensure!(
                         !self.ledger.closed.get() && self.ledger.issuance_sealed.get(),
                         "response_rights_not_sealed"
+                    );
+                    ensure!(
+                        !self.ledger.unfenced_authority.get(),
+                        "native_restore_unfenced_authority"
                     );
                     let records = self.ledger.records.try_borrow()?;
                     ensure!(
@@ -758,6 +766,60 @@ mod tests {
             let mutant = source.replacen(old, new, 1);
             assert_ne!(source, mutant);
             assert!(!sealed_boundary(&mutant));
+        }
+        use quote::ToTokens as _;
+        for name in ["seal_issuance", "require_drained"] {
+            for mutation in 0..3 {
+                let mut file = syn::parse_file(source).unwrap();
+                let method = file
+                    .items
+                    .iter_mut()
+                    .find_map(|item| {
+                        let syn::Item::Impl(item) = item else {
+                            return None;
+                        };
+                        if item.self_ty.to_token_stream().to_string() != "ResponseRights" {
+                            return None;
+                        }
+                        item.items.iter_mut().find_map(|item| match item {
+                            syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                            _ => None,
+                        })
+                    })
+                    .unwrap();
+                let guard: syn::Stmt = syn::parse_quote! {
+                    ensure!(
+                        !self.ledger.unfenced_authority.get(),
+                        "native_restore_unfenced_authority"
+                    );
+                };
+                let matches: Vec<_> = method
+                    .block
+                    .stmts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, stmt)| {
+                        stmt.to_token_stream().to_string() == guard.to_token_stream().to_string()
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                assert_eq!(matches.len(), 1, "actual debt guard target");
+                let index = matches[0];
+                match mutation {
+                    0 => {
+                        method.block.stmts.remove(index);
+                    }
+                    1 => {
+                        method.block.stmts[index] = syn::parse_quote! {
+                            ensure!(self.ledger.unfenced_authority.get(), "native_restore_unfenced_authority");
+                        };
+                    }
+                    2 if name == "seal_issuance" => method.block.stmts.swap(index, index - 1),
+                    2 => method.block.stmts.swap(index, index + 1),
+                    _ => unreachable!(),
+                }
+                assert!(!sealed_boundary(&file.to_token_stream().to_string()));
+            }
         }
     }
 
