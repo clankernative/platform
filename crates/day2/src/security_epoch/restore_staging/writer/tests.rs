@@ -1,7 +1,7 @@
 use super::*;
 use crate::security_epoch::restore_fencing::tests as drain;
-use std::{fs::OpenOptions, io::Write};
 use std::sync::Arc;
+use std::{fs::OpenOptions, io::Write};
 
 #[derive(Debug)]
 struct Unknown(Arc<()>);
