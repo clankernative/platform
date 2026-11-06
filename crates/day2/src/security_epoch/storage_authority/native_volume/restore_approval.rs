@@ -219,19 +219,20 @@ impl NativeApprovalSource {
                 },
             };
             let budget = self.original.budget()?;
-            let mut port = ApprovalPort {
-                source: &mut *self,
-                owner: PortOwner::Action(&mut *action),
+            let plan = {
+                let mut port = ApprovalPort {
+                    source: &mut *self,
+                    owner: PortOwner::Action(&mut *action),
+                };
+                crate::security_epoch::firestore::advance_approval_time(
+                    &mut port,
+                    budget,
+                    &selected,
+                    &before,
+                    operation.clone(),
+                    interval,
+                )?
             };
-            let plan = crate::security_epoch::firestore::advance_approval_time(
-                &mut port,
-                budget,
-                &selected,
-                &before,
-                operation.clone(),
-                interval,
-            )?;
-            drop(port);
             action.check_approval_source(self)?;
             self.qualified = Some(QualifiedTime {
                 operation,
@@ -339,14 +340,15 @@ impl NativeApprovalSource {
                 .plan
                 .clone();
             let budget = self.original.budget()?;
-            let mut port = ApprovalPort {
-                source: &mut *self,
-                owner: PortOwner::Completed(&mut *owner),
-            };
-            crate::security_epoch::firestore::publish_restore_approval(
-                &mut port, budget, &selected, &before, &plan, record,
-            )?;
-            drop(port);
+            {
+                let mut port = ApprovalPort {
+                    source: &mut *self,
+                    owner: PortOwner::Completed(&mut *owner),
+                };
+                crate::security_epoch::firestore::publish_restore_approval(
+                    &mut port, budget, &selected, &before, &plan, record,
+                )?;
+            }
             owner.check_signing_source(self)
         })();
         if requested.is_err() {
