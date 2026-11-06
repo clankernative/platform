@@ -1296,7 +1296,7 @@ mod tests {
             endpoint: "https://objects.example.test".into(),
             region: "us-east-1".into(),
             bucket: "fixture-bucket".into(),
-            access_key_id: "public-fixture-id".into(),
+            access_key_id: "PUBLICFIXTUREID".into(),
         };
         live.validate()?;
         let mounts = crate::integration_host::MountedCredentials::new(&missing)?;
