@@ -116,6 +116,54 @@ pub(super) struct SignedStage {
     pub signature: String,
 }
 
+/// Selection DATA for one irreversible issuer-closure attempt. The real
+/// requester still needs its retained role key, native message process and
+/// original. A signed statement alone is NOT business-rights Stop.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct FreezeSelection {
+    pub admin_binding: Digest,
+    pub operation: Digest,
+    pub fenced_root: Digest,
+    pub app: super::storage_peer_wire::StageStatement,
+    pub controller: super::storage_peer_wire::StageStatement,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct FrozenIssuance {
+    pub selection: FreezeSelection,
+    pub policy: Digest,
+    pub issuer: Digest,
+    pub cohort: Digest,
+    pub request: Digest,
+    pub challenge: Digest,
+}
+
+impl FreezeSelection {
+    pub(super) fn history_digest(&self) -> Result<Digest> {
+        let mut members = [&self.app, &self.controller];
+        members.sort_by_key(|s| {
+            (
+                s.stage.data.process.process,
+                s.stage.data.process.start_ticks,
+                s.stage.data.role,
+            )
+        });
+        Digest::of(&(
+            "day2-native-issuer-cohort-v1",
+            members.map(|s| {
+                (
+                    &s.stage.data.public_key,
+                    &s.stage.data.process,
+                    &s.stage.data.runtime,
+                    s.stage.data.role,
+                )
+            }),
+        ))
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Packet {
@@ -130,6 +178,24 @@ pub(super) enum Packet {
     },
     BirthGrant {
         certificate: IssuerCertificate,
+    },
+    FreezeHello {
+        selection: Box<FreezeSelection>,
+        request: Digest,
+    },
+    FreezeNonce {
+        request: Digest,
+        challenge: Digest,
+    },
+    FreezeBind {
+        selection: Box<FreezeSelection>,
+        request: Digest,
+        challenge: Digest,
+        signature: String,
+    },
+    FreezeGrant {
+        statement: Box<FrozenIssuance>,
+        signature: String,
     },
     StageHello {
         policy: Digest,
@@ -162,10 +228,10 @@ impl Packet {
     pub(super) fn frame(&self) -> Option<super::handshake::Frame> {
         use super::handshake::{Frame, Protocol, Step};
         let step = match self {
-            Self::StageHello { .. } => Step::Hello,
-            Self::StageNonce { .. } => Step::Challenge,
-            Self::StageBind { .. } => Step::Bind,
-            Self::StageGrant { .. } => Step::Grant,
+            Self::StageHello { .. } | Self::FreezeHello { .. } => Step::Hello,
+            Self::StageNonce { .. } | Self::FreezeNonce { .. } => Step::Challenge,
+            Self::StageBind { .. } | Self::FreezeBind { .. } => Step::Bind,
+            Self::StageGrant { .. } | Self::FreezeGrant { .. } => Step::Grant,
             Self::BirthChallenge { .. } | Self::BirthKey { .. } | Self::BirthGrant { .. } => {
                 return None;
             }
@@ -268,5 +334,34 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Packet> {
         !bytes.is_empty() && bytes.len() <= MAX_PACKET,
         "native_enrollment_packet_bound"
     );
-    crate::json::decode(bytes)
+    let value: serde_json::Value = crate::json::decode(bytes)?;
+    ensure!(
+        value.is_object(),
+        "native_enrollment_packet_object_required"
+    );
+    let selection = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("freeze_hello" | "freeze_bind") => Some("/selection"),
+        Some("freeze_grant") => {
+            ensure!(
+                value
+                    .pointer("/statement")
+                    .is_some_and(serde_json::Value::is_object),
+                "native_enrollment_freeze_object_required"
+            );
+            Some("/statement/selection")
+        }
+        _ => None,
+    };
+    if let Some(path) = selection {
+        ensure!(
+            value
+                .pointer(path)
+                .is_some_and(serde_json::Value::is_object),
+            "native_enrollment_freeze_object_required"
+        );
+        for role in ["app", "controller"] {
+            super::storage_peer_wire::require_stage_objects(&value, &format!("{path}/{role}"))?;
+        }
+    }
+    Ok(serde_json::from_value(value)?)
 }

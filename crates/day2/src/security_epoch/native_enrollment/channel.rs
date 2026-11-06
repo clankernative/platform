@@ -372,10 +372,12 @@ impl Channel {
             let expected_code = match selection {
                 ExpectedCode::Exact(code) => code,
                 ExpectedCode::Role(policy) => {
-                    let Packet::StageHello { role, .. } = &packet else {
-                        anyhow::bail!("native_enrollment_role_order")
+                    let role = match &packet {
+                        Packet::StageHello { role, .. } => *role,
+                        Packet::FreezeHello { .. } => super::NativeRole::EpochController,
+                        _ => anyhow::bail!("native_enrollment_role_order"),
                     };
-                    policy.code(*role)
+                    policy.code(role)
                 }
             };
             let process = MessageProcess::receive(received, expected_code, acquisition, costs)?;

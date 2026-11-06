@@ -1542,3 +1542,185 @@ fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
         )));
     }
 }
+
+// The Linux issuer path is inspected on every host without constructing a fake
+// native issuer. Kernel/message-origin qualification remains Linux-only.
+fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
+    use quote::ToTokens as _;
+    let file = syn::parse_file(source)?;
+    let methods: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "freeze" => Some(item),
+            _ => None,
+        })
+        .collect();
+    if methods.len() != 1 {
+        return Ok(false);
+    }
+    #[derive(Default)]
+    struct Freshness {
+        flag_references: usize,
+        current_bindings: usize,
+        snapshot_acquisitions: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Freshness {
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            self.flag_references += usize::from(path.path.is_ident("issuance_closed"));
+            syn::visit::visit_expr_path(self, path);
+        }
+        fn visit_pat_ident(&mut self, binding: &'ast syn::PatIdent) {
+            self.current_bindings += usize::from(binding.ident == "current");
+            syn::visit::visit_pat_ident(self, binding);
+        }
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            self.snapshot_acquisitions += usize::from(matches!(&*call.func, syn::Expr::Path(path)
+                if path.path.segments.iter().any(|s|s.ident=="SelfSnapshot")
+                    && path.path.segments.last().is_some_and(|s|s.ident=="acquire")));
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    use syn::visit::Visit as _;
+    let mut freshness = Freshness::default();
+    freshness.visit_block(&methods[0].block);
+    if freshness.flag_references != 1
+        || freshness.current_bindings != 0
+        || freshness.snapshot_acquisitions != 0
+    {
+        return Ok(false);
+    }
+    let body = &methods[0].block.stmts;
+    if body.len() < 6 {
+        return Ok(false);
+    }
+    let tail = body[body.len() - 5..]
+        .iter()
+        .map(|s| s.to_token_stream().to_string())
+        .collect::<Vec<_>>();
+    let expected: syn::Block = syn::parse_str(
+        r#"{
+        issuer.certificate.verify(&issuer.policy)?;
+        issuer.parent.check_identity(acquisition, &costs.hashes(Subject::ParentBefore))?;
+        current.check(acquisition)?;
+        acquisition.remaining()?;
+        channel.send(
+            &Packet::FreezeGrant {
+                statement: Box::new(statement),
+                signature,
+            },
+            acquisition,
+        )
+    }"#,
+    )?;
+    if tail
+        != expected
+            .stmts
+            .iter()
+            .map(|s| s.to_token_stream().to_string())
+            .collect::<Vec<_>>()
+    {
+        return Ok(false);
+    }
+    let closed: syn::Stmt = syn::parse_str("*issuance_closed = true;")?;
+    let closed = closed.to_token_stream().to_string();
+    let closes: Vec<_> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.to_token_stream().to_string() == closed)
+        .map(|(i, _)| i)
+        .collect();
+    if closes.len() != 1 {
+        return Ok(false);
+    }
+    let cutoff = closes[0];
+    let bound: syn::Stmt =
+        syn::parse_str(r#"ensure!(enrolled.len() == 2, "native_restore_unclosed_role_cohort");"#)?;
+    Ok(body
+        .get(cutoff + 1)
+        .is_some_and(|s| s.to_token_stream().to_string() == bound.to_token_stream().to_string())
+        && cutoff < body.len() - 5
+        && methods[0].sig.inputs.iter().any(|arg| {
+            matches!(arg, syn::FnArg::Typed(arg)
+            if matches!(&*arg.pat, syn::Pat::Ident(p) if p.ident=="current")
+                && arg.ty.to_token_stream().to_string() == syn::parse_str::<syn::Type>("&mut SelfSnapshot").unwrap().to_token_stream().to_string())
+        }))
+}
+
+#[test]
+fn issuer_freeze_keeps_same_snapshot_publication_guards_and_irreversible_cut() -> anyhow::Result<()>
+{
+    let source = include_str!("service.rs");
+    assert!(frozen_publication_source(source)?);
+    use quote::ToTokens as _;
+    for mutation in 0..8 {
+        let mut changed = syn::parse_file(source)?;
+        let function = changed
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "freeze" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let count = function.block.stmts.len();
+        match mutation {
+            0 => {
+                function.block.stmts.remove(count - 3);
+            }
+            1 => {
+                function.block.stmts.remove(count - 5);
+            }
+            2 | 3 => {
+                let arm: syn::Stmt = syn::parse_quote! { *issuance_closed = true; };
+                let matches: Vec<_> = function
+                    .block
+                    .stmts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| {
+                        s.to_token_stream().to_string() == arm.to_token_stream().to_string()
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(matches.len(), 1);
+                let index = matches[0];
+                if mutation == 2 {
+                    function.block.stmts[index] = syn::parse_quote! { *issuance_closed = false; };
+                } else {
+                    function.block.stmts[index + 1] = syn::parse_quote! { ensure!(enrolled.len() <= 2, "native_restore_unclosed_role_cohort"); };
+                }
+            }
+            4 => {
+                let mut modified = 0;
+                for argument in &mut function.sig.inputs {
+                    if let syn::FnArg::Typed(argument) = argument
+                        && matches!(&*argument.pat,syn::Pat::Ident(p) if p.ident=="current")
+                        && let syn::Type::Reference(reference) = &mut *argument.ty
+                    {
+                        assert!(reference.mutability.take().is_some());
+                        modified += 1;
+                    }
+                }
+                assert_eq!(modified, 1);
+            }
+            5 => function.block.stmts.swap(count - 3, count - 1),
+            6 => function
+                .block
+                .stmts
+                .insert(count - 5, syn::parse_str("*issuance_closed = false;")?),
+            7 => function.block.stmts.insert(
+                count - 5,
+                syn::parse_str(
+                    "let mut current = SelfSnapshot::acquire(replacement, acquisition, costs)?;",
+                )?,
+            ),
+            _ => unreachable!(),
+        }
+        assert!(
+            !frozen_publication_source(&changed.to_token_stream().to_string())?,
+            "must refuse mutation {mutation}"
+        );
+    }
+    Ok(())
+}
