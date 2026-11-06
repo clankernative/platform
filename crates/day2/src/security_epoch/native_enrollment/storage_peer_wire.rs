@@ -296,17 +296,177 @@ impl Exchange {
 /// A closed request binding is DATA. It creates neither a current peer phase
 /// nor a file, P3, epoch, writer or consumer permission.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "purpose", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum StoragePeerRequest {
+    BootstrapCreate {
+        binding: Digest,
+    },
+    BootstrapComplete {
+        binding: Digest,
+    },
+    CurrentServing {
+        binding: Digest,
+    },
+    AdminRead {
+        binding: Digest,
+        cohort: SqliteCohort,
+    },
+}
+
+/// Cross-process identity DATA for the actual retained SQLite cohort. File
+/// descriptor numbers are deliberately absent: they are local to each process.
+/// Only an authenticated, live admin-read loan may use this comparison data.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoragePeerRequest {
-    pub purpose: StoragePeerPurpose,
-    pub binding: Digest,
+pub(crate) struct SqliteCohort {
+    main: (u64, u64),
+    wal: (u64, u64),
+    shm: (u64, u64),
+}
+
+impl SqliteCohort {
+    /// Comparison DATA only, before lazy SQLite WAL/SHM activation. Missing
+    /// sidecars do not prove a complete cohort; every present member must match.
+    pub(crate) fn require_opened_members(
+        &self,
+        main: (u64, u64),
+        wal: Option<(u64, u64)>,
+        shm: Option<(u64, u64)>,
+    ) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            main == self.main
+                && wal.is_none_or(|actual| actual == self.wal)
+                && shm.is_none_or(|actual| actual == self.shm),
+            "storage_admin_opened_sqlite_member_changed"
+        );
+        Ok(())
+    }
+
+    /// Comparison DATA only. Every present candidate must be distinct from
+    /// every authenticated App member, including cross-role aliases.
+    pub(crate) fn require_disjoint_members(
+        &self,
+        main: (u64, u64),
+        wal: Option<(u64, u64)>,
+        shm: Option<(u64, u64)>,
+    ) -> Result<()> {
+        self.validate()?;
+        let candidates = [Some(main), wal, shm];
+        for (index, candidate) in candidates.iter().enumerate() {
+            if let Some(candidate) = candidate {
+                ensure!(
+                    candidate.1 > 0 && candidate.0 == main.0,
+                    "restore_auth_sqlite_candidate_shape"
+                );
+                ensure!(
+                    ![self.main, self.wal, self.shm].contains(candidate),
+                    "restore_auth_sqlite_app_alias"
+                );
+                ensure!(
+                    !candidates[..index].contains(&Some(*candidate)),
+                    "restore_auth_sqlite_candidate_alias"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn from_identities(
+        main: (u64, u64),
+        wal: (u64, u64),
+        shm: (u64, u64),
+    ) -> Result<Self> {
+        let data = Self { main, wal, shm };
+        data.validate()?;
+        Ok(data)
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.main.1 > 0
+                && self.wal.1 > 0
+                && self.shm.1 > 0
+                && self.main.0 == self.wal.0
+                && self.main.0 == self.shm.0
+                && self.main != self.wal
+                && self.main != self.shm
+                && self.wal != self.shm,
+            "storage_admin_sqlite_cohort_shape"
+        );
+        Ok(())
+    }
+}
+
+impl StoragePeerRequest {
+    pub(crate) fn purpose(&self) -> StoragePeerPurpose {
+        match self {
+            Self::BootstrapCreate { .. } => StoragePeerPurpose::BootstrapCreate,
+            Self::BootstrapComplete { .. } => StoragePeerPurpose::BootstrapComplete,
+            Self::CurrentServing { .. } => StoragePeerPurpose::CurrentServing,
+            Self::AdminRead { .. } => StoragePeerPurpose::AdminRead,
+        }
+    }
+
+    pub(crate) fn binding(&self) -> &Digest {
+        match self {
+            Self::BootstrapCreate { binding }
+            | Self::BootstrapComplete { binding }
+            | Self::CurrentServing { binding }
+            | Self::AdminRead { binding, .. } => binding,
+        }
+    }
+
+    /// DATA-only constructor for ordinary requests. Admin-read requires its
+    /// distinct variant with the actual authenticated App cohort.
+    pub(crate) fn operation(purpose: StoragePeerPurpose, binding: Digest) -> Result<Self> {
+        Ok(match purpose {
+            StoragePeerPurpose::BootstrapCreate => Self::BootstrapCreate { binding },
+            StoragePeerPurpose::BootstrapComplete => Self::BootstrapComplete { binding },
+            StoragePeerPurpose::CurrentServing => Self::CurrentServing { binding },
+            StoragePeerPurpose::AdminRead => anyhow::bail!("storage_admin_cohort_required"),
+        })
+    }
+
+    pub(crate) fn admin_cohort(&self) -> Result<&SqliteCohort> {
+        let Self::AdminRead { cohort, .. } = self else {
+            anyhow::bail!("storage_admin_purpose_required")
+        };
+        cohort.validate()?;
+        Ok(cohort)
+    }
+}
+
+/// Request selection DATA; actual peer authentication is still mandatory.
+pub(super) enum CurrentExpectation<'a> {
+    Serving,
+    Exact(&'a StoragePeerRequest),
+    AdminRead(&'a Digest),
+}
+impl CurrentExpectation<'_> {
+    pub(super) fn purpose(&self) -> StoragePeerPurpose {
+        match self {
+            Self::Serving => StoragePeerPurpose::CurrentServing,
+            Self::Exact(request) => request.purpose(),
+            Self::AdminRead(_) => StoragePeerPurpose::AdminRead,
+        }
+    }
+    fn matches(&self, request: &StoragePeerRequest) -> bool {
+        match self {
+            Self::Serving => matches!(request, StoragePeerRequest::CurrentServing { .. }),
+            Self::Exact(expected) => request == *expected,
+            Self::AdminRead(binding) => {
+                matches!(request, StoragePeerRequest::AdminRead { binding: actual, cohort } if actual == *binding && cohort.validate().is_ok())
+            }
+        }
+    }
 }
 
 impl StoragePeerPurpose {
     pub(in crate::security_epoch) fn stage_purpose(self) -> StagePurpose {
         match self {
             Self::BootstrapCreate | Self::BootstrapComplete => StagePurpose::StorageBootstrap,
-            Self::CurrentServing => StagePurpose::CurrentRole,
+            Self::CurrentServing | Self::AdminRead => StagePurpose::CurrentRole,
         }
     }
 }
@@ -332,7 +492,7 @@ impl CurrentExchange {
     ) -> Result<()> {
         ensure!(
             offered == ready
-                && ready.original.purpose == self.request.purpose.stage_purpose()
+                && ready.original.purpose == self.request.purpose().stage_purpose()
                 && self.controller_stage == ready.digest()?
                 && self.controller_nonce == *nonce,
             "storage_peer_current_ready_stage_or_nonce_changed"
@@ -487,7 +647,8 @@ impl Body {
             Self::CurrentHello { app, request, .. } => {
                 current()?;
                 ensure!(
-                    request.purpose.stage_purpose() == expected && app.original.purpose == expected,
+                    request.purpose().stage_purpose() == expected
+                        && app.original.purpose == expected,
                     "storage_peer_stage_purpose"
                 );
             }
@@ -497,7 +658,7 @@ impl Body {
             } => {
                 current()?;
                 ensure!(
-                    exchange.request.purpose.stage_purpose() == expected
+                    exchange.request.purpose().stage_purpose() == expected
                         && controller.original.purpose == expected,
                     "storage_peer_stage_purpose"
                 );
@@ -568,6 +729,17 @@ impl Message {
         controller_nonce: &Digest,
         expected: Option<&StoragePeerRequest>,
     ) -> Result<(&StageStatement, &Digest, &StoragePeerRequest)> {
+        let expected = expected.map_or(CurrentExpectation::Serving, CurrentExpectation::Exact);
+        self.current_hello_expected(initial, sequence, controller_nonce, &expected)
+    }
+
+    pub(super) fn current_hello_expected(
+        &self,
+        initial: &Digest,
+        sequence: u64,
+        controller_nonce: &Digest,
+        expected: &CurrentExpectation<'_>,
+    ) -> Result<(&StageStatement, &Digest, &StoragePeerRequest)> {
         match &self.body {
             Body::CurrentHello {
                 app,
@@ -582,10 +754,7 @@ impl Message {
                     selected == initial
                         && *number == sequence
                         && echoed == controller_nonce
-                        && expected.map_or_else(
-                            || request.purpose == StoragePeerPurpose::CurrentServing,
-                            |expected| request == expected,
-                        ),
+                        && expected.matches(request),
                     "storage_peer_current_request_changed"
                 );
                 Ok((app, nonce, request))
@@ -697,12 +866,12 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         }
         Some("current_hello") => {
             require_stage_objects(&value, "/body/app")?;
-            require_object(&value, "/body/request")?;
+            require_request_object(&value, "/body/request")?;
         }
         Some("current_offer") => {
             require_stage_objects(&value, "/body/controller")?;
             require_object(&value, "/body/exchange")?;
-            require_object(&value, "/body/exchange/request")?;
+            require_request_object(&value, "/body/exchange/request")?;
         }
         Some(
             "confirm" | "complete" | "accepted" | "current_ack" | "current_ready"
@@ -711,6 +880,18 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         _ => anyhow::bail!("storage_peer_step"),
     }
     Ok(serde_json::from_value(value)?)
+}
+
+fn require_request_object(value: &serde_json::Value, path: &str) -> Result<()> {
+    require_object(value, path)?;
+    if value
+        .pointer(&format!("{path}/purpose"))
+        .and_then(serde_json::Value::as_str)
+        == Some("admin_read")
+    {
+        require_object(value, &format!("{path}/cohort"))?;
+    }
+    Ok(())
 }
 
 fn require_object(value: &serde_json::Value, path: &str) -> Result<()> {

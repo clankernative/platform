@@ -21,7 +21,12 @@ use day2_capabilities::{
 };
 use std::{cell::RefCell, rc::Rc};
 
+mod admin_read;
+pub(in crate::security_epoch) use admin_read::{CompletedCeremony, RestoreAuthenticationAction};
 mod app_serving;
+pub(crate) use admin_read::{
+    ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData,
+};
 mod controller_serving;
 
 /// Historical result DATA, returned only after the actual consumer ACK,

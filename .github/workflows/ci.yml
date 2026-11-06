@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: gh release download cargo-audit/v0.22.2 --repo RustSec/rustsec --pattern cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz --dir /tmp/scanners
@@ -84,7 +84,7 @@ jobs:
       cache_run: ${{ steps.admit.outputs.run }}
       cache_attempt: ${{ steps.admit.outputs.attempt }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Create the single-job Rust codegen jobserver
@@ -109,7 +109,7 @@ jobs:
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
         id: bazel_actions
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
@@ -124,7 +124,7 @@ jobs:
       # Main already compiles this verifier even when queue proof is reused.
       # Publish its completed actions in the default-branch scope for later PRs.
       - name: Publish completed Linux bootstrap actions
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cache/bazel-disk
@@ -139,9 +139,10 @@ jobs:
         id: artifact_download_1
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ steps.find.outputs.artifact != '' }}
         with:
+          digest-mismatch: error
           artifact-ids: ${{ steps.find.outputs.artifact }}
           run-id: ${{ steps.find.outputs.run }}
           github-token: ${{ github.token }}
@@ -151,8 +152,9 @@ jobs:
       - name: Retry download of workflow artifacts
         if: ${{ !cancelled() && steps.artifact_download_1.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           artifact-ids: ${{ steps.find.outputs.artifact }}
           run-id: ${{ steps.find.outputs.run }}
           github-token: ${{ github.token }}
@@ -164,9 +166,10 @@ jobs:
         run: build-out/bin/xtask verify-queue-admit
         env:
           GH_TOKEN: ${{ github.token }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ steps.admit.outputs.reused == 'true' }}
         with:
+          archive: true
           name: day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-merge-reuse.json
           if-no-files-found: error
@@ -199,7 +202,7 @@ jobs:
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Create the single-job Rust codegen jobserver
@@ -224,7 +227,7 @@ jobs:
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
         id: bazel_actions
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
@@ -237,7 +240,7 @@ jobs:
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
@@ -257,8 +260,9 @@ jobs:
         run: build-out/bin/xtask verify-linux-context
       - name: Retain current native Linux preparation context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-linux-context-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
@@ -269,7 +273,7 @@ jobs:
       # never in a post-job hook over generated files or sandbox-owned paths.
       - name: Restore completed fixture builds
         id: fixture_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ matrix.part != 'tests' }}
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
@@ -281,7 +285,7 @@ jobs:
             artifacts/????????????????????????????????????????????????????????????????
       - name: Restore completed test executables
         id: test_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ matrix.part == 'tests' }}
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
@@ -295,7 +299,7 @@ jobs:
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
       - name: Restore pinned native compiler and formatter inputs
         id: native_tools
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ matrix.part != 'tests' }}
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
@@ -307,7 +311,7 @@ jobs:
       - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - name: Save pinned native compiler and formatter inputs
         if: ${{ matrix.part != 'tests' && steps.native_tools.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: ${{ steps.native_tools.outputs.cache-primary-key }}
@@ -316,8 +320,9 @@ jobs:
         id: native_preparation
       - name: Retain current compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-compiler-failure-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
           # stdout.bin is a private, job-local spool; it is never uploaded.
           path: artifacts/bazel/failures/*/outcome.json
@@ -326,8 +331,9 @@ jobs:
           retention-days: 3
       - name: Retain fixture compiler input identity and inventory
         if: ${{ matrix.part != 'tests' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-fixture-cache-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/all-verification-cache.json
@@ -336,8 +342,9 @@ jobs:
           retention-days: 14
       - name: Retain compiled test input identity and inventory
         if: ${{ matrix.part == 'tests' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-compiled-test-inputs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/ci-test-build-cache.json
@@ -354,15 +361,16 @@ jobs:
       - name: Archive test compilation and documentation preparation
         if: ${{ matrix.part == 'tests' }}
         run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/tests.list0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-preparation.tgz
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
       - name: Save completed fixture builds
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ matrix.part != 'tests' && steps.fixture_cache.outputs.cache-hit != 'true' }}
         with:
           key: ${{ steps.fixture_cache.outputs.cache-primary-key }}
@@ -370,7 +378,7 @@ jobs:
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
       - name: Save completed test executables
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ matrix.part == 'tests' && steps.test_cache.outputs.cache-hit != 'true' }}
         with:
           key: ${{ steps.test_cache.outputs.cache-primary-key }}
@@ -381,7 +389,7 @@ jobs:
 
       - name: Persist newly compiled actions under the captured source key
         if: ${{ matrix.part != 'fixtures' && !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/bazel-disk
           key: ${{ steps.bazel_actions.outputs.cache-primary-key }}
@@ -398,8 +406,9 @@ jobs:
         if: ${{ matrix.part == 'tests' && steps.linux_actions_archive.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-bazel-linux-actions.tgz
           if-no-files-found: error
@@ -417,7 +426,7 @@ jobs:
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps: &mac_verification_steps
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Download the pinned Linux Bazel executable
@@ -440,7 +449,7 @@ jobs:
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
         id: bazel_actions
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
@@ -450,7 +459,7 @@ jobs:
             day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-mac --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
@@ -462,7 +471,7 @@ jobs:
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
       - name: Restore completed fixture builds
         id: fixture_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           key: day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
@@ -473,7 +482,7 @@ jobs:
             artifacts/????????????????????????????????????????????????????????????????
       - name: Restore completed test executables
         id: test_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           key: day2-test-outputs-v2-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
@@ -494,22 +503,25 @@ jobs:
         id: native_preparation
       - name: Retain current Mac compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-compiler-failure-mac-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/bazel/failures/*/outcome.json
           if-no-files-found: warn
           retention-days: 3
       - name: Retain real Mac native preparation, exact cases and both build campaigns
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-mac-compatibility.json
           if-no-files-found: error
           retention-days: 14
       - name: Retain the separate native Mac compiler inventory
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-mac-compiler-inputs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/ci-test-build-cache.json
@@ -519,7 +531,7 @@ jobs:
           retention-days: 14
       # Capture the restore-time key so generated files cannot change it.
       - name: Save completed fixture builds
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ steps.fixture_cache.outputs.cache-hit != 'true' }}
         with:
           key: ${{ steps.fixture_cache.outputs.cache-primary-key }}
@@ -527,7 +539,7 @@ jobs:
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
       - name: Save completed test executables
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ steps.test_cache.outputs.cache-hit != 'true' }}
         with:
           key: ${{ steps.test_cache.outputs.cache-primary-key }}
@@ -545,8 +557,9 @@ jobs:
         if: ${{ steps.mac_actions_archive.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-bazel-mac-actions-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-bazel-mac-actions.tgz
           if-no-files-found: error
@@ -616,8 +629,9 @@ jobs:
         id: actions_download
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
@@ -628,8 +642,9 @@ jobs:
         if: ${{ !cancelled() && steps.actions_download.outcome == 'failure' }}
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
@@ -655,7 +670,7 @@ jobs:
         if: ${{ steps.actions_extract.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/bazel-disk
           key: day2-bazel-mac-actions-v2-macOS-ARM64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -684,8 +699,9 @@ jobs:
         id: actions_download
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
@@ -696,8 +712,9 @@ jobs:
         if: ${{ !cancelled() && steps.actions_download.outcome == 'failure' }}
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
@@ -718,7 +735,7 @@ jobs:
         if: ${{ steps.actions_extract.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/bazel-disk
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -743,7 +760,7 @@ jobs:
       checks: read
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Create the single-job Rust codegen jobserver
@@ -768,7 +785,7 @@ jobs:
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
         id: bazel_actions
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
@@ -779,7 +796,7 @@ jobs:
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore compiled actions from this run preparation only
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/bazel-disk
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -795,8 +812,9 @@ jobs:
         run: build-out/bin/xtask verify-linux-context
       - name: Retain current native Linux preparation join context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-linux-context-preparation-join-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
@@ -810,8 +828,9 @@ jobs:
         id: artifact_download_2
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -821,8 +840,9 @@ jobs:
       - name: Retry download of day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
         if: ${{ !cancelled() && steps.artifact_download_2.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -833,8 +853,9 @@ jobs:
         id: artifact_download_3
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -844,8 +865,9 @@ jobs:
       - name: Retry download of day2-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
         if: ${{ !cancelled() && steps.artifact_download_3.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -858,8 +880,9 @@ jobs:
         id: artifact_download_fixtures
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -869,8 +892,9 @@ jobs:
       - name: Retry download of the second fixture preparation part
         if: ${{ !cancelled() && steps.artifact_download_fixtures.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -883,7 +907,7 @@ jobs:
         run: tar -xzf /tmp/day2-preparation-tests/day2-preparation.tgz -C "$GITHUB_WORKSPACE"
       - name: Restore pinned native compiler and formatter inputs
         id: native_tools
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
@@ -907,8 +931,9 @@ jobs:
       - name: Archive admitted common outputs
         run: tar -czf /tmp/day2-common.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/common.list0
       - name: Retain admitted common outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-verify-common-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-common.tgz
           if-no-files-found: error
@@ -917,8 +942,9 @@ jobs:
       - name: Archive admitted workspace-day2 outputs
         run: tar -czf /tmp/day2-workspace-day2.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/workspace-day2.list0
       - name: Retain admitted workspace-day2 outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-verify-workspace-day2-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-workspace-day2.tgz
           if-no-files-found: error
@@ -927,8 +953,9 @@ jobs:
       - name: Archive admitted workspace-control outputs
         run: tar -czf /tmp/day2-workspace-control.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/workspace-control.list0
       - name: Retain admitted workspace-control outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-verify-workspace-control-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-workspace-control.tgz
           if-no-files-found: error
@@ -937,16 +964,18 @@ jobs:
       - name: Archive admitted workspace-other outputs
         run: tar -czf /tmp/day2-workspace-other.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/workspace-other.list0
       - name: Retain admitted workspace-other outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-verify-workspace-other-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-workspace-other.tgz
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
       - name: Retain the exact transport file inventory
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-transport-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-verification-transport/plan.json
           if-no-files-found: error
@@ -979,7 +1008,7 @@ jobs:
     env:
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Create the single-job Rust codegen jobserver
@@ -1004,7 +1033,7 @@ jobs:
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
         id: bazel_actions
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
@@ -1015,12 +1044,12 @@ jobs:
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore compiled actions from this run preparation only
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/bazel-disk
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
@@ -1044,8 +1073,9 @@ jobs:
         id: artifact_download_2
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1055,8 +1085,9 @@ jobs:
       - name: Retry download of common admitted fixtures and metadata
         if: ${{ !cancelled() && steps.artifact_download_2.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1070,8 +1101,9 @@ jobs:
         timeout-minutes: 2
         continue-on-error: true
         if: ${{ startsWith(matrix.shard, 'workspace-') }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1081,8 +1113,9 @@ jobs:
       - name: Retry download of this workspace shard's test executables
         if: ${{ !cancelled() && steps.artifact_download_3.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1097,8 +1130,9 @@ jobs:
         timeout-minutes: 2
         continue-on-error: true
         if: ${{ matrix.shard == 'parallel-runtime' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1108,8 +1142,9 @@ jobs:
       - name: Retry download of all required binary groups in parallel
         if: ${{ !cancelled() && steps.artifact_download_4.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1127,7 +1162,7 @@ jobs:
         run: tar -xzf /tmp/day2-verification/day2-workspace-other.tgz -C "$GITHUB_WORKSPACE"
       - name: Restore pinned native compiler and formatter inputs
         id: native_tools
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
@@ -1149,16 +1184,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - name: Retain current native Linux shard context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
           retention-days: 14
       - name: Publish fresh DST campaigns, seeds and observed transitions
         if: ${{ always() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation') }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-dst-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/dst/run-*/coverage.json
@@ -1169,8 +1206,9 @@ jobs:
           retention-days: 14
       - name: Retain redacted DST counterexamples for replay
         if: ${{ failure() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation') }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-dst-replays-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/oauth-simulation/*.json
@@ -1191,24 +1229,27 @@ jobs:
           retention-days: 14
       - name: Retain failed storage lifecycle replay bundles
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-storage-lifecycle-failures-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/storage-lifecycle-simulation/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Retain failed ordinary backup lifecycle histories
         if: ${{ failure() && matrix.shard == 'workspace-other' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-backup-lifecycle-replays-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/simulations/backup-lifecycle/replay-*.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Retain failed native OAuth consumer histories
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-native-oauth-consumer-failures-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/oauth-native-consumer-simulation/failure-*/failure.json
@@ -1217,8 +1258,9 @@ jobs:
           retention-days: 14
       - name: Retain connection request reference evidence
         if: ${{ always() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-connection-request-reference-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/native-connection-request-simulation/campaign-*/receipt.json
@@ -1227,40 +1269,45 @@ jobs:
           retention-days: 14
       - name: Publish actual Linear campaign coverage
         if: ${{ always() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-linear-coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/linear-provider-simulation/campaign-*/receipt.json
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted Linear replay seeds
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-linear-replays-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/linear-provider-simulation/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Publish actual operator-alert campaign coverage
         if: ${{ always() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-alerts-coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/alerts-provider-simulation/campaign-*/receipt.json
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted operator-alert replay seeds
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-alerts-replays-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/alerts-provider-simulation/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Publish actual credential process-loss coverage
         if: ${{ always() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-credential-crash-coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/credential-crash-reopen/campaign-*/receipt.json
@@ -1269,8 +1316,9 @@ jobs:
           retention-days: 14
       - name: Retain redacted credential process-loss cases
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-credential-crash-replays-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/credential-crash-reopen/failure-*/failure.json
@@ -1280,22 +1328,25 @@ jobs:
           retention-days: 14
       - name: Publish actual Notifications campaign coverage
         if: ${{ always() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-notifications-coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/notification-provider-simulation/campaign-*/receipt.json
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
       - name: Retain redacted Notifications replay seeds
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-notifications-replays-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/notification-provider-simulation/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-result-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-results/${{ matrix.shard }}.json
           if-no-files-found: error
@@ -1325,7 +1376,7 @@ jobs:
       DAY2_CACHE_ORIGIN_RUN: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' && needs.verify-queue-receipt.outputs.cache_run || github.run_id }}
       DAY2_CACHE_ORIGIN_ATTEMPT: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' && needs.verify-queue-receipt.outputs.cache_attempt || github.run_attempt }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Create the single-job Rust codegen jobserver
@@ -1350,7 +1401,7 @@ jobs:
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
         id: bazel_actions
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
@@ -1378,8 +1429,9 @@ jobs:
         id: bootstrap_actions_download
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
@@ -1390,8 +1442,9 @@ jobs:
         if: ${{ !cancelled() && steps.bootstrap_actions_download.outcome == 'failure' }}
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
@@ -1415,8 +1468,9 @@ jobs:
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Retain current native Linux final context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: day2-linux-context-final-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
@@ -1430,9 +1484,10 @@ jobs:
         id: artifact_download_2
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1442,8 +1497,9 @@ jobs:
       - name: Retry download of common admitted fixtures and metadata
         if: ${{ !cancelled() && steps.artifact_download_2.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1458,8 +1514,9 @@ jobs:
         timeout-minutes: 2
         continue-on-error: true
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1469,8 +1526,9 @@ jobs:
       - name: Retry download of all required binary groups in parallel
         if: ${{ !cancelled() && steps.artifact_download_3.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1490,9 +1548,10 @@ jobs:
         id: artifact_download_4
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1502,8 +1561,9 @@ jobs:
       - name: Retry download of day2-result-*-${{ github.run_id }}-${{ github.run_attempt }}
         if: ${{ !cancelled() && steps.artifact_download_4.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1514,9 +1574,10 @@ jobs:
         id: artifact_download_5
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1526,8 +1587,9 @@ jobs:
       - name: Retry download of day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
         if: ${{ !cancelled() && steps.artifact_download_5.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1537,7 +1599,7 @@ jobs:
       - name: Restore pinned native compiler and formatter inputs
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         id: native_tools
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
@@ -1556,9 +1618,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
+          archive: true
           name: day2-verification-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/verification.json
@@ -1573,9 +1636,10 @@ jobs:
         id: artifact_download_6
         timeout-minutes: 2
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1585,8 +1649,9 @@ jobs:
       - name: Retry download of day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
         if: ${{ !cancelled() && steps.artifact_download_6.outcome == 'failure' }}
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          digest-mismatch: error
           repository: clankernative/platform
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
@@ -1594,9 +1659,10 @@ jobs:
           merge-multiple: true
           path: artifacts
       - name: Retain reused evidence with its original execution identity
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
         with:
+          archive: true
           name: day2-reused-verification-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-merge-reuse.json
           if-no-files-found: error
@@ -1620,7 +1686,7 @@ jobs:
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Create the single-job Rust codegen jobserver
@@ -1645,7 +1711,7 @@ jobs:
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
         id: bazel_actions
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
@@ -1658,7 +1724,7 @@ jobs:
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
@@ -1682,9 +1748,10 @@ jobs:
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
       - run: build-out/bin/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
       - run: build-out/bin/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
+          archive: true
           name: day2-verification-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/day2-format.patch
@@ -1702,10 +1769,10 @@ jobs:
       matrix:
         stack: [cluster, app-edge, security-shell-edge, security-shell, security-epoch-controller, day2-app, qualification-runner, native-enrollment, native-enrollment-observer-access, native-enrollment-pool, native-enrollment-profile, native-enrollment-root]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
@@ -1719,10 +1786,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
@@ -1739,10 +1806,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
@@ -1756,10 +1823,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false

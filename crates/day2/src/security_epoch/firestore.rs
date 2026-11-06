@@ -1,7 +1,7 @@
 //! Bounded Firestore REST codec over private native ports. There is deliberately
-//! no production port implementation until immutable provider identity, current
-//! role, execution and continuous-clock producers have been qualified together.
-//! Parsing authenticated bytes alone would still not mint readiness.
+//! no ordinary/raw provider installer. Native ports retain their actual role,
+//! selection, current owner and continuous clock. Parsing authenticated bytes
+//! alone cannot mint readiness; live qualification remains separate.
 use super::kernel::{
     self, AuthorityRecord, Bootstrap, Phase, Receipt, Request, SentinelRecord, Snapshot,
     UpdateTime, Versioned,
@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 
+mod approval;
+pub(in crate::security_epoch) use approval::{advance_approval_time, publish_restore_approval};
 mod paired;
 mod restore;
 pub(super) use paired::{ActionTransaction, begin_action, read_with_slot};

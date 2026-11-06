@@ -12,6 +12,10 @@ pub(crate) const RESTORE_APPROVAL_LIFETIME_SECONDS: u64 = 3600;
 const MAX_REQUEST_BYTES: usize = 16_384;
 
 pub(crate) mod native;
+mod intent;
+pub(in crate::security_epoch) mod publication;
+pub(crate) mod signed;
+pub(crate) use intent::ApprovalIntent;
 
 /// Exact selected target DATA. The consumer must compare every field with its
 /// actual current selection, fenced epoch and held target, not just a digest.
@@ -26,6 +30,16 @@ pub(crate) struct TargetBinding {
     pub security_epoch: u64,
     pub artifact: Digest,
     pub schema: Digest,
+}
+
+impl TargetBinding {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.binding_generation > 0 && self.security_epoch > 0,
+            "restore_approval_target_shape"
+        );
+        Ok(())
+    }
 }
 
 /// Identity DATA only. An email or this decoded pair cannot authenticate an
@@ -73,13 +87,20 @@ pub(crate) struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
+    pub(crate) fn intent(&self) -> ApprovalIntent {
+        ApprovalIntent {
+            grant_id: self.grant_id.clone(),
+            full_archive_digest: self.full_archive_digest.clone(),
+            target: self.target.clone(),
+            executor: self.executor.clone(),
+            custody: self.custody.clone(),
+        }
+    }
+
     /// Shape checks only. No clock is sampled and no current permission follows.
     pub(crate) fn validate(&self) -> Result<()> {
         self.executor.validate()?;
-        ensure!(
-            self.target.binding_generation > 0 && self.target.security_epoch > 0,
-            "restore_approval_target_shape"
-        );
+        self.target.validate()?;
         ensure!(
             self.approved_at >= 0
                 && self.expires_at.checked_sub(self.approved_at)
@@ -119,3 +140,16 @@ impl ApprovalRequest {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::security_epoch) fn fixture_request_data() -> Result<ApprovalRequest> {
+    tests::request()
+}
+
+#[cfg(test)]
+pub(in crate::security_epoch) fn fixture_publication_data() -> Result<(
+    day2_capabilities::security_epoch::EpochStore,
+    signed::SignedApprovalRecord,
+)> {
+    publication::tests::fixture()
+}

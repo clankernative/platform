@@ -7,6 +7,36 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[test]
+fn owners_recipe_forwards_one_bounded_atomic_operation() -> Result<()> {
+    for action in ["list", "check", "add", "remove"] {
+        let mut effects = Vec::new();
+        let result = automation::run(
+            &automation::runner()?,
+            &[
+                "platform",
+                "owners",
+                action,
+                "instance.json",
+                "reports",
+                "operator",
+                "{}",
+            ],
+            |request| {
+                effects.push(request.action.clone());
+                assert_eq!(
+                    request.decode::<Value>()?,
+                    json!({"action":action,"instance":"instance.json","app_name":"reports","operator":"operator","input_json":"{}"})
+                );
+                Ok(json!({"protocol":1,"kind":"app-owners"}))
+            },
+        )?;
+        assert_eq!(effects, ["app-owners"]);
+        assert_eq!(result["kind"], "app-owners");
+    }
+    Ok(())
+}
+
+#[test]
 fn ui_lock_command_emits_the_native_source_record() -> Result<()> {
     let mut effects = Vec::new();
     let receipt = automation::run(

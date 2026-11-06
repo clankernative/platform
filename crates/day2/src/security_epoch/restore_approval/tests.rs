@@ -2,7 +2,7 @@ use super::*;
 use day2_capabilities::Name;
 use serde_json::{Value, json};
 
-fn request() -> Result<ApprovalRequest> {
+pub(super) fn request() -> Result<ApprovalRequest> {
     let digest = |label: &str| Digest::new(label.as_bytes());
     Ok(ApprovalRequest {
         grant_id: digest("one-server-grant"),

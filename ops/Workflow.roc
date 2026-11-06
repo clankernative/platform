@@ -24,6 +24,7 @@ Workflow :: [].{
 		AuthorityApply(Str, Str, Str, Str, Str),
 		AuthorityActivate(Str, Str, Str, Str, Str, Str),
 		AuthorityAdmin(Str, Str),
+		Owners(Str, Str, Str, Str, Str),
 		Resources(Str, Str, Str, Str, Str),
 		Provision(Str, Str, Str, Str),
 		Maintain(Str, Str),
@@ -59,6 +60,13 @@ Workflow :: [].{
 		["infra", "plan", configuration, output] => Ok(Infra(configuration, output))
 		["authority", "inspect", instance, app_name] => Ok(AuthorityInspect(instance, app_name))
 		["authority", "admin", instance, operator] => Ok(AuthorityAdmin(instance, operator))
+		["owners", action, instance, app_name, operator, input_json] => {
+			if ["list", "check", "add", "remove"].contains(action) {
+				Ok(Owners(action, instance, app_name, operator, input_json))
+			} else {
+				Err("unknown owner operation")
+			}
+		}
 		["provision-credentials", instance, app_name, operator, plan_file] => {
 			Ok(Provision(instance, app_name, operator, plan_file))
 		}
@@ -117,6 +125,7 @@ Workflow :: [].{
 					"infra plan CONFIG NEW_DIRECTORY",
 					"authority inspect INSTANCE APP",
 					"authority admin INSTANCE LOCAL_OPERATOR",
+					"owners list|check|add|remove INSTANCE APP LOCAL_OPERATOR INPUT_JSON",
 					"provision-credentials OPERATOR_INSTANCE APP LOCAL_OPERATOR PROVISIONING_PLAN",
 					"resources preview|reviews|catalog|company-setup INSTANCE APP LOCAL_OPERATOR",
 					"resources save|attach|propose|decide|allocate|recover|resolve-overruns INSTANCE APP LOCAL_OPERATOR INPUT_JSON_FILE",
@@ -138,6 +147,9 @@ Workflow :: [].{
 		Infra(configuration, output) => Infra.run!(configuration, output, host!)
 		AuthorityInspect(instance, app_name) => Authority.inspect!(instance, app_name, host!)
 		AuthorityAdmin(instance, operator) => Authority.admin!(instance, operator, host!)
+		Owners(action, instance, app_name, operator, input_json) => {
+			Authority.owners!(action, instance, app_name, operator, input_json, host!)
+		}
 		Provision(instance, app_name, operator, plan_file) => {
 			Provision.run!(instance, app_name, operator, plan_file, host!)
 		}

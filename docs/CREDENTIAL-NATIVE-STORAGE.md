@@ -510,6 +510,35 @@ refusing prerequisite-only configuration; epoch catalog DATA alone does not
 select native mode. Native Runtime connection opens retain existing-file and
 NOFOLLOW semantics and never chmod/initialize the original.
 
+The native Controller admin reader is not yet an accepting source for restore
+approval. Its SQLite connection must be joined to genuine creator continuity
+for MAIN, WAL and SHM. A matching pathname, MAIN inode, seed or stable read view
+does not establish that continuity: a compatible older WAL can restore an
+administrator that current policy removed while MAIN keeps the same inode.
+
+The pinned bundled SQLite enables `SQLITE_ENABLE_FILESTAT`. A scoped Unix VFS
+patch appends device/inode observations from `osFstat` on its actual held
+MAIN/WAL/SHM descriptors. Failed, nonregular or wider-than-64-bit observations
+produce null and refuse decoding. No descriptor is opened, duplicated or closed,
+and no guessed C layout or unsafe Rust is used. This also avoids interpreting
+macOS `/dev/fd` metadata as the underlying volume's device identity.
+The test-only
+`store::native_storage::opened_files` fixture borrows an actual transaction and
+observes the Unix VFS handles that SQLite opened, without reconstructing C
+structures or opening/closing a duplicate database descriptor. It covers a
+regular-file MAIN substitution, compatible older WAL/SHM retained for the
+whole read, an in-place authority rollback preserving all three inodes, and
+SHM recreation by a read-only connection. The sidecar fixture
+uses a separate process so SQLite cannot reuse an in-process cached SHM node.
+It compares actual authority rows and actual opened file identities with the
+distinct current fixture result; pathname checks alone are insufficient.
+
+These are mechanism and counterexample tests, not a creator-owner factory,
+native reader permission or live qualification. The accepting reader still
+needs the retained creator cohort and authenticated peer handoff, with writer
+exclusion/content continuity and explicit sidecar replacement/recreation rules,
+before it may supply approval authority.
+
 No local filesystem test, mock deployment plan, static proof inventory or
 earlier CI receipt establishes actual native P3, serving or end-to-end OAuth
 success. Live provider/kernel/deployment qualification remains separate.
@@ -526,3 +555,55 @@ SAME-owner CurrentPreparedFilePhase, checks the exact projection before accept,
 and produces the fresh statement from that stage. The exchange's original
 five-second budget, per-message handles and strict HUP/CLOEXEC checks remain.
 Unknown or abandoned exchange state cannot reopen, rebind or adopt the listener.
+
+
+## First SQLite connection custody
+
+The App file continuation now consumes one SQLite birth attempt before the first
+persisted SQLite open. Existing WAL, SHM or rollback-journal leaves refuse the
+attempt. The first opened MAIN must match the actual retained App file before
+configuration or schema admission. The same first connection is held through WAL
+activation, its actual MAIN/WAL/SHM capture, runtime publication and subsequent
+App file checks. There is no close-and-reopen adoption path and no retained
+business transaction. Initial load cannot complete without moving that connection
+into the actual App continuation. Every failure remains terminal.
+
+Fresh checks compare the keeper's actual open descriptors and fixed sidecar paths
+with its original cohort; refusing a keeper does not close it under another SQL
+unit's locks. Resource teardown follows the App owner's borrowed lifetime.
+
+This keeper is not immutable storage, a native admission grant or writer exclusion.
+The real concurrent-writer control demonstrates that a retained SQLite snapshot
+can still see an older admin while every keeper identity matches. The accepting
+Controller admin reader remains closed until its actual authenticated request
+borrows App writer exclusion through the live read transaction, acknowledgement
+and final original checks. No such read loan is introduced by connection custody.
+Native/deployed qualification remains separate.
+
+
+## Authenticated admin read loan
+
+A dedicated signed `AdminRead` exchange binds the exact operation and the App's
+retained MAIN/WAL/SHM device-and-inode cohort. It is not an ordinary serving or
+SQL-read label. The App holds its actual executor, role and active-storage
+borrow, with the continuation Busy, while the Controller owns the reader.
+The Controller retains its original physical-file and peer handles across the
+whole SQL unit, including rollback, connection close and error cleanup. The
+fixed reader opens read-only without following a symlink, checks actual SQLite
+handles against the App cohort and original MAIN, and closes the transaction
+and connection before coherent reobservation or peer acknowledgement.
+
+The resulting membership proof borrows the real loan, metadata and exact
+operation. It is current policy membership, not authentication of a claimed
+email or subject, a signing permission or a restore approval. A future producer
+must supply genuine passkey/executor authentication and use the membership
+while this loan is still held. There is no public grant-producing route here.
+The loan preserves the original five-second bound and permanent refusal; an
+unknown close, abandoned loan or failed final peer exchange cannot restore the
+App or Controller continuation. This is read exclusion, not complete stopped
+rights or permission to replace a writer after restore.
+
+Portable tests exercise the local SQL disposition against an independent seeded
+model, real SQLite cohort/readonly/refusal behavior, signed wire controls and
+production wiring mutations. They do not establish native process-death,
+App/Controller concurrency or deployed restore qualification.

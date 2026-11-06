@@ -240,7 +240,9 @@ impl RetainedPeer {
             "storage_peer_local_role"
         );
         let mut acquisition = match purpose {
-            StoragePeerPurpose::CurrentServing => stage.narrow_io_acquisition(5)?,
+            StoragePeerPurpose::CurrentServing | StoragePeerPurpose::AdminRead => {
+                stage.narrow_io_acquisition(5)?
+            }
             StoragePeerPurpose::BootstrapCreate | StoragePeerPurpose::BootstrapComplete => {
                 stage.storage()?.narrow_storage_bootstrap_io_acquisition(
                     STORAGE_BOOTSTRAP_LIMIT.as_secs().try_into()?,
@@ -409,7 +411,7 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
         self.owner.disposition.begin_notified(self.sequence)?;
         let (acquisition, local, sequence) =
             self.owner
-                .start_phase(stage, NativeRole::AppHost, self.sequence, request.purpose)?;
+                .start_phase(stage, NativeRole::AppHost, self.sequence, request.purpose())?;
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (acquisition, local, sequence, request);
@@ -627,11 +629,33 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
         stage: &mut EnrolledRoleStage<'_>,
         expected: Option<&StoragePeerRequest>,
     ) -> Result<CurrentStoragePeerPhase<'peer>> {
+        let expected = expected.map_or(
+            super::super::storage_peer_wire::CurrentExpectation::Serving,
+            super::super::storage_peer_wire::CurrentExpectation::Exact,
+        );
+        self.accept_expected(stage, expected)
+    }
+
+    pub(crate) fn accept_admin_read(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+        binding: &Digest,
+    ) -> Result<CurrentStoragePeerPhase<'peer>> {
+        self.accept_expected(
+            stage,
+            super::super::storage_peer_wire::CurrentExpectation::AdminRead(binding),
+        )
+    }
+
+    fn accept_expected(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+        expected: super::super::storage_peer_wire::CurrentExpectation<'_>,
+    ) -> Result<CurrentStoragePeerPhase<'peer>> {
         self.owner.disposition.check(self.sequence)?;
         stage.require_purpose(self.purpose.stage_purpose())?;
         ensure!(
-            expected.is_none_or(|request| request.purpose == self.purpose)
-                && (self.purpose == StoragePeerPurpose::CurrentServing || expected.is_some()),
+            expected.purpose() == self.purpose,
             "storage_peer_current_expected_request_required"
         );
         // Keep exactly the already-spent Ready acquisition. A different
@@ -658,11 +682,15 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
                 .owner
                 .channel
                 .receive_storage(stage, &mut acquisition)?;
-            let (remote, nonce, request) =
-                hello.current_hello(&self.owner.initial, sequence, &self.nonce, expected)?;
+            let (remote, nonce, request) = hello.current_hello_expected(
+                &self.owner.initial,
+                sequence,
+                &self.nonce,
+                &expected,
+            )?;
             let (remote, nonce, request) = (remote.clone(), nonce.clone(), request.clone());
             ensure!(
-                request.purpose == self.purpose,
+                request.purpose() == self.purpose,
                 "storage_peer_current_purpose_changed"
             );
             ensure!(
@@ -880,7 +908,7 @@ impl CurrentStoragePeerPhase<'_> {
     pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         let result = (|| {
             self.owner.disposition.check(self.exchange.sequence)?;
-            stage.require_purpose(self.exchange.request.purpose.stage_purpose())?;
+            stage.require_purpose(self.exchange.request.purpose().stage_purpose())?;
             self.owner.check_resources(stage, &mut self.acquisition)?;
             ensure!(
                 self.local == stage.storage()?.storage_statement()?,

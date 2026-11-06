@@ -8,6 +8,7 @@ use day2_capabilities::{
 use serde::{Deserialize, Serialize};
 
 pub(super) mod advance;
+pub(super) mod approval_time;
 pub(super) mod restore;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

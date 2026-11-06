@@ -77,6 +77,9 @@ pub(crate) struct AppFileContinuity {
     identity: FileIdentity,
     process: u32,
     thread: ThreadId,
+    // Born before the first persisted SQLite open; never reset or readopted.
+    sqlite_started: bool,
+    sqlite: Option<crate::store::NativeSqliteKeeper>,
     valid: bool,
 }
 
@@ -295,6 +298,8 @@ impl<'stage, 'role> AppPreparedFile<'stage, 'role> {
             identity: self.identity,
             process: std::process::id(),
             thread: std::thread::current().id(),
+            sqlite_started: false,
+            sqlite: None,
             valid: true,
         })
     }
@@ -311,6 +316,98 @@ impl<'stage, 'role> AppPreparedFile<'stage, 'role> {
 }
 
 impl AppFileContinuity {
+    /// Consume the sole first-open opportunity while borrowing the genuine
+    /// App file. An interrupted or refused attempt cannot adopt later sidecars.
+    pub(in crate::security_epoch) fn begin_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_current(stage)?;
+            ensure!(
+                !self.sqlite_started && self.sqlite.is_none(),
+                "app_sqlite_birth_already_attempted"
+            );
+            self.sqlite_started = true;
+            crate::store::require_unopened_native_sqlite(&self.directory)?;
+            self.check_current(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn check_opened_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        db: &rusqlite::Connection,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_current(stage)?;
+            ensure!(
+                self.sqlite_started && self.sqlite.is_none(),
+                "app_sqlite_birth_not_current"
+            );
+            crate::store::NativeSqliteKeeper::require_initial_main(db, &self.file)?;
+            self.check_current(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn retain_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        mut keeper: crate::store::NativeSqliteKeeper,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_current(stage)?;
+            ensure!(
+                self.sqlite_started && self.sqlite.is_none(),
+                "app_sqlite_keeper_not_first"
+            );
+            keeper.check(&self.directory, &self.file)?;
+            self.sqlite = Some(keeper);
+            self.check_current(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn require_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_current(stage)?;
+            ensure!(
+                self.sqlite_started && self.sqlite.is_some(),
+                "app_sqlite_keeper_not_retained"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn sqlite_cohort(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<crate::security_epoch::native_enrollment::SqliteCohort> {
+        self.require_sqlite(stage)?;
+        self.sqlite
+            .as_ref()
+            .context("app_sqlite_keeper_not_retained")?
+            .cohort_data()
+    }
+
     /// Checks physical continuity with a NEW bounded stage of the SAME live
     /// enrollment. It intentionally does not compare initial bytes or length:
     /// legitimate SQLite writes change those after activation. No active epoch,
@@ -397,12 +494,15 @@ impl AppFileContinuity {
                     "app_file_continuity_mount_path_changed"
                 );
                 acquisition.remaining()?;
+                if let Some(keeper) = &mut self.sqlite {
+                    keeper.check(&self.directory, &self.file)?;
+                }
                 self.owner.check(stage)?;
                 stage.check_selection(&self.policy, &self.store, NativeRole::AppHost)
             }
         })();
         if result.is_err() {
-            self.valid = false;
+            self.refuse();
         }
         result
     }
@@ -443,7 +543,7 @@ impl AppFileContinuity {
             }
         })();
         if result.is_err() {
-            self.valid = false;
+            self.refuse();
         }
         result
     }
@@ -452,5 +552,8 @@ impl AppFileContinuity {
     /// Restoring a name, dropping a phase or waiting cannot renew this owner.
     pub(crate) fn refuse(&mut self) {
         self.valid = false;
+        if let Some(keeper) = &mut self.sqlite {
+            keeper.refuse();
+        }
     }
 }

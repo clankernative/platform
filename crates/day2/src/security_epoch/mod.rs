@@ -10,6 +10,7 @@
 mod admission_work;
 mod authenticated_reads;
 mod bootstrap;
+use bootstrap::{CompletedCeremony, RestoreAuthenticationAction};
 mod control_slot;
 mod control_slot_firestore;
 pub(crate) mod control_slot_io;
@@ -32,12 +33,15 @@ pub(crate) mod restore_cut;
 mod restore_fencing;
 mod restore_original;
 mod restore_staging;
+mod restore_host_clock;
+mod restore_webauthn;
 mod runtime_profile;
 mod seed_core;
 mod self_check_profile;
 pub(crate) mod serving;
 pub(crate) use serving::ServingParticipant;
 mod storage_authority;
+pub(crate) use storage_authority::AuthenticationStoreFiles;
 mod transport;
 
 /// Desired schema metadata only; this creates no native original or authority.
@@ -51,7 +55,7 @@ pub(crate) fn native_schema_metadata(
 pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort, RetainedEpochReads};
 pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
-    CurrentAppServingPhase,
+    ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData, CurrentAppServingPhase,
 };
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;

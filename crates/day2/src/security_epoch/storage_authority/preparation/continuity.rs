@@ -7,6 +7,7 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use super::{observe_anchored_file, observe_current_anchored_file};
+use crate::security_epoch::restore_host_clock::UnfencedControllerClock;
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
     authenticated_reads::{ControllerEpochReads, ProviderEpochReads},
@@ -14,7 +15,8 @@ use crate::security_epoch::{
     controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     storage_authority::{
-        DirectoryIdentity, ReviewedStorageSelection, native_volume::NativeVolumeContinuity,
+        AuthenticationStoreFiles, DirectoryIdentity, NativeApprovalSource,
+        ReviewedStorageSelection, native_volume::NativeVolumeContinuity,
     },
 };
 use anyhow::{Result, ensure};
@@ -561,6 +563,21 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 }
 
 impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
+    pub(in crate::security_epoch::storage_authority) fn capture_approval_source(
+        &mut self,
+        clock: UnfencedControllerClock,
+    ) -> Result<NativeApprovalSource> {
+        self.check()?;
+        let requested = self.inner.phase.capture_approval_source(clock);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let source = requested?;
+        checked?;
+        Ok(source)
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             self.inner.disposition.check()?;
@@ -590,6 +607,53 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
             self.inner.disposition.refuse();
         }
         result
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn admit_authentication_store(
+        &mut self,
+        cohort: &crate::security_epoch::native_enrollment::SqliteCohort,
+    ) -> Result<AuthenticationStoreFiles> {
+        self.check()?;
+        let requested = self.inner.phase.admit_authentication_store(
+            self.inner.directory,
+            self.inner.anchor,
+            cohort,
+        );
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let files = requested?;
+        checked?;
+        Ok(files)
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn check_opened_admin_database(
+        &mut self,
+        db: &rusqlite::Connection,
+        cohort: &crate::security_epoch::native_enrollment::SqliteCohort,
+    ) -> Result<()> {
+        self.check()?;
+        let requested =
+            crate::store::check_controller_sqlite_opened_files(db, self.inner.file, cohort);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn check_admin_database(
+        &mut self,
+        db: &rusqlite::Connection,
+        cohort: &crate::security_epoch::native_enrollment::SqliteCohort,
+    ) -> Result<()> {
+        self.check()?;
+        let requested = crate::store::check_controller_sqlite_files(db, self.inner.file, cohort);
+        let checked = self.check();
+        requested?;
+        checked
     }
 
     pub(crate) fn controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {

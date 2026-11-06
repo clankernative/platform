@@ -38,7 +38,7 @@ impl ActiveControllerStorageContinuity {
             // Authenticated request selection is DATA. This can only be the
             // original App enrollment and a fresh current-serving transcript.
             let binding = trace.measure(ServingStep::RequestBinding, || {
-                Ok(physical.app_request()?.binding.clone())
+                Ok(physical.app_request()?.binding().clone())
             })?;
             let names = trace.measure(ServingStep::Names, || {
                 request_names(&self.store, &self.completion)

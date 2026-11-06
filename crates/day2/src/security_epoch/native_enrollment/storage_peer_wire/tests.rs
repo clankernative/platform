@@ -85,8 +85,7 @@ fn current_hello_selects_the_queued_ready_and_exact_request_even_when_validly_si
     let (_, app, key) = fixture(NativeRole::AppHost);
     let initial = Digest::new(b"one retained peer");
     let ready_nonce = Digest::new(b"one controller ready");
-    let request = StoragePeerRequest {
-        purpose: StoragePeerPurpose::CurrentServing,
+    let request = StoragePeerRequest::CurrentServing {
         binding: Digest::new(b"actual consumer"),
     };
     let hello = signed(
@@ -125,8 +124,7 @@ fn current_hello_selects_the_queued_ready_and_exact_request_even_when_validly_si
             .current_hello(&Digest::new(b"other original"), 1, &ready_nonce, None)
             .is_err()
     );
-    let foreign = StoragePeerRequest {
-        purpose: request.purpose,
+    let foreign = StoragePeerRequest::CurrentServing {
         binding: Digest::new(b"another consumer"),
     };
     assert!(
@@ -134,9 +132,8 @@ fn current_hello_selects_the_queued_ready_and_exact_request_even_when_validly_si
             .current_hello(&initial, 1, &ready_nonce, Some(&foreign))
             .is_err()
     );
-    let bootstrap = StoragePeerRequest {
-        purpose: StoragePeerPurpose::BootstrapCreate,
-        binding: request.binding.clone(),
+    let bootstrap = StoragePeerRequest::BootstrapCreate {
+        binding: request.binding().clone(),
     };
     let wrong_purpose = signed(
         &app,
@@ -189,8 +186,7 @@ fn current_begin_ready_cannot_be_replaced_by_a_later_grant_clock_or_nonce() {
     let exchange = CurrentExchange {
         initial,
         sequence: 1,
-        request: StoragePeerRequest {
-            purpose: StoragePeerPurpose::CurrentServing,
+        request: StoragePeerRequest::CurrentServing {
             binding: Digest::new(b"consumer"),
         },
         app_stage: Digest::new(b"fresh app stage"),
@@ -882,8 +878,7 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
 fn repeated_exchange_data_keeps_the_http_original_and_rejects_replay_or_widening() {
     let (_, admitted, key, _) = fixture_with_issuer(NativeRole::AppHost);
     let initial = Digest::new(b"actual-initial-exchange-required-by-native-factory");
-    let request = StoragePeerRequest {
-        purpose: StoragePeerPurpose::CurrentServing,
+    let request = StoragePeerRequest::CurrentServing {
         binding: Digest::new(b"same-http-operation"),
     };
     let mut previous = admitted.original.clone();
@@ -1033,8 +1028,7 @@ fn cold_admission_still_expires_and_fresh_requests_bind_historical_admission_dat
             app: Box::new(fresh.clone()),
             initial: Digest::new(b"original-known-exchange"),
             sequence: 1,
-            request: StoragePeerRequest {
-                purpose: StoragePeerPurpose::CurrentServing,
+            request: StoragePeerRequest::CurrentServing {
                 binding: Digest::new(b"exact-request"),
             },
             nonce: Digest::new(b"fresh-app-nonce"),
@@ -1067,8 +1061,7 @@ fn current_exchange_binds_sequence_purpose_request_and_both_fresh_intervals() {
     let exchange = CurrentExchange {
         initial: Digest::new(b"initial"),
         sequence: 1,
-        request: StoragePeerRequest {
-            purpose: StoragePeerPurpose::CurrentServing,
+        request: StoragePeerRequest::CurrentServing {
             binding: Digest::new(b"intent-action-body"),
         },
         app_stage: Digest::new(b"current-app-stage"),
@@ -1112,8 +1105,7 @@ fn current_wire_stays_closed_and_rejects_nested_arrays_and_unknown_fields() {
             app: Box::new(stage.clone()),
             initial: Digest::new(b"initial"),
             sequence: 1,
-            request: StoragePeerRequest {
-                purpose: StoragePeerPurpose::BootstrapCreate,
+            request: StoragePeerRequest::BootstrapCreate {
                 binding: Digest::new(b"request"),
             },
             nonce: Digest::new(b"nonce"),
@@ -1292,10 +1284,9 @@ fn bootstrap_request_rejects_valid_ordinary_grant_even_when_both_are_short() {
                 StagePurpose::StorageBootstrap,
             )
             .unwrap();
-        let request = StoragePeerRequest {
-            purpose,
-            binding: Digest::new(b"fixed-bootstrap-request"),
-        };
+        let request =
+            StoragePeerRequest::operation(purpose, Digest::new(b"fixed-bootstrap-request"))
+                .unwrap();
         let nonce = Digest::new(b"ready");
         let initial = Digest::new(b"initial-peer");
         let body = |statement: &StageStatement| Body::CurrentHello {
@@ -3478,4 +3469,159 @@ mod activation_histories {
         };
         replay(Path::new(&path))
     }
+}
+
+#[test]
+fn admin_read_is_signed_distinct_and_exact_with_a_mandatory_cohort() {
+    let (_, app, key) = fixture(NativeRole::AppHost);
+    let initial = Digest::new(b"retained peer");
+    let ready = Digest::new(b"fresh controller ready");
+    let operation = Digest::new(b"exact admin operation");
+    let cohort = SqliteCohort::from_identities((9, 10), (9, 11), (9, 12)).unwrap();
+    let request = StoragePeerRequest::AdminRead {
+        binding: operation.clone(),
+        cohort,
+    };
+    let hello = signed(
+        &app,
+        &key,
+        Body::CurrentHello {
+            app: Box::new(app.clone()),
+            initial: initial.clone(),
+            sequence: 2,
+            request: request.clone(),
+            nonce: Digest::new(b"fresh app"),
+            controller_nonce: ready.clone(),
+        },
+    );
+    let decoded = decode(&serde_json::to_vec(&hello).unwrap()).unwrap();
+    decoded.verify(&app).unwrap();
+    decoded
+        .current_hello_expected(
+            &initial,
+            2,
+            &ready,
+            &CurrentExpectation::AdminRead(&operation),
+        )
+        .unwrap();
+    assert!(decoded.current_hello(&initial, 2, &ready, None).is_err());
+    assert!(
+        decoded
+            .current_hello_expected(
+                &initial,
+                2,
+                &ready,
+                &CurrentExpectation::AdminRead(&Digest::new(b"other operation"))
+            )
+            .is_err()
+    );
+    assert!(
+        decoded
+            .current_hello_expected(
+                &initial,
+                3,
+                &ready,
+                &CurrentExpectation::AdminRead(&operation)
+            )
+            .is_err()
+    );
+    assert!(
+        decoded
+            .current_hello_expected(
+                &initial,
+                2,
+                &Digest::new(b"old ready"),
+                &CurrentExpectation::AdminRead(&operation)
+            )
+            .is_err()
+    );
+    let ordinary = StoragePeerRequest::CurrentServing {
+        binding: operation.clone(),
+    };
+    assert!(
+        decoded
+            .current_hello(&initial, 2, &ready, Some(&ordinary))
+            .is_err()
+    );
+    assert!(
+        StoragePeerRequest::operation(StoragePeerPurpose::AdminRead, operation.clone()).is_err()
+    );
+    for identities in [
+        ((9, 0), (9, 11), (9, 12)),
+        ((9, 10), (9, 10), (9, 12)),
+        ((9, 10), (8, 11), (9, 12)),
+    ] {
+        assert!(SqliteCohort::from_identities(identities.0, identities.1, identities.2).is_err());
+    }
+    let original = serde_json::to_value(&hello).unwrap();
+    for (path, value) in [
+        ("/body/request", serde_json::json!([])),
+        ("/body/request/cohort", serde_json::json!([])),
+        ("/body/request/cohort/main", serde_json::json!([9, 99])),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).unwrap() = value;
+        let changed = decode(&serde_json::to_vec(&changed).unwrap());
+        if path.ends_with("main") {
+            assert!(changed.unwrap().verify(&app).is_err());
+        } else {
+            assert!(changed.is_err());
+        }
+    }
+    for field in ["binding", "cohort", "purpose"] {
+        let mut changed = original.clone();
+        changed["body"]["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    let mut ordinary_with_cohort = original.clone();
+    ordinary_with_cohort["body"]["request"]["purpose"] = serde_json::json!("current_serving");
+    assert!(decode(&serde_json::to_vec(&ordinary_with_cohort).unwrap()).is_err());
+    for field in ["purpose", "binding", "cohort"] {
+        let raw = serde_json::to_string(&original).unwrap();
+        let value = serde_json::to_string(&original["body"]["request"][field]).unwrap();
+        let fragment = format!("\"{field}\":{value}");
+        let duplicate = raw.replacen(&fragment, &format!("{fragment},{fragment}"), 1);
+        assert!(
+            raw != duplicate,
+            "duplicate-field mutation must change the exact wire bytes"
+        );
+        assert!(decode(duplicate.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn authentication_cohort_comparison_rejects_every_app_alias_and_candidate_alias()
+-> anyhow::Result<()> {
+    let app = SqliteCohort::from_identities((9, 10), (9, 11), (9, 12))?;
+    let valid = [(9, 20), (9, 21), (9, 22)];
+    app.require_disjoint_members(valid[0], Some(valid[1]), Some(valid[2]))?;
+    app.require_disjoint_members(valid[0], None, None)?;
+    // Same inode on another device is distinct DATA; native placement is a
+    // separate actual mount/profile check, not invented by this comparator.
+    app.require_disjoint_members((19, 10), Some((19, 11)), Some((19, 12)))?;
+    for slot in 0..3 {
+        for member in [(9, 10), (9, 11), (9, 12)] {
+            let mut candidate = valid;
+            candidate[slot] = member;
+            assert!(
+                app.require_disjoint_members(candidate[0], Some(candidate[1]), Some(candidate[2]))
+                    .is_err()
+            );
+        }
+    }
+    for (main, wal, shm) in [
+        ((9, 0), None, None),
+        ((9, 20), Some((9, 0)), None),
+        ((9, 20), None, Some((9, 0))),
+        ((9, 20), Some((9, 20)), None),
+        ((9, 20), None, Some((9, 20))),
+        ((9, 20), Some((9, 21)), Some((9, 21))),
+        ((9, 20), Some((10, 21)), None),
+    ] {
+        assert!(app.require_disjoint_members(main, wal, shm).is_err());
+    }
+    Ok(())
 }

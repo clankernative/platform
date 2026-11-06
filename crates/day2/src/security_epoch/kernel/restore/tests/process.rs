@@ -147,8 +147,7 @@ fn require_death(exit: &Exit, cut: Cut) -> Result<()> {
     Ok(())
 }
 
-async fn execute(config: &Config, input: &Path, kill: bool, attempt: &mut Attempt) -> Result<Exit> {
-    attempt.phase = RoundStage::Launch;
+fn child_command(input: &Path) -> Result<tokio::process::Command> {
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
     command
         .arg("--exact")
@@ -168,8 +167,18 @@ async fn execute(config: &Config, input: &Path, kill: bool, attempt: &mut Attemp
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
+    Ok(command)
+}
+
+async fn execute(config: &Config, input: &Path, kill: bool, attempt: &mut Attempt) -> Result<Exit> {
+    attempt.phase = RoundStage::Launch;
+    let mut command = child_command(input)?;
     let mut child = command.spawn()?;
     attempt.spawned = true;
+    // Tokio Child::wait closes its stored stdin before awaiting death. Keep
+    // that writer outside Child so wait cannot wake this paused checkpoint
+    // with EOF while a requested SIGKILL is still being delivered.
+    let held_stdin = child.stdin.take().context("restore_child_stdin_missing")?;
     let mut pipe = child.stderr.take().context("restore_child_pipe_missing")?;
     let result = (async {
         attempt.phase = RoundStage::Checkpoint;
@@ -222,6 +231,7 @@ async fn execute(config: &Config, input: &Path, kill: bool, attempt: &mut Attemp
             attempt.signal = status.signal();
         }
     }
+    drop(held_stdin);
     result
 }
 
@@ -546,4 +556,61 @@ async fn normal_completion_and_clean_checkpoint_exit_cannot_impersonate_process_
         assert!(require_death(&substituted, config.cut).is_err());
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_stdin_eof_emits_refusal_and_cannot_impersonate_process_loss() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("epoch.sqlite");
+    let (_, before) = initial();
+    drop(Provider::open(&path, &before)?);
+    let config = Config {
+        format: 1,
+        database: path,
+        seed: 17,
+        cut: Cut::AfterRoot,
+        behavior: Behavior::Pause,
+    };
+    let input = directory.path().join("input.json");
+    std::fs::write(&input, serde_json::to_vec(&config)?)?;
+    let mut child = child_command(&input)?.spawn()?;
+    let held_stdin = child.stdin.take().context("restore_child_stdin_missing")?;
+    let mut pipe = child.stderr.take().context("restore_child_pipe_missing")?;
+    let result = (async {
+        let mut checkpoint = [0; 16];
+        tokio::time::timeout(WAIT, pipe.read_exact(&mut checkpoint)).await??;
+        ensure!(
+            checkpoint == marker(config.cut),
+            "restore_child_checkpoint_missing"
+        );
+        // A deterministic counterexample to treating a closed checkpoint pipe
+        // as silent waiting: the child emits a second, explicit refusal frame.
+        drop(held_stdin);
+        let mut refusal = [0; 16];
+        tokio::time::timeout(WAIT, pipe.read_exact(&mut refusal)).await??;
+        ensure!(refusal == [0xFF; 16], "restore_child_eof_refusal_missing");
+        let status = tokio::time::timeout(WAIT, child.wait()).await??;
+        ensure!(
+            status.signal().is_none() && status.code().is_some_and(|code| code != 0),
+            "restore_child_eof_exit_not_known"
+        );
+        let exit = Exit {
+            checkpoint,
+            code: status.code(),
+            signal: status.signal(),
+            eof: false,
+            kill_requested: false,
+        };
+        ensure!(
+            require_death(&exit, config.cut).is_err(),
+            "restore_child_eof_accepted_as_death"
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    if result.is_err() {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(WAIT, child.wait()).await;
+    }
+    result
 }
