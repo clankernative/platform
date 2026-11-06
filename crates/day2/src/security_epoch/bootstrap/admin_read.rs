@@ -253,6 +253,7 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
                 self.reader.is_none(),
                 "controller_admin_reader_already_open"
             );
+            self.check_opened_database(db)?;
             self.disposition.retain_reader()?;
             self.reader = Some(std::ptr::from_ref(db));
             Ok(())
@@ -356,6 +357,21 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
             .as_mut()
             .context("controller_admin_loan_closed")?
             .check_admin_database(db);
+        let checked = self.check_local();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    pub(crate) fn check_opened_database(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        self.check_local()?;
+        let requested = self
+            .physical
+            .as_mut()
+            .context("controller_admin_loan_closed")?
+            .check_opened_admin_database(db);
         let checked = self.check_local();
         if requested.is_err() || checked.is_err() {
             self.refuse();

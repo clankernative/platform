@@ -23,6 +23,34 @@ pub(crate) struct ControllerAdminData {
     pub(crate) authority: crate::authority_state::AuthorityStamp,
 }
 
+fn require_original_main(actual: &opened_files::Handle, original: &File) -> Result<()> {
+    let retained = original.metadata()?;
+    ensure!(
+        retained.is_file()
+            && retained.nlink() == 1
+            && (actual.device, actual.inode) == (retained.dev(), retained.ino()),
+        "controller_admin_main_not_original"
+    );
+    Ok(())
+}
+
+/// Actual opened MAIN before configuration; compare any sidecar already open.
+/// This deliberately cannot stand in for the later complete cohort check.
+pub(crate) fn check_controller_sqlite_opened_files(
+    db: &Connection,
+    original: &File,
+    cohort: &SqliteCohort,
+) -> Result<()> {
+    let actual =
+        opened_files::held(db).map_err(|_| anyhow::anyhow!("controller_admin_files_refused"))?;
+    require_original_main(&actual.main, original)?;
+    cohort.require_opened_members(
+        (actual.main.device, actual.main.inode),
+        actual.journal.map(|file| (file.device, file.inode)),
+        actual.shm.map(|file| (file.device, file.inode)),
+    )
+}
+
 /// Only compares already-opened resources. This returns no file/role or loan.
 pub(crate) fn check_controller_sqlite_files(
     db: &Connection,
@@ -31,13 +59,7 @@ pub(crate) fn check_controller_sqlite_files(
 ) -> Result<()> {
     let actual =
         opened_files::held(db).map_err(|_| anyhow::anyhow!("controller_admin_files_refused"))?;
-    let retained = original.metadata()?;
-    ensure!(
-        retained.is_file()
-            && retained.nlink() == 1
-            && (actual.main.device, actual.main.inode) == (retained.dev(), retained.ino()),
-        "controller_admin_main_not_original"
-    );
+    require_original_main(&actual.main, original)?;
     ensure!(
         &opened_files::cohort(&actual)? == cohort,
         "controller_admin_cohort_changed"
@@ -94,6 +116,7 @@ impl InitialStoreMetadata {
             connection = Some(opened?);
             post?;
             let db = connection.as_mut().context("controller_admin_sql_closed")?;
+            loan.check_opened_database(db)?;
             configure_connection(db)
                 .map_err(|_| anyhow::anyhow!("controller_admin_sql_configuration_refused"))?;
             db.pragma_update(None, "query_only", true)
@@ -150,6 +173,85 @@ impl InitialStoreMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opened_main_admission_refuses_foreign_connection_after_named_path_is_restored() -> Result<()>
+    {
+        let (_directory, path, _keeper, original, cohort) = fixture()?;
+        let other = tempfile::tempdir()?;
+        let foreign = other.path().join("foreign.sqlite");
+        let foreign_keeper = Connection::open(&foreign)?;
+        foreign_keeper.execute_batch("CREATE TABLE foreign_image(value INTEGER)")?;
+        let saved = path.with_extension("held");
+        std::fs::rename(&path, &saved)?;
+        std::fs::rename(&foreign, &path)?;
+        let reader = open_readonly(&path)?;
+        std::fs::rename(&path, &foreign)?;
+        std::fs::rename(&saved, &path)?;
+        assert_eq!(std::fs::metadata(&path)?.ino(), original.metadata()?.ino());
+        // No configure_connection, transaction or authority projection yet.
+        assert!(check_controller_sqlite_opened_files(&reader, &original, &cohort).is_err());
+        drop(foreign_keeper);
+        Ok(())
+    }
+
+    #[test]
+    fn opened_members_compare_every_present_sidecar_without_inventing_missing_ones() -> Result<()> {
+        let (_directory, path, _keeper, original, cohort) = fixture()?;
+        let mut reader = open_readonly(&path)?;
+        check_controller_sqlite_opened_files(&reader, &original, &cohort)?;
+        let tx = reader.transaction()?;
+        let actual = opened_files::snapshot(&tx)?;
+        tx.rollback()?;
+        let unused = [
+            actual.main.inode,
+            actual.journal.unwrap().inode,
+            actual.shm.unwrap().inode,
+        ]
+        .into_iter()
+        .max()
+        .unwrap()
+        .checked_add(1)
+        .unwrap();
+        for (wal, shm) in [
+            (
+                (actual.main.device, unused),
+                (actual.shm.unwrap().device, actual.shm.unwrap().inode),
+            ),
+            (
+                (
+                    actual.journal.unwrap().device,
+                    actual.journal.unwrap().inode,
+                ),
+                (actual.main.device, unused),
+            ),
+        ] {
+            let wrong =
+                SqliteCohort::from_identities((actual.main.device, actual.main.inode), wal, shm)?;
+            assert!(check_controller_sqlite_opened_files(&reader, &original, &wrong).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lazy_missing_sidecars_never_satisfy_complete_admission() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("without-wal.sqlite");
+        let keeper = Connection::open(&path)?;
+        keeper.execute_batch("CREATE TABLE data(value INTEGER)")?;
+        let original = File::open(&path)?;
+        let main = original.metadata()?;
+        // Synthetic comparison DATA only, not an App keeper or native cohort.
+        let expected = SqliteCohort::from_identities(
+            (main.dev(), main.ino()),
+            (main.dev(), main.ino().checked_add(1).unwrap()),
+            (main.dev(), main.ino().checked_add(2).unwrap()),
+        )?;
+        let reader = open_readonly(&path)?;
+        check_controller_sqlite_opened_files(&reader, &original, &expected)?;
+        assert!(check_controller_sqlite_files(&reader, &original, &expected).is_err());
+        Ok(())
+    }
 
     fn fixture() -> Result<(
         tempfile::TempDir,
