@@ -1273,6 +1273,8 @@ pub struct EndpointBinding {
 #[serde(from = "StoredBinding")]
 pub struct AppBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_secrets: Option<day2_capabilities::app_secrets::Namespace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<crate::security_admission::Requirements>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<day2_capabilities::runtime::RuntimeProfile>,
@@ -1323,6 +1325,8 @@ pub struct AppBinding {
 #[serde(deny_unknown_fields)]
 struct StoredBinding {
     #[serde(default)]
+    managed_secrets: Option<day2_capabilities::app_secrets::Namespace>,
+    #[serde(default)]
     security: Option<crate::security_admission::Requirements>,
     #[serde(default)]
     runtime: Option<day2_capabilities::runtime::RuntimeProfile>,
@@ -1354,6 +1358,7 @@ struct StoredBinding {
 impl From<StoredBinding> for AppBinding {
     fn from(stored: StoredBinding) -> Self {
         Self {
+            managed_secrets: stored.managed_secrets,
             security: stored.security,
             runtime: stored.runtime,
             artifact: stored.artifact,
@@ -2047,6 +2052,26 @@ impl Instance {
         ensure!(!instance.apps.is_empty(), "instance has no apps");
         for name in instance.apps.keys() {
             day2_contracts::names::identifier(name)?;
+        }
+        for (app, binding) in &instance.apps {
+            if let Some(namespace) = &binding.managed_secrets {
+                namespace.validate()?;
+                let prefix = day2_capabilities::app_secrets::prefix(&instance.scope(app)?);
+                if let Some(control) = &instance.control {
+                    for provider in control.secrets.values() {
+                        let day2_capabilities::SecretProvider::GcpVersion {
+                            project_number,
+                            secret,
+                            ..
+                        } = provider;
+                        ensure!(
+                            *project_number != namespace.project_number
+                                || !secret.as_str().starts_with(&prefix),
+                            "app_secret_namespace_overlaps_platform_secret"
+                        );
+                    }
+                }
+            }
         }
         if let Some(control) = &instance.control {
             control.validate(instance.apps.keys().map(String::as_str))?;

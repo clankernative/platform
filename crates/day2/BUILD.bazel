@@ -6,6 +6,7 @@ package(default_visibility = ["//visibility:public"])
 filegroup(name = "font_fixture_bytes", srcs = ["tests/fixtures/fonts/test-subset.rs"])
 
 COMPILE_INPUTS = [
+    "src/app_secrets/steps.json",
     ":font_fixture_bytes",
     "//crates/worker:src/first_request.rs",
     "//:Cargo.lock",
@@ -55,6 +56,7 @@ COMPILE_INPUTS = [
     "//:ops/Release.roc",
     "//:ops/Runner.roc",
     "//:ops/SecretRetirement.roc",
+    "//:ops/AppSecrets.roc",
     "//:ops/Simulation.roc",
     "//:ops/UiDependency.roc",
     "//:ops/Verify.roc",

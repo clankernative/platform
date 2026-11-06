@@ -19,6 +19,10 @@ const MAX_EFFECTS: usize = 4096;
 // Explicitly catalog the private package, as we do for the public SDK. Changes
 // invalidate both the executable cache and centralized CI recipe identity.
 pub const SOURCES: &[(&str, &[u8])] = &[
+    (
+        "ops/AppSecrets.roc",
+        include_bytes!("../../../ops/AppSecrets.roc"),
+    ),
     ("ops/Runner.roc", include_bytes!("../../../ops/Runner.roc")),
     ("ops/main.roc", include_bytes!("../../../ops/main.roc")),
     (
