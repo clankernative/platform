@@ -20,7 +20,10 @@ executor/custody field are covered. Transport is bounded and rejects unknown or
 duplicate fields and noncanonical signatures.
 
 `verify_signature_data` checks cryptographic DATA against the exact expected
-statement and public key; neither argument is authenticated by this function.
+statement and the exact selected KMS version/public-key pair; neither argument
+is authenticated by this function. The signing-key commitment includes the full
+canonical resource version, so reimporting the same public bytes elsewhere does
+not preserve that identity.
 Computing a key digest or verifying an intact signature creates no current
 registry trust, passkey proof, time witness, single use or native owner. A caller
 cannot obtain `VerifiedApproval` from this API. No production signer or accepting
