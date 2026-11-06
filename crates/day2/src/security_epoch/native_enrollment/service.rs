@@ -302,7 +302,7 @@ fn freeze(
                 && statement.stage.data.role == role,
             "native_restore_issuer_selection_changed"
         );
-        statement.validate_issuer_stage_data(&issuer.policy, &issuer.certificate, role, now)?;
+        statement.validate_issued_request_data(&issuer.policy, &issuer.certificate, role, now)?;
         let key = (
             statement.stage.data.process.process,
             statement.stage.data.process.start_ticks,
@@ -376,14 +376,15 @@ fn freeze(
         challenge,
     };
     let signature = issuer.key.sign("restore-issuer-frozen", &statement)?;
-    // Recheck the signed CurrentRole bounds after nonce/bind IO on the same
-    // clock. This remains enrollment DATA validation, not App liveness/Stop.
+    // Recheck this Current request after nonce/bind IO on the same clock.
+    // The historical cold grant is identity, never a renewed request deadline.
+    // This is DATA validation, not App liveness or complete business Stop.
     let now = acquisition.sample()?.elapsed;
     for (statement, role) in [
         (&statement.selection.app, NativeRole::AppHost),
         (&statement.selection.controller, NativeRole::EpochController),
     ] {
-        statement.validate_issuer_stage_data(&issuer.policy, &issuer.certificate, role, now)?;
+        statement.validate_issued_request_data(&issuer.policy, &issuer.certificate, role, now)?;
     }
     // Same publication guards as enrollment, on the actual entry snapshot and
     // original request acquisition; freezing is not an issuer-check exemption.
