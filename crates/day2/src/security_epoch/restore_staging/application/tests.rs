@@ -510,7 +510,8 @@ fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_befo
     // Use the same source parser for both sides. Compiler-produced quote tokens
     // retain different opaque macro punctuation spacing; no argument, literal
     // or ordering may be discarded to make the expected source match.
-    let tail: syn::Block = syn::parse_str(r#"{
+    let tail: syn::Block = syn::parse_str(
+        r#"{
         selected.artifact.require_current_api()?;
         selected.cut.require_artifact(selected.artifact)?;
         ensure!(
@@ -533,9 +534,14 @@ fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_befo
             selected.namespace,
             selected.source_epoch,
         )
-    }"#).unwrap();
+    }"#,
+    )
+    .unwrap();
     let roundtrip: syn::Block = syn::parse_str(&tail.to_token_stream().to_string()).unwrap();
-    assert_eq!(tail.to_token_stream().to_string(), roundtrip.to_token_stream().to_string());
+    assert_eq!(
+        tail.to_token_stream().to_string(),
+        roundtrip.to_token_stream().to_string()
+    );
     let valid = |f: &syn::ItemFn| {
         f.block.stmts.len() >= tail.stmts.len()
             && f.block
@@ -546,7 +552,22 @@ fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_befo
                 .zip(tail.stmts.iter().rev())
                 .all(|(a, b)| a.to_token_stream().to_string() == b.to_token_stream().to_string())
     };
-    assert_eq!(actual.block.stmts.iter().rev().take(tail.stmts.len()).map(|s|s.to_token_stream().to_string()).collect::<Vec<_>>(), tail.stmts.iter().rev().map(|s|s.to_token_stream().to_string()).collect::<Vec<_>>(), "actual static source tail");
+    assert_eq!(
+        actual
+            .block
+            .stmts
+            .iter()
+            .rev()
+            .take(tail.stmts.len())
+            .map(|s| s.to_token_stream().to_string())
+            .collect::<Vec<_>>(),
+        tail.stmts
+            .iter()
+            .rev()
+            .map(|s| s.to_token_stream().to_string())
+            .collect::<Vec<_>>(),
+        "actual static source tail"
+    );
     assert!(valid(actual));
     let start = actual.block.stmts.len() - tail.stmts.len();
     for index in 0..tail.stmts.len() {
