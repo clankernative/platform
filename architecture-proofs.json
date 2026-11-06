@@ -119,6 +119,15 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_staging.rs",
+      "scope": "const",
+      "fingerprint": "sha256:16389a0bd14c411a09b8ed10cace22c3c3ec6b3a7684b3adb9a6d045f94d41c2",
+      "registration": {
+        "source": "crates/day2/src/security_epoch/mod.rs",
+        "module": "restore_staging"
+      }
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
       "scope": "const",
       "fingerprint": "sha256:f2499f9eb70a64af334461b4f9646c6eca2f78fbf54dd2c6370f27e78d04dc8f",
@@ -5544,6 +5553,101 @@
       "proof_uses": [],
       "destructor": "sha256:d334117fb813e2e0a6ba440e32f0edaf7c68be77720068ff9ec85507ec536c37",
       "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging.rs",
+      "type_name": "MemoryAdmission",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn begin (& self) -> Result < (Transaction < '_ > , MemoryHook < '_ >) >",
+        "pub (crate) fn begin_for_tests (& self) -> Result < (Transaction < '_ > , MemoryHook < '_ >) >",
+        "fn configure (db : & 'db mut Connection) -> Result < Self >",
+        "pub (crate) fn configure_for_tests (db : & 'db mut Connection) -> Result < Self >"
+      ],
+      "factories": [
+        {
+          "owner": "MemoryAdmission < 'db >",
+          "signature": "fn configure (db : & 'db mut Connection) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "MemoryAdmission < 'db >",
+          "signature": "fn begin (& self) -> Result < (Transaction < '_ > , MemoryHook < '_ >) >"
+        }
+      ],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/application.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging.rs",
+            "module": "application"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging.rs",
+            "module": "writer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+            "module": "dispatch"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging.rs",
+      "type_name": "MemoryHook",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (crate) fn enter (& self , tx : & Transaction < '_ >) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "MemoryAdmission < 'db >",
+          "signature": "fn begin (& self) -> Result < (Transaction < '_ > , MemoryHook < '_ >) >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn reset_in (tx : & Transaction < '_ > , hook : & MemoryHook < '_ > , selected : & Selection < '_ > , namespace : & Namespace , source_epoch : u64) -> Result < Summary >"
+        },
+        {
+          "owner": "MemoryHook < '_ >",
+          "signature": "pub (crate) fn enter (& self , tx : & Transaction < '_ >) -> Result < () >"
+        }
+      ],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/application.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging.rs",
+            "module": "application"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging.rs",
+            "module": "writer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+            "module": "dispatch"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
