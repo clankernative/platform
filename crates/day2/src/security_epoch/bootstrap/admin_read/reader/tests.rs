@@ -16,10 +16,13 @@ fn exact_policy_selection_checks_both_principals_and_never_adopts_a_new_stamp() 
     let actors = ["approver@example.test", "executor@example.test"];
     let current = data(7, &actors);
     let operation = Digest::new(b"exact accepting action");
-    let selected = AdminSelection::capture(&current, &operation, actors[0], actors[1])?;
+    let selected = AdminSelection::capture(&current, &operation, actors[0], actors[1])?.unwrap();
     selected.check(&current)?;
     // The same admin may approve and execute. There is no two-person rule.
-    AdminSelection::capture(&current, &operation, actors[0], actors[0])?;
+    assert!(AdminSelection::capture(&current, &operation, actors[0], actors[0])?.is_some());
+    for nonmember in [data(7, &actors[..1]), data(7, &actors[1..]), data(7, &[])] {
+        assert!(AdminSelection::capture(&nonmember, &operation, actors[0], actors[1])?.is_none());
+    }
     for changed in [
         data(8, &actors),
         data(7, &actors[..1]),
@@ -35,6 +38,75 @@ fn exact_policy_selection_checks_both_principals_and_never_adopts_a_new_stamp() 
         AdminSelection::capture(&current, &operation, "domain:private-identity", actors[1])
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn actual_durable_authority_changes_cannot_rebind_the_captured_selection() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut db = rusqlite::Connection::open(directory.path().join("authority.sqlite"))?;
+    crate::authority_state::upgrade(&db)?;
+    let document = crate::authority_state::AuthorityDocument {
+        security: None,
+        enabled: true,
+        hosted_domain: None,
+        readers: Default::default(),
+        writers: Default::default(),
+        policy: Some(crate::authority::Policy {
+            version: 1,
+            admins: [
+                "approver@example.test".to_owned(),
+                "executor@example.test".to_owned(),
+            ]
+            .into(),
+            operations: Default::default(),
+            constraints: Default::default(),
+            delegations: Default::default(),
+        }),
+        resources: Default::default(),
+        credentials: Default::default(),
+    };
+    db.execute(
+        "INSERT INTO day2_authority VALUES(1,?1,1,?2,'fixture-artifact','fixture-path')",
+        rusqlite::params![
+            Digest::new(b"durable authority epoch").as_str(),
+            serde_json::to_string(&document)?
+        ],
+    )?;
+    let read = |db: &rusqlite::Connection| -> Result<ControllerAdminData> {
+        let active = crate::authority_state::current(db)?;
+        Ok(ControllerAdminData {
+            members: active.policy()?.admins.clone(),
+            authority: active.stamp,
+        })
+    };
+    let selected = AdminSelection::capture(
+        &read(&db)?,
+        &Digest::new(b"action"),
+        "approver@example.test",
+        "executor@example.test",
+    )?
+    .unwrap();
+    let tx = db.transaction()?;
+    tx.execute("UPDATE day2_authority SET revision=2", [])?;
+    tx.commit()?;
+    // A known later revision still refuses even with identical current admins.
+    assert!(selected.check(&read(&db)?).is_err());
+    let mut removed = document;
+    removed
+        .policy
+        .as_mut()
+        .unwrap()
+        .admins
+        .remove("executor@example.test");
+    db.execute(
+        "UPDATE day2_authority SET revision=3,document=?1",
+        [serde_json::to_string(&removed)?],
+    )?;
+    assert!(selected.check(&read(&db)?).is_err());
+    drop(db);
+    let reopened = rusqlite::Connection::open(directory.path().join("authority.sqlite"))?;
+    assert!(selected.check(&read(&reopened)?).is_err());
     Ok(())
 }
 
@@ -158,4 +230,55 @@ fn abandoning_reader_drops_actual_sqlite_before_the_native_loan() {
     let mut wrong = names.clone();
     wrong.swap(0, 1);
     assert_ne!(wrong, ["sqlite", "loan", "metadata", "selected"]);
+}
+
+fn denied_settles(source: &str) -> bool {
+    use quote::ToTokens;
+    struct Denial(Option<syn::Expr>);
+    impl<'ast> Visit<'ast> for Denial {
+        fn visit_local(&mut self, node: &'ast syn::Local) {
+            if matches!(&node.pat, syn::Pat::TupleStruct(pattern) if pattern.path.is_ident("Some"))
+            {
+                self.0 = node
+                    .init
+                    .as_ref()
+                    .and_then(|init| init.diverge.as_ref())
+                    .map(|(_, expr)| *expr.clone());
+            }
+            syn::visit::visit_local(self, node);
+        }
+    }
+    let file = syn::parse_file(source).unwrap();
+    let mut denial = Denial(None);
+    denial.visit_file(&file);
+    let Some(syn::Expr::Block(body)) = denial.0 else {
+        return false;
+    };
+    let wrapper = format!(
+        "impl Guard {{ fn denied() {} }}",
+        body.block.to_token_stream()
+    );
+    let trace = calls(&wrapper, "Guard", "denied");
+    let expected: syn::Stmt = syn::parse_quote!(return Ok(None););
+    before(&trace, "close", "check_local")
+        && before(&trace, "check_local", "finish_checked")
+        && body.block.stmts.last().is_some_and(|last| {
+            last.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        })
+}
+
+#[test]
+fn known_initial_denial_settles_the_same_reader_before_returning_data() {
+    let source = include_str!("../reader.rs");
+    assert!(denied_settles(source));
+    for (old, new) in [
+        (
+            "let closed = sqlite.close(&mut loan);",
+            "let closed = Ok(());",
+        ),
+        ("loan.finish_checked()?;", ""),
+    ] {
+        assert_eq!(source.matches(old).count(), 1);
+        assert!(!denied_settles(&source.replace(old, new)));
+    }
 }

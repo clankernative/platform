@@ -1822,7 +1822,7 @@
       ],
       "methods": [
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
-        "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (in crate :: security_epoch) fn begin_admin_read < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , operation : & Digest , trace : & 'storage ServingTiming) -> Result < ControllerAdminReadLoan < 'storage , 'role > >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ > , trace : & ServingTiming) -> Result < ServingObservation >",
@@ -1845,7 +1845,7 @@
         },
         {
           "owner": "ActiveControllerStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >"
         },
         {
           "owner": "ActiveControllerStorageContinuity",
@@ -2196,7 +2196,7 @@
       "type_name": "ControllerAdminReader",
       "owning_children": [],
       "methods": [
-        "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >",
+        "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)"
@@ -2204,11 +2204,11 @@
       "factories": [
         {
           "owner": "ActiveControllerStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >"
         },
         {
           "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
-          "signature": "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
+          "signature": "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >"
         }
       ],
       "material_uses": [

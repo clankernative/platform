@@ -7,6 +7,11 @@ current administrators; they may be the same administrator. Their supplied
 names are still DATA, not authentication. A passkey-backed approval producer
 must authenticate their identity and subject bindings separately.
 
+An initial known nonmember returns `None` only after actual SQLite close,
+native postchecks and complete counter/peer settlement. It creates no reader or
+approval. Malformed input and native/SQL/unknown outcomes remain errors. Losing
+membership after a reader has captured its selection remains terminal.
+
 The App holds its real mutable owner and storage continuation before the
 Controller opens SQLite. The reader opens one read-only, no-follow connection,
 binds its stable boxed identity, and retains its actual MAIN/WAL/SHM descriptors

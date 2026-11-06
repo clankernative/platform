@@ -33,10 +33,17 @@ impl AdminSelection {
         operation: &Digest,
         approver: &str,
         executor: &str,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         for actor in [approver, executor] {
             crate::authority::valid_actor(actor)
                 .map_err(|_| anyhow::anyhow!("controller_admin_actor_shape"))?;
+        }
+        ensure!(
+            !data.authority.epoch.is_empty() && data.authority.revision > 0,
+            "controller_admin_authority_missing"
+        );
+        if !data.members.contains(approver) || !data.members.contains(executor) {
+            return Ok(None);
         }
         let selected = Self {
             operation: operation.clone(),
@@ -45,7 +52,7 @@ impl AdminSelection {
             authority: data.authority.clone(),
         };
         selected.check(data)?;
-        Ok(selected)
+        Ok(Some(selected))
     }
 
     fn check(&self, data: &ControllerAdminData) -> Result<()> {
@@ -72,7 +79,7 @@ impl ActiveControllerStorageContinuity {
         operation: &Digest,
         principals: [&str; 2],
         trace: &'storage ServingTiming,
-    ) -> Result<ControllerAdminReader<'metadata, 'storage, 'role>> {
+    ) -> Result<Option<ControllerAdminReader<'metadata, 'storage, 'role>>> {
         let loan = self.begin_admin_read(stage, operation, trace)?;
         ControllerAdminReader::capture(metadata, loan, operation, principals[0], principals[1])
     }
@@ -87,7 +94,7 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
         operation: &Digest,
         approver: &str,
         executor: &str,
-    ) -> Result<ControllerAdminReader<'metadata, 'storage, 'role>> {
+    ) -> Result<Option<ControllerAdminReader<'metadata, 'storage, 'role>>> {
         let requested = (|| {
             loan.check_action(metadata, operation)?;
             let mut sqlite = crate::store::ControllerAdminSqlite::open(&mut loan)?;
@@ -96,19 +103,32 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
             loan.check_action(metadata, operation)?;
             Ok((sqlite, selected))
         })();
-        let (sqlite, selected) = match requested {
+        let (mut sqlite, selected) = match requested {
             Ok(values) => values,
             Err(error) => {
                 loan.refuse();
                 return Err(error);
             }
         };
-        Ok(ControllerAdminReader {
+        let Some(selected) = selected else {
+            // A known initial policy denial is DATA, just as in member().
+            // It escapes only after actual close and known peer settlement.
+            let closed = sqlite.close(&mut loan);
+            let checked = loan.check_local();
+            if closed.is_err() || checked.is_err() {
+                loan.refuse();
+            }
+            closed?;
+            checked?;
+            loan.finish_checked()?;
+            return Ok(None);
+        };
+        Ok(Some(ControllerAdminReader {
             sqlite,
             loan,
             metadata,
             selected,
-        })
+        }))
     }
 }
 
