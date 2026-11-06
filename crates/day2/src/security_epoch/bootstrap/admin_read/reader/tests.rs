@@ -327,10 +327,21 @@ fn execution_reader_interval(source: &str) -> Result<bool> {
         })
         .flatten()
         .collect();
+    let expected_capture: syn::Stmt = syn::parse_quote! {
+        let mut original = crate::security_epoch::restore_original::RestoreOriginalGuard::capture(
+            &mut stage,
+            &self.policy,
+            &self.store,
+            record.statement.request.clone(),
+            operation.clone(),
+        )?;
+    };
     if methods.len() != 1
         || methods[0].block.stmts.len() != 6
         || methods[0].block.stmts[0].to_token_stream().to_string()
             != "record . encode () ? ;"
+        || methods[0].block.stmts[1].to_token_stream().to_string()
+            != expected_capture.to_token_stream().to_string()
     {
         return Ok(false);
     }
@@ -389,5 +400,12 @@ fn restore_execution_original_precedes_the_actual_accepting_reader() -> Result<(
     assert_ne!(source, waited);
     syn::parse_file(&waited)?;
     assert!(!execution_reader_interval(&waited)?);
+    let expression = capture.trim().strip_prefix("let mut original = ").unwrap()
+        .strip_suffix(';').unwrap();
+    let nested = source.replacen(capture,
+        &format!("        let mut original = {{ std::thread::yield_now(); {expression} }};\n"), 1);
+    assert_ne!(source, nested);
+    syn::parse_file(&nested)?;
+    assert!(!execution_reader_interval(&nested)?);
     Ok(())
 }
