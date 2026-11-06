@@ -456,7 +456,7 @@ fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_befo
         ensure!(crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),"complete_restore_source_artifact_changed");
         let scope=format!("{}/{}/{}",namespace.installation.as_str(),namespace.environment.as_str(),namespace.app.as_str());
         crate::store::validate_storage_in(tx,selected.artifact,&scope)?;
-        crate::oauth::restore::reset_application_in(tx,selected.fence,selected.authority_schema,selected.oauth_schema,selected.cut,selected.namespace,selected.source_epoch)
+        crate::oauth::restore::reset_application_in(tx,selected.fence,selected.authority_schema,selected.oauth_schema,selected.cut,selected.namespace,selected.source_epoch,)
     });
     let valid=|f:&syn::ItemFn| f.block.stmts.len()>=tail.stmts.len() && f.block.stmts.iter().rev().take(tail.stmts.len()).zip(tail.stmts.iter().rev()).all(|(a,b)|a.to_token_stream().to_string()==b.to_token_stream().to_string());
     assert!(valid(actual));
