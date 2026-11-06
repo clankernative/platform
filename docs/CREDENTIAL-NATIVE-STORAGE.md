@@ -687,7 +687,8 @@ serving adoption and deployed restore qualification remain separate work.
 ### Closed restore supplier interfaces
 
 The authenticated executor now has a consuming `stop_for_restore` entrypoint.
-Its retained writer loan has fixed `admit_creator_root`, `settle_target` and
+Its retained writer loan has fixed `require_staging_input`,
+`admit_creator_root`, `settle_target` and
 `activate_writer` operations. The root representation owns the volume and
 directory descriptors, their identities and the unchanged original. There is
 no root constructor, resource getter, caller-selected phase or clock renewal.
