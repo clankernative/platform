@@ -242,6 +242,11 @@ pub(crate) fn authorized(
     if runtime.uses_native_storage() {
         require_native_bearer_fence(resource_action)?;
     }
+    // Imported-contract authorization may sign and insert local grants before
+    // a later validation returns Err. Record BEFORE entering that whole unit;
+    // neither Err, rollback guesses nor known usage proves zero issuance.
+    // Conservative refusal debt is never retired by response completion.
+    crate::oauth::native_management::record_unfenced_runtime(runtime)?;
     let mut resource =
         crate::resources::authorize(connection, runtime, request, instruction, resource_action)?;
     let mut quote = crate::resources::ProviderQuote {
