@@ -776,9 +776,6 @@ fn check_public(selected: &KeySelection, value: &Value) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests;
-
 // Exact historical key acquisition stays in this actual native source.
 const KEY_ORIGIN: &str = "https://secretmanager.googleapis.com";
 const MAX_REPLY: usize = 4096;
@@ -1220,6 +1217,9 @@ impl KeyHttp {
         decode_secret_access_response(selected, &bytes).map(Zeroizing::new)
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
 #[path = "restore_approval/keys/tests.rs"]
