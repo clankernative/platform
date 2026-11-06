@@ -125,11 +125,8 @@ fn serve(
             issuer,
             enrolled,
             issuance_closed,
-            channel,
-            acquisition,
-            costs,
-            &mut current,
-            &mut peer,
+            (channel, acquisition),
+            (costs, &mut current, &mut peer),
             *selection,
             request,
         );
@@ -278,15 +275,14 @@ fn freeze(
     issuer: &mut IssuerOwner,
     enrolled: &BTreeMap<(u32, u64, super::NativeRole), Enrollment>,
     issuance_closed: &mut bool,
-    channel: &mut Channel,
-    acquisition: &mut NativeAcquisition,
-    costs: &Costs,
-    current: &mut SelfSnapshot,
-    peer: &mut MessageProcess,
+    transport: (&mut Channel, &mut NativeAcquisition),
+    observations: (&Costs, &mut SelfSnapshot, &mut MessageProcess),
     selection: protocol::FreezeSelection,
     request: day2_capabilities::Digest,
 ) -> Result<()> {
     use super::NativeRole;
+    let (channel, acquisition) = transport;
+    let (costs, current, peer) = observations;
     ensure!(!*issuance_closed, "native_enrollment_issuance_closed");
     let controller = &selection.controller;
     let app = &selection.app;
