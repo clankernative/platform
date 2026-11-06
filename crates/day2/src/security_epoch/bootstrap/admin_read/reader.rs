@@ -141,7 +141,8 @@ impl ActiveControllerStorageContinuity {
             &intent.commitment()?,
             [&record.statement.approver.email, &intent.executor.email],
             trace,
-        )? else {
+        )?
+        else {
             return Ok(None);
         };
         reader.check_execution_original(&mut original, record, operation)?;
@@ -166,7 +167,10 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
         let requested = (|| {
             self.check_registry_local()?;
             original.check_join(
-                self.loan.physical.as_mut().context("restore_execution_reader_closed")?
+                self.loan
+                    .physical
+                    .as_mut()
+                    .context("restore_execution_reader_closed")?
                     .controller_stage()?,
                 &record.statement.request,
                 operation,
@@ -338,7 +342,9 @@ const _: () = {
 const _: () = {
     macro_rules! closed_execution_reader {
         ($bound:path) => {{
-            trait Ambiguous<T> { fn check() {} }
+            trait Ambiguous<T> {
+                fn check() {}
+            }
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <RestoreExecutionReader<'static, 'static, 'static> as Ambiguous<_>>::check;

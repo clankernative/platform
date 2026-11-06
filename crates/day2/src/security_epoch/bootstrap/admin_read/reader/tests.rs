@@ -299,7 +299,8 @@ fn execution_reader_interval(source: &str) -> Result<bool> {
     impl<'ast> syn::visit::Visit<'ast> for Calls {
         fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
             if let syn::Expr::Path(path) = &*expression.func {
-                self.0.push(path.path.segments.last().unwrap().ident.to_string());
+                self.0
+                    .push(path.path.segments.last().unwrap().ident.to_string());
             }
             syn::visit::visit_expr_call(self, expression);
         }
@@ -309,30 +310,66 @@ fn execution_reader_interval(source: &str) -> Result<bool> {
         }
     }
     let file = syn::parse_file(source)?;
-    let methods: Vec<_> = file.items.iter().filter_map(|item| match item {
-        syn::Item::Impl(item) => Some(item.items.iter().filter_map(|method| match method {
-            syn::ImplItem::Fn(method) if method.sig.ident == "begin_restore_execution_reader" => Some(method),
+    let methods: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) => Some(item.items.iter().filter_map(|method| match method {
+                syn::ImplItem::Fn(method)
+                    if method.sig.ident == "begin_restore_execution_reader" =>
+                {
+                    Some(method)
+                }
+                _ => None,
+            })),
             _ => None,
-        })),
-        _ => None,
-    }).flatten().collect();
-    if methods.len() != 1 { return Ok(false); }
-    let mut calls = Calls::default(); calls.visit_block(&methods[0].block);
-    let selected: Vec<_> = calls.0.iter().filter(|call| matches!(call.as_str(),
-        "capture" | "begin_accepting_admin_reader" | "check_execution_original")).map(String::as_str).collect();
-    Ok(selected == ["capture", "begin_accepting_admin_reader", "check_execution_original"])
+        })
+        .flatten()
+        .collect();
+    if methods.len() != 1 {
+        return Ok(false);
+    }
+    let mut calls = Calls::default();
+    calls.visit_block(&methods[0].block);
+    let selected: Vec<_> = calls
+        .0
+        .iter()
+        .filter(|call| {
+            matches!(
+                call.as_str(),
+                "capture" | "begin_accepting_admin_reader" | "check_execution_original"
+            )
+        })
+        .map(String::as_str)
+        .collect();
+    Ok(selected
+        == [
+            "capture",
+            "begin_accepting_admin_reader",
+            "check_execution_original",
+        ])
 }
 
 #[test]
 fn restore_execution_original_precedes_the_actual_accepting_reader() -> Result<()> {
     let source = include_str!("../reader.rs");
     assert!(execution_reader_interval(source)?);
-    let changed = source.replacen("RestoreOriginalGuard::capture(", "RestoreOriginalGuard::from_data(", 1);
-    assert_ne!(source, changed); assert!(!execution_reader_interval(&changed)?);
-    let changed = source.replacen("reader.check_execution_original(&mut original, record, operation)?;", "", 1);
-    assert_ne!(source, changed); assert!(!execution_reader_interval(&changed)?);
+    let changed = source.replacen(
+        "RestoreOriginalGuard::capture(",
+        "RestoreOriginalGuard::from_data(",
+        1,
+    );
+    assert_ne!(source, changed);
+    assert!(!execution_reader_interval(&changed)?);
+    let changed = source.replacen(
+        "reader.check_execution_original(&mut original, record, operation)?;",
+        "",
+        1,
+    );
+    assert_ne!(source, changed);
+    assert!(!execution_reader_interval(&changed)?);
     let start = source.find("        let mut original = crate::security_epoch::restore_original::RestoreOriginalGuard::capture(").unwrap();
-    let end = source[start..].find("        let intent =").unwrap()+start;
+    let end = source[start..].find("        let intent =").unwrap() + start;
     let capture = &source[start..end];
     let removed = source.replacen(capture, "", 1);
     let marker = "        reader.check_execution_original(&mut original, record, operation)?;";

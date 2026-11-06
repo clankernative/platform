@@ -752,7 +752,8 @@ fn full_signed_publication_and_original_provider_version_are_required() -> Resul
     tx.check_commit(&ack, &names()?.strong(&serde_json::to_vec(&strong)?)?)?;
     strong[7]["found"]["updateTime"] = json!(version(4));
     assert!(
-        tx.check_commit(&ack, &names()?.strong(&serde_json::to_vec(&strong)?)?).is_err()
+        tx.check_commit(&ack, &names()?.strong(&serde_json::to_vec(&strong)?)?)
+            .is_err()
     );
     Ok(())
 }

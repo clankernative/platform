@@ -17,7 +17,9 @@ use day2_capabilities::{Digest, restore_signing::KeySelection, security_epoch::E
 use std::time::Duration;
 
 mod consumer;
-pub(in crate::security_epoch) use consumer::{AuthenticatedRestoreExecution, PendingRestoreExecution};
+pub(in crate::security_epoch) use consumer::{
+    AuthenticatedRestoreExecution, PendingRestoreExecution,
+};
 
 pub(in crate::security_epoch) struct PendingApproval {
     ceremony: ControllerCeremony,
