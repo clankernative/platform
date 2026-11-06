@@ -3,7 +3,10 @@
 //! grant-use/root-fence send/readback and the complete real peer/issuer stop.
 use super::super::super::super::super::ControllerAdminReadLoan;
 use super::super::super::super::ControllerAdminReader;
-use super::{AuthenticatedRestoreExecution, approval_window};
+use super::{
+    AuthenticatedRestoreExecution, ExecutionCompletion, RestoreAuthenticationAction,
+    RestoreOriginalGuard, SignedApprovalRecord, approval_window,
+};
 use crate::security_epoch::{
     kernel::{self, restore::approval_use},
     native_enrollment::{AuthorityStopData, FrozenRoleIssuer},
@@ -23,6 +26,75 @@ impl<'metadata, 'storage, 'role> AuthenticatedRestoreExecution<'metadata, 'stora
     ) -> Result<FencedRestoreContinuation<'metadata, 'storage, 'role>> {
         self.refuse();
         anyhow::bail!("native_restore_stop_supplier_unavailable")
+    }
+}
+
+/// A closed borrow of the actual authenticated executor's fields, keeping its
+/// native source separately borrowable. No factory accepts replacement fields
+/// or returns a source, stage, clock, descriptor or callback permission.
+struct ExecutionSourceLoan<'borrow, 'metadata, 'storage, 'role> {
+    action: &'borrow mut RestoreAuthenticationAction<'metadata, 'storage, 'role>,
+    original: &'borrow mut RestoreOriginalGuard,
+    completion: &'borrow mut ExecutionCompletion,
+    record: &'borrow SignedApprovalRecord,
+    operation: &'borrow Digest,
+    time_operation: &'borrow Digest,
+    refused: &'borrow mut bool,
+}
+
+impl AuthenticatedRestoreExecution<'_, '_, '_> {
+    pub(super) fn check_source(&mut self) -> Result<RestoreObservation> {
+        ExecutionSourceLoan {
+            action: &mut self.action,
+            original: &mut self.original,
+            completion: &mut self.completion,
+            record: &self.record,
+            operation: &self.operation,
+            time_operation: &self.time_operation,
+            refused: &mut self.refused,
+        }
+        .check(&mut self.source)
+    }
+}
+
+impl ExecutionSourceLoan<'_, '_, '_, '_> {
+    fn check(
+        &mut self,
+        source: &mut crate::security_epoch::storage_authority::NativeApprovalSource,
+    ) -> Result<RestoreObservation> {
+        let requested = (|| {
+            ensure!(!*self.refused, "restore_executor_refused");
+            self.action
+                .check_execution_original(self.original, self.record, self.operation)?;
+            self.completion.check_current(
+                &mut self.action.reader,
+                (
+                    self.action
+                        .sqlite
+                        .as_mut()
+                        .context("restore_auth_sqlite_closed")?,
+                    &mut self.action.files,
+                ),
+                self.record,
+                self.operation,
+            )?;
+            source.require_qualified(self.time_operation)?;
+            let time = source.current_time(self.action)?;
+            approval_window(self.record, &time)?;
+            Ok(())
+        })();
+        // The same original's postcheck still runs on a primary failure.
+        // The first failure remains primary; no Source operation can reset it.
+        let checked =
+            self.action
+                .check_execution_original(self.original, self.record, self.operation);
+        if requested.is_err() || checked.is_err() {
+            *self.refused = true;
+            self.original.refuse();
+            self.action.refuse();
+        }
+        requested?;
+        checked
     }
 }
 
@@ -457,6 +529,8 @@ const _: () = {
             let _ = <crate::security_epoch::storage_authority::RestoreCreatorRoot as Ambiguous<
                 _,
             >>::check;
+            let _ =
+                <ExecutionSourceLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <FencedRestoreContinuation<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <RestoreWriteLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <FencedReadUnit<'static, 'static, 'static> as Ambiguous<_>>::check;
@@ -479,6 +553,272 @@ mod tests {
     use anyhow::Result;
     use quote::ToTokens as _;
     use std::{cell::Cell, rc::Rc};
+
+    fn source_method(source: &str, owner: &str, name: &str) -> Result<syn::Block> {
+        let mut found = Vec::new();
+        for item in syn::parse_file(source)?.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            let syn::Type::Path(path) = &*item.self_ty else {
+                continue;
+            };
+            if !path
+                .path
+                .segments
+                .last()
+                .is_some_and(|part| part.ident == owner)
+            {
+                continue;
+            }
+            for member in item.items {
+                if let syn::ImplItem::Fn(method) = member {
+                    if method.sig.ident == name {
+                        found.push(method.block);
+                    }
+                }
+            }
+        }
+        anyhow::ensure!(found.len() == 1, "one actual owning method required");
+        Ok(found.remove(0))
+    }
+
+    fn source_loan_wiring(parent: &str, leaf: &str) -> Result<bool> {
+        let delegate = source_method(parent, "AuthenticatedRestoreExecution", "check")?;
+        let expected_delegate: syn::Block = syn::parse_quote!({ self.check_source() });
+        if delegate.to_token_stream().to_string() != expected_delegate.to_token_stream().to_string()
+        {
+            return Ok(false);
+        }
+        let borrow = source_method(leaf, "AuthenticatedRestoreExecution", "check_source")?;
+        let expected_borrow: syn::Block = syn::parse_quote!({
+            ExecutionSourceLoan {
+                action: &mut self.action,
+                original: &mut self.original,
+                completion: &mut self.completion,
+                record: &self.record,
+                operation: &self.operation,
+                time_operation: &self.time_operation,
+                refused: &mut self.refused,
+            }
+            .check(&mut self.source)
+        });
+        if borrow.to_token_stream().to_string() != expected_borrow.to_token_stream().to_string() {
+            return Ok(false);
+        }
+        #[derive(Default)]
+        struct Calls(Vec<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                self.0.push(call.method.to_string());
+                syn::visit::visit_expr_method_call(self, call);
+            }
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func {
+                    if let Some(name) = path.path.get_ident() {
+                        self.0.push(name.to_string());
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let body = source_method(leaf, "ExecutionSourceLoan", "check")?;
+        // The mandatory postcheck is a direct top-level call, including when
+        // requested already failed; a closure gated on requested is not equal.
+        let Some(syn::Stmt::Local(checked)) = body.stmts.get(1) else {
+            return Ok(false);
+        };
+        let syn::Pat::Ident(binding) = &checked.pat else {
+            return Ok(false);
+        };
+        let Some(initializer) = &checked.init else {
+            return Ok(false);
+        };
+        let syn::Expr::MethodCall(call) = &*initializer.expr else {
+            return Ok(false);
+        };
+        let arguments: Vec<_> = call
+            .args
+            .iter()
+            .map(|argument| argument.to_token_stream().to_string())
+            .collect();
+        if binding.ident != "checked"
+            || initializer.diverge.is_some()
+            || call.method != "check_execution_original"
+            || call.receiver.to_token_stream().to_string() != "self . action"
+            || arguments != ["self . original", "self . record", "self . operation"]
+        {
+            return Ok(false);
+        }
+        let Some(syn::Stmt::Local(requested)) = body.stmts.first() else {
+            return Ok(false);
+        };
+        let Some(initializer) = &requested.init else {
+            return Ok(false);
+        };
+        let syn::Expr::Call(call) = &*initializer.expr else {
+            return Ok(false);
+        };
+        let syn::Expr::Closure(closure) = &*call.func else {
+            return Ok(false);
+        };
+        let syn::Expr::Block(requested) = &*closure.body else {
+            return Ok(false);
+        };
+        let Some(syn::Stmt::Macro(guard)) = requested.block.stmts.first() else {
+            return Ok(false);
+        };
+        if !guard.mac.path.is_ident("ensure") {
+            return Ok(false);
+        }
+        use syn::parse::Parser as _;
+        let arguments = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+            .parse2(guard.mac.tokens.clone())?;
+        let expected: syn::Expr = syn::parse_quote!(!*self.refused);
+        let code: syn::Expr = syn::parse_quote!("restore_executor_refused");
+        if arguments.len() != 2
+            || arguments
+                .first()
+                .map(|argument| argument.to_token_stream().to_string())
+                != Some(expected.to_token_stream().to_string())
+            || arguments
+                .last()
+                .map(|argument| argument.to_token_stream().to_string())
+                != Some(code.to_token_stream().to_string())
+        {
+            return Ok(false);
+        }
+        let mut calls = Calls::default();
+        syn::visit::Visit::visit_block(&mut calls, &body);
+        let relevant = [
+            "check_execution_original",
+            "check_current",
+            "require_qualified",
+            "current_time",
+            "approval_window",
+            "is_err",
+            "refuse",
+        ];
+        let flow: Vec<_> = calls
+            .0
+            .iter()
+            .filter(|name| relevant.contains(&name.as_str()))
+            .map(String::as_str)
+            .collect();
+        if flow
+            != [
+                "check_execution_original",
+                "check_current",
+                "require_qualified",
+                "current_time",
+                "approval_window",
+                "check_execution_original",
+                "is_err",
+                "is_err",
+                "refuse",
+                "refuse",
+            ]
+        {
+            return Ok(false);
+        }
+        if calls.0.iter().any(|name| {
+            ["begin", "capture", "narrow", "authenticate", "clone"].contains(&name.as_str())
+        }) || body.stmts.len() != 5
+        {
+            return Ok(false);
+        }
+        let refusal: syn::Stmt = syn::parse_quote! {
+            if requested.is_err() || checked.is_err() {
+                *self.refused = true;
+                self.original.refuse();
+                self.action.refuse();
+            }
+        };
+        let primary: syn::Stmt = syn::parse_quote! { requested?; };
+        let post: syn::Stmt = syn::parse_quote! { checked };
+        Ok(
+            body.stmts[2].to_token_stream().to_string() == refusal.to_token_stream().to_string()
+                && body.stmts[3].to_token_stream().to_string()
+                    == primary.to_token_stream().to_string()
+                && body.stmts[4].to_token_stream().to_string()
+                    == post.to_token_stream().to_string(),
+        )
+    }
+
+    #[test]
+    fn actual_executor_borrows_its_own_fields_and_source_with_original_postcheck() -> Result<()> {
+        let parent = include_str!("../consumer.rs");
+        let leaf = include_str!("stop.rs");
+        assert!(source_loan_wiring(parent, leaf)?);
+        let duplicate = parent.replacen(
+            "self.check_source()",
+            "self.check_source()?; self.check_source()",
+            1,
+        );
+        assert_ne!(parent, duplicate);
+        assert!(!source_loan_wiring(&duplicate, leaf)?);
+        let mut conditional = syn::parse_file(leaf)?;
+        let mut replacements = 0;
+        for item in &mut conditional.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            let syn::Type::Path(path) = &*item.self_ty else {
+                continue;
+            };
+            if !path
+                .path
+                .segments
+                .last()
+                .is_some_and(|part| part.ident == "ExecutionSourceLoan")
+            {
+                continue;
+            }
+            for member in &mut item.items {
+                let syn::ImplItem::Fn(method) = member else {
+                    continue;
+                };
+                if method.sig.ident != "check" {
+                    continue;
+                }
+                method.block.stmts[1] = syn::parse_quote! {
+                    let checked = (|| {
+                        requested.as_ref().map_err(|_| anyhow::anyhow!("skip"))?;
+                        self.action.check_execution_original(self.original, self.record, self.operation)
+                    })();
+                };
+                replacements += 1;
+            }
+        }
+        assert_eq!(replacements, 1, "actual unconditional production postcheck");
+        assert!(!source_loan_wiring(
+            parent,
+            &conditional.to_token_stream().to_string()
+        )?);
+        for (old, new) in [
+            (
+                "ensure!(!*self.refused, \"restore_executor_refused\");",
+                "ensure!(true, \"restore_executor_refused\");",
+            ),
+            ("refused: &mut self.refused,", "refused: &mut false,"),
+            ("source.require_qualified(self.time_operation)?;", ""),
+            ("approval_window(self.record, &time)?;", ""),
+            (
+                "if requested.is_err() || checked.is_err() {",
+                "if requested.is_err() {",
+            ),
+            ("self.original.refuse();", ""),
+            (
+                "requested?;\n        checked",
+                "checked?;\n        requested.map(|_| unreachable!())",
+            ),
+        ] {
+            let mutant = leaf.replacen(old, new, 1);
+            assert_ne!(leaf, mutant, "actual executor/source target required");
+            assert!(!source_loan_wiring(parent, &mutant)?);
+        }
+        Ok(())
+    }
 
     #[test]
     fn actual_negative_loan_owner_refuses_after_last_good_check_or_unwind() {
