@@ -2339,7 +2339,7 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >",
         "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
         "pub (crate) fn check_registry_local (& mut self) -> Result < () >",
@@ -2380,18 +2380,18 @@
         },
         {
           "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": [
-        "admit_authentication_store"
+        "admit_restore_authentication"
       ]
     },
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
-      "type_name": "AuthenticationStoreAction",
+      "type_name": "RestoreAuthenticationAction",
       "kind": "private_material",
       "consuming_methods": [
         "finish_checked"
@@ -2410,53 +2410,53 @@
       "factories": [
         {
           "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >"
         }
       ],
       "material_uses": [
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , expected : & ApprovalIntent) -> Result < () >"
         },
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >"
         },
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >"
         },
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
         },
         {
-          "owner": "AuthenticationStoreAction < 'metadata , 'storage , 'role >",
+          "owner": "RestoreAuthenticationAction < 'metadata , 'storage , 'role >",
           "signature": "fn capture_source (& mut self) -> Result < NativeApprovalSource >"
         },
         {
-          "owner": "AuthenticationStoreAction < 'metadata , 'storage , 'role >",
+          "owner": "RestoreAuthenticationAction < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn approval_clock_data (& mut self , clock : & mut UnfencedControllerClock) -> Result < HostTimeData >"
         },
         {
-          "owner": "AuthenticationStoreAction < 'metadata , 'storage , 'role >",
+          "owner": "RestoreAuthenticationAction < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn approval_snapshot_data (& mut self , source : & mut NativeApprovalSource) -> Result < (EpochStore , Snapshot) >"
         },
         {
-          "owner": "AuthenticationStoreAction < 'metadata , 'storage , 'role >",
+          "owner": "RestoreAuthenticationAction < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn check_approval_source (& mut self , source : & mut NativeApprovalSource) -> Result < () >"
         },
         {
-          "owner": "AuthenticationStoreAction < 'metadata , 'storage , 'role >",
+          "owner": "RestoreAuthenticationAction < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn issue_approval (mut self , credential_id : & [u8]) -> Result < PendingApproval >"
         },
         {
           "owner": "CompletedCeremony < 'metadata , 'storage , 'role >",
-          "signature": "fn prepare (pending : PendingApproval , mut action : AuthenticationStoreAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
+          "signature": "fn prepare (pending : PendingApproval , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
         },
         {
           "owner": "PendingApproval",
-          "signature": "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : AuthenticationStoreAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >"
+          "signature": "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >"
         }
       ],
       "proof_uses": [],
@@ -2478,14 +2478,14 @@
         "pub (in crate :: security_epoch) fn check_publication_source (& mut self , source : & mut NativeApprovalSource) -> Result < (EpochStore , Snapshot) >",
         "pub (in crate :: security_epoch) fn check_signing_source (& mut self , source : & mut NativeApprovalSource) -> Result < () >",
         "fn mark_may (& mut self) -> Result < () >",
-        "fn prepare (pending : PendingApproval , mut action : AuthenticationStoreAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >",
+        "fn prepare (pending : PendingApproval , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >",
         "fn record_publication (& mut self , record : & SignedApprovalRecord) -> Result < () >",
         "pub (in crate :: security_epoch) fn signing_data (& self) -> Result < (KeySelection , ApprovalStatement) >"
       ],
       "factories": [
         {
           "owner": "CompletedCeremony < 'metadata , 'storage , 'role >",
-          "signature": "fn prepare (pending : PendingApproval , mut action : AuthenticationStoreAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
+          "signature": "fn prepare (pending : PendingApproval , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
         }
       ],
       "material_uses": [
@@ -2519,23 +2519,23 @@
       "type_name": "PendingApproval",
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : AuthenticationStoreAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >",
+        "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >",
         "pub (in crate :: security_epoch) fn challenge_data (& self) -> Result < String >"
       ],
       "factories": [
         {
-          "owner": "AuthenticationStoreAction < 'metadata , 'storage , 'role >",
+          "owner": "RestoreAuthenticationAction < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn issue_approval (mut self , credential_id : & [u8]) -> Result < PendingApproval >"
         }
       ],
       "material_uses": [
         {
           "owner": "CompletedCeremony < 'metadata , 'storage , 'role >",
-          "signature": "fn prepare (pending : PendingApproval , mut action : AuthenticationStoreAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
+          "signature": "fn prepare (pending : PendingApproval , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
         },
         {
           "owner": "PendingApproval",
-          "signature": "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : AuthenticationStoreAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >"
+          "signature": "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >"
         },
         {
           "owner": "PendingApproval",
@@ -6214,10 +6214,10 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn check_phase (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < () >",
-        "pub (in crate :: security_epoch) fn current_time (& mut self , action : & mut AuthenticationStoreAction < '_ , '_ , '_ >) -> Result < HostTimeData >",
-        "pub (in crate :: security_epoch) fn finish_checked (mut self , action : & mut AuthenticationStoreAction < '_ , '_ , '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn current_time (& mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ >) -> Result < HostTimeData >",
+        "pub (in crate :: security_epoch) fn finish_checked (mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn publish_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ > , record : & SignedApprovalRecord) -> Result < () >",
-        "pub (in crate :: security_epoch) fn qualify_time (& mut self , action : & mut AuthenticationStoreAction < '_ , '_ , '_ > , operation : Digest) -> Result < HostTimeData >",
+        "pub (in crate :: security_epoch) fn qualify_time (& mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ > , operation : Digest) -> Result < HostTimeData >",
         "fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn require_qualified (& mut self , operation : & Digest) -> Result < () >",
         "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >"
@@ -6239,11 +6239,11 @@
         },
         {
           "owner": "NativeApprovalSource",
-          "signature": "pub (in crate :: security_epoch) fn current_time (& mut self , action : & mut AuthenticationStoreAction < '_ , '_ , '_ >) -> Result < HostTimeData >"
+          "signature": "pub (in crate :: security_epoch) fn current_time (& mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ >) -> Result < HostTimeData >"
         },
         {
           "owner": "NativeApprovalSource",
-          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self , action : & mut AuthenticationStoreAction < '_ , '_ , '_ >) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ >) -> Result < () >"
         },
         {
           "owner": "NativeApprovalSource",
@@ -6251,7 +6251,7 @@
         },
         {
           "owner": "NativeApprovalSource",
-          "signature": "pub (in crate :: security_epoch) fn qualify_time (& mut self , action : & mut AuthenticationStoreAction < '_ , '_ , '_ > , operation : Digest) -> Result < HostTimeData >"
+          "signature": "pub (in crate :: security_epoch) fn qualify_time (& mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ > , operation : Digest) -> Result < HostTimeData >"
         },
         {
           "owner": "NativeApprovalSource",

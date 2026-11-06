@@ -1,7 +1,7 @@
 //! Genuine short-action approval composition. The human wait retains server
 //! ceremony DATA only. Neither a row, scalar timestamp nor signature can enter
 //! the private completed owner or recover an interrupted signing attempt.
-use super::AuthenticationStoreAction;
+use super::RestoreAuthenticationAction;
 use crate::security_epoch::{
     kernel::Snapshot,
     restore_approval::{
@@ -32,7 +32,7 @@ enum SigningState {
 }
 
 pub(in crate::security_epoch) struct CompletedCeremony<'metadata, 'storage, 'role> {
-    action: Option<AuthenticationStoreAction<'metadata, 'storage, 'role>>,
+    action: Option<RestoreAuthenticationAction<'metadata, 'storage, 'role>>,
     ceremony: ControllerCeremony,
     assertion: Assertion,
     challenge: Digest,
@@ -82,7 +82,7 @@ fn seconds_ceiling(value: Duration) -> Result<i64> {
     )?)
 }
 
-impl<'metadata, 'storage, 'role> AuthenticationStoreAction<'metadata, 'storage, 'role> {
+impl<'metadata, 'storage, 'role> RestoreAuthenticationAction<'metadata, 'storage, 'role> {
     pub(in crate::security_epoch) fn issue_approval(
         mut self,
         credential_id: &[u8],
@@ -199,7 +199,7 @@ impl PendingApproval {
 
     pub(in crate::security_epoch) fn approve<'metadata, 'storage, 'role>(
         self,
-        mut action: AuthenticationStoreAction<'metadata, 'storage, 'role>,
+        mut action: RestoreAuthenticationAction<'metadata, 'storage, 'role>,
         assertion: &Assertion,
     ) -> Result<Option<SignedApprovalRecord>> {
         self.intent.require_exact(&action.intent)?;
@@ -230,7 +230,7 @@ impl PendingApproval {
 impl<'metadata, 'storage, 'role> CompletedCeremony<'metadata, 'storage, 'role> {
     fn prepare(
         pending: PendingApproval,
-        mut action: AuthenticationStoreAction<'metadata, 'storage, 'role>,
+        mut action: RestoreAuthenticationAction<'metadata, 'storage, 'role>,
         assertion: &Assertion,
         mut source: NativeApprovalSource,
     ) -> Result<Option<(Self, NativeApprovalSource)>> {

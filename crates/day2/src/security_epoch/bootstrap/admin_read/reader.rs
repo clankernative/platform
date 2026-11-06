@@ -11,7 +11,7 @@ use day2_capabilities::Digest;
 
 mod authentication_store;
 pub(in crate::security_epoch) use authentication_store::{
-    AuthenticationStoreAction, CompletedCeremony,
+    RestoreAuthenticationAction, CompletedCeremony,
 };
 
 /// Fields drop in declaration order: SQLite closes before the actual native

@@ -17,7 +17,7 @@ use super::{
     AcquiredProviderAuthentication, CurrentVolumePhase, ProviderAuthentication, VolumeAdmission,
 };
 use crate::security_epoch::{
-    AuthenticationStoreAction, CompletedCeremony, CurrentControllerStoragePhase,
+    RestoreAuthenticationAction, CompletedCeremony, CurrentControllerStoragePhase,
     firestore::{Budget, EpochReply, Port, Sample},
     kernel::approval_time::{Interval, Plan, Utc},
     native_enrollment::{NativeRole, SameEnrolledOwner, StagePurpose},
@@ -170,7 +170,7 @@ impl NativeApprovalSource {
 
     pub(in crate::security_epoch) fn current_time(
         &mut self,
-        action: &mut AuthenticationStoreAction<'_, '_, '_>,
+        action: &mut RestoreAuthenticationAction<'_, '_, '_>,
     ) -> Result<HostTimeData> {
         let requested = (|| {
             action.check_approval_source(self)?;
@@ -193,7 +193,7 @@ impl NativeApprovalSource {
 
     pub(in crate::security_epoch) fn qualify_time(
         &mut self,
-        action: &mut AuthenticationStoreAction<'_, '_, '_>,
+        action: &mut RestoreAuthenticationAction<'_, '_, '_>,
         operation: Digest,
     ) -> Result<HostTimeData> {
         let requested = (|| {
@@ -357,7 +357,7 @@ impl NativeApprovalSource {
 
     pub(in crate::security_epoch) fn finish_checked(
         mut self,
-        action: &mut AuthenticationStoreAction<'_, '_, '_>,
+        action: &mut RestoreAuthenticationAction<'_, '_, '_>,
     ) -> Result<()> {
         self.current_time(action)?;
         action.check_approval_source(&mut self)?;
@@ -380,7 +380,7 @@ impl Drop for NativeApprovalSource {
 }
 
 enum PortOwner<'borrow, 'metadata, 'storage, 'role> {
-    Action(&'borrow mut AuthenticationStoreAction<'metadata, 'storage, 'role>),
+    Action(&'borrow mut RestoreAuthenticationAction<'metadata, 'storage, 'role>),
     Completed(&'borrow mut CompletedCeremony<'metadata, 'storage, 'role>),
 }
 

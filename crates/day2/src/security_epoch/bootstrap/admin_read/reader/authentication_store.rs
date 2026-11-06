@@ -1,5 +1,8 @@
-//! One current action on an existing native authentication ledger. It retains
-//! the accepting reader; no human wait, new original or ordinary SQL fallback.
+//! Closed administrative restore authentication, not a business Current scope.
+//! The actual owner type is the classification: only its consuming fixed reader
+//! factory can create it. No purpose flag exempts arbitrary AdminRead/CurrentRole
+//! callbacks. It retains the accepting reader and existing auth ledger; no human
+//! wait, new original, business continuation or ordinary SQL fallback exists.
 use super::ControllerAdminReader;
 use crate::security_epoch::{
     restore_approval::ApprovalIntent, storage_authority::AuthenticationStoreFiles,
@@ -12,7 +15,7 @@ pub(in crate::security_epoch) use producer::CompletedCeremony;
 
 // SQLite closes first on unwinding; the unfinished file guard then poisons the
 // same shared original before the actual reader/peer/counter owner is released.
-pub(in crate::security_epoch) struct AuthenticationStoreAction<'metadata, 'storage, 'role> {
+pub(in crate::security_epoch) struct RestoreAuthenticationAction<'metadata, 'storage, 'role> {
     sqlite: Option<Box<Connection>>,
     files: AuthenticationStoreFiles,
     reader: ControllerAdminReader<'metadata, 'storage, 'role>,
@@ -21,10 +24,10 @@ pub(in crate::security_epoch) struct AuthenticationStoreAction<'metadata, 'stora
 }
 
 impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'role> {
-    pub(in crate::security_epoch) fn admit_authentication_store(
+    pub(in crate::security_epoch) fn admit_restore_authentication(
         mut self,
         expected: &ApprovalIntent,
-    ) -> Result<AuthenticationStoreAction<'metadata, 'storage, 'role>> {
+    ) -> Result<RestoreAuthenticationAction<'metadata, 'storage, 'role>> {
         let requested = (|| {
             expected.validate()?;
             ensure!(
@@ -70,7 +73,7 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
                 return Err(error);
             }
         };
-        let mut action = AuthenticationStoreAction {
+        let mut action = RestoreAuthenticationAction {
             sqlite: Some(sqlite),
             files,
             reader: self,
@@ -82,7 +85,7 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
     }
 }
 
-impl AuthenticationStoreAction<'_, '_, '_> {
+impl RestoreAuthenticationAction<'_, '_, '_> {
     pub(in crate::security_epoch) fn check(&mut self, expected: &ApprovalIntent) -> Result<()> {
         let requested = (|| {
             ensure!(!self.refused, "restore_auth_action_refused");
@@ -167,7 +170,7 @@ const _: () = {
             }
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
-            let _ = <AuthenticationStoreAction<'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <RestoreAuthenticationAction<'static, 'static, 'static> as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);
@@ -183,6 +186,121 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The exemption is the fixed actual owner, never a caller-controlled
+    // purpose value. It cannot lend a business callback, stage or SQL handle.
+    fn closed_administrative_action(source: &str) -> bool {
+        use quote::ToTokens;
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let Some(owner) = file.items.iter().find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "RestoreAuthenticationAction" => Some(item),
+            _ => None,
+        }) else {
+            return false;
+        };
+        if owner
+            .fields
+            .iter()
+            .any(|field| !matches!(field.vis, syn::Visibility::Inherited))
+        {
+            return false;
+        }
+        let fields = owner.fields.to_token_stream().to_string();
+        if !fields.contains("reader : ControllerAdminReader < 'metadata , 'storage , 'role >")
+            || !fields.contains("intent : ApprovalIntent")
+            || fields.contains("purpose :")
+            || fields.contains("business :")
+        {
+            return false;
+        }
+        let mut factories = 0;
+        for item in &file.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            let self_type = item.self_ty.to_token_stream().to_string();
+            for member in &item.items {
+                let syn::ImplItem::Fn(method) = member else {
+                    continue;
+                };
+                let signature = method.sig.to_token_stream().to_string();
+                if self_type.starts_with("RestoreAuthenticationAction") {
+                    if !matches!(
+                        method.sig.ident.to_string().as_str(),
+                        "check" | "check_local" | "finish_checked" | "refuse"
+                    ) || signature.contains("Fn")
+                        || signature.contains("EnrolledRoleStage")
+                        || signature.contains("Connection")
+                    {
+                        return false;
+                    }
+                } else if signature.contains("RestoreAuthenticationAction") {
+                    factories += 1;
+                    if !self_type.starts_with("ControllerAdminReader")
+                        || method.sig.ident != "admit_restore_authentication"
+                        || method
+                            .sig
+                            .generics
+                            .params
+                            .iter()
+                            .any(|parameter| !matches!(parameter, syn::GenericParam::Lifetime(_)))
+                        || signature.contains("purpose")
+                        || signature.contains("bool")
+                        || signature.contains("Fn")
+                    {
+                        return false;
+                    }
+                    let body = method.block.to_token_stream().to_string();
+                    let (Some(checked), Some(opened), Some(created)) = (
+                        body.find("self . check (self . metadata"),
+                        body.find("admit_authentication_store ()"),
+                        body.find("let mut action = RestoreAuthenticationAction"),
+                    ) else {
+                        return false;
+                    };
+                    if checked >= opened
+                        || opened >= created
+                        || !body
+                            .contains("self . selected . operation == expected . commitment () ?")
+                        || !body.contains("intent : expected . clone ()")
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        factories == 1
+    }
+
+    #[test]
+    fn restore_authentication_classification_requires_the_actual_closed_owner() {
+        let source = include_str!("authentication_store.rs");
+        assert!(closed_administrative_action(source));
+        for (old, new) in [
+            (
+                "reader: ControllerAdminReader<'metadata, 'storage, 'role>,",
+                "pub reader: ControllerAdminReader<'metadata, 'storage, 'role>,",
+            ),
+            (
+                "expected: &ApprovalIntent,",
+                "expected: &ApprovalIntent, purpose: bool,",
+            ),
+            (
+                "self.check(self.metadata, &operation, &approver, &executor)?;",
+                "",
+            ),
+            (
+                "pub(in crate::security_epoch) fn refuse(&mut self)",
+                "pub(in crate::security_epoch) fn business(&mut self)",
+            ),
+        ] {
+            let mutant = source.replacen(old, new, 1);
+            assert_ne!(mutant, source, "actual administrative boundary");
+            assert!(!closed_administrative_action(&mutant));
+        }
+    }
 
     #[test]
     fn actual_auth_begin_refuses_full_check_even_while_app_connection_is_outside_unit() -> Result<()>
@@ -209,7 +327,7 @@ mod tests {
                 .self_ty
                 .to_token_stream()
                 .to_string()
-                .starts_with("AuthenticationStoreAction")
+                .starts_with("RestoreAuthenticationAction")
             {
                 return None;
             }
@@ -293,7 +411,7 @@ mod tests {
                 }
                 item.items.iter().find_map(|member| match member {
                     syn::ImplItem::Fn(method)
-                        if method.sig.ident == "admit_authentication_store" =>
+                        if method.sig.ident == "admit_restore_authentication" =>
                     {
                         Some(method)
                     }
