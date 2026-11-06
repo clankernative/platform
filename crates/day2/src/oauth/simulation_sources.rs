@@ -55,6 +55,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         "native_management/response.rs",
         include_str!("native_management/response.rs"),
     ),
+    (
+        "native_management/response_tickets.rs",
+        include_str!("native_management/response_tickets.rs"),
+    ),
     ("native_original.rs", include_str!("native_original.rs")),
     ("outbound.rs", include_str!("outbound.rs")),
     ("profiles.rs", include_str!("profiles.rs")),
