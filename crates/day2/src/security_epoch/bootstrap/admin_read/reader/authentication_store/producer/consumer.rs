@@ -481,9 +481,7 @@ mod tests {
                 approval_window(&self.record, &time)?;
                 Ok(())
             })();
-            let checked = self.action.check_execution_original(
-                &mut self.original, &self.record, &self.operation,
-            );
+            let checked = self.action.check_execution_original(&mut self.original, &self.record, &self.operation);
             if requested.is_err() || checked.is_err() { self.refuse(); }
             requested?;
             checked
