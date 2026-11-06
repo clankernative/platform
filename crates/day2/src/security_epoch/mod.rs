@@ -26,6 +26,7 @@ pub(crate) mod native_enrollment;
 mod native_identity;
 mod native_namespace;
 mod preparation_image;
+pub(crate) mod restore_approval;
 mod restore_fencing;
 mod restore_host_clock;
 mod runtime_profile;
