@@ -5,7 +5,10 @@ use crate::{
     security_epoch::restore_staging::MemoryAdmission,
 };
 use anyhow::Context;
-use day2_capabilities::{Digest, resources::{BudgetDefinition, BudgetLimits, BudgetScope}};
+use day2_capabilities::{
+    Digest,
+    resources::{BudgetDefinition, BudgetLimits, BudgetScope},
+};
 use rusqlite::{Connection, MAIN_DB, TransactionBehavior, types::Value};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
