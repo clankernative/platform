@@ -5083,6 +5083,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
