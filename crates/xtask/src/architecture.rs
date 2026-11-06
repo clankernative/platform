@@ -8858,11 +8858,18 @@ mod tests {
 
     #[test]
     fn sql_callback_controls_pin_complete_restore_image_builder() {
-        let syntax = syn::parse_file(include_str!("../../day2/src/security_epoch/restore_staging.rs")).unwrap();
-        let functions: Vec<_> = syntax.items.into_iter().filter_map(|item| match item {
-            Item::Fn(function) if function.sig.ident == "prepare_image" => Some(function),
-            _ => None,
-        }).collect();
+        let syntax = syn::parse_file(include_str!(
+            "../../day2/src/security_epoch/restore_staging.rs"
+        ))
+        .unwrap();
+        let functions: Vec<_> = syntax
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Fn(function) if function.sig.ident == "prepare_image" => Some(function),
+                _ => None,
+            })
+            .collect();
         assert_eq!(functions.len(), 1);
         let function = &functions[0];
         let source = "crates/day2/src/security_epoch/restore_staging.rs";
@@ -8880,10 +8887,16 @@ mod tests {
         };
         assert!(!refused(source, function));
         let mut setter = function.clone();
-        setter.block.stmts.insert(0, syn::parse_quote!(borrowed.authorizer(None);));
+        setter
+            .block
+            .stmts
+            .insert(0, syn::parse_quote!(borrowed.authorizer(None);));
         assert!(refused(source, &setter));
         let mut foreign = function.clone();
-        foreign.sig.inputs.push(syn::parse_quote!(borrowed: &Connection));
+        foreign
+            .sig
+            .inputs
+            .push(syn::parse_quote!(borrowed: &Connection));
         assert!(refused(source, &foreign));
         assert!(refused("crates/day2/src/impostor.rs", function));
     }
