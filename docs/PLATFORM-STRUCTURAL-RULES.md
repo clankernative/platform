@@ -292,6 +292,14 @@ copy. The proof-source reader consumes at most four MiB plus one lookahead byte
 on its opened regular descriptor, refusing excess. It does not establish
 `NOFOLLOW`, pathname/descriptor identity or a coherent multi-file snapshot.
 
+The reviewed proof registry admits at most 256 entries, providing finite metadata
+headroom for independent owning modules. Every entry still receives the same
+identity, API, trait and source enforcement; nothing is truncated or implicitly
+approved. Candidate inspection requests retain their separate 128-entry limits
+for destructor, proof-use and owning-API selectors. The four-MiB input bound,
+32 trait sources, 128 parsed-buffer destructors, eight owning children and
+per-proof API limits remain unchanged. Registry capacity grants no runtime authority.
+
 Proofs bind the exact installation, app, operation, artifact, binding, account,
 generation and epoch required for their action. Persisted facts do not become
 current authority merely by decoding. The responsible boundary establishes
