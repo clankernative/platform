@@ -323,7 +323,10 @@ fn require_single_image(source: &std::path::Path) -> Result<()> {
 
 /// Fixed fresh-memory DATA builder. It accepts no raw connection or callback;
 /// the entire function is reviewed/pinned for its sole serialize operation.
-fn prepare_image<A: Checks>(owner: &mut A, image: &mut Zeroizing<Vec<u8>>) -> Result<application::Summary> {
+fn prepare_image<A: Checks>(
+    owner: &mut A,
+    image: &mut Zeroizing<Vec<u8>>,
+) -> Result<application::Summary> {
     // This is always a fresh scratch connection. No filename, physical owner,
     // database_list result or caller-supplied Connection can construct it.
     boundary(owner, |s| {

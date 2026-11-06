@@ -45,8 +45,13 @@ pub(super) fn reset_in(
         crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),
         "complete_restore_source_artifact_changed"
     );
-    let scope = format!("{}/{}/{}",namespace.installation.as_str(),namespace.environment.as_str(),namespace.app.as_str());
-    crate::store::validate_storage_in(tx,selected.artifact,&scope)?;
+    let scope = format!(
+        "{}/{}/{}",
+        namespace.installation.as_str(),
+        namespace.environment.as_str(),
+        namespace.app.as_str()
+    );
+    crate::store::validate_storage_in(tx, selected.artifact, &scope)?;
     // The canonical operation's cumulative admission SAVEPOINT belongs inside
     // this same outer transaction. Only prepare_image commits, serializes and
     // closes it; no applied-cut loan or raw connection can escape this call.
