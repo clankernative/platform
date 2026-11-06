@@ -2018,6 +2018,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -2114,6 +2121,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -2132,6 +2146,7 @@
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (in crate :: security_epoch) fn begin_admin_read < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , operation : & Digest , trace : & 'storage ServingTiming) -> Result < ControllerAdminReadLoan < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_restore_execution_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , mut stage : EnrolledRoleStage < 'role > , record : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , trace : & 'storage ServingTiming) -> Result < Option < RestoreExecutionReader < 'metadata , 'storage , 'role > > >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ > , trace : & ServingTiming) -> Result < ServingObservation >",
         "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , mut stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
@@ -2158,6 +2173,10 @@
         {
           "owner": "ActiveControllerStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn begin_admin_read < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , operation : & Digest , trace : & 'storage ServingTiming) -> Result < ControllerAdminReadLoan < 'storage , 'role > >"
+        },
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_restore_execution_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , mut stage : EnrolledRoleStage < 'role > , record : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , trace : & 'storage ServingTiming) -> Result < Option < RestoreExecutionReader < 'metadata , 'storage , 'role > > >"
         },
         {
           "owner": "ActiveControllerStorageContinuity",
@@ -2202,6 +2221,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
             "module": "producer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
           }
         },
         {
@@ -2290,6 +2316,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
             "module": "producer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
           }
         },
         {
