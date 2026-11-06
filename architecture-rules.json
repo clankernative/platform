@@ -3,6 +3,7 @@
   "sources": [
     "cli/checks/src/lib.rs",
     "crates/day2-assets/src/lib.rs",
+    "crates/day2-capabilities/src/cli_login.rs",
     "crates/day2-capabilities/src/credential_runtime.rs",
     "crates/day2-capabilities/src/credentials.rs",
     "crates/day2-capabilities/src/integrations.rs",
@@ -172,6 +173,7 @@
     "crates/day2/src/carta_live_tests.rs",
     "crates/day2/src/carta_qualification.rs",
     "crates/day2/src/chart_live_tests.rs",
+    "crates/day2/src/cli_login.rs",
     "crates/day2/src/codegen.rs",
     "crates/day2/src/compatibility.rs",
     "crates/day2/src/connection_codegen.rs",
