@@ -52,8 +52,7 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
             // native/file lifetime; no shadow DDL or supplied success exists.
             self.check_registry_local()?;
             crate::store::check_authentication_sqlite(&mut files, &sqlite)?;
-            let schema =
-                crate::security_epoch::restore_webauthn::store::require_existing_schema(&sqlite);
+            let schema = crate::security_epoch::restore_webauthn::require_existing_schema(&sqlite);
             let held = crate::store::check_authentication_sqlite(&mut files, &sqlite);
             let native = self.check_registry_local();
             schema?;
@@ -269,5 +268,72 @@ mod tests {
             1,
         );
         assert!(!outside_before_reader(&delayed));
+    }
+    #[test]
+    fn admission_uses_actual_auth_schema_result_then_both_real_postchecks_before_success() {
+        use quote::ToTokens;
+        fn wired(source: &str) -> bool {
+            let Ok(file) = syn::parse_file(source) else {
+                return false;
+            };
+            let Some(factory) = file.items.iter().find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if !item
+                    .self_ty
+                    .to_token_stream()
+                    .to_string()
+                    .starts_with("ControllerAdminReader")
+                {
+                    return None;
+                }
+                item.items.iter().find_map(|member| match member {
+                    syn::ImplItem::Fn(method)
+                        if method.sig.ident == "admit_authentication_store" =>
+                    {
+                        Some(method)
+                    }
+                    _ => None,
+                })
+            }) else {
+                return false;
+            };
+            let text = factory.block.to_token_stream().to_string();
+            let ordered = [
+                "let schema = crate :: security_epoch :: restore_webauthn :: require_existing_schema (& sqlite) ;",
+                "let held = crate :: store :: check_authentication_sqlite (& mut files , & sqlite) ;",
+                "let native = self . check_registry_local () ;",
+                "schema ? ; held ? ; native ? ; Ok ((sqlite , files))",
+            ];
+            let mut previous = None;
+            for target in ordered {
+                let Some(index) = text.find(target) else {
+                    return false;
+                };
+                if previous.is_some_and(|prior| prior >= index) {
+                    return false;
+                }
+                previous = Some(index);
+            }
+            text.matches("require_existing_schema").count() == 1
+        }
+        let source = include_str!("authentication_store.rs");
+        assert!(wired(source));
+        for (old, new) in [
+            (
+                "crate::security_epoch::restore_webauthn::require_existing_schema(&sqlite)",
+                "Ok::<(), anyhow::Error>(())",
+            ),
+            (
+                "let native = self.check_registry_local();",
+                "let native = Ok::<(), anyhow::Error>(());",
+            ),
+            ("schema?;", "let _discarded_schema_failure = schema;"),
+        ] {
+            let mutant = source.replacen(old, new, 1);
+            assert_ne!(source, mutant, "actual admission target");
+            assert!(!wired(&mutant));
+        }
     }
 }

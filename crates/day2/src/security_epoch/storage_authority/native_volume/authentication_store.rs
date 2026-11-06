@@ -184,6 +184,13 @@ impl CurrentVolumePhase<'_, '_> {
             );
             // Acquire actual provider material on THIS original. No warm-purpose
             // relabel, new stage, renewed clock or metadata-only profile witness.
+            let provider_original = self
+                .reader
+                .stage
+                .narrow_io_acquisition(self.reader.store.max_lease_seconds)?;
+            // The retained HTTP view must meet the actual post-peer ceiling
+            // BEFORE the first credential/provider read, not merely afterwards.
+            meet_authentication_original(provider_original, &mut self.reader.acquisition)?;
             let material = self.reader.acquire_material()?;
             self.reader.authentication = ProviderAuthentication::Acquired(Box::new(material));
             self.check_durability_profile()?;
@@ -484,6 +491,94 @@ mod tests {
 #[cfg(test)]
 mod descriptor_tests {
     use super::*;
+
+    #[test]
+    fn actual_stage_cap_meets_reader_before_provider_io_and_again_before_file_admission() {
+        use quote::ToTokens;
+        fn wired(source: &str) -> bool {
+            let Ok(file) = syn::parse_file(source) else {
+                return false;
+            };
+            let Some(admit) = file.items.iter().find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if !item
+                    .self_ty
+                    .to_token_stream()
+                    .to_string()
+                    .starts_with("CurrentVolumePhase")
+                {
+                    return None;
+                }
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(function)
+                        if function.sig.ident == "admit_authentication_store" =>
+                    {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+            }) else {
+                return false;
+            };
+            let text = admit.block.to_token_stream().to_string();
+            let required = [
+                "let provider_original = self . reader . stage . narrow_io_acquisition (self . reader . store . max_lease_seconds) ? ;",
+                "meet_authentication_original (provider_original , & mut self . reader . acquisition) ? ;",
+                "let material = self . reader . acquire_material () ? ;",
+                "self . check_durability_profile () ? ;",
+                "let current = self . reader . stage . narrow_io_acquisition (self . reader . store . max_lease_seconds) ? ;",
+                "let original = meet_authentication_original (current , & mut self . reader . acquisition) ? ;",
+                "let root = self . resources . directory . try_clone () ? ;",
+            ];
+            let mut previous = None;
+            for target in required {
+                let Some(index) = text.find(target) else {
+                    return false;
+                };
+                if previous.is_some_and(|last| last >= index) {
+                    return false;
+                }
+                previous = Some(index);
+            }
+            let Some(helper) = file.items.iter().find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "meet_authentication_original" => {
+                    Some(item)
+                }
+                _ => None,
+            }) else {
+                return false;
+            };
+            let expected: syn::Block = syn::parse_quote!({
+                current.exchange_current_views(retained)?;
+                Ok(current)
+            });
+            text.matches("meet_authentication_original").count() == 2
+                && helper.block.to_token_stream().to_string()
+                    == expected.to_token_stream().to_string()
+        }
+        let source = include_str!("authentication_store.rs");
+        assert!(wired(source));
+        let normalized = syn::parse_file(source)
+            .unwrap()
+            .to_token_stream()
+            .to_string();
+        let before = "meet_authentication_original (provider_original , & mut self . reader . acquisition) ? ;";
+        let acquire = "let material = self . reader . acquire_material () ? ;";
+        let removed = normalized.replacen(before, "", 1);
+        assert_ne!(removed, normalized);
+        assert!(!wired(&removed));
+        let ordered = format!("{before} {acquire}");
+        let reordered = normalized.replacen(&ordered, &format!("{acquire} {before}"), 1);
+        assert_ne!(reordered, normalized, "mutate actual pre-provider ordering");
+        assert!(!wired(&reordered));
+        let skipped_meet =
+            normalized.replacen("current . exchange_current_views (retained) ? ;", "", 1);
+        assert_ne!(skipped_meet, normalized);
+        assert!(!wired(&skipped_meet));
+    }
+
     #[test]
     fn auth_files_meet_both_actual_clock_views_without_discarding_an_earlier_cap() -> Result<()> {
         use std::time::Duration;
