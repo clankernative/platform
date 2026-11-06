@@ -293,6 +293,7 @@ fn known_initial_denial_settles_the_same_reader_before_returning_data() {
 // Actual source interval: the dedicated restore original is captured before
 // the existing reader can open/recover/read SQLite, never after its result.
 fn execution_reader_interval(source: &str) -> Result<bool> {
+    use quote::ToTokens as _;
     use syn::visit::Visit as _;
     #[derive(Default)]
     struct Calls(Vec<String>);
@@ -326,7 +327,11 @@ fn execution_reader_interval(source: &str) -> Result<bool> {
         })
         .flatten()
         .collect();
-    if methods.len() != 1 {
+    if methods.len() != 1
+        || methods[0].block.stmts.len() != 6
+        || methods[0].block.stmts[0].to_token_stream().to_string()
+            != "record . statement . validate () ? ;"
+    {
         return Ok(false);
     }
     let mut calls = Calls::default();
@@ -376,5 +381,13 @@ fn restore_execution_original_precedes_the_actual_accepting_reader() -> Result<(
     let moved = removed.replacen(marker, &format!("{capture}{marker}"), 1);
     syn::parse_file(&moved)?;
     assert!(!execution_reader_interval(&moved)?);
+    let waited = source.replacen(
+        "        record.statement.validate()?;",
+        "        std::thread::yield_now();\n        record.statement.validate()?;",
+        1,
+    );
+    assert_ne!(source, waited);
+    syn::parse_file(&waited)?;
+    assert!(!execution_reader_interval(&waited)?);
     Ok(())
 }
