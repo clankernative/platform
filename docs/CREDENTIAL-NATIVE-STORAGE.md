@@ -607,3 +607,20 @@ Portable tests exercise the local SQL disposition against an independent seeded
 model, real SQLite cohort/readonly/refusal behavior, signed wire controls and
 production wiring mutations. They do not establish native process-death,
 App/Controller concurrency or deployed restore qualification.
+
+
+### Issuer closure for a future restore stop
+
+The native issuer can irreversibly close new enrollment and cold-peer grants
+for its actual retained generation. Its fixed authenticated exchange requires
+the current App and Controller stages and refuses any other historical enrolled
+actor. The client retains the actual issuer message handles, same enrolled
+Controller owner and original deadline. A missing, malformed or lost response
+cannot reopen this issuer or construct a positive closure owner.
+
+This closure covers issuer grants only. It is not complete business-authority
+exclusion, App response drain, grant-use consumption, RootFenced authority or a
+restored writer. The accepting join remains closed until it retains those actual
+owners and genuinely proves every required exact historical key is available;
+copying an archive key list or accepting caller-provided availability is not that
+proof. No live or kernel qualification is claimed by the portable DATA controls.

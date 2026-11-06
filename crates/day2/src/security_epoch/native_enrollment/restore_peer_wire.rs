@@ -89,6 +89,21 @@ fn target_only<'de, D: Deserializer<'de>>(
     })
 }
 
+// Authenticated stop projection DATA only. It is produced only after the
+// actual retained peer has checked the signed frozen issuer statement.
+#[derive(Clone, PartialEq, Eq)]
+pub(in crate::security_epoch) struct AuthorityStopData {
+    pub admin_binding: Digest,
+    pub operation: Digest,
+    pub root: Digest,
+    pub stopped: Digest,
+}
+
+pub(in crate::security_epoch) enum AdminPeerResult {
+    Known,
+    Stop(AuthorityStopData),
+}
+
 map_record! { Creator { device_major: u32, device_minor: u32, inode: u64, length: u64, user: u32, group: u32 } }
 // Historical document selectors only, not initial-file/holder authority. They
 // let the App read the same complete record set without receiving a send port.

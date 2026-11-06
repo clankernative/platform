@@ -559,6 +559,19 @@ pub(in crate::security_epoch::native_enrollment) enum Body {
     CurrentReady {
         exchange: Digest,
     },
+    CurrentStop {
+        exchange: Digest,
+        frozen: Box<protocol::FrozenIssuance>,
+        signature: String,
+    },
+    CurrentStopped {
+        exchange: Digest,
+        stopped: Digest,
+    },
+    CurrentStopReleased {
+        exchange: Digest,
+        stopped: Digest,
+    },
     CurrentResult {
         exchange: Digest,
     },
@@ -604,9 +617,15 @@ impl Body {
             ),
             Self::CurrentAck { .. } => (Protocol::CurrentStorage, Step::Ack, None),
             Self::CurrentReady { .. } => (Protocol::CurrentStorage, Step::Ready, None),
-            Self::CurrentResult { .. } => (Protocol::CurrentStorage, Step::Known, None),
-            Self::CurrentConsumed { .. } => (Protocol::CurrentStorage, Step::Consumed, None),
-            Self::CurrentReleased { .. } => (Protocol::CurrentStorage, Step::Released, None),
+            Self::CurrentResult { .. } | Self::CurrentStop { .. } => {
+                (Protocol::CurrentStorage, Step::Known, None)
+            }
+            Self::CurrentConsumed { .. } | Self::CurrentStopped { .. } => {
+                (Protocol::CurrentStorage, Step::Consumed, None)
+            }
+            Self::CurrentReleased { .. } | Self::CurrentStopReleased { .. } => {
+                (Protocol::CurrentStorage, Step::Released, None)
+            }
         };
         Frame {
             protocol,
@@ -675,6 +694,14 @@ impl Body {
             | Self::CurrentResult { .. }
             | Self::CurrentConsumed { .. }
             | Self::CurrentReleased { .. } => current()?,
+            Self::CurrentStop { .. }
+            | Self::CurrentStopped { .. }
+            | Self::CurrentStopReleased { .. } => {
+                ensure!(
+                    expected == StagePurpose::CurrentRole,
+                    "restore_stop_current_original_required"
+                );
+            }
         }
         Ok(())
     }
@@ -698,7 +725,8 @@ impl Body {
             | Self::Accepted { .. }
             | Self::CurrentHello { .. }
             | Self::CurrentAck { .. }
-            | Self::CurrentConsumed { .. } => NativeRole::AppHost,
+            | Self::CurrentConsumed { .. }
+            | Self::CurrentStopped { .. } => NativeRole::AppHost,
             Self::InitialReady { .. }
             | Self::Offer { .. }
             | Self::Complete { .. }
@@ -706,7 +734,9 @@ impl Body {
             | Self::CurrentOffer { .. }
             | Self::CurrentReady { .. }
             | Self::CurrentResult { .. }
-            | Self::CurrentReleased { .. } => NativeRole::EpochController,
+            | Self::CurrentReleased { .. }
+            | Self::CurrentStop { .. }
+            | Self::CurrentStopReleased { .. } => NativeRole::EpochController,
         }
     }
 }
@@ -873,6 +903,13 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
             require_object(&value, "/body/exchange")?;
             require_request_object(&value, "/body/exchange/request")?;
         }
+        Some("current_stop") => {
+            require_object(&value, "/body/frozen")?;
+            require_object(&value, "/body/frozen/selection")?;
+            require_stage_objects(&value, "/body/frozen/selection/app")?;
+            require_stage_objects(&value, "/body/frozen/selection/controller")?;
+        }
+        Some("current_stopped" | "current_stop_released") => {}
         Some(
             "confirm" | "complete" | "accepted" | "current_ack" | "current_ready"
             | "current_result" | "current_consumed" | "current_released",
@@ -904,7 +941,7 @@ fn require_object(value: &serde_json::Value, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn require_stage_objects(value: &serde_json::Value, prefix: &str) -> Result<()> {
+pub(super) fn require_stage_objects(value: &serde_json::Value, prefix: &str) -> Result<()> {
     for suffix in [
         "",
         "/certificate",
