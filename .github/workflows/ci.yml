@@ -100,11 +100,19 @@ jobs:
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
@@ -218,11 +226,19 @@ jobs:
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
@@ -340,6 +356,18 @@ jobs:
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}
         id: native_preparation
+      - name: Retain checksum-addressed source downloads for main publication
+        if: ${{ !cancelled() && matrix.part == 'inputs' && steps.native_preparation.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: day2-bazel-source-downloads-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ~/.cache/bazel-repo/content_addressable
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
       - name: Retain current compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -462,11 +490,19 @@ jobs:
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
@@ -523,6 +559,18 @@ jobs:
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-mac
         id: native_preparation
+      - name: Retain checksum-addressed source downloads for main publication
+        if: ${{ !cancelled() && steps.native_preparation.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: day2-bazel-source-downloads-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ~/.cache/bazel-repo/content_addressable
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
       - name: Retain current Mac compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -696,6 +744,60 @@ jobs:
         with:
           path: ~/.cache/bazel-disk
           key: day2-bazel-mac-actions-v2-macOS-ARM64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Checkout current dependency keys for source-cache publication
+        id: repository_checkout
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Source archives are untrusted acceleration data. Bazel still checks
+      # each requested checksum; no compiler or verification receipt is reused.
+      - name: Find this dependency key in the current branch scope
+        id: repository_lookup
+        if: ${{ !cancelled() && steps.repository_checkout.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-macOS-ARM64-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+      - name: Download source archives from the admitted origin
+        id: repository_download
+        if: ${{ !cancelled() && steps.repository_lookup.outputs.cache-primary-key != '' && steps.repository_lookup.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          digest-mismatch: error
+          repository: clankernative/platform
+          github-token: ${{ github.token }}
+          run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
+          name: day2-bazel-source-downloads-macOS-ARM64-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}
+          path: ~/.cache/bazel-repo/content_addressable
+      - name: Retry source archive download once
+        id: repository_retry
+        if: ${{ !cancelled() && steps.repository_download.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          digest-mismatch: error
+          repository: clankernative/platform
+          github-token: ${{ github.token }}
+          run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
+          name: day2-bazel-source-downloads-macOS-ARM64-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}
+          path: ~/.cache/bazel-repo/content_addressable
+      - name: Publish source downloads in this branch scope
+        if: ${{ !cancelled() && (steps.repository_download.outcome == 'success' || steps.repository_retry.outcome == 'success') }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: ${{ steps.repository_lookup.outputs.cache-primary-key }}
+
 
   publish-linux-actions:
     # Same trust boundary as the Mac publisher: an independently completed full
@@ -761,6 +863,60 @@ jobs:
         with:
           path: ~/.cache/bazel-disk
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Checkout current dependency keys for source-cache publication
+        id: repository_checkout
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Source archives are untrusted acceleration data. Bazel still checks
+      # each requested checksum; no compiler or verification receipt is reused.
+      - name: Find this dependency key in the current branch scope
+        id: repository_lookup
+        if: ${{ !cancelled() && steps.repository_checkout.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: true
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-Linux-X64-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+      - name: Download source archives from the admitted origin
+        id: repository_download
+        if: ${{ !cancelled() && steps.repository_lookup.outputs.cache-primary-key != '' && steps.repository_lookup.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          digest-mismatch: error
+          repository: clankernative/platform
+          github-token: ${{ github.token }}
+          run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
+          name: day2-bazel-source-downloads-Linux-X64-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}
+          path: ~/.cache/bazel-repo/content_addressable
+      - name: Retry source archive download once
+        id: repository_retry
+        if: ${{ !cancelled() && steps.repository_download.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          digest-mismatch: error
+          repository: clankernative/platform
+          github-token: ${{ github.token }}
+          run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}
+          name: day2-bazel-source-downloads-Linux-X64-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}
+          path: ~/.cache/bazel-repo/content_addressable
+      - name: Publish source downloads in this branch scope
+        if: ${{ !cancelled() && (steps.repository_download.outcome == 'success' || steps.repository_retry.outcome == 'success') }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: ${{ steps.repository_lookup.outputs.cache-primary-key }}
+
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
@@ -798,11 +954,19 @@ jobs:
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
@@ -1046,11 +1210,19 @@ jobs:
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
@@ -1413,11 +1585,19 @@ jobs:
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
@@ -1723,11 +1903,19 @@ jobs:
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
-          repository-cache: true
+          repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Restore source-keyed compiled actions
