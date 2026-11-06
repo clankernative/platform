@@ -32,6 +32,11 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+      "scope": "const",
+      "fingerprint": "sha256:6ed6ce9addf4aa1a22a543e7fbb1eee762be2d21238f891c65a1ea6842348a79"
+    },
+    {
       "source": "crates/day2/src/security_epoch/credential_material.rs",
       "scope": "const",
       "fingerprint": "sha256:10d5afa272f4b447e9b29d5e934ea00fc853003d091eaf134498827b5ab66491",
@@ -72,11 +77,6 @@
       "scope": "const",
       "fingerprint": "sha256:f909a61c61b47abf6f83e1d6e25dd174020790e0e30fa5e8f6f1d5524dc63ee0",
       "registration": null
-    },
-    {
-      "source": "crates/day2/src/store/native_storage/controller_admins/reader.rs",
-      "scope": "const",
-      "fingerprint": "sha256:6ed6ce9addf4aa1a22a543e7fbb1eee762be2d21238f891c65a1ea6842348a79"
     },
     {
       "source": "crates/day2/src/store/native_storage/keeper.rs",
@@ -1717,6 +1717,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
+            "module": "reader"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -1792,6 +1799,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
+            "module": "reader"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -1808,7 +1822,7 @@
       ],
       "methods": [
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
-        "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < crate :: store :: ControllerAdminReader < 'metadata , 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn begin_admin_read < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , operation : & Digest , trace : & 'storage ServingTiming) -> Result < ControllerAdminReadLoan < 'storage , 'role > >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ > , trace : & ServingTiming) -> Result < ServingObservation >",
@@ -1831,7 +1845,7 @@
         },
         {
           "owner": "ActiveControllerStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < crate :: store :: ControllerAdminReader < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
         },
         {
           "owner": "ActiveControllerStorageContinuity",
@@ -1859,6 +1873,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
             "module": "admin_read"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
+            "module": "reader"
           }
         },
         {
@@ -1926,6 +1947,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
             "module": "admin_read"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
+            "module": "reader"
           }
         },
         {
@@ -2035,8 +2063,17 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
       "type_name": "ControllerAdminReadLoan",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
+            "module": "reader"
+          }
+        }
+      ],
       "methods": [
+        "pub (crate) fn begin_retained_sql (& mut self , db : & rusqlite :: Connection) -> Result < () >",
         "pub (crate) fn begin_sql (& mut self) -> Result < () >",
         "pub (crate) fn check_action (& mut self , metadata : & crate :: store :: InitialStoreMetadata , operation : & Digest) -> Result < () >",
         "pub (crate) fn check_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
@@ -2061,6 +2098,10 @@
         {
           "owner": "ControllerAdminReadLoan < 'storage , 'role >",
           "signature": "fn refresh (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ControllerAdminReadLoan < 'storage , 'role >",
+          "signature": "pub (crate) fn begin_retained_sql (& mut self , db : & rusqlite :: Connection) -> Result < () >"
         },
         {
           "owner": "ControllerAdminReadLoan < 'storage , 'role >",
@@ -2109,6 +2150,10 @@
         {
           "owner": "ControllerAdminReadLoan < 'storage , 'role >",
           "signature": "pub (crate) fn retain_reader (& mut self , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
+          "signature": "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
         }
       ],
       "proof_uses": [],
@@ -2118,7 +2163,15 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
       "type_name": "CurrentAdminMembership",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
+            "module": "reader"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn check (& mut self , metadata : & crate :: store :: InitialStoreMetadata , actor : & str , operation : & Digest) -> Result < () >"
       ],
@@ -2132,6 +2185,44 @@
         {
           "owner": "CurrentAdminMembership < '_ , '_ , '_ >",
           "signature": "pub (crate) fn check (& mut self , metadata : & crate :: store :: InitialStoreMetadata , actor : & str , operation : & Digest) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+      "type_name": "ControllerAdminReader",
+      "owning_children": [],
+      "methods": [
+        "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >",
+        "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
+        "pub (crate) fn finish_checked (mut self) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
+        },
+        {
+          "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
+          "signature": "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >"
+        },
+        {
+          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn finish_checked (mut self) -> Result < () >"
+        },
+        {
+          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
         }
       ],
       "proof_uses": [],
@@ -6000,65 +6091,32 @@
     },
     {
       "source": "crates/day2/src/store/native_storage/controller_admins/reader.rs",
-      "type_name": "ControllerAdminReader",
+      "type_name": "ControllerAdminSqlite",
       "owning_children": [],
       "methods": [
-        "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
-        "pub (crate) fn finish_checked (mut self) -> Result < () >",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (crate) fn check_handles (& self) -> Result < () >",
+        "pub (crate) fn close (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < () >",
+        "pub (crate) fn open (loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < Self >",
+        "pub (crate) fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
       ],
       "factories": [
         {
-          "owner": "InitialStoreMetadata",
-          "signature": "pub (crate) fn accept_admin_reader < 'metadata , 'storage , 'role > (& 'metadata self , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < ControllerAdminReader < 'metadata , 'storage , 'role > >"
+          "owner": "ControllerAdminSqlite",
+          "signature": "pub (crate) fn open (loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < Self >"
         }
       ],
       "material_uses": [
         {
-          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >"
+          "owner": "ControllerAdminSqlite",
+          "signature": "pub (crate) fn check_handles (& self) -> Result < () >"
         },
         {
-          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn finish_checked (mut self) -> Result < () >"
+          "owner": "ControllerAdminSqlite",
+          "signature": "pub (crate) fn close (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < () >"
         },
         {
-          "owner": "ControllerAdminReader < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn refuse (& mut self)"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/store/native_storage/controller_admins/reader.rs",
-      "type_name": "ReaderConnection",
-      "owning_children": [],
-      "methods": [
-        "fn check_handles (& self) -> Result < () >",
-        "fn close (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < () >",
-        "fn open (loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < Self >",
-        "fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
-      ],
-      "factories": [
-        {
-          "owner": "ReaderConnection",
-          "signature": "fn open (loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < Self >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "ReaderConnection",
-          "signature": "fn check_handles (& self) -> Result < () >"
-        },
-        {
-          "owner": "ReaderConnection",
-          "signature": "fn close (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < () >"
-        },
-        {
-          "owner": "ReaderConnection",
-          "signature": "fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
+          "owner": "ControllerAdminSqlite",
+          "signature": "pub (crate) fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
         }
       ],
       "proof_uses": [],

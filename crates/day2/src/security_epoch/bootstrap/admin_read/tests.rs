@@ -193,6 +193,14 @@ fn successful_reader_unit_is_not_connection_close_or_peer_release() {
     assert!(state.end_retained_sql(true).is_err());
     assert!(state.close_reader().is_err());
     assert!(state.finish().is_err());
+
+    let mut state = ReadDisposition::new();
+    state.retain_reader().unwrap();
+    state.begin_sql().unwrap();
+    assert!(state.end_retained_sql(false).is_err());
+    assert!(state.end_retained_sql(true).is_err());
+    assert!(state.close_reader().is_err());
+    assert!(state.finish().is_err());
 }
 
 fn method(source: &str, owner: &str, name: &str) -> syn::ImplItemFn {

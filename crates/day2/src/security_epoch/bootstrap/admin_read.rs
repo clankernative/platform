@@ -14,6 +14,8 @@ use crate::security_epoch::{
 use anyhow::{Context, Result, ensure};
 use std::{marker::PhantomData, rc::Rc};
 
+mod reader;
+
 pub(crate) struct ControllerAdminReadLoan<'storage, 'role> {
     physical: Option<CurrentControllerStoragePhase<'storage, 'role>>,
     reads: CounterRequest<'storage>,
@@ -96,21 +98,6 @@ impl ActiveAppStorageContinuity {
 }
 
 impl ActiveControllerStorageContinuity {
-    /// Fixed accepting source: actual active continuity and same fresh role
-    /// original, authenticated App exclusion, then the retained SQL reader.
-    /// Principals are ordered approver/executor DATA, never authentication.
-    pub(in crate::security_epoch) fn begin_accepting_admin_reader<'metadata, 'storage, 'role>(
-        &'storage mut self,
-        metadata: &'metadata crate::store::InitialStoreMetadata,
-        stage: EnrolledRoleStage<'role>,
-        operation: &Digest,
-        principals: [&str; 2],
-        trace: &'storage ServingTiming,
-    ) -> Result<crate::store::ControllerAdminReader<'metadata, 'storage, 'role>> {
-        let loan = self.begin_admin_read(stage, operation, trace)?;
-        metadata.accept_admin_reader(loan, operation, principals[0], principals[1])
-    }
-
     /// This is a pre-fence active-root path, never a post-fence writer source.
     pub(in crate::security_epoch) fn begin_admin_read<'storage, 'role>(
         &'storage mut self,
@@ -238,6 +225,22 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
         closed?;
         ended?;
         self.check_local()
+    }
+
+    pub(crate) fn begin_retained_sql(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        let result = (|| {
+            self.check_local()?;
+            self.disposition.require_reader_closed_unit()?;
+            ensure!(
+                self.reader == Some(std::ptr::from_ref(db)) && db.is_autocommit(),
+                "controller_admin_reader_substituted_or_unit_open"
+            );
+            self.disposition.begin_sql()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
     }
 
     /// Bind the actual stable boxed connection, before any configuration or

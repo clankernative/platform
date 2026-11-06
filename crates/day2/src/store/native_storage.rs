@@ -22,8 +22,8 @@ const DATABASE: &str = "/state/day2-native/day2-initial.sqlite";
 
 mod controller_admins;
 mod keeper;
-pub(crate) use controller_admins::ControllerAdminReader;
 pub(crate) use controller_admins::check_controller_sqlite_files;
+pub(crate) use controller_admins::{ControllerAdminData, ControllerAdminSqlite};
 mod opened_files;
 pub(crate) use keeper::require_unopened as require_unopened_native_sqlite;
 

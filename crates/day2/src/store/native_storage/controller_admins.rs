@@ -16,7 +16,7 @@ use std::{
 };
 
 mod reader;
-pub(crate) use reader::ControllerAdminReader;
+pub(crate) use reader::ControllerAdminSqlite;
 
 pub(crate) struct ControllerAdminData {
     pub(crate) members: BTreeSet<String>,

@@ -1,7 +1,7 @@
 # Action-scoped Controller administrator reader
 
-`InitialStoreMetadata::accept_admin_reader` consumes the actual authenticated
-`ControllerAdminReadLoan`. It binds the exact metadata object, operation,
+`ActiveControllerStorageContinuity::begin_accepting_admin_reader` acquires the
+actual authenticated `ControllerAdminReadLoan` and consumes it into the reader. It binds the exact metadata object, operation,
 approver and executor to one current policy revision. Both principals must be
 current administrators; they may be the same administrator. Their supplied
 names are still DATA, not authentication. A passkey-backed approval producer
