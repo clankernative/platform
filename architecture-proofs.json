@@ -74,6 +74,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f2499f9eb70a64af334461b4f9646c6eca2f78fbf54dd2c6370f27e78d04dc8f",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
       "scope": "const",
       "fingerprint": "sha256:5722fc840604c24fc0bba2020f0c7c8b028266eba9e5e625d07eafb731f54736",
@@ -2331,6 +2337,13 @@
             "source": "crates/day2/src/security_epoch/firestore.rs",
             "module": "restore"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/firestore/restore/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/firestore/restore.rs",
+            "module": "writer"
+          }
         }
       ],
       "methods": [
@@ -4434,6 +4447,67 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+      "type_name": "Disposition",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >",
+        "pub (in crate :: security_epoch) fn fresh () -> Self",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn require_known (& mut self , target : & Digest) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn fresh () -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >"
+        },
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn require_known (& mut self , target : & Digest) -> Result < () >"
+        }
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+      "type_name": "Flight",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& self , expected : & Digest) -> Result < () >",
+        "pub (in crate :: security_epoch) fn known (mut self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Flight",
+          "signature": "pub (in crate :: security_epoch) fn check (& self , expected : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "Flight",
+          "signature": "pub (in crate :: security_epoch) fn known (mut self) -> Result < () >"
+        }
+      ],
+      "destructor": "sha256:3a22a9882408f59413f93dcb5f7d735527c21cc560a12bc344a815e59208609d",
+      "owning_children": []
     },
     {
       "source": "crates/day2/src/security_epoch/serving.rs",

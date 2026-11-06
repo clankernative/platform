@@ -348,6 +348,9 @@ impl CurrentExchange {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::security_epoch::native_enrollment) enum Body {
+    Restore {
+        payload: super::restore_peer_wire::RestoreBody,
+    },
     InitialReady {
         controller: Box<StageStatement>,
         nonce: Digest,
@@ -421,6 +424,7 @@ impl Body {
     pub(super) fn frame(&self) -> super::handshake::Frame {
         use super::handshake::{Frame, Protocol, Step};
         let (protocol, step, sequence) = match self {
+            Self::Restore { payload } => (Protocol::RestoredStorage, payload.step(), None),
             Self::InitialReady { .. } => (Protocol::InitialStorage, Step::BeginReady, None),
             Self::Hello { .. } => (Protocol::InitialStorage, Step::Hello, None),
             Self::Offer { .. } => (Protocol::InitialStorage, Step::Offer, None),
@@ -466,6 +470,7 @@ impl Body {
             Ok(())
         };
         match self {
+            Self::Restore { payload } => payload.require_stage_purpose(expected)?,
             Self::InitialReady { controller, .. } | Self::Offer { controller, .. } => ensure!(
                 expected == StagePurpose::InitialFirstHolder
                     && controller.original.purpose == expected,
@@ -526,6 +531,7 @@ impl Body {
 
     pub(in crate::security_epoch::native_enrollment) fn sender_role(&self) -> NativeRole {
         match self {
+            Self::Restore { payload } => payload.sender_role(),
             Self::Hello { .. }
             | Self::Confirm { .. }
             | Self::Accepted { .. }
@@ -659,6 +665,22 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
             require_stage_objects(&value, "/body/controller")?
         }
         Some("hello") => require_stage_objects(&value, "/body/app")?,
+        Some("restore") => {
+            require_object(&value, "/body/payload")?;
+            match value
+                .pointer("/body/payload/phase")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("ready" | "offer") => {
+                    require_stage_objects(&value, "/body/payload/controller")?
+                }
+                Some("hello") => require_stage_objects(&value, "/body/payload/app")?,
+                Some(
+                    "confirm" | "durable" | "accepted" | "activated" | "activated_ack" | "released",
+                ) => {}
+                _ => anyhow::bail!("storage_restore_phase"),
+            }
+        }
         Some("offer") => {
             require_stage_objects(&value, "/body/controller")?;
             for path in [
@@ -724,4 +746,4 @@ fn require_stage_objects(value: &serde_json::Value, prefix: &str) -> Result<()> 
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::security_epoch::native_enrollment) mod tests;

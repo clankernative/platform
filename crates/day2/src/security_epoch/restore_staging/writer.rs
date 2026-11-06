@@ -6,6 +6,9 @@ use super::*;
 use crate::security_epoch::restore_fencing::{self as fence, ApprovalIdentity, Binding, Session};
 use std::fs::File;
 
+mod dispatch;
+pub(in crate::security_epoch) use dispatch::{Disposition, Flight};
+
 mod sealed {
     pub trait Source {}
 }

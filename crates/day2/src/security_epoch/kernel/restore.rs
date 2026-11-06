@@ -3,6 +3,7 @@
 //! The epoch fence and both create-only receipts must commit atomically.
 pub(in crate::security_epoch) mod approval_use;
 pub(in crate::security_epoch) mod completion;
+pub(in crate::security_epoch) mod writer;
 
 use super::{EpochStore, Phase, Snapshot, Versioned, advance};
 use crate::security_epoch::restore_approval::{AdminIdentity, ApprovalRequest, TargetBinding};

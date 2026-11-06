@@ -587,3 +587,4 @@ fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
 pub(super) mod tests;
 
 mod writer;
+pub(in crate::security_epoch) use writer::{Disposition, Flight};

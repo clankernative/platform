@@ -294,7 +294,9 @@ fn app_holder_candidate_keeps_pod_process_and_key_identities_separate() {
     assert!(statement.app_holder().is_err());
 }
 
-fn fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
+pub(in crate::security_epoch::native_enrollment) fn fixture(
+    role: NativeRole,
+) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
     let (policy, statement, key, _issuer) = fixture_with_issuer(role);
     (policy, statement, key)
 }

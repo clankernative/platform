@@ -18,6 +18,8 @@ use std::{collections::BTreeSet, marker::PhantomData, rc::Rc};
 
 const MAX_RECORD_BYTES: usize = 32_768;
 
+mod writer;
+
 /// Names and full original-plan commitment, never caller-selected paths.
 pub(in crate::security_epoch) struct Names {
     selection: EpochStore,
@@ -100,26 +102,7 @@ impl Names {
     /// Once a canonical header is known, retain this object through semantic
     /// decoding so a rejected document can still be rolled back by its sender.
     pub(in crate::security_epoch) fn transaction(self, bytes: &[u8]) -> Result<Transaction> {
-        let mut entries = entries(bytes)?;
-        let first = entries
-            .first_mut()
-            .context("restore_provider_stream_empty")?
-            .as_object_mut()
-            .context("restore_provider_entry_object")?;
-        let token = first
-            .remove("transaction")
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .context("restore_provider_transaction_missing")?;
-        let decoded = STANDARD
-            .decode(&token)
-            .map_err(|_| anyhow::anyhow!("restore_provider_transaction_encoding"))?;
-        ensure!(
-            !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
-            "restore_provider_transaction_encoding"
-        );
-        if first.is_empty() {
-            entries.remove(0);
-        }
+        let (token, entries) = transaction_header(bytes, Stream::Reservation)?;
         Ok(Transaction {
             names: self,
             token,
@@ -129,7 +112,7 @@ impl Names {
     }
 
     pub(in crate::security_epoch) fn strong(&self, bytes: &[u8]) -> Result<Observed> {
-        self.decode(entries(bytes)?)
+        self.decode(entries(bytes, Stream::Reservation)?)
     }
 
     fn decode(&self, entries: Vec<Value>) -> Result<Observed> {
@@ -228,15 +211,48 @@ struct RawEntry {
     missing: Option<String>,
 }
 
-fn entries(bytes: &[u8]) -> Result<Vec<Value>> {
+enum Stream {
+    Reservation,
+    Writer,
+}
+
+fn transaction_header(bytes: &[u8], stream: Stream) -> Result<(String, Vec<Value>)> {
+    let mut entries = entries(bytes, stream)?;
+    let first = entries
+        .first_mut()
+        .context("restore_provider_stream_empty")?
+        .as_object_mut()
+        .context("restore_provider_entry_object")?;
+    let token = first
+        .remove("transaction")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .context("restore_provider_transaction_missing")?;
+    let decoded = STANDARD
+        .decode(&token)
+        .map_err(|_| anyhow::anyhow!("restore_provider_transaction_encoding"))?;
+    ensure!(
+        !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
+        "restore_provider_transaction_encoding"
+    );
+    if first.is_empty() {
+        entries.remove(0);
+    }
+    Ok((token, entries))
+}
+
+fn entries(bytes: &[u8], stream: Stream) -> Result<Vec<Value>> {
     ensure!(
         bytes.len() <= super::MAX_BYTES,
         "restore_provider_reply_bound"
     );
     let values: Vec<Value> = crate::json::decode(bytes)
         .map_err(|_| anyhow::anyhow!("restore_provider_reply_encoding"))?;
+    let limit = match stream {
+        Stream::Reservation => 8,
+        Stream::Writer => 10,
+    };
     ensure!(
-        !values.is_empty() && values.len() <= 8,
+        !values.is_empty() && values.len() <= limit,
         "restore_provider_stream_bound"
     );
     Ok(values)
