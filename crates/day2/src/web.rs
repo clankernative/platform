@@ -134,6 +134,7 @@ pub(crate) struct Host {
     redirects: crate::redirects::Catalog,
     api: crate::openapi::Catalog,
     appearance: Appearance,
+    cli_discovery: Option<crate::cli_login::Discovery>,
     authority: String,
     origin: String,
     cookie_name: String,
@@ -584,6 +585,11 @@ impl LocalServer {
                 observed.enter(NativeStartupStep::Appearance);
                 Appearance::load(&runtime)?
             },
+            cli_discovery: if matches!(sign_in, SignIn::Edge(_)) {
+                crate::cli_login::Discovery::load(&runtime, &origin)?
+            } else {
+                None
+            },
             secret: {
                 observed.enter(NativeStartupStep::SessionSecret);
                 security::secret(&runtime, entropy.as_ref())?
@@ -879,7 +885,8 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
     if request.uri().path().starts_with("/_platform/app-") {
         return handle_app_call(host, request).await;
     }
-    let json = crate::web_api::is_json(request.uri().path());
+    let json = crate::web_api::is_json(request.uri().path())
+        || request.uri().path() == crate::cli_login::PATH;
     let live_request = request.method() == Method::GET
         && request.uri().path() == "/_live"
         && request
@@ -1139,11 +1146,10 @@ impl Host {
     /// Who a request is from, before anything else looks at it.
     ///
     /// Development reads the session cookie the sign-in link set. At the edge
-    /// the assertion is required on every request and decides who it is from;
-    /// a request without a valid one is refused here, before dispatch, so no
-    /// route can forget to ask. The one exception is inbound deliveries, which
-    /// are from a provider rather than a person and are established by their
-    /// own signature.
+    /// the assertion is required on every human request and decides who it is
+    /// from, before dispatch, so a route cannot forget to ask. Explicit public
+    /// metadata/download routes establish no identity or session. Provider and
+    /// managed-credential ingress use their own separate admission boundaries.
     ///
     /// The second value is a freshly issued session token, when the request
     /// arrived without a session for the person its assertion names.
@@ -1161,6 +1167,11 @@ impl Host {
         // updater has no browser session or IAP assertion. Only exact admitted
         // names bypass identity; no other route inherits anonymous access.
         if crate::public_downloads::registered(&self.runtime, path) {
+            return Ok((None, None));
+        }
+        // The instance operator selected this public bootstrap projection.
+        // Supplying a cookie or assertion cannot turn it into a human session.
+        if path == crate::cli_login::PATH && self.cli_discovery.is_some() {
             return Ok((None, None));
         }
         if path.starts_with(crate::ingress::ROUTE_PREFIX) {
@@ -1234,6 +1245,12 @@ impl Host {
             crate::error::Failure::UnsupportedMethod
         );
         self.appearance.check_binding(&self.runtime)?;
+        if uri.path() == crate::cli_login::PATH {
+            return match &self.cli_discovery {
+                Some(discovery) => discovery.serve(&self.runtime, method, uri, body),
+                None => Ok(StatusCode::NOT_FOUND.into_response()),
+            };
+        }
         if uri.path().starts_with(crate::public_downloads::PREFIX) {
             return crate::public_downloads::serve(&self.runtime, uri.path(), method, headers);
         }

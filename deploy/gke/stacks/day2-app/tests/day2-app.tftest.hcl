@@ -1604,6 +1604,127 @@ run "renders_freetool_app_resource_scope" {
   }
 }
 
+run "cli_bootstrap_registration_comes_from_the_edge_contract" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\",\"client_secret\":\"synthetic-desktop-registration-value\"}"
+      }
+    }
+  }
+  assert {
+    condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).identity == {
+      scheme             = "google_iap"
+      hosted_domain      = "example.com"
+      cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "synthetic-desktop-registration-value" }
+    }
+    error_message = "The runtime must publish the edge-selected registration with the existing instance identity, without a second client selection."
+  }
+}
+
+run "cli_bootstrap_refuses_a_malformed_contract_registration" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"https://evil.example/client\",\"client_secret\":\"synthetic-desktop-registration-value\"}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_partial_registration" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\"}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_unparseable_registration" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "invalid JSON"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_numeric_registration_values" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\",\"client_secret\":1234567890123456}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_unselected_registration_fields" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\",\"client_secret\":\"synthetic-desktop-registration-value\",\"refresh_token\":\"synthetic-user-token\"}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
 run "rolling_sqlite_keeps_incumbent_and_requires_same_node" {
   command = plan
   variables { rolling_deploys = true }

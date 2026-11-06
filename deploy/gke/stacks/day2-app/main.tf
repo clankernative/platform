@@ -23,11 +23,13 @@ locals {
   shell_audience        = trimspace(lookup(local.shell_contract, "IAP_JWT_AUDIENCE", ""))
   shell_service_account = trimspace(lookup(local.shell_contract, "OAUTH_SHELL_SERVICE_ACCOUNT", ""))
 
-  contract_iap_audience = trimspace(lookup(local.contract, "IAP_JWT_AUDIENCE", ""))
-  iap_audience          = var.iap_audience_override != "" ? var.iap_audience_override : local.contract_iap_audience
-  contract_app_domain   = trimspace(lookup(local.contract, "APP_DOMAIN", ""))
-  pvc_name              = lookup(local.contract, "PVC_NAME", "data")
-  service_name          = lookup(local.contract, "SERVICE_NAME", "app")
+  contract_iap_audience      = trimspace(lookup(local.contract, "IAP_JWT_AUDIENCE", ""))
+  iap_audience               = var.iap_audience_override != "" ? var.iap_audience_override : local.contract_iap_audience
+  contract_app_domain        = trimspace(lookup(local.contract, "APP_DOMAIN", ""))
+  cli_desktop_client_present = contains(keys(local.contract), "CLI_DESKTOP_CLIENT")
+  cli_desktop_client         = try(jsondecode(lookup(local.contract, "CLI_DESKTOP_CLIENT", "null")), null)
+  pvc_name                   = lookup(local.contract, "PVC_NAME", "data")
+  service_name               = lookup(local.contract, "SERVICE_NAME", "app")
   # The label the platform's Service selects. Required from the contract; the
   # fallback only keeps the plan renderable until the precondition reports it.
   contract_label_key   = trimspace(lookup(local.contract, "REQUIRED_SERVICE_LABEL_KEY", ""))
@@ -53,10 +55,10 @@ locals {
   base_instance = merge({
     installation = var.installation
     environment  = var.environment
-    identity = {
+    identity = merge({
       scheme        = "google_iap"
       hosted_domain = var.hosted_domain
-    }
+    }, local.cli_desktop_client == null ? {} : { cli_desktop_client = local.cli_desktop_client })
     apps = {
       (var.app_id) = merge({
         artifact  = "artifacts/${var.artifact_id}"
@@ -144,6 +146,16 @@ resource "kubernetes_config_map_v1" "instance" {
   }
 
   lifecycle {
+    precondition {
+      condition = !local.cli_desktop_client_present ? true : try(
+        toset(keys(local.cli_desktop_client)) == toset(["client_id", "client_secret"]) &&
+        local.cli_desktop_client.client_id == tostring(local.cli_desktop_client.client_id) &&
+        local.cli_desktop_client.client_secret == tostring(local.cli_desktop_client.client_secret) &&
+        can(regex("^[A-Za-z0-9-]{1,200}\\.apps\\.googleusercontent\\.com$", local.cli_desktop_client.client_id)) &&
+        can(regex("^[A-Za-z0-9_-]{16,256}$", local.cli_desktop_client.client_secret)), false
+      )
+      error_message = "The platform contract's CLI_DESKTOP_CLIENT must be a complete bounded Google Desktop registration with exactly client_id and client_secret."
+    }
     precondition {
       condition = var.security_shell_contract == null ? true : (
         lookup(local.shell_contract, "EDGE_ROLE", "") == "security_shell" &&
