@@ -525,6 +525,176 @@ mod tests {
         Ok(())
     }
 
+    fn standalone_admin_shape(source: &str) -> Result<bool> {
+        use syn::visit::Visit as _;
+        let file = syn::parse_file(source)?;
+        let functions: Vec<_> = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "await_controller_admin_read" => {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect();
+        if functions.len() != 1
+            || functions[0].sig.inputs.len() != 2
+            || !functions[0].sig.generics.params.is_empty()
+        {
+            return Ok(false);
+        }
+        use quote::ToTokens as _;
+        use syn::parse::Parser as _;
+        let expected = [
+            (
+                "runtime.uses_native_storage()",
+                "native_admin_read_storage_required",
+            ),
+            (
+                "ACTIVE_SINK.with(|slot| slot.try_borrow().map(|slot| slot.is_none()))?",
+                "native_admin_read_standalone_required",
+            ),
+        ];
+        for (statement, (condition, message)) in functions[0].block.stmts.iter().zip(expected) {
+            let mac = match statement {
+                syn::Stmt::Macro(s) => &s.mac,
+                syn::Stmt::Expr(syn::Expr::Macro(s), _) => &s.mac,
+                _ => return Ok(false),
+            };
+            if !mac.path.is_ident("ensure") {
+                return Ok(false);
+            }
+            let args = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                .parse2(mac.tokens.clone())?;
+            if args.len() != 2
+                || args[0].to_token_stream().to_string()
+                    != syn::parse_str::<syn::Expr>(condition)?
+                        .to_token_stream()
+                        .to_string()
+                || !matches!(&args[1],syn::Expr::Lit(syn::ExprLit{lit:syn::Lit::Str(value),..}) if value.value()==message)
+            {
+                return Ok(false);
+            }
+        }
+        #[derive(Default)]
+        struct Calls {
+            forbidden: usize,
+            events: Vec<String>,
+        }
+        impl<'a> syn::visit::Visit<'a> for Calls {
+            fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func {
+                    self.forbidden += usize::from(
+                        path.path.segments.last().is_some_and(|s| {
+                            matches!(
+                                s.ident.to_string().as_str(),
+                                "with_app_request" | "with_app_participant" | "current_sink"
+                            )
+                        }) || (path.path.segments.iter().any(|s| s.ident == "Sink")
+                            && path.path.segments.last().is_some_and(|s| s.ident == "new")),
+                    );
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+            fn visit_expr_method_call(&mut self, call: &'a syn::ExprMethodCall) {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "begin_current_stage"
+                        | "check_for"
+                        | "prepare_current"
+                        | "borrow_stop"
+                        | "admin_read"
+                        | "capture_app_request"
+                ) {
+                    self.events.push(call.method.to_string());
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let mut calls = Calls::default();
+        calls.visit_block(&functions[0].block);
+        Ok(calls.forbidden == 0
+            && calls.events
+                == [
+                    "begin_current_stage",
+                    "check_for",
+                    "prepare_current",
+                    "borrow_stop",
+                    "admin_read",
+                    "check_for",
+                ])
+    }
+
+    #[test]
+    fn actual_admin_join_has_no_response_ticket_or_reclassified_http_original() -> Result<()> {
+        let source = include_str!("../native_management.rs");
+        assert!(standalone_admin_shape(source)?);
+        use quote::ToTokens as _;
+        for (target, inserted) in [
+            (
+                "let mut stage = role.begin_current_stage()?;",
+                "let _ = Sink::new();",
+            ),
+            (
+                "storage.prepare_current()?;",
+                "with_app_request(&scope, || Ok(()))?;",
+            ),
+            (
+                "let requested = storage.admin_read(&mut stage, operation, &mut cohort);",
+                "let _ = role.begin_current_stage();",
+            ),
+        ] {
+            let mut file = syn::parse_file(source)?;
+            let function = file
+                .items
+                .iter_mut()
+                .find_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == "await_controller_admin_read" => {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let target: syn::Stmt = syn::parse_str(target)?;
+            let target = target.to_token_stream().to_string();
+            let actual = function.to_token_stream().to_string();
+            assert_eq!(
+                actual.matches(&target).count(),
+                1,
+                "actual selected admin target"
+            );
+            let insertion: syn::Stmt = syn::parse_str(inserted)?;
+            let mutant = actual.replacen(
+                &target,
+                &format!("{target} {}", insertion.to_token_stream()),
+                1,
+            );
+            *function = syn::parse_str(&mutant)?;
+            assert!(!standalone_admin_shape(
+                &file.to_token_stream().to_string()
+            )?);
+        }
+        for index in 0..2 {
+            let mut file = syn::parse_file(source)?;
+            let function = file
+                .items
+                .iter_mut()
+                .find_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == "await_controller_admin_read" => {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            function.block.stmts.remove(index);
+            assert!(!standalone_admin_shape(
+                &file.to_token_stream().to_string()
+            )?);
+        }
+        Ok(())
+    }
+
     fn stop_scope(app: &str) -> AuthorityScope {
         AuthorityScope {
             installation: "fixture".to_owned().try_into().unwrap(),

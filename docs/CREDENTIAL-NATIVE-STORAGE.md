@@ -641,3 +641,23 @@ substitute for its history. This is conservative refusal accounting only; it
 neither admits a native stop nor claims remote revocation, a RootFenced commit,
 exact historical-key availability or a restored writer. The fixed App admin
 peer and accepting join remain separate work.
+
+
+### Fixed App stop peer
+
+The standalone App administrative entry captures a distinct current App original
+before physical/peer work and borrows the actual installed authority cohort.
+It creates no response ticket for its own drain and cannot reclassify an HTTP
+original. The signed stop exchange binds the retained App and Controller stages,
+closed issuer generation, exact administrative exchange and Fenced predecessor.
+The App seals issuance, checks the complete initial records and exact Fenced
+root, and requires the actual cohort drained before its distinct stop ACK.
+Ordinary result/ACK/release messages cannot settle the stop; uncertainty refuses.
+The old App holder stays unusable after the terminal stop.
+
+These are fixed peer operations, not an accepting restore supplier. The known
+approval-use/Fenced commit, same-original historical-key producer, retained
+fenced writer continuation and actual target-writer transitions remain separate.
+Additional issuer history and unsupported escaping authority refuse rather than
+being silently omitted. Portable wire/ledger/source controls do not qualify
+native process death, concurrent drain or operational restore.

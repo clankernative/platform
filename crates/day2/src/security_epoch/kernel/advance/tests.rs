@@ -484,3 +484,43 @@ fn fenced_phase_wire_is_closed_and_preserves_the_bootstrap_epoch() -> Result<()>
     assert!(serde_json::from_value::<InitialRequest>(unsupported).is_err());
     Ok(())
 }
+
+#[test]
+fn app_stop_checks_exact_operation_and_whole_initial_receipts() -> Result<()> {
+    let (selection, before) = initial();
+    let initial = before.activate.as_ref().unwrap().value.request.clone();
+    let operation = Digest::new(b"exact-restore-advance");
+    let plan =
+        Request::new(&selection, operation.clone(), &before)?.prepare(&selection, &before)?;
+    let mut after = before.clone();
+    after.root.as_mut().unwrap().value = plan.root;
+    after.sentinel.as_mut().unwrap().value = plan.sentinel;
+    let root = Digest::of(&after.root.as_ref().unwrap().value)?;
+    check_fenced_initial(&selection, &initial, &after, &root, &operation)?;
+    assert!(
+        check_fenced_initial(
+            &selection,
+            &initial,
+            &after,
+            &root,
+            &Digest::new(b"other-advance")
+        )
+        .is_err()
+    );
+    for malformed in [true, false] {
+        let mut changed = after.clone();
+        if malformed {
+            changed.activate.as_mut().unwrap().value.after_root =
+                Digest::new(b"altered-activation-receipt");
+        } else {
+            changed.create.as_mut().unwrap().value.after_root =
+                Digest::new(b"altered-create-receipt");
+        }
+        assert!(check_fenced_initial(&selection, &initial, &changed, &root, &operation).is_err());
+    }
+    let mut foreign = after.clone();
+    foreign.sentinel.as_mut().unwrap().value.phase =
+        before.sentinel.as_ref().unwrap().value.phase.clone();
+    assert!(check_fenced_initial(&selection, &initial, &foreign, &root, &operation).is_err());
+    Ok(())
+}

@@ -53,6 +53,7 @@ mod storage_peer_wire;
 #[cfg(target_os = "linux")]
 mod storage_socket_directory;
 
+pub(in crate::security_epoch) use restore_peer_wire::{AdminPeerResult, AuthorityStopData};
 pub(crate) use serving_peer::{
     ControllerServingListener, ControllerServingPeer, ControllerServingRendezvous,
     CurrentServingPeerPhase, ShellServingConnection, ShellServingPeer,
@@ -78,7 +79,7 @@ pub(crate) enum StoragePeerPurpose {
 pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{
     EnrolledCurrentRequest, EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage,
-    EnrolledStorageStage, SameEnrolledOwner, UnselectedShellRequest,
+    EnrolledStorageStage, FrozenRoleIssuer, SameEnrolledOwner, UnselectedShellRequest,
 };
 pub(in crate::security_epoch) use protocol::StagePurpose;
 
