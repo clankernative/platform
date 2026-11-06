@@ -21,6 +21,16 @@ directory descriptors. It writes only through the actual creator descriptor,
 then syncs and checks the exact readback. Memory commit records prepared DATA;
 physical writes and durability checks remain separate effects.
 
+The scratch connection is configured once, before deserialization, model reads
+or integrity checks. A private continuous mutable borrow lends the actual outer
+transaction and one-use hook proof; the proof cannot be cloned, rebound or made
+from memory PRAGMA data. Complete reset admission uses that same installed
+runtime progress callback. Nested admission never replaces or removes it, on
+success, refusal or unwind, and beginning a transaction never renews already
+spent work. The connection's original execution limit stays active through
+commit, serialization and close. These are scratch-SQL ownership guarantees,
+not native storage, archive, approval or writer authority.
+
 The first profile bounds the image to 16 MiB, lineages to 1,024 and versions to
 4,096. It requires an existing complete canonical credential unit with foreign
 keys enabled. Unknown or partial schemas, foreign namespaces or source epochs,
