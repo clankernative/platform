@@ -6,6 +6,7 @@ package(default_visibility = ["//visibility:public"])
 filegroup(name = "font_fixture_bytes", srcs = ["tests/fixtures/fonts/test-subset.rs"])
 
 COMPILE_INPUTS = [
+    "//build/bazel:roc-packages.json",
     ":font_fixture_bytes",
     "//crates/worker:src/first_request.rs",
     "//:Cargo.lock",
