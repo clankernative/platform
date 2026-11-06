@@ -36,6 +36,10 @@ impl Granted {
     /// the authorization path, which needs a registered operation and a resolved
     /// grant, not a worker.
     pub(crate) fn new() -> Result<Self> {
+        Self::with_request_limit(16_384)
+    }
+
+    fn with_request_limit(max_request_bytes: u64) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("instance.json");
         let state = directory.path().join(".state");
@@ -62,7 +66,7 @@ impl Granted {
                 "slots":{"directory":{"kind":"app_operation",
                     "allowed_resources":[{"id":"callee_list","revision":1}],
                     "actions":["delegate_query"],
-                    "limits":{"max_request_bytes":16_384,"max_response_bytes":65_536,
+                    "limits":{"max_request_bytes":max_request_bytes,"max_response_bytes":65_536,
                         "max_calls_per_invocation":4},
                     "budgets":[{"id":"reads","revision":1}]}}}},
             "budgets":{"reads":{"revision":1,"scope":"app","period_seconds":3600,
@@ -158,7 +162,9 @@ impl Granted {
     }
 
     pub(crate) fn for_issuance() -> Result<Self> {
-        let granted = Self::new()?;
+        // Narrow the resource grant below the unchanged 16 KiB instruction
+        // bound, so a valid instruction reaches issuance before its refusal.
+        let granted = Self::with_request_limit(1024)?;
         granted
             .caller
             .accept("ask", "alice", "sql-issuance", &json!({}), 100)?;
@@ -182,14 +188,22 @@ impl Granted {
     }
 
     pub(crate) fn imported_instruction(&self, oversized: bool) -> Instruction {
-        Instruction {
+        let instruction = Instruction {
             kind: "observe".into(),
             model: "app.query.v1".into(),
             data: json!({"contract":{"operation":"callee.list","digest":self.imported_digest},
-                "input":if oversized { "x".repeat(16_384) } else { "{}".into() }})
+                "input":if oversized { "x".repeat(1024) } else { "{}".into() }})
             .to_string(),
             ..Instruction::default()
+        };
+        assert!(
+            instruction.decode().is_ok(),
+            "fixture must pass the unchanged protocol envelope"
+        );
+        if oversized {
+            assert!(instruction.data.len() > 1024);
         }
+        instruction
     }
 
     /// Catch the actual issuer result and COMMIT even on Err. A transaction
