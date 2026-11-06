@@ -39,34 +39,66 @@ pub(crate) struct MemoryHook<'db> {
 
 impl<'db> MemoryAdmission<'db> {
     fn configure(db: &'db mut Connection) -> Result<Self> {
-        ensure!(db.is_autocommit(), "restore_memory_configuration_inside_transaction");
-        ensure!(db.path().is_none_or(str::is_empty), "restore_memory_connection_required");
-        ensure!(db.pragma_query_value(None,"temp_store",|row|row.get::<_,i64>(0))?==2,"restore_memory_temp_required");
+        ensure!(
+            db.is_autocommit(),
+            "restore_memory_configuration_inside_transaction"
+        );
+        ensure!(
+            db.path().is_none_or(str::is_empty),
+            "restore_memory_connection_required"
+        );
+        ensure!(
+            db.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
+            "restore_memory_temp_required"
+        );
         crate::store::configure_connection(db)?;
-        Ok(Self {db,begun:Cell::new(false),local:std::marker::PhantomData})
+        Ok(Self {
+            db,
+            begun: Cell::new(false),
+            local: std::marker::PhantomData,
+        })
     }
 
     fn begin(&self) -> Result<(Transaction<'_>, MemoryHook<'_>)> {
-        ensure!(!self.begun.replace(true), "restore_memory_transaction_spent");
-        ensure!(self.db.is_autocommit(), "restore_memory_transaction_already_open");
+        ensure!(
+            !self.begun.replace(true),
+            "restore_memory_transaction_spent"
+        );
+        ensure!(
+            self.db.is_autocommit(),
+            "restore_memory_transaction_already_open"
+        );
         let db: &Connection = &*self.db;
-        let tx=Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
-        Ok((tx,MemoryHook {db,used:Cell::new(false)}))
+        let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        Ok((
+            tx,
+            MemoryHook {
+                db,
+                used: Cell::new(false),
+            },
+        ))
     }
 
     #[cfg(test)]
-    pub(crate) fn configure_for_tests(db: &'db mut Connection) -> Result<Self> {Self::configure(db)}
+    pub(crate) fn configure_for_tests(db: &'db mut Connection) -> Result<Self> {
+        Self::configure(db)
+    }
 
     #[cfg(test)]
-    pub(crate) fn begin_for_tests(&self) -> Result<(Transaction<'_>,MemoryHook<'_>)> {self.begin()}
+    pub(crate) fn begin_for_tests(&self) -> Result<(Transaction<'_>, MemoryHook<'_>)> {
+        self.begin()
+    }
 }
 
 impl MemoryHook<'_> {
-    pub(crate) fn enter(&self,tx:&Transaction<'_>) -> Result<()> {
+    pub(crate) fn enter(&self, tx: &Transaction<'_>) -> Result<()> {
         ensure!(!self.used.replace(true), "restore_memory_admission_spent");
-        ensure!(std::ptr::eq(self.db,&**tx),"restore_memory_admission_connection_changed");
-        ensure!(!tx.is_autocommit(),"restore_memory_transaction_required");
-        memory_shape(tx,None)?;
+        ensure!(
+            std::ptr::eq(self.db, &**tx),
+            "restore_memory_admission_connection_changed"
+        );
+        ensure!(!tx.is_autocommit(), "restore_memory_transaction_required");
+        memory_shape(tx, None)?;
         Ok(())
     }
 }
@@ -74,34 +106,36 @@ impl MemoryHook<'_> {
 const _: () = {
     macro_rules! assert_not_impl {
         ($owner:ty,$bound:path) => {{
-            trait Ambiguous<A> {fn check() {}}
-            impl<T:?Sized> Ambiguous<()> for T {}
-            impl<T:?Sized+$bound> Ambiguous<u8> for T {}
-            let _=<$owner as Ambiguous<_>>::check;
+            trait Ambiguous<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
         }};
     }
-    assert_not_impl!(MemoryAdmission<'static>,Clone);
-    assert_not_impl!(MemoryAdmission<'static>,Copy);
-    assert_not_impl!(MemoryAdmission<'static>,Default);
-    assert_not_impl!(MemoryAdmission<'static>,std::fmt::Debug);
-    assert_not_impl!(MemoryAdmission<'static>,Send);
-    assert_not_impl!(MemoryAdmission<'static>,Sync);
-    assert_not_impl!(MemoryAdmission<'static>,serde::Serialize);
-    assert_not_impl!(MemoryAdmission<'static>,serde::Deserialize<'static>);
-    assert_not_impl!(MemoryAdmission<'static>,std::ops::Deref);
-    assert_not_impl!(MemoryAdmission<'static>,AsRef<Connection>);
-    assert_not_impl!(MemoryAdmission<'static>,std::borrow::Borrow<Connection>);
-    assert_not_impl!(MemoryHook<'static>,Clone);
-    assert_not_impl!(MemoryHook<'static>,Copy);
-    assert_not_impl!(MemoryHook<'static>,Default);
-    assert_not_impl!(MemoryHook<'static>,std::fmt::Debug);
-    assert_not_impl!(MemoryHook<'static>,Send);
-    assert_not_impl!(MemoryHook<'static>,Sync);
-    assert_not_impl!(MemoryHook<'static>,serde::Serialize);
-    assert_not_impl!(MemoryHook<'static>,serde::Deserialize<'static>);
-    assert_not_impl!(MemoryHook<'static>,std::ops::Deref);
-    assert_not_impl!(MemoryHook<'static>,AsRef<Connection>);
-    assert_not_impl!(MemoryHook<'static>,std::borrow::Borrow<Connection>);
+    assert_not_impl!(MemoryAdmission<'static>, Clone);
+    assert_not_impl!(MemoryAdmission<'static>, Copy);
+    assert_not_impl!(MemoryAdmission<'static>, Default);
+    assert_not_impl!(MemoryAdmission<'static>, std::fmt::Debug);
+    assert_not_impl!(MemoryAdmission<'static>, Send);
+    assert_not_impl!(MemoryAdmission<'static>, Sync);
+    assert_not_impl!(MemoryAdmission<'static>, serde::Serialize);
+    assert_not_impl!(MemoryAdmission<'static>, serde::Deserialize<'static>);
+    assert_not_impl!(MemoryAdmission<'static>, std::ops::Deref);
+    assert_not_impl!(MemoryAdmission<'static>, AsRef<Connection>);
+    assert_not_impl!(MemoryAdmission<'static>, std::borrow::Borrow<Connection>);
+    assert_not_impl!(MemoryHook<'static>, Clone);
+    assert_not_impl!(MemoryHook<'static>, Copy);
+    assert_not_impl!(MemoryHook<'static>, Default);
+    assert_not_impl!(MemoryHook<'static>, std::fmt::Debug);
+    assert_not_impl!(MemoryHook<'static>, Send);
+    assert_not_impl!(MemoryHook<'static>, Sync);
+    assert_not_impl!(MemoryHook<'static>, serde::Serialize);
+    assert_not_impl!(MemoryHook<'static>, serde::Deserialize<'static>);
+    assert_not_impl!(MemoryHook<'static>, std::ops::Deref);
+    assert_not_impl!(MemoryHook<'static>, AsRef<Connection>);
+    assert_not_impl!(MemoryHook<'static>, std::borrow::Borrow<Connection>);
 };
 
 mod sealed {
@@ -428,30 +462,31 @@ fn prepare_image<A: Checks>(
             db.pragma_update(None, "temp_store", "MEMORY")?;
             let memory = MemoryAdmission::configure(db)?;
             {
-            let db = &mut *memory.db;
-            // Safe pinned API reads a complete in-memory slice, not a fallible FD
-            // stream; exact source bytes were hashed above, before any SQL admit.
-            db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;
-            memory_shape(db, Some(image.len()))?;
-            let page_size: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0))?;
-            db.pragma_update(
-                None,
-                "max_page_count",
-                i64::try_from(MAX_BYTES)? / page_size,
-            )?;
-            db.pragma_update(None, "foreign_keys", true)?;
-            db.pragma_update(None, "journal_mode", "MEMORY")?;
-            ensure!(
-                db.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))? == "memory",
-                "restore_memory_journal_required"
-            );
-            ensure!(
-                db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))? == "ok",
-                "restore_image_integrity"
-            );
+                let db = &mut *memory.db;
+                // Safe pinned API reads a complete in-memory slice, not a fallible FD
+                // stream; exact source bytes were hashed above, before any SQL admit.
+                db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;
+                memory_shape(db, Some(image.len()))?;
+                let page_size: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0))?;
+                db.pragma_update(
+                    None,
+                    "max_page_count",
+                    i64::try_from(MAX_BYTES)? / page_size,
+                )?;
+                db.pragma_update(None, "foreign_keys", true)?;
+                db.pragma_update(None, "journal_mode", "MEMORY")?;
+                ensure!(
+                    db.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))?
+                        == "memory",
+                    "restore_memory_journal_required"
+                );
+                ensure!(
+                    db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))? == "ok",
+                    "restore_image_integrity"
+                );
             }
             current.local_sql()?;
-            let (tx,hook) = memory.begin()?;
+            let (tx, hook) = memory.begin()?;
             let (ns, epoch) = {
                 let s = current.state();
                 (s.input.namespace.clone(), s.input.source_epoch)

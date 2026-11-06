@@ -217,16 +217,39 @@ impl Fixture {
         }
     }
 
-    fn begin_reset(&mut self) -> Result<(MemoryAdmission<'_>,Selection<'_>)> {
-        let Self {db,namespace,artifact,fence,authority_schema,oauth_schema,cut,..}=self;
-        let selected=Selection {namespace,source_epoch:1,artifact,fence,authority_schema,oauth_schema,cut};
-        Ok((MemoryAdmission::configure(db)?,selected))
+    fn begin_reset(&mut self) -> Result<(MemoryAdmission<'_>, Selection<'_>)> {
+        let Self {
+            db,
+            namespace,
+            artifact,
+            fence,
+            authority_schema,
+            oauth_schema,
+            cut,
+            ..
+        } = self;
+        let selected = Selection {
+            namespace,
+            source_epoch: 1,
+            artifact,
+            fence,
+            authority_schema,
+            oauth_schema,
+            cut,
+        };
+        Ok((MemoryAdmission::configure(db)?, selected))
     }
 
     fn reset(&mut self) -> Result<Summary> {
-        let (memory,selected)=self.begin_reset()?;
-        let (tx,hook)=memory.begin()?;
-        let result=reset_in(&tx,&hook,&selected,selected.namespace,selected.source_epoch)?;
+        let (memory, selected) = self.begin_reset()?;
+        let (tx, hook) = memory.begin()?;
+        let result = reset_in(
+            &tx,
+            &hook,
+            &selected,
+            selected.namespace,
+            selected.source_epoch,
+        )?;
         tx.commit()?;
         Ok(result)
     }
@@ -407,65 +430,106 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
 
 #[test]
 fn original_sql_work_limit_survives_complete_reset_refusal_and_unwind() -> Result<()> {
-    #[derive(Clone,Copy)]
-    enum Finish {Complete,Refuse,Unwind}
-    const WORK:&str="WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<2000) SELECT max(n) FROM work";
-    for finish in [Finish::Complete,Finish::Refuse,Finish::Unwind] {
+    #[derive(Clone, Copy)]
+    enum Finish {
+        Complete,
+        Refuse,
+        Unwind,
+    }
+    const WORK: &str = "WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<2000) SELECT max(n) FROM work";
+    for finish in [Finish::Complete, Finish::Refuse, Finish::Unwind] {
         effects::scope(simulation::World::new(98317), || -> Result<()> {
-            let mut fixture=Fixture::new()?;
-            let before=snapshot(&fixture.db)?;
-            let (memory,selected)=fixture.begin_reset()?;
+            let mut fixture = Fixture::new()?;
+            let before = snapshot(&fixture.db)?;
+            let (memory, selected) = fixture.begin_reset()?;
             // Charge the real configured callback using actual SQLite VM work.
             // The second half is below a fresh lifetime cap, but exceeds the
             // SAME original cap when combined with this measured first half.
-            let before_steps={
-                let mut statement=memory.db.prepare(WORK)?;
+            let before_steps = {
+                let mut statement = memory.db.prepare(WORK)?;
                 for _ in 0..512 {
-                    assert_eq!(statement.query_row([],|row|row.get::<_,i64>(0))?,2000);
-                    if statement.get_status(rusqlite::StatementStatus::VmStep)>=5_500_000 {break;}
+                    assert_eq!(statement.query_row([], |row| row.get::<_, i64>(0))?, 2000);
+                    if statement.get_status(rusqlite::StatementStatus::VmStep) >= 5_500_000 {
+                        break;
+                    }
                 }
-                let steps=statement.get_status(rusqlite::StatementStatus::VmStep);
+                let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
                 assert!((5_500_000..6_000_000).contains(&steps));
                 steps
             };
-            let (tx,hook)=memory.begin()?;
+            let (tx, hook) = memory.begin()?;
             match finish {
-                Finish::Complete=>{
-                    reset_in(&tx,&hook,&selected,selected.namespace,1)?;
+                Finish::Complete => {
+                    reset_in(&tx, &hook, &selected, selected.namespace, 1)?;
                 }
-                Finish::Refuse=>{
-                    assert!(crate::oauth::restore::reset_application_in((&tx,&hook),selected.fence,selected.authority_schema,selected.oauth_schema,selected.cut,selected.namespace,8).is_err());
+                Finish::Refuse => {
+                    assert!(
+                        crate::oauth::restore::reset_application_in(
+                            (&tx, &hook),
+                            selected.fence,
+                            selected.authority_schema,
+                            selected.oauth_schema,
+                            selected.cut,
+                            selected.namespace,
+                            8
+                        )
+                        .is_err()
+                    );
                 }
-                Finish::Unwind=>{
-                    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _:Result<()>=crate::oauth::schema::admit_retained_memory_transaction(&tx,&hook,|tx| {
-                            tx.execute("UPDATE fixture_business SET value='must-roll-back'",[])?;
-                            panic!("controlled_memory_admission_unwind");
-                        });
+                Finish::Unwind => {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _: Result<()> = crate::oauth::schema::admit_retained_memory_transaction(
+                            &tx,
+                            &hook,
+                            |tx| {
+                                tx.execute(
+                                    "UPDATE fixture_business SET value='must-roll-back'",
+                                    [],
+                                )?;
+                                panic!("controlled_memory_admission_unwind");
+                            },
+                        );
                     }));
                     assert!(result.is_err());
                 }
             }
             tx.commit()?;
             assert!(memory.begin().is_err());
-            if !matches!(finish,Finish::Complete) {assert!(before==snapshot(memory.db)?);}
-            assert!(crate::oauth::schema::admit_retained_memory_transaction(&Transaction::new_unchecked(memory.db,TransactionBehavior::Immediate)?,&hook,|_|Ok(())).is_err());
-            let mut statement=memory.db.prepare(WORK)?;
-            let mut interrupted=false;
+            if !matches!(finish, Finish::Complete) {
+                assert!(before == snapshot(memory.db)?);
+            }
+            assert!(
+                crate::oauth::schema::admit_retained_memory_transaction(
+                    &Transaction::new_unchecked(memory.db, TransactionBehavior::Immediate)?,
+                    &hook,
+                    |_| Ok(())
+                )
+                .is_err()
+            );
+            let mut statement = memory.db.prepare(WORK)?;
+            let mut interrupted = false;
             for _ in 0..512 {
-                match statement.query_row([],|row|row.get::<_,i64>(0)) {
-                    Ok(value)=>{
-                        assert_eq!(value,2000);
-                        if statement.get_status(rusqlite::StatementStatus::VmStep)>=before_steps {break;}
+                match statement.query_row([], |row| row.get::<_, i64>(0)) {
+                    Ok(value) => {
+                        assert_eq!(value, 2000);
+                        if statement.get_status(rusqlite::StatementStatus::VmStep) >= before_steps {
+                            break;
+                        }
                     }
-                    Err(error)=>{
-                        assert_eq!(error.sqlite_error_code(),Some(rusqlite::ErrorCode::OperationInterrupted));
-                        interrupted=true;
+                    Err(error) => {
+                        assert_eq!(
+                            error.sqlite_error_code(),
+                            Some(rusqlite::ErrorCode::OperationInterrupted)
+                        );
+                        interrupted = true;
                         break;
                     }
                 }
             }
-            assert!(interrupted,"original configured work counter was replaced or renewed");
+            assert!(
+                interrupted,
+                "original configured work counter was replaced or renewed"
+            );
             Ok(())
         })?;
     }
@@ -483,19 +547,19 @@ fn reset_selection_cannot_substitute_the_staging_namespace_or_source_epoch() -> 
                 namespace.binding_generation += 1;
             }
             {
-            let (memory,selected)=fixture.begin_reset()?;
-            let (tx,hook)=memory.begin()?;
-            assert!(
-                reset_in(
-                    &tx,
-                    &hook,
-                    &selected,
-                    &namespace,
-                    if wrong_epoch { 2 } else { 1 }
-                )
-                .is_err()
-            );
-            tx.commit()?;
+                let (memory, selected) = fixture.begin_reset()?;
+                let (tx, hook) = memory.begin()?;
+                assert!(
+                    reset_in(
+                        &tx,
+                        &hook,
+                        &selected,
+                        &namespace,
+                        if wrong_epoch { 2 } else { 1 }
+                    )
+                    .is_err()
+                );
+                tx.commit()?;
             }
             assert!(before == snapshot(&fixture.db)?);
         }
@@ -524,11 +588,11 @@ fn cut_rejects_a_foreign_artifact_or_schema_before_any_denial_write() -> Result<
             assert!(fixture.cut.require_artifact(&foreign).is_err());
             let before = snapshot(&fixture.db)?;
             {
-            let (memory,mut selected)=fixture.begin_reset()?;
-            selected.artifact=&foreign;
-            let (tx,hook)=memory.begin()?;
-            assert!(reset_in(&tx, &hook, &selected, selected.namespace, 1).is_err());
-            tx.commit()?;
+                let (memory, mut selected) = fixture.begin_reset()?;
+                selected.artifact = &foreign;
+                let (tx, hook) = memory.begin()?;
+                assert!(reset_in(&tx, &hook, &selected, selected.namespace, 1).is_err());
+                tx.commit()?;
             }
             assert!(before == snapshot(&fixture.db)?);
         }
@@ -551,17 +615,17 @@ fn a_matching_historical_artifact_is_not_a_current_restore_profile() -> Result<(
         fixture.cut.require_artifact(&historical)?;
         let before = snapshot(&fixture.db)?;
         {
-        let (memory,mut selected)=fixture.begin_reset()?;
-        selected.artifact=&historical;
-        let (tx,hook)=memory.begin()?;
-        assert_eq!(
-            reset_in(&tx, &hook, &selected, selected.namespace, 1)
-                .unwrap_err()
-                .root_cause()
-                .to_string(),
-            "artifact_upgrade_required"
-        );
-        tx.commit()?;
+            let (memory, mut selected) = fixture.begin_reset()?;
+            selected.artifact = &historical;
+            let (tx, hook) = memory.begin()?;
+            assert_eq!(
+                reset_in(&tx, &hook, &selected, selected.namespace, 1)
+                    .unwrap_err()
+                    .root_cause()
+                    .to_string(),
+                "artifact_upgrade_required"
+            );
+            tx.commit()?;
         }
         assert!(before == snapshot(&fixture.db)?);
         Ok(())
@@ -678,21 +742,21 @@ fn cut_binding_failure_after_fence_rolls_back_even_when_caller_catches_and_commi
                 1,
             )?;
             {
-            let (memory,selected)=fixture.begin_reset()?;
-            let (tx,hook)=memory.begin()?;
-            assert!(
-                crate::oauth::restore::reset_application_in(
-                    (&tx, &hook),
-                    selected.fence,
-                    selected.authority_schema,
-                    selected.oauth_schema,
-                    if after_cut { selected.cut } else { &wrong },
-                    selected.namespace,
-                    if after_cut { 8 } else { 1 }
-                )
-                .is_err()
-            );
-            tx.commit()?;
+                let (memory, selected) = fixture.begin_reset()?;
+                let (tx, hook) = memory.begin()?;
+                assert!(
+                    crate::oauth::restore::reset_application_in(
+                        (&tx, &hook),
+                        selected.fence,
+                        selected.authority_schema,
+                        selected.oauth_schema,
+                        if after_cut { selected.cut } else { &wrong },
+                        selected.namespace,
+                        if after_cut { 8 } else { 1 }
+                    )
+                    .is_err()
+                );
+                tx.commit()?;
             }
             assert!(fixture.db.is_autocommit());
             assert!(
@@ -711,14 +775,17 @@ fn credential_only_profile_still_refuses_closed_peer_history_and_nested_budget_c
         let mut fixture = Fixture::new()?;
         let before = snapshot(&fixture.db)?;
         {
-        let (memory,selected)=fixture.begin_reset()?;
-        let (tx,hook)=memory.begin()?;
-        crate::oauth::schema::admit_retained_memory_transaction(&tx,&hook, |tx| {
-            assert!(credentials::restore::stage_reset(tx, selected.namespace, 1).is_err());
-            assert!(crate::oauth::schema::admit_retained_memory_transaction(tx,&hook, |_| Ok(())).is_err());
-            crate::oauth::schema::require_admission(tx)
-        })?;
-        tx.commit()?;
+            let (memory, selected) = fixture.begin_reset()?;
+            let (tx, hook) = memory.begin()?;
+            crate::oauth::schema::admit_retained_memory_transaction(&tx, &hook, |tx| {
+                assert!(credentials::restore::stage_reset(tx, selected.namespace, 1).is_err());
+                assert!(
+                    crate::oauth::schema::admit_retained_memory_transaction(tx, &hook, |_| Ok(()))
+                        .is_err()
+                );
+                crate::oauth::schema::require_admission(tx)
+            })?;
+            tx.commit()?;
         }
         assert!(before == snapshot(&fixture.db)?);
         Ok(())
@@ -862,34 +929,34 @@ fn history(
                 Action::DropReset | Action::WrongEpoch => {
                     let before = snapshot(&fixture.db)?;
                     {
-                    let (memory,selected)=fixture.begin_reset()?;
-                    let (tx,hook)=memory.begin()?;
-                    let result = crate::oauth::restore::reset_application_in(
-                        (&tx, &hook),
-                        selected.fence,
-                        selected.authority_schema,
-                        selected.oauth_schema,
-                        selected.cut,
-                        selected.namespace,
+                        let (memory, selected) = fixture.begin_reset()?;
+                        let (tx, hook) = memory.begin()?;
+                        let result = crate::oauth::restore::reset_application_in(
+                            (&tx, &hook),
+                            selected.fence,
+                            selected.authority_schema,
+                            selected.oauth_schema,
+                            selected.cut,
+                            selected.namespace,
+                            if matches!(action, Action::WrongEpoch) {
+                                8
+                            } else {
+                                1
+                            },
+                        );
+                        assert_eq!(
+                            result.is_ok(),
+                            matches!(action, Action::DropReset) && !reset_committed
+                        );
                         if matches!(action, Action::WrongEpoch) {
-                            8
+                            // Even a caller that catches the error and commits the
+                            // surrounding transaction cannot retain a partial cut.
+                            tx.commit()?;
                         } else {
-                            1
-                        },
-                    );
-                    assert_eq!(
-                        result.is_ok(),
-                        matches!(action, Action::DropReset) && !reset_committed
-                    );
-                    if matches!(action, Action::WrongEpoch) {
-                        // Even a caller that catches the error and commits the
-                        // surrounding transaction cannot retain a partial cut.
-                        tx.commit()?;
-                    } else {
-                        // A real complete reset ran, but the actual outer
-                        // transaction drops before its commit or image copy.
-                        drop(tx);
-                    }
+                            // A real complete reset ran, but the actual outer
+                            // transaction drops before its commit or image copy.
+                            drop(tx);
+                        }
                     }
                     assert!(before == snapshot(&fixture.db)?);
                 }

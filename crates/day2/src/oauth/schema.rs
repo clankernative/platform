@@ -605,24 +605,24 @@ mod tests {
             db.execute_batch("CREATE TABLE evidence(value INTEGER)")?;
         }
         {
-        let owner=crate::security_epoch::MemoryAdmission::configure_for_tests(&mut a)?;
-        let other=crate::security_epoch::MemoryAdmission::configure_for_tests(&mut b)?;
-        let (tx,hook)=owner.begin_for_tests()?;
-        let (foreign,foreign_hook)=other.begin_for_tests()?;
-        assert!(admit_retained_memory_transaction(&tx,&foreign_hook, |_| Ok(())).is_err());
-        admit_retained_memory_transaction(&tx,&hook, |tx| {
-            require_admission(tx)?;
-            assert!(admit_retained_memory_transaction(tx,&hook, |_| Ok(())).is_err());
-            assert!(admit_retained_memory_transaction(&foreign,&hook, |_| Ok(())).is_err());
-            require_admission(tx)?;
-            assert!(require_admission(&foreign).is_err());
-            tx.execute("INSERT INTO evidence VALUES(1)", [])?;
-            Ok(())
-        })?;
-        tx.commit()?;
-        foreign.rollback()?;
-        assert!(owner.begin_for_tests().is_err());
-        assert!(other.begin_for_tests().is_err());
+            let owner = crate::security_epoch::MemoryAdmission::configure_for_tests(&mut a)?;
+            let other = crate::security_epoch::MemoryAdmission::configure_for_tests(&mut b)?;
+            let (tx, hook) = owner.begin_for_tests()?;
+            let (foreign, foreign_hook) = other.begin_for_tests()?;
+            assert!(admit_retained_memory_transaction(&tx, &foreign_hook, |_| Ok(())).is_err());
+            admit_retained_memory_transaction(&tx, &hook, |tx| {
+                require_admission(tx)?;
+                assert!(admit_retained_memory_transaction(tx, &hook, |_| Ok(())).is_err());
+                assert!(admit_retained_memory_transaction(&foreign, &hook, |_| Ok(())).is_err());
+                require_admission(tx)?;
+                assert!(require_admission(&foreign).is_err());
+                tx.execute("INSERT INTO evidence VALUES(1)", [])?;
+                Ok(())
+            })?;
+            tx.commit()?;
+            foreign.rollback()?;
+            assert!(owner.begin_for_tests().is_err());
+            assert!(other.begin_for_tests().is_err());
         }
         assert_eq!(
             a.query_row("SELECT count(*) FROM evidence", [], |r| r.get::<_, i64>(0))?,
@@ -643,20 +643,20 @@ mod tests {
         db.pragma_update(None, "temp_store", "MEMORY")?;
         db.execute_batch("CREATE TABLE evidence(value INTEGER)")?;
         {
-        let owner=crate::security_epoch::MemoryAdmission::configure_for_tests(&mut db)?;
-        let (tx,hook)=owner.begin_for_tests()?;
-        assert!(
-            admit_retained_memory_transaction(&tx,&hook, |tx| {
-                tx.execute("INSERT INTO evidence VALUES(1)", [])?;
-                assert!(admission_step(usize::MAX));
-                assert!(admit_retained_memory_transaction(tx,&hook, |_| Ok(())).is_err());
-                assert!(require_admission(tx).is_err());
-                Ok(())
-            })
-            .is_err()
-        );
-        tx.commit()?;
-        assert!(owner.begin_for_tests().is_err());
+            let owner = crate::security_epoch::MemoryAdmission::configure_for_tests(&mut db)?;
+            let (tx, hook) = owner.begin_for_tests()?;
+            assert!(
+                admit_retained_memory_transaction(&tx, &hook, |tx| {
+                    tx.execute("INSERT INTO evidence VALUES(1)", [])?;
+                    assert!(admission_step(usize::MAX));
+                    assert!(admit_retained_memory_transaction(tx, &hook, |_| Ok(())).is_err());
+                    assert!(require_admission(tx).is_err());
+                    Ok(())
+                })
+                .is_err()
+            );
+            tx.commit()?;
+            assert!(owner.begin_for_tests().is_err());
         }
         assert_eq!(
             db.query_row("SELECT count(*) FROM evidence", [], |r| r.get::<_, i64>(0))?,
