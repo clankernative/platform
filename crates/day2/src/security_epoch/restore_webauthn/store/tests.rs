@@ -60,7 +60,9 @@ fn observed(db: &Connection) -> (String, i64, u32) {
     db.query_row("SELECT c.state,k.version,k.counter FROM main.restore_passkey_challenges c CROSS JOIN main.restore_passkey_keys k",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
 }
 
-fn schema_snapshot(db: &Connection) -> Result<Vec<(String, String, String, Option<String>)>> {
+type SchemaRow = (String, String, String, Option<String>);
+
+fn schema_snapshot(db: &Connection) -> Result<Vec<SchemaRow>> {
     let mut query =
         db.prepare("SELECT type,name,tbl_name,sql FROM main.sqlite_schema ORDER BY type,name")?;
     let rows = query.query_map([], |row| {
