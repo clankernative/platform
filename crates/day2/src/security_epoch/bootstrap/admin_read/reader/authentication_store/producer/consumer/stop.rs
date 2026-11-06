@@ -659,7 +659,12 @@ mod tests {
         let syn::Expr::Call(call) = &*initializer.expr else {
             return Ok(false);
         };
-        let syn::Expr::Closure(closure) = &*call.func else {
+        // The production immediately-invoked closure is parenthesized in
+        // syn; inspect that actual callee before checking its closure body.
+        let syn::Expr::Paren(callee) = &*call.func else {
+            return Ok(false);
+        };
+        let syn::Expr::Closure(closure) = &*callee.expr else {
             return Ok(false);
         };
         let syn::Expr::Block(requested) = &*closure.body else {
