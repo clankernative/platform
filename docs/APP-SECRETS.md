@@ -41,6 +41,37 @@ contains installation, environment and app. Labels bind the provider container
 to the exact scope and original create request. Existing secrets are not adopted.
 Control/bootstrap secret containers cannot overlap these namespaces.
 
+### GKE exclusive workload
+
+The `day2-app` deployment root accepts an explicit `managed_secrets` selection:
+
+```hcl
+managed_secrets = {
+  project_number    = 123456789012
+  token_secret_name = "app-secret-provider-token"
+}
+```
+
+An operator creates that Kubernetes Secret in the app namespace with a private
+`access-token` key. Supply its bytes from a private file using the installation's
+credential process; never put the value in Terraform variables, a plan, source,
+command-line arguments or output. Terraform references the existing name only.
+The selected provider identity must have only the reviewed Secret Manager access.
+
+At pod start, a digest-pinned init container copies the selected key to a regular
+UID/GID 10001 file with mode 0600 in a dedicated memory-backed volume. The app
+host mounts that volume read-only. It never mounts the Kubernetes source Secret;
+companions and backup jobs receive neither volume. The pod keeps API-token
+automount disabled. An absent selection adds no namespace, material mount or
+init container. Selecting a namespace does not activate authority on existing
+app data.
+
+This is explicit operator delivery, not an automatic token issuer: update the
+existing Kubernetes Secret and recreate the exclusive pod before bearer expiry.
+Running pods keep their startup copy. Provider rejection or expiry fails closed
+without token discovery or write retries. Rolling, release-managed and native
+enrollment workloads are refused until their material-release path is qualified.
+
 The metadata schema is installed only during fresh app initialization. Existing
 databases without it fail closed. Do not erase GoLinks links or perform an
 implicit migration to enable this feature. Backup restore clears desired
