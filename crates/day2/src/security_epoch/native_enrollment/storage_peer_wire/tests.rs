@@ -3774,45 +3774,62 @@ fn freeze_records_are_map_only_through_both_actual_wire_decoders() -> anyhow::Re
 }
 
 #[test]
-fn issuer_stage_data_refuses_bootstrap_rebinding_and_signed_deadline_equality() -> anyhow::Result<()>
-{
-    let (policy, app, _, issuer) = fixture_with_issuer(NativeRole::AppHost);
-    let now = Duration::from_secs(102);
-    app.validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)?;
+fn issuer_freeze_preserves_historical_admission_and_fresh_current_request() -> anyhow::Result<()> {
+    let (policy, mut app, _, issuer) = fixture_with_issuer(NativeRole::AppHost);
+    // A legitimate retained first-holder can have an expired historical
+    // bootstrap grant. Only its actual fresh request supplies this interval.
+    app.stage.data.purpose = StagePurpose::StorageBootstrap;
+    app.stage.data.deadline_ns = 160_000_000_000;
+    app.stage.signature = issuer.sign("role-stage", &app.stage.data)?;
+    app.original.origin_ns = 200_000_000_000;
+    app.original.deadline_ns = 205_000_000_000;
+    let now = Duration::from_secs(202);
+    app.validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)?;
     assert!(
-        app.validate_issuer_stage_data(&policy, &app.certificate, NativeRole::EpochController, now)
-            .is_err()
-    );
-    assert!(
-        app.validate_issuer_stage_data(
+        app.validate_issued_request_data(
             &policy,
             &app.certificate,
-            NativeRole::AppHost,
-            Duration::from_secs(105)
+            NativeRole::EpochController,
+            now
         )
         .is_err()
     );
-    let mut bootstrap = app.clone();
-    bootstrap.stage.data.purpose = StagePurpose::StorageBootstrap;
-    bootstrap.stage.signature = issuer.sign("role-stage", &bootstrap.stage.data)?;
-    // Even validly signed bootstrap cannot borrow a Current-only envelope.
     assert!(
-        bootstrap
-            .validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)
+        app.validate_issued_request_data(
+            &policy,
+            &app.certificate,
+            NativeRole::AppHost,
+            Duration::from_secs(205)
+        )
+        .is_err()
+    );
+    let mut bootstrap_request = app.clone();
+    bootstrap_request.original.purpose = StagePurpose::StorageBootstrap;
+    assert!(
+        bootstrap_request
+            .validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)
             .is_err()
     );
     let mut extension = app.clone();
     extension.original.deadline_ns += 1;
     assert!(
         extension
-            .validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)
+            .validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)
             .is_err()
     );
     let mut later_origin = app.clone();
     later_origin.original.origin_ns += 1;
+    later_origin.validate_issued_request_data(
+        &policy,
+        &app.certificate,
+        NativeRole::AppHost,
+        now,
+    )?;
+    let mut unsigned = app.clone();
+    unsigned.stage.data.process.boot.push('x');
     assert!(
-        later_origin
-            .validate_issuer_stage_data(&policy, &app.certificate, NativeRole::AppHost, now)
+        unsigned
+            .validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)
             .is_err()
     );
     Ok(())

@@ -210,23 +210,34 @@ impl StageStatement {
         )
     }
 
-    /// Signed enrollment DATA only. The issuer's retained table and actual
-    /// requester checks remain separate; this cannot authenticate a live App
-    /// peer or replace the Controller's actual retained message process.
-    pub(super) fn validate_issuer_stage_data(
+    /// Historical signed enrollment plus CURRENT request DATA only. The
+    /// issuer separately compares its actual retained enrollment table and
+    /// authenticates the Controller's whole selection transcript. No new cold
+    /// admission, grant deadline or live App ownership is inferred here.
+    pub(super) fn validate_issued_request_data(
         &self,
         policy: &EnrollmentPolicy,
         issuer: &IssuerCertificate,
         role: NativeRole,
         now: Duration,
     ) -> Result<()> {
-        self.validate_sender(
-            policy,
-            issuer,
-            role,
-            self.stage.data.process.process,
-            now,
-            StagePurpose::CurrentRole,
+        self.certificate.verify(policy)?;
+        ensure!(
+            self.certificate == *issuer
+                && self.stage.data.issuer == issuer.digest()?
+                && self.stage.data.policy == policy.digest()?
+                && self.stage.data.role == role
+                && self.stage.data.process.code == *policy.code(role),
+            "native_restore_issued_selection_changed"
+        );
+        self.stage.data.purpose.require_role(role)?;
+        self.original
+            .validate_request(now, StagePurpose::CurrentRole)?;
+        protocol::verify(
+            &self.certificate.data.public_key,
+            "role-stage",
+            &self.stage.data,
+            &self.stage.signature,
         )
     }
 
