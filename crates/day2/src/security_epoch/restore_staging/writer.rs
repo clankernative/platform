@@ -3,11 +3,15 @@
 //! A future supplier must retain genuine SAME-original rights, not stamp a
 //! cloned continuity ID onto separately acquired native authority.
 use super::{CHUNK, Checks, MAX_BYTES, Projection, State, execute, sum};
-use anyhow::{Context, Result, ensure};
 use crate::security_epoch::restore_fencing::{self as fence, ApprovalIdentity, Binding, Session};
+use anyhow::{Context, Result, ensure};
 use day2_capabilities::Digest;
 use ring::digest::{Context as Hash, SHA256};
-use std::{fs::File, io::{Read, Seek, SeekFrom}, os::unix::fs::MetadataExt};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
+};
 use zeroize::Zeroizing;
 
 mod dispatch;
