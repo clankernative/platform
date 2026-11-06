@@ -38,7 +38,7 @@ mod tests {
             kind: "observe".into(),
             model: crate::resources::ATTENUATE.into(),
             data: json!({"handle":parent["token"],"limits":{
-            "max_request_bytes":8192,"max_response_bytes":32768,
+            "max_request_bytes":512,"max_response_bytes":32768,
             "max_calls_per_invocation":2}})
             .to_string(),
             ..Instruction::default()
