@@ -240,7 +240,7 @@ fn safe_floor_uses_one_complete_transaction_exact_cas_and_known_readback() -> Re
         snapshot(&f, true, false, false)?,
     ]);
     let budget = port.budget()?;
-    let plan = advance(
+    let plan = advance_approval_time(
         &mut port,
         budget,
         &f.selected,
@@ -306,7 +306,7 @@ fn malformed_or_foreign_floor_snapshots_refuse_before_any_write() -> Result<()> 
         let mut port = Script::new(vec![before, json!({})]);
         let budget = port.budget()?;
         assert!(
-            advance(
+            advance_approval_time(
                 &mut port,
                 budget,
                 &f.selected,
@@ -345,7 +345,7 @@ fn ambiguous_floor_commit_and_changed_readback_never_retry_or_return_qualificati
         .push_back(Err(anyhow::anyhow!("fixture-lost-ack")));
     let budget = port.budget()?;
     assert!(
-        advance(
+        advance_approval_time(
             &mut port,
             budget,
             &f.selected,
@@ -366,7 +366,7 @@ fn ambiguous_floor_commit_and_changed_readback_never_retry_or_return_qualificati
         let mut port = Script::new(vec![snapshot(&f, false, false, false)?, ack(2, 4), after]);
         let budget = port.budget()?;
         assert!(
-            advance(
+            advance_approval_time(
                 &mut port,
                 budget,
                 &f.selected,
@@ -390,7 +390,7 @@ fn publication_is_create_only_and_exact_readback_is_required() -> Result<()> {
         snapshot(&f, true, true, true)?,
     ]);
     let budget = port.budget()?;
-    publish(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record)?;
+    publish_restore_approval(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record)?;
     assert_eq!(port.calls.len(), 3);
     assert_eq!(port.calls[1].1["writes"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -404,20 +404,29 @@ fn publication_is_create_only_and_exact_readback_is_required() -> Result<()> {
     );
     let mut port = Script::new(vec![snapshot(&f, true, true, true)?, json!({})]);
     let budget = port.budget()?;
-    assert!(publish(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record).is_err());
+    assert!(
+        publish_restore_approval(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record)
+            .is_err()
+    );
     assert_eq!(port.calls.len(), 2);
     assert!(port.calls[1].0.ends_with(":rollback"));
     let mut after = snapshot(&f, true, true, true)?;
     after[7]["found"]["updateTime"] = serde_json::to_value(version(6))?;
     let mut port = Script::new(vec![snapshot(&f, true, true, false)?, ack(1, 5), after]);
     let budget = port.budget()?;
-    assert!(publish(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record).is_err());
+    assert!(
+        publish_restore_approval(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record)
+            .is_err()
+    );
     assert_eq!(port.calls.len(), 3);
     let mut port = Script::new(vec![snapshot(&f, true, true, false)?]);
     port.replies
         .push_back(Err(anyhow::anyhow!("fixture-lost-publication-ack")));
     let budget = port.budget()?;
-    assert!(publish(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record).is_err());
+    assert!(
+        publish_restore_approval(&mut port, budget, &f.selected, &f.root, &f.plan, &f.record)
+            .is_err()
+    );
     assert_eq!(port.calls.len(), 2);
     Ok(())
 }

@@ -252,7 +252,7 @@ struct WriteResult {
 /// read/write transaction. Its read set fences both writes; the floor update
 /// additionally has the exact prior version and the receipt is create-only.
 /// A lost/invalid ACK refuses; no receipt can recreate this live native call.
-pub(in crate::security_epoch) fn advance(
+pub(in crate::security_epoch) fn advance_approval_time(
     port: &mut impl Port,
     mut budget: Budget,
     selected: &EpochStore,
@@ -333,7 +333,7 @@ pub(in crate::security_epoch) fn advance(
 
 /// Create-only publication under the same complete root/time read set.
 /// It contains the full immutable wire record, never a recovered native owner.
-pub(in crate::security_epoch) fn publish(
+pub(in crate::security_epoch) fn publish_restore_approval(
     port: &mut impl Port,
     mut budget: Budget,
     selected: &EpochStore,

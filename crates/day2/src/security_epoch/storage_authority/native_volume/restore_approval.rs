@@ -56,7 +56,7 @@ struct QualifiedTime {
 }
 
 const _: () = {
-    macro_rules! closed {
+    macro_rules! assert_not_impl {
         ($bound:path) => {{
             trait Ambiguous<T> {
                 fn check() {}
@@ -66,14 +66,14 @@ const _: () = {
             let _ = <NativeApprovalSource as Ambiguous<_>>::check;
         }};
     }
-    closed!(Clone);
-    closed!(Copy);
-    closed!(Default);
-    closed!(std::fmt::Debug);
-    closed!(serde::Serialize);
-    closed!(serde::Deserialize<'static>);
-    closed!(Send);
-    closed!(Sync);
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
 };
 
 impl CurrentVolumePhase<'_, '_> {
@@ -223,7 +223,7 @@ impl NativeApprovalSource {
                 source: &mut *self,
                 owner: PortOwner::Action(&mut *action),
             };
-            let plan = crate::security_epoch::firestore::approval::advance(
+            let plan = crate::security_epoch::firestore::advance_approval_time(
                 &mut port,
                 budget,
                 &selected,
@@ -343,7 +343,7 @@ impl NativeApprovalSource {
                 source: &mut *self,
                 owner: PortOwner::Completed(&mut *owner),
             };
-            crate::security_epoch::firestore::approval::publish(
+            crate::security_epoch::firestore::publish_restore_approval(
                 &mut port, budget, &selected, &before, &plan, record,
             )?;
             drop(port);

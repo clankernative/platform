@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 
-pub(in crate::security_epoch) mod approval;
+mod approval;
+pub(in crate::security_epoch) use approval::{advance_approval_time, publish_restore_approval};
 mod paired;
 pub(super) use paired::{ActionTransaction, begin_action, read_with_slot};
 

@@ -84,6 +84,9 @@ fn challenge_child() -> Result<()> {
     ensure!(bytes.len() <= 4096, "challenge_child_config_bound");
     let config: Config = crate::json::decode(&bytes)?;
     ensure!(config.database.is_absolute(), "challenge_child_path");
+    if (6..=10).contains(&config.cut) {
+        return journal_child(&config);
+    }
     let selected = cut(config.cut)?;
     let f = stable_fixture();
     let mut db = Connection::open(config.database)?;
@@ -110,6 +113,56 @@ fn challenge_child() -> Result<()> {
         &f.assertion(7, 0x0d),
     )?;
     anyhow::bail!("challenge_child_missing_checkpoint")
+}
+
+fn journal_child(config: &Config) -> Result<()> {
+    let mut f = stable_fixture();
+    let record = super::super::signing::tests::statement(&mut f)?;
+    let mut db = Connection::open(&config.database)?;
+    let id = prepare(&mut db, &f);
+    complete(
+        &mut db,
+        &f.key,
+        &id,
+        &f.challenge.request,
+        1001,
+        &f.assertion(7, 0x0d),
+    )?;
+    let pause = || -> Result<()> {
+        std::io::stderr().write_all(&marker(config.cut))?;
+        std::io::stderr().flush()?;
+        if config.exit_at_cut {
+            std::process::exit(0);
+        }
+        let mut release = [0];
+        std::io::stdin().read_exact(&mut release)?;
+        anyhow::bail!("journal_child_released_without_death")
+    };
+    let tx = db.transaction()?;
+    prepare_signing(&tx, &f.key, &id, &record.statement, 7)?;
+    if config.cut == 6 {
+        pause()?;
+    }
+    tx.commit()?;
+    if config.cut == 7 {
+        pause()?;
+    }
+    let tx = db.transaction()?;
+    mark_may_sign(&tx, &f.key, &id, &record.statement)?;
+    if config.cut == 8 {
+        pause()?;
+    }
+    tx.commit()?;
+    if config.cut == 9 {
+        pause()?;
+    }
+    let tx = db.transaction()?;
+    record_publication(&tx, &f.key, &id, &record)?;
+    tx.commit()?;
+    if config.cut == 10 {
+        pause()?;
+    }
+    anyhow::bail!("journal_child_missing_checkpoint")
 }
 
 struct Exit {
@@ -147,6 +200,9 @@ async fn execute(config: &Config, input: &std::path::Path, kill: bool) -> Result
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn()?;
+    // Keep the actual parent pipe open until the requested kill is reaped;
+    // child.wait must not turn an unrequested EOF into a checkpoint exit.
+    let _held_stdin = child.stdin.take().context("challenge_child_stdin")?;
     let mut pipe = child.stderr.take().context("challenge_child_pipe")?;
     let result = (async {
         let mut checkpoint = [0; 16];
@@ -177,6 +233,58 @@ async fn execute(config: &Config, input: &std::path::Path, kill: bool) -> Result
         let _ = tokio::time::timeout(WAIT, child.wait()).await;
     }
     result
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn signing_journal_real_child_death_preserves_attempt_state_without_reconstructing_owner()
+-> Result<()> {
+    for n in 6..=10 {
+        let root = tempfile::tempdir()?;
+        let config = Config {
+            database: root.path().join("outside-restore.sqlite"),
+            cut: n,
+            exit_at_cut: false,
+        };
+        let input = root.path().join("journal-cut.json");
+        std::fs::write(&input, serde_json::to_vec(&config)?)?;
+        let exit = execute(&config, &input, true).await?;
+        require_death(&exit, n)?;
+        let mut db = Connection::open(&config.database)?;
+        assert_eq!(observed(&db), ("verified".into(), 2, 7));
+        let row: Option<(String, bool)> = db
+            .query_row(
+                "SELECT state,signed_record IS NOT NULL FROM main.restore_approval_issuance",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        // Independent table from actual transaction boundaries. A committed
+        // MaySign/published row remains DATA, never a resumed native signer.
+        let expected = match n {
+            6 => None,
+            7 | 8 => Some(("prepared".into(), false)),
+            9 => Some(("may_sign".into(), false)),
+            10 => Some(("published".into(), true)),
+            _ => unreachable!(),
+        };
+        assert_eq!(row, expected, "cut {n}");
+        let mut f = stable_fixture();
+        let _record = super::super::signing::tests::statement(&mut f)?;
+        let id = challenge_id(&f.challenge)?;
+        assert!(
+            complete(
+                &mut db,
+                &f.key,
+                &id,
+                &f.challenge.request,
+                1002,
+                &f.assertion(8, 0x0d)
+            )
+            .is_err()
+        );
+        assert_eq!(observed(&db), ("verified".into(), 2, 7));
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -36,6 +36,8 @@ statement, then commits MaySign before any signer call. Every SQL transaction
 closes before configuration/provider I/O or signing. No row is a recovery entry
 to the completed owner. Interrupted or ambiguous work needs a new ceremony;
 neither a later clock nor a fresh HTTP original renews the frozen times.
+The captured key version and counter remain exact at every signing boundary;
+removal, counter change or an equal-value registry rewrite refuses the attempt.
 
 The signer credential is minted for the actual selected Controller identity and
 the fixed Cloud KMS scope only after UV, qualified time and the known MaySign

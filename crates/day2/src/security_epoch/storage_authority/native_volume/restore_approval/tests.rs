@@ -521,7 +521,7 @@ fn is_closed(source: &str) -> Result<bool> {
                     return Ok(false);
                 }
             }
-            syn::Item::Impl(item) => {
+            syn::Item::Impl(item) if matches!(item.self_ty.as_ref(),syn::Type::Path(path) if path.path.is_ident("Kms")) => {
                 for entry in item.items {
                     if let syn::ImplItem::Fn(method) = entry {
                         if !matches!(method.vis, syn::Visibility::Inherited) {
@@ -542,7 +542,7 @@ fn is_closed(source: &str) -> Result<bool> {
 }
 
 #[test]
-fn production_data_transport_has_no_reachable_signer_factory_or_general_frame_api() -> Result<()> {
+fn production_signer_keeps_transport_private_without_a_general_frame_api() -> Result<()> {
     let source = include_str!("../restore_approval.rs");
     assert!(is_closed(source)?);
     for (from, to) in [
@@ -553,6 +553,68 @@ fn production_data_transport_has_no_reachable_signer_factory_or_general_frame_ap
     ] {
         assert_eq!(source.matches(from).count(), 1);
         assert!(!is_closed(&source.replacen(from, to, 1))?);
+    }
+    Ok(())
+}
+
+#[test]
+fn native_signer_factory_meets_the_real_original_before_provider_work_and_uses_completed_owner()
+-> Result<()> {
+    use quote::ToTokens;
+    fn guards(source: &str) -> bool {
+        let file = syn::parse_file(source).unwrap();
+        let method = |owner: &str, name: &str| {
+            file.items.iter().filter_map(|item|match item{syn::Item::Impl(item)=>Some(item),_=>None})
+            .filter(|item|matches!(item.self_ty.as_ref(),syn::Type::Path(path) if path.path.segments.last().unwrap().ident==owner))
+            .flat_map(|item|&item.items).find_map(|item|match item{syn::ImplItem::Fn(f) if f.sig.ident==name=>Some(f.to_token_stream().to_string()),_=>None}).unwrap()
+        };
+        let factory = method("CurrentVolumePhase", "capture_approval_source");
+        let Some(meet) = factory.find("exchange_current_views") else {
+            return false;
+        };
+        let Some(acquire) = factory.find("acquire_material") else {
+            return false;
+        };
+        let signer = method("NativeApprovalSource", "sign_completed");
+        let context = method("RequestContext", "check");
+        let signature = method("Kms", "sign");
+        meet < acquire
+            && factory.matches("exchange_current_views").count() == 2
+            && factory.contains("StagePurpose :: CurrentRole")
+            && factory.contains("ProviderAuthentication :: ConnectionRequest")
+            && factory.contains("check_durability_profile")
+            && signer.contains("owner : & mut CompletedCeremony")
+            && signer.contains(
+                "RequestContext :: Native { owner : & mut * owner , source : & mut * self , }",
+            )
+            && matches!((signer.find("check_signing_source"),signer.find("mint_restore_signer")),(Some(before),Some(after)) if before<after)
+            && context.contains("owner . check_signing_source (source) ?")
+            && signature.contains("statement : & ApprovalStatement")
+            && signature.contains("context : & mut RequestContext")
+            && signature.contains("statement . signature_input_data () ?")
+    }
+    let source = include_str!("../restore_approval.rs");
+    assert!(guards(source));
+    for (old, new) in [
+        (
+            "original.exchange_current_views(&mut self.reader.acquisition)?;",
+            "original.remaining()?;",
+        ),
+        (
+            "self.check_durability_profile()?;",
+            "self.skip_durability()?;",
+        ),
+        (
+            "owner.check_signing_source(source)?;",
+            "source.original.remaining()?;",
+        ),
+        (
+            "statement.signature_input_data()?",
+            "serde_json::to_vec(statement)?",
+        ),
+    ] {
+        assert!(source.contains(old));
+        assert!(!guards(&source.replacen(old, new, 1)), "accepted {old}");
     }
     Ok(())
 }

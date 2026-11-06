@@ -1,6 +1,6 @@
 //! Fixed one-attempt signing journal under the actual authentication SQL unit.
 //! Rows are DATA, never a recovered UV continuation or signing/native owner.
-use super::TrustedKey;
+use super::super::TrustedKey;
 use crate::security_epoch::restore_approval::signed::{ApprovalStatement, SignedApprovalRecord};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
@@ -150,4 +150,4 @@ pub(in crate::security_epoch::restore_webauthn) fn check_may_sign(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

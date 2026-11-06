@@ -43,7 +43,7 @@ pub(in crate::security_epoch) struct CompletedCeremony<'metadata, 'storage, 'rol
 }
 
 const _: () = {
-    macro_rules! closed {
+    macro_rules! assert_not_impl {
         ($bound:path) => {{
             trait Ambiguous<T> {
                 fn check() {}
@@ -54,14 +54,14 @@ const _: () = {
             let _ = <PendingApproval as Ambiguous<_>>::check;
         }};
     }
-    closed!(Clone);
-    closed!(Copy);
-    closed!(Default);
-    closed!(std::fmt::Debug);
-    closed!(serde::Serialize);
-    closed!(serde::Deserialize<'static>);
-    closed!(Send);
-    closed!(Sync);
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
 };
 
 fn operation(kind: &str, intent: &ApprovalIntent, challenge: &str) -> Result<Digest> {

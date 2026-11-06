@@ -9,7 +9,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use rusqlite::{Connection, OptionalExtension};
 
-fn statement(f: &mut Fixture) -> Result<SignedApprovalRecord> {
+pub(in crate::security_epoch::restore_webauthn::store) fn statement(
+    f: &mut Fixture,
+) -> Result<SignedApprovalRecord> {
     let mut request = restore_approval::fixture_request_data()?;
     request.approved_at = 1100;
     request.expires_at = 4700;
