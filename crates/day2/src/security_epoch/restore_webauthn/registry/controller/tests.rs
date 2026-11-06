@@ -33,18 +33,20 @@ fn controller_record_binds_exact_operation_instance_scope_and_approver() -> Resu
         Digest::new(b"held file"),
         &[1, 2, 3],
         &request,
+        &captured.executor,
     )?;
     // These are record DATA, not a key origin or an approval.
     assert_eq!(selected.revision, 7);
     assert_eq!(selected.credential_id, [1, 2, 3]);
-    for change in 0..5 {
+    for change in 0..6 {
         let mut altered = context(&instance)?;
         match change {
             0 => altered.operation = Digest::new(b"another operation"),
             1 => altered.instance = Digest::new(b"another instance"),
             2 => altered.scope = "another/canary/app".into(),
             3 => altered.app = "another-app".into(),
-            _ => altered.approver = altered.executor.clone(),
+            4 => altered.approver = altered.executor.clone(),
+            _ => altered.executor = "another-executor@example.test".into(),
         }
         assert!(
             controller_record(
@@ -52,7 +54,8 @@ fn controller_record_binds_exact_operation_instance_scope_and_approver() -> Resu
                 &altered,
                 Digest::new(b"held file"),
                 &[1, 2, 3],
-                &request
+                &request,
+                &captured.executor,
             )
             .is_err()
         );
@@ -63,7 +66,8 @@ fn controller_record_binds_exact_operation_instance_scope_and_approver() -> Resu
             &captured,
             Digest::new(b"held file"),
             &[9],
-            &request
+            &request,
+            &captured.executor,
         )
         .is_err()
     );
@@ -84,7 +88,8 @@ fn controller_record_binds_exact_operation_instance_scope_and_approver() -> Resu
             &removed_context,
             Digest::new(b"held file"),
             &[1, 2, 3],
-            &request
+            &request,
+            &captured.executor,
         )
         .is_err()
     );
@@ -180,7 +185,7 @@ fn actual_controller_key_loan_keeps_the_native_reader_and_postchecks() {
     for (old, new) in [
         ("self.begin_attempt()?;", ""),
         (
-            "let checked = self.observe_controller(reader);",
+            "let checked = self.observe_controller(reader, executor);",
             "let checked = Ok(());",
         ),
         (
@@ -240,4 +245,63 @@ fn actual_registry_local_loan_brackets_handles_without_sql_or_provider_work() {
     let early = "let checked = self.loan.check_local();\n        let requested = self.sqlite.check_handles();";
     assert_eq!(source.matches(old).count(), 1);
     assert!(!registry_local(&source.replacen(old, early, 1)));
+}
+
+fn typed_intent_wiring(source: &str) -> bool {
+    let file = syn::parse_file(source).unwrap();
+    let capture = method(&file, "ControllerCeremony", "capture");
+    let verify = method(&file, "ControllerCeremony", "verify_current");
+    let trace = calls(&verify.block);
+    capture
+        .sig
+        .to_token_stream()
+        .to_string()
+        .contains("intent : ApprovalIntent")
+        && capture
+            .block
+            .to_token_stream()
+            .to_string()
+            .contains("& intent . executor . email")
+        && verify
+            .block
+            .to_token_stream()
+            .to_string()
+            .contains("self . intent . require_exact (expected) ?")
+        && verify
+            .block
+            .to_token_stream()
+            .to_string()
+            .contains("& self . intent . executor . email")
+        && before(&trace, "require_exact", "verify_current_controller")
+        && matches!(
+            method(&file, "RegistryCeremony", "capture_controller").vis,
+            syn::Visibility::Inherited
+        )
+        && matches!(
+            method(&file, "RegistryCeremony", "verify_current_controller").vis,
+            syn::Visibility::Inherited
+        )
+}
+
+#[test]
+fn actual_controller_entry_requires_complete_intent_before_crypto_and_hides_digest_helpers() {
+    let source = include_str!("../controller.rs");
+    assert!(typed_intent_wiring(source));
+    for (old, new) in [
+        ("self.intent.require_exact(expected)?;", ""),
+        ("&intent.executor.email", "&String::new()"),
+        ("&self.intent.executor.email", "&String::new()"),
+        (
+            "fn capture_controller(",
+            "pub(crate) fn capture_controller(",
+        ),
+        (
+            "fn verify_current_controller(",
+            "pub(crate) fn verify_current_controller(",
+        ),
+    ] {
+        assert_eq!(source.matches(old).count(), 1);
+        let mutant = source.replace(old, new);
+        assert!(!typed_intent_wiring(&mutant));
+    }
 }
