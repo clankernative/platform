@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn lazy_missing_sidecars_never_satisfy_complete_admission() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("without-wal.sqlite");
+        let path = directory.path().canonicalize()?.join("without-wal.sqlite");
         let keeper = Connection::open(&path)?;
         keeper.execute_batch("CREATE TABLE data(value INTEGER)")?;
         let original = File::open(&path)?;
