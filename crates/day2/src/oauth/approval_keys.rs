@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use url::{Host, Url};
+use zeroize::Zeroizing;
 
 const MAX_RESPONSE_BYTES: usize = 4096;
 const METADATA_URL: &str =
@@ -167,7 +168,7 @@ pub(crate) struct GcpSecretVersion {
 }
 
 impl GcpSecretVersion {
-    pub(super) fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.project_number > 0
                 && self.version > 0
@@ -182,7 +183,7 @@ impl GcpSecretVersion {
         Ok(())
     }
 
-    pub(super) fn resource_name(&self) -> String {
+    pub(crate) fn resource_name(&self) -> String {
         format!(
             "projects/{}/secrets/{}/versions/{}",
             self.project_number, self.secret, self.version
@@ -300,15 +301,16 @@ pub(crate) fn decode_secret_access_response(
         body.len() <= MAX_RESPONSE_BYTES,
         "OAuth secret response too large"
     );
-    let response: AccessResponse =
+    let mut response: AccessResponse =
         crate::json::decode(body).map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
     ensure!(
         response.name == version.resource_name(),
         "OAuth secret version changed"
     );
-    let decoded = STANDARD
-        .decode(response.payload.data)
-        .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?;
+    let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
+    let mut decoded = Zeroizing::new(STANDARD
+        .decode(data.as_bytes())
+        .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?);
     ensure!(
         !decoded.is_empty() && decoded.len() <= 2048,
         "invalid OAuth secret length"
@@ -322,7 +324,7 @@ pub(crate) fn decode_secret_access_response(
         crc32c::crc32c(&decoded) == checksum,
         "OAuth secret checksum mismatch"
     );
-    Ok(decoded)
+    Ok(std::mem::take(&mut *decoded))
 }
 
 impl GcpApprovalKeys {

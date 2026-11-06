@@ -12,7 +12,7 @@ use day2_capabilities::Digest;
 mod authentication_store;
 pub(crate) use authentication_store::FencedReadUnit;
 pub(in crate::security_epoch) use authentication_store::{
-    CompletedCeremony, FencedRegistryLoan, FencedRestoreContinuation, RestoreAuthenticationAction,
+    ExecutionSourceLoan, CompletedCeremony, FencedRegistryLoan, FencedRestoreContinuation, RestoreAuthenticationAction,
     RestoreWriteLoan,
 };
 

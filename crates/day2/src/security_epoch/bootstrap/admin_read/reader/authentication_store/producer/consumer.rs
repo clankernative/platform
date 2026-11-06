@@ -19,7 +19,7 @@ use std::time::Duration;
 mod stop;
 pub(crate) use stop::FencedReadUnit;
 pub(in crate::security_epoch) use stop::{
-    FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
+    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
 };
 
 const EXECUTION_CHALLENGE_SECONDS: i64 = 300;
@@ -47,6 +47,7 @@ pub(in crate::security_epoch) struct AuthenticatedRestoreExecution<'metadata, 's
     record: SignedApprovalRecord,
     operation: Digest,
     time_operation: Digest,
+    historical_keys: Option<crate::security_epoch::storage_authority::HistoricalKeyAvailability>,
     refused: bool,
 }
 
@@ -239,6 +240,7 @@ impl PendingRestoreExecution {
             record: self.record,
             operation: self.operation,
             time_operation,
+            historical_keys: None,
             refused: false,
         };
         owner.check()?;
