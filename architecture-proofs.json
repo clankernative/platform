@@ -73,7 +73,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
       "scope": "const",
-      "fingerprint": "sha256:8a7890ea2c9bf4a5785b3d12b740e950a5920b9b638469a3e4fed73b452f3294",
+      "fingerprint": "sha256:73409d372b5937d6c3e937bc1b87edfcefcefeb149859b241d7070eee7e0886c",
       "registration": null
     },
     {
