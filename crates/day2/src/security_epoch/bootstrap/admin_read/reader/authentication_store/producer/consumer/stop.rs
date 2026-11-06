@@ -13,6 +13,19 @@ use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 use std::{cell::Cell, rc::Rc};
 
+impl<'metadata, 'storage, 'role> AuthenticatedRestoreExecution<'metadata, 'storage, 'role> {
+    /// Consume the actual authenticated executor and retain its same original
+    /// through known reservation, complete stop and writer handoff. This source
+    /// interface refuses until those accepting operations are implemented.
+    pub(in crate::security_epoch) fn stop_for_restore(
+        mut self,
+        _intent: &kernel::restore::Intent,
+    ) -> Result<FencedRestoreContinuation<'metadata, 'storage, 'role>> {
+        self.refuse();
+        anyhow::bail!("native_restore_stop_supplier_unavailable")
+    }
+}
+
 pub(in crate::security_epoch) struct FencedRestoreContinuation<'metadata, 'storage, 'role> {
     auth: AuthenticatedRestoreExecution<'metadata, 'storage, 'role>,
     issuer: FrozenRoleIssuer,
@@ -366,6 +379,41 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
 }
 
 impl RestoreWriteLoan<'_, '_, '_, '_> {
+    /// Admission precedes Parent construction and its first mkdir/create.
+    /// The accepting implementation must bind the target from this actual
+    /// owner's Fenced plan, never from a caller flag or a directory identity.
+    pub(in crate::security_epoch) fn admit_creator_root(
+        &mut self,
+        _held_root: &std::fs::File,
+    ) -> Result<crate::security_epoch::storage_authority::RestoreCreatorRoot> {
+        self.refuse();
+        anyhow::bail!("native_restore_creator_root_supplier_unavailable")
+    }
+
+    /// The report and file are inputs, not completion or P3 authority. The
+    /// fixed implementation must verify the actual retained creator and same
+    /// reservation, perform one known settlement and check the whole readback.
+    pub(in crate::security_epoch) fn settle_target(
+        &mut self,
+        _held_creator: &std::fs::File,
+        _report: &kernel::restore::completion::TargetReport,
+    ) -> Result<kernel::restore::completion::Receipt> {
+        self.refuse();
+        anyhow::bail!("native_restore_target_settlement_unavailable")
+    }
+
+    /// Admit the genuine new holder/P3 and update this same retained owner's
+    /// phase only after its known conditional write, strong complete read and
+    /// mandatory postchecks. A holder or historical receipt supplies no grant.
+    pub(in crate::security_epoch) fn activate_writer(
+        &mut self,
+        _held_creator: &std::fs::File,
+        _holder: &kernel::Holder,
+    ) -> Result<kernel::restore::writer::Receipt> {
+        self.refuse();
+        anyhow::bail!("native_restore_writer_transition_unavailable")
+    }
+
     pub(in crate::security_epoch) fn check_current(&mut self) -> Result<RestoreObservation> {
         self.owner.check_current()
     }
@@ -394,6 +442,7 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <LostRestoreLoan as Ambiguous<_>>::check;
+            let _ = <crate::security_epoch::storage_authority::RestoreCreatorRoot as Ambiguous<_>>::check;
             let _ = <FencedRestoreContinuation<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <RestoreWriteLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <FencedReadUnit<'static, 'static, 'static> as Ambiguous<_>>::check;

@@ -683,3 +683,18 @@ approval-use/Fenced conditional send and readback plus genuine historical-key
 availability under current custody. A plan, receipt, archive key list or public
 observation cannot supply those. Fixed target-writer transitions, new-generation
 serving adoption and deployed restore qualification remain separate work.
+
+### Closed restore supplier interfaces
+
+The authenticated executor now has a consuming `stop_for_restore` entrypoint.
+Its retained writer loan has fixed `admit_creator_root`, `settle_target` and
+`activate_writer` operations. The root representation owns the volume and
+directory descriptors, their identities and the unchanged original. There is
+no root constructor, resource getter, caller-selected phase or clock renewal.
+
+These interfaces currently refuse and permanently refuse the actual owner;
+they do not perform reservation, stopping, root admission or writer transitions.
+They exist so the consuming composition can bind to concrete signatures while
+the genuine suppliers are implemented. Files, target reports and holder records
+are inputs, never authority. Successful implementations and their proof-policy,
+test and native qualification evidence remain pending.

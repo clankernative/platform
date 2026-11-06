@@ -26,6 +26,8 @@ mod authentication_store;
 pub(crate) use authentication_store::AuthenticationStoreFiles;
 mod restore_approval;
 pub(crate) use restore_approval::NativeApprovalSource;
+mod restore_writer;
+pub(in crate::security_epoch) use restore_writer::RestoreCreatorRoot;
 
 const ROOT: &str = "/state";
 const PROFILE: &str = "/etc/day2-native/storage.json";

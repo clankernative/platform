@@ -515,6 +515,7 @@
     "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
     "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval.rs",
     "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval/tests.rs",
+    "crates/day2/src/security_epoch/storage_authority/native_volume/restore_writer.rs",
     "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
     "crates/day2/src/security_epoch/storage_authority/persistent_disk/tests.rs",
     "crates/day2/src/security_epoch/storage_authority/preparation.rs",
