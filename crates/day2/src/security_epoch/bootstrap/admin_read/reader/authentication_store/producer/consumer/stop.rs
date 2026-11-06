@@ -929,20 +929,40 @@ mod tests {
             let mut changed = syn::parse_file(leaf)?;
             let mut targets = 0;
             for item in &mut changed.items {
-                let syn::Item::Impl(item) = item else { continue; };
-                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == "ExecutionSourceLoan")) { continue; }
+                let syn::Item::Impl(item) = item else {
+                    continue;
+                };
+                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == "ExecutionSourceLoan"))
+                {
+                    continue;
+                }
                 for member in &mut item.items {
-                    let syn::ImplItem::Fn(method) = member else { continue; };
-                    if method.sig.ident != "check" { continue; }
+                    let syn::ImplItem::Fn(method) = member else {
+                        continue;
+                    };
+                    if method.sig.ident != "check" {
+                        continue;
+                    }
                     targets += 1;
                     let body = &mut method.block;
                     match cut {
                         0..=2 => {
-                            let syn::Stmt::Local(local) = &mut body.stmts[0] else { unreachable!() };
-                            let syn::Expr::Call(call) = &mut *local.init.as_mut().unwrap().expr else { unreachable!() };
-                            let syn::Expr::Paren(callee) = &mut *call.func else { unreachable!() };
-                            let syn::Expr::Closure(closure) = &mut *callee.expr else { unreachable!() };
-                            let syn::Expr::Block(requested) = &mut *closure.body else { unreachable!() };
+                            let syn::Stmt::Local(local) = &mut body.stmts[0] else {
+                                unreachable!()
+                            };
+                            let syn::Expr::Call(call) = &mut *local.init.as_mut().unwrap().expr
+                            else {
+                                unreachable!()
+                            };
+                            let syn::Expr::Paren(callee) = &mut *call.func else {
+                                unreachable!()
+                            };
+                            let syn::Expr::Closure(closure) = &mut *callee.expr else {
+                                unreachable!()
+                            };
+                            let syn::Expr::Block(requested) = &mut *closure.body else {
+                                unreachable!()
+                            };
                             if cut == 0 {
                                 requested.block.stmts[0] = syn::parse_quote! { ensure!(true, "restore_executor_refused"); };
                             } else {
@@ -952,34 +972,59 @@ mod tests {
                                     syn::parse_quote! { approval_window(self.record, &time)?; }
                                 };
                                 let before = requested.block.stmts.len();
-                                requested.block.stmts.retain(|stmt| stmt.to_token_stream().to_string() != target.to_token_stream().to_string());
-                                assert_eq!(requested.block.stmts.len() + 1, before, "one actual required check");
+                                requested.block.stmts.retain(|stmt| {
+                                    stmt.to_token_stream().to_string()
+                                        != target.to_token_stream().to_string()
+                                });
+                                assert_eq!(
+                                    requested.block.stmts.len() + 1,
+                                    before,
+                                    "one actual required check"
+                                );
                             }
                         }
-                        3 => body.stmts[2] = syn::parse_quote! {
-                            if requested.is_err() {
-                                *self.refused = true;
-                                self.original.refuse();
-                                self.action.refuse();
+                        3 => {
+                            body.stmts[2] = syn::parse_quote! {
+                                if requested.is_err() {
+                                    *self.refused = true;
+                                    self.original.refuse();
+                                    self.action.refuse();
+                                }
                             }
-                        },
+                        }
                         4 => {
-                            let syn::Stmt::Expr(syn::Expr::If(refusal), _) = &mut body.stmts[2] else { unreachable!() };
+                            let syn::Stmt::Expr(syn::Expr::If(refusal), _) = &mut body.stmts[2]
+                            else {
+                                unreachable!()
+                            };
                             let target: syn::Stmt = syn::parse_quote! { self.original.refuse(); };
                             let before = refusal.then_branch.stmts.len();
-                            refusal.then_branch.stmts.retain(|stmt| stmt.to_token_stream().to_string() != target.to_token_stream().to_string());
-                            assert_eq!(refusal.then_branch.stmts.len() + 1, before, "one actual original refusal");
+                            refusal.then_branch.stmts.retain(|stmt| {
+                                stmt.to_token_stream().to_string()
+                                    != target.to_token_stream().to_string()
+                            });
+                            assert_eq!(
+                                refusal.then_branch.stmts.len() + 1,
+                                before,
+                                "one actual original refusal"
+                            );
                         }
                         5 => {
                             body.stmts[3] = syn::parse_quote! { checked?; };
-                            body.stmts[4] = syn::Stmt::Expr(syn::parse_quote! { requested.map(|_| unreachable!()) }, None);
+                            body.stmts[4] = syn::Stmt::Expr(
+                                syn::parse_quote! { requested.map(|_| unreachable!()) },
+                                None,
+                            );
                         }
                         _ => unreachable!(),
                     }
                 }
             }
             assert_eq!(targets, 1, "one actual execution-source checker");
-            assert!(!source_loan_wiring(parent, &changed.to_token_stream().to_string())?, "actual checker mutation {cut}");
+            assert!(
+                !source_loan_wiring(parent, &changed.to_token_stream().to_string())?,
+                "actual checker mutation {cut}"
+            );
         }
         Ok(())
     }
