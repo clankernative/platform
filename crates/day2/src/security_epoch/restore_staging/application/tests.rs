@@ -2,11 +2,13 @@ use super::*;
 use crate::{
     authority_state, budget,
     managed_credentials::{effects, simulation, store as credentials},
+    security_epoch::restore_staging::MemoryAdmission,
 };
-use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
-use rusqlite::types::Value;
+use anyhow::Context;
+use day2_capabilities::{Digest, resources::{BudgetDefinition, BudgetLimits, BudgetScope}};
+use rusqlite::{Connection, TransactionBehavior, types::Value};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 pub(in crate::security_epoch::restore_staging) struct Fixture {
     pub(in crate::security_epoch::restore_staging) db: Connection,
