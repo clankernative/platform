@@ -42,10 +42,13 @@ fn doc<T: Serialize>(name: &str, value: &T, token: u64, domain: Option<&str>) ->
         "createTime":version(1),"updateTime":version(token)}}))
 }
 
-fn publication(f: &Fixture) -> Result<Versioned<crate::security_epoch::restore_approval::publication::Publication>> {
+fn publication(
+    f: &Fixture,
+) -> Result<Versioned<crate::security_epoch::restore_approval::publication::Publication>> {
     Ok(Versioned {
         value: crate::security_epoch::restore_approval::fixture_publication_for_request_data(
-            &f.selected, &f.authority.grant.approval,
+            &f.selected,
+            &f.authority.grant.approval,
         )?,
         version: version(2),
     })
@@ -54,11 +57,11 @@ fn publication(f: &Fixture) -> Result<Versioned<crate::security_epoch::restore_a
 fn publication_entry(f: &Fixture, name: &str) -> Result<Value> {
     let value = publication(f)?;
     Ok(json!({"readTime":READ,"found":{"name":name,
-        "createTime":version(1),"updateTime":value.version,
-        "fields":{
-            "payload":{"stringValue":String::from_utf8(value.value.encode(&f.selected)?)?},
-            "commitment":{"stringValue":Digest::of(&("day2-restore-approval-publication-document-v1",&value.value))?}
-        }}}))
+    "createTime":version(1),"updateTime":value.version,
+    "fields":{
+        "payload":{"stringValue":String::from_utf8(value.value.encode(&f.selected)?)?},
+        "commitment":{"stringValue":Digest::of(&("day2-restore-approval-publication-document-v1",&value.value))?}
+    }}}))
 }
 
 fn reply(f: &Fixture, p: &kernel::Plan, after: bool, header: bool) -> Result<Vec<Value>> {
@@ -187,8 +190,8 @@ fn every_observed_record_version_and_occupied_writer_refuses_before_commit_body(
     for index in 0..9 {
         let mut values = reply(&f, &p, false, true)?;
         values[index + 1]["found"]["updateTime"] = json!(version(90));
-        let tx =
-            Names::new(&f.selected, &f.request, &p, &publication(&f)?)?.transaction(&serde_json::to_vec(&values)?)?;
+        let tx = Names::new(&f.selected, &f.request, &p, &publication(&f)?)?
+            .transaction(&serde_json::to_vec(&values)?)?;
         assert!(
             tx.commit_body(&f.selected, &f.request, &p, &f.authority, 1002)
                 .is_err()
@@ -245,8 +248,8 @@ fn malformed_streams_keep_known_header_but_never_become_valid_observations() -> 
             5 => values[9]["readTime"] = json!("2026-11-03T00:00:00Z"),
             _ => values[9]["found"]["fields"]["unexpected"] = json!({"stringValue":"not-admitted"}),
         }
-        let tx =
-            Names::new(&f.selected, &f.request, &p, &publication(&f)?)?.transaction(&serde_json::to_vec(&values)?)?;
+        let tx = Names::new(&f.selected, &f.request, &p, &publication(&f)?)?
+            .transaction(&serde_json::to_vec(&values)?)?;
         assert!(tx.observed().is_err());
         assert!(!tx.rollback_body()?.is_empty());
     }
@@ -330,8 +333,11 @@ fn writer_never_substitutes_or_refreshes_the_consumed_publication_version() -> R
         assert!(tx.observed().is_err());
         assert!(!tx.rollback_body()?.is_empty());
         values.remove(0);
-        assert!(Names::new(&f.selected, &f.request, &p, &expected)?
-            .strong(&serde_json::to_vec(&values)?).is_err());
+        assert!(
+            Names::new(&f.selected, &f.request, &p, &expected)?
+                .strong(&serde_json::to_vec(&values)?)
+                .is_err()
+        );
     }
     let other = fixture(85, true)?;
     assert!(Names::new(&f.selected, &f.request, &p, &publication(&other)?).is_err());

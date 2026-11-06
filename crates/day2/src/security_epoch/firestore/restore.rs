@@ -4,11 +4,11 @@
 use super::{Entry, Names as InitialNames, decode_snapshot, encode_fields};
 use crate::security_epoch::{
     journal::snapshot_digest,
-    restore_approval::publication::{self, Publication},
     kernel::{
         Snapshot, UpdateTime, Versioned, advance,
         restore::{self, approval_use},
     },
+    restore_approval::publication::{self, Publication},
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -57,7 +57,10 @@ impl Names {
             publication: format!(
                 "{}/documents/day2_restore_approval_publications_v1/{}",
                 initial.database,
-                key(&publication::key(selection, &plan.approval_use.grant_id_data())?),
+                key(&publication::key(
+                    selection,
+                    plan.approval_use.grant_id_data()
+                )?),
             ),
             expected_publication: publication.clone(),
             selection: selection.clone(),
@@ -201,7 +204,9 @@ impl Names {
                 grant = record(entry.found, "day2-restore-grant-document-v1", at)?;
             } else {
                 publication = Some(publication_record(
-                    entry.found.context("restore_provider_publication_missing")?,
+                    entry
+                        .found
+                        .context("restore_provider_publication_missing")?,
                     &self.selection,
                     &self.expected_publication,
                 )?);
@@ -408,11 +413,7 @@ fn publication_record(
     // The complete stream already checked exact name and ordered timestamps.
     let _ = (document.name, document.create_time);
     let payload = document.fields.payload.string_value;
-    let value = Publication::decode(
-        payload.as_bytes(),
-        selected,
-        &expected.grant_id_data(),
-    )?;
+    let value = Publication::decode(payload.as_bytes(), selected, expected.grant_id_data())?;
     ensure!(
         &value == expected
             && value.encode(selected)? == payload.as_bytes()
@@ -420,7 +421,10 @@ fn publication_record(
                 == Digest::of(&("day2-restore-approval-publication-document-v1", &value))?.as_str(),
         "restore_provider_publication_changed"
     );
-    Ok(Versioned { value, version: document.update_time })
+    Ok(Versioned {
+        value,
+        version: document.update_time,
+    })
 }
 
 /// Historical provider DATA only, including an occupied grant-use record.

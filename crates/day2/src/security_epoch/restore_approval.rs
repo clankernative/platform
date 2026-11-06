@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) const RESTORE_APPROVAL_LIFETIME_SECONDS: u64 = 3600;
 const MAX_REQUEST_BYTES: usize = 16_384;
 
-pub(crate) mod native;
 mod intent;
+pub(crate) mod native;
 pub(in crate::security_epoch) mod publication;
 pub(crate) mod signed;
 pub(crate) use intent::ApprovalIntent;
@@ -164,6 +164,9 @@ pub(in crate::security_epoch) fn fixture_publication_for_request_data(
     let (_, mut record) = fixture_publication_data()?;
     record.statement.request = request.clone();
     let pair = Ed25519KeyPair::from_seed_unchecked(&[31; 32]).unwrap();
-    record.signature = URL_SAFE_NO_PAD.encode(pair.sign(&record.statement.signature_input_data()?).as_ref());
+    record.signature = URL_SAFE_NO_PAD.encode(
+        pair.sign(&record.statement.signature_input_data()?)
+            .as_ref(),
+    );
     publication::Publication::record_data(selected, record)
 }

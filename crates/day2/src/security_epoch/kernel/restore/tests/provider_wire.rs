@@ -24,10 +24,19 @@ fn fields(value: Value) -> Result<Value> {
     Ok(Value::Object(result))
 }
 
-fn publication(selection: &EpochStore, plan: &model::Plan) -> Result<crate::security_epoch::restore_approval::publication::Publication> {
+fn publication(
+    selection: &EpochStore,
+    plan: &model::Plan,
+) -> Result<crate::security_epoch::restore_approval::publication::Publication> {
     crate::security_epoch::restore_approval::fixture_publication_for_request_data(
         selection,
-        &plan.reservation.receipt.request.authorization.grant.approval,
+        &plan
+            .reservation
+            .receipt
+            .request
+            .authorization
+            .grant
+            .approval,
     )
 }
 
@@ -100,9 +109,20 @@ fn names(selection: &EpochStore, plan: &model::Plan) -> Result<Vec<String>> {
         ),
         format!(
             "projects/{}/databases/{}/documents/day2_restore_approval_publications_v1/{}",
-            project.as_str(), database.as_str(),
-            &crate::security_epoch::restore_approval::publication::key(selection,
-                &plan.reservation.receipt.request.authorization.grant.approval.grant_id)?.as_str()[7..]
+            project.as_str(),
+            database.as_str(),
+            &crate::security_epoch::restore_approval::publication::key(
+                selection,
+                &plan
+                    .reservation
+                    .receipt
+                    .request
+                    .authorization
+                    .grant
+                    .approval
+                    .grant_id
+            )?
+            .as_str()[7..]
         ),
     ])
 }
@@ -129,7 +149,8 @@ fn initial_reply(selection: &EpochStore, plan: &model::Plan) -> Result<Vec<Value
 
 fn commit(selection: &EpochStore, plan: &model::Plan, current: &Current) -> Result<Value> {
     let reply = serde_json::to_vec(&initial_reply(selection, plan)?)?;
-    let transaction = wire::RestoreNames::new(selection, plan, &publication(selection, plan)?)?.transaction(&reply)?;
+    let transaction = wire::RestoreNames::new(selection, plan, &publication(selection, plan)?)?
+        .transaction(&reply)?;
     assert_eq!(transaction.observed()?.snapshot, plan.reservation.before);
     crate::json::decode(&transaction.commit_body(selection, plan, current, 1000)?)
 }
@@ -151,8 +172,8 @@ fn exact_read_write_transaction_and_all_five_writes_pin_scope_and_conditions() -
     let mut combined = initial_reply(&selection, &plan)?;
     combined.remove(0);
     combined[0]["transaction"] = json!(TX);
-    let transaction =
-        wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?.transaction(&serde_json::to_vec(&combined)?)?;
+    let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+        .transaction(&serde_json::to_vec(&combined)?)?;
     let combined: Value =
         crate::json::decode(&transaction.commit_body(&selection, &plan, &current, 1000)?)?;
     assert_eq!(combined, value);
@@ -220,8 +241,9 @@ fn semantic_rejection_keeps_the_canonical_transaction_available_only_for_cleanup
             reply.remove(0);
             reply[0]["transaction"] = json!(TX);
         }
-        let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
-            .transaction(&serde_json::to_vec(&reply)?)?;
+        let transaction =
+            wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+                .transaction(&serde_json::to_vec(&reply)?)?;
         assert!(transaction.observed().is_err(), "cut={cut}");
         let cleanup: Value = crate::json::decode(&transaction.rollback_body()?)?;
         assert_eq!(cleanup, json!({"transaction":TX}));
@@ -250,8 +272,9 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
     for index in 1..=4 {
         let mut reply = initial_reply(&selection, &plan)?;
         reply[index]["found"]["updateTime"] = json!(version(4));
-        let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
-            .transaction(&serde_json::to_vec(&reply)?)?;
+        let transaction =
+            wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+                .transaction(&serde_json::to_vec(&reply)?)?;
         assert!(
             transaction
                 .commit_body(&selection, &plan, &current, 1000)
@@ -260,7 +283,8 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
         );
     }
     let original = serde_json::to_vec(&initial_reply(&selection, &plan)?)?;
-    let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?.transaction(&original)?;
+    let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+        .transaction(&original)?;
     assert!(
         transaction
             .commit_body(&selection, &plan, &current, 1005)
@@ -269,7 +293,8 @@ fn changed_original_expiry_and_equal_value_rewrites_cannot_prepare_a_send() -> R
     let cleanup: Value = crate::json::decode(&transaction.rollback_body()?)?;
     assert_eq!(cleanup, json!({"transaction":TX}));
     let (_, other) = approval_use::plan(&selection, &before, 44)?;
-    let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?.transaction(&original)?;
+    let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+        .transaction(&original)?;
     assert!(
         transaction
             .commit_body(&selection, &other, &current, 1000)
@@ -287,8 +312,9 @@ fn all_four_retained_documents_require_update_before_read_and_keep_cleanup_on_re
         for field in ["updateTime", "createTime"] {
             let mut reply = initial_reply(&selection, &plan)?;
             reply[index]["found"][field] = json!("2026-11-05T00:00:00Z");
-            let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
-                .transaction(&serde_json::to_vec(&reply)?)?;
+            let transaction =
+                wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+                    .transaction(&serde_json::to_vec(&reply)?)?;
             assert!(transaction.observed().is_err(), "row={index}field={field}");
             assert!(
                 transaction
@@ -436,7 +462,9 @@ fn five_wire_write_cuts_and_unknown_completion_reopen_against_independent_expect
                 let count: i64 = db.query_row("SELECT count(*) FROM records", [], |r| r.get(0))?;
                 assert_eq!(count, if committed { 8 } else { 5 });
                 let bytes = read_back(&db, &names)?;
-                let observed = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?.strong(&bytes)?;
+                let observed =
+                    wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+                        .strong(&bytes)?;
                 assert_eq!(
                     observed.snapshot.root.as_ref().unwrap().value.epoch.value(),
                     if committed { 2 } else { 1 }
@@ -574,8 +602,8 @@ fn exactly_five_acknowledgements_and_post_commit_read_time_are_historical_data_o
     let (_, plan) = approval_use::plan(&selection, &before, 47)?;
     let initial = initial_reply(&selection, &plan)?;
     let strong: Vec<_> = initial.into_iter().skip(1).collect();
-    let observed =
-        wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?.strong(&serde_json::to_vec(&strong)?)?;
+    let observed = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+        .strong(&serde_json::to_vec(&strong)?)?;
     let reply =
         json!({"writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)});
     let record = wire::restore_commit_reply(&serde_json::to_vec(&reply)?)?;
@@ -627,8 +655,8 @@ fn provider_owned_parse_details_and_oversize_bytes_never_escape_closed_errors() 
     let mut reply = initial_reply(&selection, &plan)?;
     reply[1]["found"]["fields"]["phase"]["mapValue"]["fields"]["phase"]["stringValue"] =
         json!(PRIVATE);
-    let transaction =
-        wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?.transaction(&serde_json::to_vec(&reply)?)?;
+    let transaction = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+        .transaction(&serde_json::to_vec(&reply)?)?;
     let error = match transaction.observed() {
         Ok(_) => anyhow::bail!("unexpected provider admission"),
         Err(error) => error,
@@ -638,10 +666,13 @@ fn provider_owned_parse_details_and_oversize_bytes_never_escape_closed_errors() 
     assert_eq!(cleanup, json!({"transaction":TX}));
     let duplicate = format!("[{{\"transaction\":\"{TX}\",\"transaction\":\"{PRIVATE}\"}}]");
     for bytes in [duplicate.into_bytes(), vec![b' '; 65_537]] {
-        let error = match wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?.transaction(&bytes) {
-            Ok(_) => anyhow::bail!("unexpected malformed transaction"),
-            Err(error) => error,
-        };
+        let error =
+            match wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
+                .transaction(&bytes)
+            {
+                Ok(_) => anyhow::bail!("unexpected malformed transaction"),
+                Err(error) => error,
+            };
         assert!(!format!("{error:#}").contains(PRIVATE));
     }
     let invalid = format!("{{\"writeResults\":\"{PRIVATE}\",\"commitTime\":\"{PRIVATE}\"}}");
@@ -665,32 +696,50 @@ fn full_signed_publication_and_original_provider_version_are_required() -> Resul
         let doc = &mut values[8];
         match cut {
             0 => *doc = json!({"readTime":READ,"missing":doc["found"]["name"]}),
-            1 => doc["found"]["fields"]["commitment"]["stringValue"] = json!(Digest::new(b"changed")),
+            1 => {
+                doc["found"]["fields"]["commitment"]["stringValue"] = json!(Digest::new(b"changed"))
+            }
             2 => doc["found"]["fields"]["unknown"] = json!({"stringValue":"extra"}),
             3 => doc["found"]["updateTime"] = json!("2026-11-05T00:00:00Z"),
-            4 => doc["found"]["name"] = json!("projects/foreign/databases/foreign/documents/foreign"),
+            4 => {
+                doc["found"]["name"] = json!("projects/foreign/databases/foreign/documents/foreign")
+            }
             5 => doc["found"]["fields"]["payload"]["stringValue"] = json!("{}"),
             6 => doc["found"]["fields"]["payload"]["extra"] = true.into(),
             7 => {
-                let text = doc["found"]["fields"]["payload"]["stringValue"].as_str().unwrap();
+                let text = doc["found"]["fields"]["payload"]["stringValue"]
+                    .as_str()
+                    .unwrap();
                 doc["found"]["fields"]["payload"]["stringValue"] = json!(format!(" {text}"));
-            },
+            }
             8 => {
-                let text = doc["found"]["fields"]["payload"]["stringValue"].as_str().unwrap();
-                doc["found"]["fields"]["payload"]["stringValue"] = json!(text.replacen('{', "{\"format\":\"day2_restore_approval_publication_v1\",", 1));
-            },
+                let text = doc["found"]["fields"]["payload"]["stringValue"]
+                    .as_str()
+                    .unwrap();
+                doc["found"]["fields"]["payload"]["stringValue"] = json!(text.replacen(
+                    '{',
+                    "{\"format\":\"day2_restore_approval_publication_v1\",",
+                    1
+                ));
+            }
             9 => {
                 let (_, other) = approval_use::plan(&selection, &before, 50)?;
                 *doc = publication_entry(&selection, &other)?;
                 // A self-consistent alternate publication cannot replace the
                 // expected exact grant, even at its original selected path.
                 doc["found"]["name"] = original[8]["found"]["name"].clone();
-            },
+            }
             _ => doc["found"]["fields"] = json!([]),
         }
         let tx = names()?.transaction(&serde_json::to_vec(&values)?)?;
-        assert!(tx.commit_body(&selection, &plan, &current, 1000).is_err(), "cut={cut}");
-        assert_eq!(crate::json::decode::<Value>(&tx.rollback_body()?)?, json!({"transaction":TX}));
+        assert!(
+            tx.commit_body(&selection, &plan, &current, 1000).is_err(),
+            "cut={cut}"
+        );
+        assert_eq!(
+            crate::json::decode::<Value>(&tx.rollback_body()?)?,
+            json!({"transaction":TX})
+        );
     }
     let tx = names()?.transaction(&serde_json::to_vec(&original)?)?;
     let captured = tx.observed()?.publication;
@@ -698,8 +747,15 @@ fn full_signed_publication_and_original_provider_version_are_required() -> Resul
         "writeResults":vec![json!({"updateTime":version(3)});5],"commitTime":version(3)
     }))?)?;
     let mut strong: Vec<_> = original.into_iter().skip(1).collect();
-    names()?.strong(&serde_json::to_vec(&strong)?)?.after_commit(&ack, &captured)?;
+    names()?
+        .strong(&serde_json::to_vec(&strong)?)?
+        .after_commit(&ack, &captured)?;
     strong[7]["found"]["updateTime"] = json!(version(4));
-    assert!(names()?.strong(&serde_json::to_vec(&strong)?)?.after_commit(&ack, &captured).is_err());
+    assert!(
+        names()?
+            .strong(&serde_json::to_vec(&strong)?)?
+            .after_commit(&ack, &captured)
+            .is_err()
+    );
     Ok(())
 }
