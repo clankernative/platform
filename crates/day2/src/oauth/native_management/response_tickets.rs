@@ -111,10 +111,10 @@ impl ResponseTickets {
             let owners = owners.try_borrow()?;
             let owner = owners
                 .get(scope.app.as_str())
-                .context("response_rights_app_missing")?;
+                .context("native request App missing")?;
             ensure!(
                 owner.kind == NativeRole::AppHost && owner.selection.scope() == scope,
-                "response_rights_app_changed"
+                "native request App selection changed"
             );
             tickets.push(owner.response_rights.register(response)?);
             Ok(())
