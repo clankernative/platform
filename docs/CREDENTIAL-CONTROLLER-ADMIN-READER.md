@@ -20,6 +20,13 @@ transaction commits or rolls back before provider/configuration reobservation
 or any external work. There is no SQL, connection, descriptor, stage or native
 owner getter and no arbitrary SQL callback.
 
+Before configuration, both Controller reader entries compare SQLite's actual
+opened MAIN with the original and authenticated App cohort. Every sidecar
+already open must also match. WAL/SHM may be opened lazily, so this early check
+does not claim a complete cohort. The later complete checks before and after
+policy projection remain mandatory. Comparisons inspect held descriptors;
+they never open and close a duplicate of the SQLite MAIN inode.
+
 The first read captures the exact authority stamp. Later checks read current
 policy again and refuse a different stamp, removed principal, disabled
 application, changed artifact, substituted metadata/operation or changed
