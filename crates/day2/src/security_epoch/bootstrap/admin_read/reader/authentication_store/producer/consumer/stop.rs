@@ -3,8 +3,9 @@
 //! grant-use/root-fence send/readback and the complete real peer/issuer stop.
 use super::super::super::super::super::ControllerAdminReadLoan;
 use super::super::super::super::ControllerAdminReader;
+use super::super::super::RestoreAuthenticationAction;
 use super::{
-    AuthenticatedRestoreExecution, ExecutionCompletion, RestoreAuthenticationAction,
+    AuthenticatedRestoreExecution, ExecutionCompletion,
     RestoreOriginalGuard, SignedApprovalRecord, approval_window,
 };
 use crate::security_epoch::{
