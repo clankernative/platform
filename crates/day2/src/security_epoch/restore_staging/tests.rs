@@ -363,25 +363,46 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
             visit::visit_item_trait(self, item)
         }
     }
-    fn closed(source: &str) -> bool {
+    fn closed(sources: [&str; 4]) -> bool {
         let mut seen = Implementations {
             production: 0,
             defaults: 0,
         };
-        seen.visit_file(&syn::parse_file(source).unwrap());
+        for source in sources {
+            seen.visit_file(&syn::parse_file(source).unwrap());
+        }
         seen.production == 0 && seen.defaults == 0
     }
     let source = include_str!("../restore_staging.rs");
-    assert!(closed(source));
-    assert!(!closed(
-        &(source.to_owned() + "\nimpl Checks for UntrustedData {}")
-    ));
+    // Match the actual closed production child catalog, including the writer
+    // where the future concrete native adapter will live. A parent-only scan
+    // must not silently accept an implementation supplied by another child.
+    let sources = [
+        source,
+        include_str!("writer.rs"),
+        include_str!("application.rs"),
+        include_str!("writer/dispatch.rs"),
+    ];
+    assert!(closed(sources));
+    for index in 0..sources.len() {
+        for implementation in [
+            "\nimpl Checks for UntrustedData {}",
+            "\nmod nested { impl super::Checks for UntrustedData {} }",
+        ] {
+            let mutant = sources[index].to_owned() + implementation;
+            let mut changed = sources;
+            changed[index] = &mutant;
+            assert!(!closed(changed), "source {index}: {implementation}");
+        }
+    }
     let begin = source.find("fn current(").unwrap();
     let end = source[begin..].find(';').unwrap() + begin;
     assert!(!source[begin..end].contains('{'));
     let mut mutant = source.to_owned();
     mutant.replace_range(end..=end, " { Ok(()) }");
-    assert!(!closed(&mutant));
+    let mut changed = sources;
+    changed[0] = &mutant;
+    assert!(!closed(changed));
     macro_rules! assert_not_impl {
         ($bound:path) => {{
             trait Ambiguous<A> {
