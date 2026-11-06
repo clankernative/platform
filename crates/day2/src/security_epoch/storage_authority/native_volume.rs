@@ -25,8 +25,8 @@ use std::{fs::File, io::Read};
 mod authentication_store;
 pub(crate) use authentication_store::AuthenticationStoreFiles;
 mod restore_approval;
-pub(crate) use restore_approval::NativeApprovalSource;
 pub(in crate::security_epoch) use restore_approval::HistoricalKeyAvailability;
+pub(crate) use restore_approval::NativeApprovalSource;
 
 const ROOT: &str = "/state";
 const PROFILE: &str = "/etc/day2-native/storage.json";

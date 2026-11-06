@@ -308,9 +308,11 @@ pub(crate) fn decode_secret_access_response(
         "OAuth secret version changed"
     );
     let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
-    let mut decoded = Zeroizing::new(STANDARD
-        .decode(data.as_bytes())
-        .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?);
+    let mut decoded = Zeroizing::new(
+        STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?,
+    );
     ensure!(
         !decoded.is_empty() && decoded.len() <= 2048,
         "invalid OAuth secret length"
