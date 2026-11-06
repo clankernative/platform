@@ -21,8 +21,9 @@ The wait path uses authenticated lower/upper clock bounds in one qualified clock
 domain. The lower bound must reach the frozen maximum expiry, and every upper
 bound must remain strictly before the original approval expiry. Equality at the
 approval deadline, rewind, changed inventory, changed source or an original too
-short to cover drain refuses. No duration is selected here; approval governance,
-its genuine issuer and its fixed interval are pending user policy.
+short to cover drain refuses. The drain selects no new duration: its genuine
+input must retain the unchanged native action clock and separately enforce the
+signed approval's fixed one-hour validity. Neither bound may be renewed.
 
 Every consuming boundary must freshly join the same session, exact operation,
 namespace generation, source/target epochs, selection, roots, holders and target
@@ -71,6 +72,15 @@ or fallible borrow is appended. The ordinary connection-completion and autonomou
 request paths use the same retained terminal bookkeeping at their actual endpoint.
 Abort, lost publication, cancellation, owner loss and unfinished Drop leave rights
 unresolved. Unknown records are never pruned or cleared by a guessed timeout.
+
+The same retained ledger can irreversibly seal response issuance before its
+outstanding records are inspected. Captures then refuse. Existing tickets may
+still reach their unchanged actual transport terminal; sealing never completes
+a ticket itself. Owner death is separate and still makes a prepared terminal
+unknown. A drain check requires that same live, sealed ledger and only known
+complete records. No count, deadline, borrowed record list or fresh empty ledger
+is an authenticated cohort, and this check cannot construct complete Stop.
+The genuine native caller and its complete owner-cohort binding remain pending.
 
 This is the real response-right hook, not a complete cohort Stop supplier. No
 complete-stop constructor, restart adoption or accepting restored writer is
