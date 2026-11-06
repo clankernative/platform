@@ -739,6 +739,8 @@ mod tests {
                 passed: effects(shard),
                 timings_ms: effects(shard).into_iter().map(|step| (step, 100)).collect(),
                 binaries: expected_binaries(&prepared, shard),
+                day2: super::super::cases::part(shard)
+                    .then(|| super::super::cases::sample(&prepared, shard)),
             })
             .collect();
         let timings = admit_join(&prepared, &shards, Some(&mac))?;
@@ -784,7 +786,30 @@ mod tests {
     }
 
     #[test]
-    fn queue_reuse_requires_complete_parts_seven_campaigns_current_compiler_and_default_targets()
+    fn split_day2_receipts_cannot_expand_the_original_aggregate_workspace_budget() -> Result<()> {
+        let source = full()?;
+        let joined = source
+            .files
+            .get("ci-verification.json")
+            .context("joined test receipt")?;
+        let prepared: Prepared = serde_json::from_value(source.files["ci-prepared.json"].clone())?;
+        let mut receipts: Vec<Receipt> = serde_json::from_value(joined["shards"].clone())?;
+        let mac = serde_json::from_value(joined["mac"].clone())?;
+        let lifecycle = receipts
+            .iter_mut()
+            .find(|receipt| receipt.shard == "workspace-day2-runtime")
+            .context("new part")?;
+        lifecycle
+            .timings_ms
+            .insert("test-workspace-day2-runtime".into(), 12_600_000);
+        assert!(admit_join(&prepared, &receipts, Some(&mac)).is_err());
+        receipts.retain(|receipt| receipt.shard != "workspace-day2-runtime");
+        assert!(admit_join(&prepared, &receipts, Some(&mac)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn queue_reuse_requires_complete_parts_eight_campaigns_current_compiler_and_default_targets()
     -> Result<()> {
         let Full {
             candidate,

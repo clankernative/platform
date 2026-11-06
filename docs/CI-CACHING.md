@@ -271,3 +271,15 @@ References: [Bazel caching](https://bazel.build/remote/caching),
 [GitHub cache scopes and limits](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),
 [workflow runs](https://docs.github.com/en/rest/actions/workflow-runs),
 [artifact API](https://docs.github.com/en/rest/actions/artifacts).
+
+### Day2 runtime partitions
+
+The day2 binary group serves both `workspace-day2` and `workspace-day2-runtime`;
+it is still admitted by exact compiler/preparation identity before either job
+executes it. The runtime part runs the integration harness and OAuth lifecycle library
+histories; the other part runs the remaining library and bin-unit cases. The
+jobs run disjoint actual case inventories, not cached test results. Composition requires both authenticated result artifacts, current
+executable inventory equality and complete joined DST observations. A main queue
+reuse receipt without the additional part and its completed case evidence refuses.
+The binary group is shared transport data; it does not let either part stand in
+for the other's fresh runtime outcomes.
