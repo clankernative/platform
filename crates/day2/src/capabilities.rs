@@ -1327,7 +1327,65 @@ mod tests {
     }
 
     fn native_bearer_guard_precedes_resource_and_signing(source: &str) -> bool {
-        use quote::ToTokens;
+        use syn::visit::{self, Visit};
+        fn path(expression: &syn::Expr, expected: &str) -> bool {
+            let syn::Expr::Path(value) = expression else {
+                return false;
+            };
+            value.qself.is_none()
+                && value
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::")
+                    == expected
+        }
+        fn guard(statement: &syn::Stmt) -> bool {
+            let syn::Stmt::Expr(syn::Expr::If(branch), None) = statement else {
+                return false;
+            };
+            let syn::Expr::MethodCall(condition) = branch.cond.as_ref() else {
+                return false;
+            };
+            if branch.else_branch.is_some()
+                || condition.method != "uses_native_storage"
+                || !condition.args.is_empty()
+                || !path(&condition.receiver, "runtime")
+                || branch.then_branch.stmts.len() != 1
+            {
+                return false;
+            }
+            let syn::Stmt::Expr(syn::Expr::Try(requested), Some(_)) = &branch.then_branch.stmts[0]
+            else {
+                return false;
+            };
+            let syn::Expr::Call(call) = requested.expr.as_ref() else {
+                return false;
+            };
+            path(&call.func, "require_native_bearer_fence")
+                && call.args.len() == 1
+                && path(&call.args[0], "resource_action")
+        }
+        #[derive(Default)]
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(value) = call.func.as_ref() {
+                    self.0.push(
+                        value
+                            .path
+                            .segments
+                            .iter()
+                            .map(|part| part.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::"),
+                    );
+                }
+                visit::visit_expr_call(self, call);
+            }
+        }
         let Ok(file) = syn::parse_file(source) else {
             return false;
         };
@@ -1337,43 +1395,78 @@ mod tests {
         }) else {
             return false;
         };
-        let required: syn::Expr = syn::parse_quote!(if runtime.uses_native_storage() {
-            require_native_bearer_fence(resource_action)?;
-        });
-        let expected = required.to_token_stream().to_string();
-        let mut guard = None;
+        let mut guarded = None;
         let mut resolved = None;
         let mut resource = None;
         for (index, statement) in function.block.stmts.iter().enumerate() {
-            let text = statement.to_token_stream().to_string();
-            if text == expected && guard.replace(index).is_some() {
+            if guard(statement) && guarded.replace(index).is_some() {
                 return false;
             }
-            if text.starts_with("let resource_action = ResourceAction :: ALL") {
-                resolved = Some(index);
-            }
-            if text.starts_with("let mut resource = crate :: resources :: authorize (") {
-                resource = Some(index);
+            if let syn::Stmt::Local(local) = statement {
+                let syn::Pat::Ident(name) = &local.pat else {
+                    continue;
+                };
+                let Some(initializer) = &local.init else {
+                    continue;
+                };
+                let syn::Expr::Try(checked) = initializer.expr.as_ref() else {
+                    continue;
+                };
+                if name.ident == "resource_action" {
+                    let mut origin = checked.expr.as_ref();
+                    while let syn::Expr::MethodCall(method) = origin {
+                        origin = method.receiver.as_ref();
+                    }
+                    if path(origin, "ResourceAction::ALL") {
+                        resolved = Some(index);
+                    }
+                }
+                if name.ident == "resource"
+                    && name.mutability.is_some()
+                    && let syn::Expr::Call(call) = checked.expr.as_ref()
+                    && path(&call.func, "crate::resources::authorize")
+                    && call.args.len() == 5
+                    && call
+                        .args
+                        .iter()
+                        .zip([
+                            "connection",
+                            "runtime",
+                            "request",
+                            "instruction",
+                            "resource_action",
+                        ])
+                        .all(|(argument, expected)| path(argument, expected))
+                {
+                    resource = Some(index);
+                }
             }
         }
-        let (Some(resolved), Some(guard), Some(resource)) = (resolved, guard, resource) else {
+        let (Some(resolved), Some(guarded), Some(resource)) = (resolved, guarded, resource) else {
             return false;
         };
-        let text = function.block.to_token_stream().to_string();
+        let mut calls = Calls::default();
+        calls.visit_block(&function.block);
+        let position = |name: &str| calls.0.iter().position(|call| call == name);
         let (Some(authorize), Some(prepare), Some(mounts), Some(sign)) = (
-            text.find("crate :: resources :: authorize ("),
-            text.find("crate :: integrations :: prepare ("),
-            text.find("let mounts = crate :: integration_host :: MountedCredentials :: new ("),
-            text.find("crate :: integrations :: presign ("),
+            position("crate::resources::authorize"),
+            position("crate::integrations::prepare"),
+            position("crate::integration_host::MountedCredentials::new"),
+            position("crate::integrations::presign"),
         ) else {
             return false;
         };
-        resolved + 1 == guard
-            && guard + 1 == resource
+        resolved + 1 == guarded
+            && guarded + 1 == resource
             && authorize < prepare
             && authorize < mounts
             && mounts < sign
-            && text.matches("require_native_bearer_fence").count() == 1
+            && calls
+                .0
+                .iter()
+                .filter(|call| call.as_str() == "require_native_bearer_fence")
+                .count()
+                == 1
     }
 
     #[test]
@@ -1381,6 +1474,14 @@ mod tests {
         let source = include_str!("capabilities.rs");
         assert!(native_bearer_guard_precedes_resource_and_signing(source));
         for (old, new) in [
+            (
+                "let resource_action = ResourceAction::ALL",
+                "let resource_action = [ResourceAction::ObjectStoreHead]",
+            ),
+            (
+                "connection, runtime, request, instruction, resource_action)?",
+                "connection, runtime, request, instruction, ResourceAction::ObjectStoreHead)?",
+            ),
             ("if runtime.uses_native_storage() {", "if false {"),
             ("require_native_bearer_fence(resource_action)?;", ""),
             (
