@@ -2768,6 +2768,35 @@ mod tests {
     }
 
     #[test]
+    fn mac_allocation_retry_uses_api_eligibility_not_scheduler_result_or_guard_success() {
+        let guard = ci_job("admit-mac-acquisition-retry");
+        assert!(guard.contains("if: ${{ !cancelled() }}"));
+        assert!(!guard.contains("needs.verify-mac-compatibility.result"));
+        assert!(guard.contains("admitted: ${{ steps.admit.outputs.admitted }}"));
+        for fact in [
+            ".run_id == ${{ github.run_id }}",
+            ".run_attempt == ${{ github.run_attempt }}",
+            ".head_sha == ",
+            ".labels == [\"macos-15\"]",
+            ".status == \"completed\"",
+            ".conclusion == \"cancelled\"",
+            ".runner_id == 0",
+            ".runner_name == \"\"",
+            "(.steps | length) == 0",
+            "then \"admitted=true\"",
+            "then \"admitted=false\"",
+            ">> \"$GITHUB_OUTPUT\"",
+        ] {
+            assert!(guard.contains(fact), "{fact}");
+        }
+        let retry = ci_job("retry-mac-compatibility");
+        assert!(retry.contains("!cancelled()"));
+        assert!(retry.contains("needs.admit-mac-acquisition-retry.outputs.admitted == 'true'"));
+        assert!(!retry.contains("outputs.admitted == 'success'"));
+        assert!(retry.contains("steps: *mac_verification_steps"));
+    }
+
+    #[test]
     fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
         validate_linux_context("0::/\n", "6442450944\n")?;
         for (group, memory) in [
