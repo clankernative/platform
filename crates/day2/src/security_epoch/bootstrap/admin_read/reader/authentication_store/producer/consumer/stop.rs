@@ -5,8 +5,8 @@ use super::super::super::super::super::ControllerAdminReadLoan;
 use super::super::super::super::ControllerAdminReader;
 use super::super::super::RestoreAuthenticationAction;
 use super::{
-    AuthenticatedRestoreExecution, ExecutionCompletion,
-    RestoreOriginalGuard, SignedApprovalRecord, approval_window,
+    AuthenticatedRestoreExecution, ExecutionCompletion, RestoreOriginalGuard, SignedApprovalRecord,
+    approval_window,
 };
 use crate::security_epoch::{
     kernel::{self, restore::approval_use},
@@ -66,7 +66,10 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
         intent: &kernel::restore::Intent,
     ) -> Result<()> {
         let requested = (|| {
-            ensure!(self.historical_keys.is_none(), "restore_keys_already_retained");
+            ensure!(
+                self.historical_keys.is_none(),
+                "restore_keys_already_retained"
+            );
             let mut loan = ExecutionSourceLoan {
                 action: &mut self.action,
                 original: &mut self.original,
@@ -95,7 +98,9 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
     ) -> Result<()> {
         let requested = (|| {
             self.check()?;
-            self.historical_keys.as_mut().context("restore_keys_not_retained")?
+            self.historical_keys
+                .as_mut()
+                .context("restore_keys_not_retained")?
                 .require(intent, &self.record, &self.operation)
         })();
         let checked = self.check();
@@ -140,18 +145,28 @@ impl ExecutionSourceLoan<'_, '_, '_, '_> {
                     && request.target.authority == selected.authority_key()?
                     && request.target.scope == selected.scope
                     && request.target.security_epoch == 2
-                    && intent.archive.required_keys.iter().filter(|key| key.purpose == kernel::restore::KeyPurpose::CustodyEncryption)
+                    && intent
+                        .archive
+                        .required_keys
+                        .iter()
+                        .filter(|key| key.purpose == kernel::restore::KeyPurpose::CustodyEncryption)
                         .all(|key| key.binding == request.custody),
                 "restore_keys_approval_binding_changed"
             );
             let instance = self.action.reader.metadata.require_native_selection(
-                selected, &request.target.artifact, policy,
+                selected,
+                &request.target.artifact,
+                policy,
             )?;
-            ensure!(instance.security_key_set(selected.scope.app.as_str())? == selected.key_set,
-                "restore_keys_current_key_set_changed");
+            ensure!(
+                instance.security_key_set(selected.scope.app.as_str())? == selected.key_set,
+                "restore_keys_current_key_set_changed"
+            );
             instance.security_key_selections(selected.scope.app.as_str())
         })();
-        if requested.is_err() { self.refuse(); }
+        if requested.is_err() {
+            self.refuse();
+        }
         requested
     }
 
@@ -419,7 +434,10 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
     fn check_local_inner(&mut self) -> Result<()> {
         let requested = (|| {
             self.auth.action.check_local()?;
-            self.auth.historical_keys.as_mut().context("restore_keys_not_retained")?
+            self.auth
+                .historical_keys
+                .as_mut()
+                .context("restore_keys_not_retained")?
                 .check_retained(&self.auth.record, &self.auth.operation)?;
             let physical = self
                 .auth

@@ -3,9 +3,12 @@
 //! valid signature cannot construct it. Live qualification remains separate.
 use crate::artifact::{SecurityKeyPurpose, SecurityKeySelection};
 use crate::oauth::approval_keys::{GcpSecretVersion, decode_secret_access_response};
-use crate::security_epoch::{NativeAcquisition, bootstrap::ExecutionSourceLoan,
-    kernel::restore::{ExactKey, Intent, KeyPurpose}};
 use crate::security_epoch::restore_approval::signed::{ApprovalStatement, SignedApprovalRecord};
+use crate::security_epoch::{
+    NativeAcquisition,
+    bootstrap::ExecutionSourceLoan,
+    kernel::restore::{ExactKey, Intent, KeyPurpose},
+};
 use anyhow::{Context, Result, ensure};
 use base64::{
     Engine,
@@ -803,48 +806,97 @@ struct SelectedKey {
 
 fn archive_purpose(current: SecurityKeyPurpose) -> Option<KeyPurpose> {
     match current {
-        SecurityKeyPurpose::CredentialEncryption | SecurityKeyPurpose::OauthCustodyEncryption => Some(KeyPurpose::CustodyEncryption),
-        SecurityKeyPurpose::CredentialVerifier | SecurityKeyPurpose::OauthCustodyVerifier => Some(KeyPurpose::CustodyVerifier),
-        SecurityKeyPurpose::CredentialShellAttestation | SecurityKeyPurpose::OauthShellAttestation => Some(KeyPurpose::ShellAttestation),
-        SecurityKeyPurpose::OauthProviderClient | SecurityKeyPurpose::OauthReauthenticationClient => None,
+        SecurityKeyPurpose::CredentialEncryption | SecurityKeyPurpose::OauthCustodyEncryption => {
+            Some(KeyPurpose::CustodyEncryption)
+        }
+        SecurityKeyPurpose::CredentialVerifier | SecurityKeyPurpose::OauthCustodyVerifier => {
+            Some(KeyPurpose::CustodyVerifier)
+        }
+        SecurityKeyPurpose::CredentialShellAttestation
+        | SecurityKeyPurpose::OauthShellAttestation => Some(KeyPurpose::ShellAttestation),
+        SecurityKeyPurpose::OauthProviderClient
+        | SecurityKeyPurpose::OauthReauthenticationClient => None,
     }
 }
 
 fn complete_requirements(admitted: &[SecurityKeySelection]) -> Result<Vec<ExactKey>> {
     let mut required = Vec::new();
     for key in admitted {
-        let Some(purpose) = archive_purpose(key.purpose) else { continue; };
+        let Some(purpose) = archive_purpose(key.purpose) else {
+            continue;
+        };
         let SecretProvider::GcpVersion { version, .. } = &key.provider;
-        required.push(ExactKey { binding: key.binding.clone(), version: version.to_string(), purpose });
+        required.push(ExactKey {
+            binding: key.binding.clone(),
+            version: version.to_string(),
+            purpose,
+        });
     }
-    required.sort_by(|a,b| (&a.purpose, a.binding.id.as_str(), a.binding.revision.as_str(), a.version.as_str())
-        .cmp(&(&b.purpose, b.binding.id.as_str(), b.binding.revision.as_str(), b.version.as_str())));
+    required.sort_by(|a, b| {
+        (
+            &a.purpose,
+            a.binding.id.as_str(),
+            a.binding.revision.as_str(),
+            a.version.as_str(),
+        )
+            .cmp(&(
+                &b.purpose,
+                b.binding.id.as_str(),
+                b.binding.revision.as_str(),
+                b.version.as_str(),
+            ))
+    });
     required.dedup();
-    ensure!((1..=32).contains(&required.len()), "restore_keys_manifest_bound");
+    ensure!(
+        (1..=32).contains(&required.len()),
+        "restore_keys_manifest_bound"
+    );
     Ok(required)
 }
 
 // Pure resolution DATA. Archive strings cannot supply a project, secret name
 // or alias. Each requirement must resolve to one exact admitted resource.
 fn resolve(required: &[ExactKey], admitted: &[SecurityKeySelection]) -> Result<Vec<SelectedKey>> {
-    ensure!((1..=32).contains(&required.len()), "restore_keys_manifest_bound");
+    ensure!(
+        (1..=32).contains(&required.len()),
+        "restore_keys_manifest_bound"
+    );
     // Archive key-set equality with current selection is already required.
     // A caller cannot omit a referenced member by supplying a smaller list.
-    ensure!(required == complete_requirements(admitted)?, "restore_keys_incomplete_manifest");
+    ensure!(
+        required == complete_requirements(admitted)?,
+        "restore_keys_incomplete_manifest"
+    );
     let mut result = Vec::new();
     let mut resources = std::collections::BTreeSet::new();
     let mut previous = None;
     for key in required {
-        let identity = (&key.purpose, key.binding.id.as_str(), key.binding.revision.as_str(), key.version.as_str());
-        ensure!(previous.is_none_or(|before| before < identity), "restore_keys_manifest_order");
+        let identity = (
+            &key.purpose,
+            key.binding.id.as_str(),
+            key.binding.revision.as_str(),
+            key.version.as_str(),
+        );
+        ensure!(
+            previous.is_none_or(|before| before < identity),
+            "restore_keys_manifest_order"
+        );
         previous = Some(identity);
         let mut found = None;
         for selected in admitted {
-            if selected.binding != key.binding || archive_purpose(selected.purpose).as_ref() != Some(&key.purpose) {
+            if selected.binding != key.binding
+                || archive_purpose(selected.purpose).as_ref() != Some(&key.purpose)
+            {
                 continue;
             }
-            let SecretProvider::GcpVersion { project_number, secret, version } = &selected.provider;
-            if key.version != version.to_string() { continue; }
+            let SecretProvider::GcpVersion {
+                project_number,
+                secret,
+                version,
+            } = &selected.provider;
+            if key.version != version.to_string() {
+                continue;
+            }
             let candidate = GcpSecretVersion {
                 project_number: project_number.get(),
                 secret: secret.as_str().to_owned(),
@@ -853,12 +905,21 @@ fn resolve(required: &[ExactKey], admitted: &[SecurityKeySelection]) -> Result<V
             candidate.validate()?;
             // The same physical key may be selected by several namespaces.
             // Conflicting resources for an archive reference are ambiguous.
-            ensure!(found.as_ref().is_none_or(|before| before == &candidate), "restore_keys_ambiguous_resource");
+            ensure!(
+                found.as_ref().is_none_or(|before| before == &candidate),
+                "restore_keys_ambiguous_resource"
+            );
             found = Some(candidate);
         }
         let provider = found.context("restore_keys_version_not_admitted")?;
-        ensure!(resources.insert(provider.resource_name()), "restore_keys_resource_reused");
-        result.push(SelectedKey { archive: key.clone(), provider });
+        ensure!(
+            resources.insert(provider.resource_name()),
+            "restore_keys_resource_reused"
+        );
+        result.push(SelectedKey {
+            archive: key.clone(),
+            provider,
+        });
     }
     Ok(result)
 }
@@ -874,7 +935,9 @@ impl HistoricalKeyAvailability {
             ensure!(&self.intent == intent, "restore_keys_intent_substituted");
             self.check_retained(record, operation)
         })();
-        if requested.is_err() { self.original.refuse(); }
+        if requested.is_err() {
+            self.original.refuse();
+        }
         requested
     }
 
@@ -887,25 +950,36 @@ impl HistoricalKeyAvailability {
     ) -> Result<()> {
         let requested = (|| {
             self.original.remaining()?;
-            ensure!(self.request == record.statement.request.commitment()?
-                && &self.operation == operation
-                && self.intent.operation == *operation
-                && self.intent.archive.full_archive_digest == record.statement.request.full_archive_digest
-                && self.material.len() == self.intent.archive.required_keys.len()
-                && !self.material.is_empty()
-                && self.material.iter().zip(&self.intent.archive.required_keys)
-                    .all(|(held, required)| held.selected == *required && held.material.len() == 32),
-                "restore_keys_retained_material_changed");
+            ensure!(
+                self.request == record.statement.request.commitment()?
+                    && &self.operation == operation
+                    && self.intent.operation == *operation
+                    && self.intent.archive.full_archive_digest
+                        == record.statement.request.full_archive_digest
+                    && self.material.len() == self.intent.archive.required_keys.len()
+                    && !self.material.is_empty()
+                    && self
+                        .material
+                        .iter()
+                        .zip(&self.intent.archive.required_keys)
+                        .all(|(held, required)| held.selected == *required
+                            && held.material.len() == 32),
+                "restore_keys_retained_material_changed"
+            );
             self.original.remaining()?;
             Ok(())
         })();
-        if requested.is_err() { self.original.refuse(); }
+        if requested.is_err() {
+            self.original.refuse();
+        }
         requested
     }
 }
 
 impl Drop for HistoricalKeyAvailability {
-    fn drop(&mut self) { self.original.refuse(); }
+    fn drop(&mut self) {
+        self.original.refuse();
+    }
 }
 
 impl NativeApprovalSource {
@@ -915,12 +989,18 @@ impl NativeApprovalSource {
         intent: &Intent,
     ) -> Result<HistoricalKeyAvailability> {
         let requested = (|| {
-            ensure!(!self.historical_keys_attempted, "restore_keys_attempt_spent");
+            ensure!(
+                !self.historical_keys_attempted,
+                "restore_keys_attempt_spent"
+            );
             self.historical_keys_attempted = true;
             // A nongeneric lost-acquisition owner shares this actual source's
             // refusal before any external work; catching a panic cannot regrant.
             let mut birth = KeyBirth {
-                original: Some(self.original.narrow(self.store.max_lease_seconds, Duration::MAX)?),
+                original: Some(
+                    self.original
+                        .narrow(self.store.max_lease_seconds, Duration::MAX)?,
+                ),
             };
             owner.check(self)?;
             let selected = owner.historical_key_data(&self.store, &self.policy, intent);
@@ -938,7 +1018,11 @@ impl NativeApprovalSource {
             let credential = minted?;
             checked?;
             let http = KeyHttp::new()?;
-            let mut context = KeyContext::Native { owner: &mut *owner, source: &mut *self, credential };
+            let mut context = KeyContext::Native {
+                owner: &mut *owner,
+                source: &mut *self,
+                credential,
+            };
             let material = http.read_all(&selection, &mut context)?;
             context.check()?;
             let request = context.request_commitment_data()?;
@@ -947,7 +1031,10 @@ impl NativeApprovalSource {
                 request,
                 operation: intent.operation.clone(),
                 material,
-                original: birth.original.take().context("restore_keys_original_missing")?,
+                original: birth
+                    .original
+                    .take()
+                    .context("restore_keys_original_missing")?,
             };
             // One final actual-owner check is required before availability can
             // be installed. Failure drops material and poisons the same clock.
@@ -970,20 +1057,35 @@ enum KeyContext<'borrow, 'fields, 'metadata, 'storage, 'role> {
         credential: crate::security_epoch::CredentialMaterial,
     },
     #[cfg(test)]
-    Fixture { authorization: HeaderValue, fail_at: Option<usize>, checks: usize, original: &'borrow mut NativeAcquisition },
+    Fixture {
+        authorization: HeaderValue,
+        fail_at: Option<usize>,
+        checks: usize,
+        original: &'borrow mut NativeAcquisition,
+    },
 }
 
 impl KeyContext<'_, '_, '_, '_, '_> {
     fn check(&mut self) -> Result<Duration> {
         match self {
-            Self::Native { owner, source, .. } => { owner.check(source)?; source.original.remaining() }
+            Self::Native { owner, source, .. } => {
+                owner.check(source)?;
+                source.original.remaining()
+            }
             #[cfg(test)]
-            Self::Fixture { original, checks, fail_at, .. } => {
+            Self::Fixture {
+                original,
+                checks,
+                fail_at,
+                ..
+            } => {
                 let at = *checks;
                 *checks += 1;
-                if *fail_at == Some(at) { original.refuse(); }
+                if *fail_at == Some(at) {
+                    original.refuse();
+                }
                 original.remaining()
-            },
+            }
         }
     }
 
@@ -1005,7 +1107,10 @@ impl KeyContext<'_, '_, '_, '_, '_> {
 
     fn refuse(&mut self) {
         match self {
-            Self::Native { owner, source, .. } => { owner.refuse(); source.refuse(); }
+            Self::Native { owner, source, .. } => {
+                owner.refuse();
+                source.refuse();
+            }
             #[cfg(test)]
             Self::Fixture { original, .. } => original.refuse(),
         }
@@ -1018,7 +1123,9 @@ pub(super) struct KeyBirth {
 
 impl Drop for KeyBirth {
     fn drop(&mut self) {
-        if let Some(original) = &mut self.original { original.refuse(); }
+        if let Some(original) = &mut self.original {
+            original.refuse();
+        }
     }
 }
 
@@ -1031,47 +1138,80 @@ struct KeyHttp {
 impl KeyHttp {
     fn new() -> Result<Self> {
         Ok(Self {
-            client: Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
-                .retry(reqwest::retry::never()).build()?,
+            client: Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()?,
             #[cfg(test)]
             fixture_origin: None,
         })
     }
 
-    fn read_all(&self, selected: &[SelectedKey], context: &mut KeyContext<'_, '_, '_, '_, '_>) -> Result<Vec<HeldKey>> {
+    fn read_all(
+        &self,
+        selected: &[SelectedKey],
+        context: &mut KeyContext<'_, '_, '_, '_, '_>,
+    ) -> Result<Vec<HeldKey>> {
         let requested = (|| {
-            ensure!((1..=32).contains(&selected.len()), "restore_keys_manifest_bound");
+            ensure!(
+                (1..=32).contains(&selected.len()),
+                "restore_keys_manifest_bound"
+            );
             let mut result = Vec::new();
             for key in selected {
                 let material = self.read(&key.provider, context)?;
                 ensure!(material.len() == 32, "restore_keys_material_shape");
-                result.push(HeldKey { selected: key.archive.clone(), material });
+                result.push(HeldKey {
+                    selected: key.archive.clone(),
+                    material,
+                });
             }
             context.check()?;
             Ok(result)
         })();
-        if requested.is_err() { context.refuse(); }
+        if requested.is_err() {
+            context.refuse();
+        }
         requested
     }
 
-    fn read(&self, selected: &GcpSecretVersion, context: &mut KeyContext<'_, '_, '_, '_, '_>) -> Result<Zeroizing<Vec<u8>>> {
+    fn read(
+        &self,
+        selected: &GcpSecretVersion,
+        context: &mut KeyContext<'_, '_, '_, '_, '_>,
+    ) -> Result<Zeroizing<Vec<u8>>> {
         let origin = KEY_ORIGIN;
         #[cfg(test)]
         let origin = self.fixture_origin.as_deref().unwrap_or(origin);
         context.check()?;
         let mut authorization = context.authorization()?;
         authorization.set_sensitive(true);
-        let request = self.client.get(format!("{origin}/v1/{}:access", selected.resource_name()))
+        let request = self
+            .client
+            .get(format!("{origin}/v1/{}:access", selected.resource_name()))
             .header(reqwest::header::AUTHORIZATION, authorization)
             .timeout(context.check()?);
-        let sent = request.send().map_err(|_| anyhow::anyhow!("restore_keys_transport"));
+        let sent = request
+            .send()
+            .map_err(|_| anyhow::anyhow!("restore_keys_transport"));
         let checked = context.check();
         let response = sent?;
         checked?;
-        ensure!(response.status() == reqwest::StatusCode::OK, "restore_keys_unavailable");
-        ensure!(response.content_length().is_none_or(|n| n <= MAX_REPLY as u64), "restore_keys_reply_bound");
+        ensure!(
+            response.status() == reqwest::StatusCode::OK,
+            "restore_keys_unavailable"
+        );
+        ensure!(
+            response
+                .content_length()
+                .is_none_or(|n| n <= MAX_REPLY as u64),
+            "restore_keys_reply_bound"
+        );
         let mut bytes = Zeroizing::new(Vec::new());
-        let read = response.take((MAX_REPLY + 1) as u64).read_to_end(&mut bytes)
+        let read = response
+            .take((MAX_REPLY + 1) as u64)
+            .read_to_end(&mut bytes)
             .map_err(|_| anyhow::anyhow!("restore_keys_transport"));
         let checked = context.check();
         read?;
@@ -1080,7 +1220,6 @@ impl KeyHttp {
         decode_secret_access_response(selected, &bytes).map(Zeroizing::new)
     }
 }
-
 
 #[cfg(test)]
 #[path = "restore_approval/keys/tests.rs"]
