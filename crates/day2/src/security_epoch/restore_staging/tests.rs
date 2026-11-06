@@ -402,6 +402,61 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
     assert_not_impl!(serde::Deserialize<'static>);
 }
 
+#[test]
+fn memory_admission_rejects_invalid_owners_before_replacing_their_hook() -> Result<()> {
+    use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+    for fault in 0..3 {
+        let directory=tempfile::tempdir()?;
+        let mut db=if fault==0 {Connection::open(directory.path().join("foreign.sqlite"))?} else {Connection::open_in_memory()?};
+        if fault!=2 {db.pragma_update(None,"temp_store","MEMORY")?;}
+        if fault==1 {db.execute_batch("BEGIN")?;}
+        let hits=Arc::new(AtomicUsize::new(0));let observed=Arc::clone(&hits);
+        db.progress_handler(1,Some(move || {observed.fetch_add(1,Ordering::Relaxed);false}))?;
+        assert!(MemoryAdmission::configure(&mut db).is_err());
+        let before=hits.load(Ordering::Relaxed);
+        db.query_row("WITH RECURSIVE w(n) AS(VALUES(0) UNION ALL SELECT n+1 FROM w WHERE n<2000) SELECT max(n) FROM w",[],|r|r.get::<_,i64>(0))?;
+        assert!(hits.load(Ordering::Relaxed)>before);
+        if fault==1 {db.execute_batch("ROLLBACK")?;}
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_memory_admission_checks_the_actual_hook_and_never_selects_raw_installation() {
+    use quote::ToTokens as _;
+    struct Calls(Vec<String>);
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path)=call.func.as_ref() {self.0.push(path.path.segments.last().unwrap().ident.to_string());}
+            visit::visit_expr_call(self,call);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.0.push(call.method.to_string());visit::visit_expr_method_call(self,call);
+        }
+    }
+    let file=syn::parse_file(include_str!("../../oauth/schema.rs")).unwrap();
+    let functions:Vec<_>=file.items.into_iter().filter_map(|item|match item {
+        syn::Item::Fn(f) if f.sig.ident=="admit_retained_memory_transaction"=>Some(f),_=>None
+    }).collect();
+    assert_eq!(functions.len(),1);
+    let first:syn::Stmt=syn::parse_str("hook.enter(tx)?;").unwrap();
+    let last:syn::Expr=syn::parse_str("admit_with_runtime_hook(tx, |_| operation(tx))").unwrap();
+    let valid=|f:&syn::ItemFn| {
+        let mut calls=Calls(Vec::new());calls.visit_block(&f.block);
+        f.block.stmts.first().is_some_and(|s|s.to_token_stream().to_string()==first.to_token_stream().to_string())
+        && matches!(f.block.stmts.last(),Some(syn::Stmt::Expr(e,None)) if e.to_token_stream().to_string()==last.to_token_stream().to_string())
+        && calls.0.iter().filter(|name|name.as_str()=="enter").count()==1
+        && calls.0.iter().filter(|name|name.as_str()=="admit_with_runtime_hook").count()==1
+        && !calls.0.iter().any(|name|matches!(name.as_str(),"admit"|"admit_inner"|"progress_handler"|"configure_connection"))
+    };
+    assert!(valid(&functions[0]));
+    let mut no_owner=functions[0].clone();no_owner.block.stmts.remove(0);assert!(!valid(&no_owner));
+    for tail in ["admit(tx, |_| operation(tx))","admit_with_runtime_hook(other, |_| operation(tx))"] {
+        let mut changed=functions[0].clone();*changed.block.stmts.last_mut().unwrap()=syn::Stmt::Expr(syn::parse_str(tail).unwrap(),None);assert!(!valid(&changed));
+    }
+    let mut clear=functions[0].clone();clear.block.stmts.insert(1,syn::parse_quote!(tx.progress_handler(0,None);));assert!(!valid(&clear));
+}
+
 // This oracle does not call execute, stage_reset or schema admission. Its only
 // state transition is the independently specified atomic commit of revocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -691,9 +746,11 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
         let mut calls = Calls(Vec::new());
         calls.visit_block(&functions[0].block);
         let ordered = [
-            "db . transaction_with_behavior (TransactionBehavior :: Immediate)",
+            "MemoryAdmission :: configure (db)",
+            "db . deserialize_read_exact (MAIN_DB , & image [..] , image . len () , false)",
+            "memory . begin ()",
             "current . application (& tx)",
-            "application :: reset_in (& tx , & selected , & ns , epoch)",
+            "application :: reset_in (& tx , & hook , & selected , & ns , epoch)",
             "tx . commit ()",
             "db . serialize (MAIN_DB)",
             "drop (loan)",
@@ -702,13 +759,10 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
         ];
         let mut previous = None;
         for expected in ordered {
-            let positions: Vec<_> = calls
-                .0
-                .iter()
-                .enumerate()
-                .filter(|(i, c)| c.as_str() == expected && previous.is_none_or(|last| last < *i))
-                .map(|(i, _)| i)
-                .collect();
+            let all: Vec<_> = calls.0.iter().enumerate().filter(|(_,c)|c.as_str()==expected).map(|(i,_)|i).collect();
+            let expected_count=if expected=="owner . local_sql ()" {2} else {1};
+            if all.len()!=expected_count {return false;}
+            let positions:Vec<_>=all.into_iter().filter(|i|previous.is_none_or(|last|last<*i)).collect();
             if positions.len() != 1 || previous.is_some_and(|last| last >= positions[0]) {
                 return false;
             }
@@ -730,12 +784,20 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
     assert!(valid(source));
     for (from, to) in [
         (
-            "application::reset_in(&tx, &selected, &ns, epoch)?",
+            "let memory = MemoryAdmission::configure(db)?;",
+            "let memory = MemoryAdmission::configure(foreign)?;",
+        ),
+        (
+            "let (tx, hook) = memory.begin()?;",
+            "let (tx, hook) = memory.begin()?; let repeated = memory.begin()?;",
+        ),
+        (
+            "application::reset_in(&tx, &hook, &selected, &ns, epoch)?",
             "restore::stage_reset(&tx, &ns, epoch)?",
         ),
         (
-            "application::reset_in(&tx, &selected, &ns, epoch)?",
-            "{ tx.commit()?; application::reset_in(&tx, &selected, &ns, epoch)? }",
+            "application::reset_in(&tx, &hook, &selected, &ns, epoch)?",
+            "{ tx.commit()?; application::reset_in(&tx, &hook, &selected, &ns, epoch)? }",
         ),
         (
             "let selected = current.application(&tx)?;",
@@ -750,7 +812,7 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
         ("drop(loan);", "drop(loan); let reset=reset?;"),
     ] {
         assert_eq!(source.matches(from).count(), 1);
-        assert!(!valid(&source.replacen(from, to, 1)), "{from}");
+        assert!(!valid(&source.replacen(from, to, 1)), "{from} -> {to}");
     }
 }
 #[test]
