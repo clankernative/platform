@@ -20,6 +20,7 @@ pub(super) type Summary = crate::oauth::restore::ApplicationResetSummary;
 
 pub(super) fn reset_in(
     tx: &Transaction<'_>,
+    hook: &MemoryHook<'_>,
     selected: &Selection<'_>,
     namespace: &Namespace,
     source_epoch: u64,
@@ -56,7 +57,7 @@ pub(super) fn reset_in(
     // this same outer transaction. Only prepare_image commits, serializes and
     // closes it; no applied-cut loan or raw connection can escape this call.
     crate::oauth::restore::reset_application_in(
-        tx,
+        (tx, hook),
         selected.fence,
         selected.authority_schema,
         selected.oauth_schema,

@@ -865,7 +865,7 @@ pub(crate) struct ApplicationResetSummary {
 /// One rollback-owning admission inside the caller's existing memory-only
 /// transaction. The applied-cut loan cannot escape this concrete continuation.
 pub(crate) fn reset_application_in(
-    tx: &Transaction<'_>,
+    (tx, hook): (&Transaction<'_>, &crate::security_epoch::MemoryHook<'_>),
     fence: &crate::security_epoch::restore_authority::PreparedRestoreFence,
     authority_schema: &crate::security_epoch::restore_authority::RestoreFenceSchema,
     oauth_schema: &Profile,
@@ -873,7 +873,7 @@ pub(crate) fn reset_application_in(
     namespace: &day2_capabilities::credentials::Namespace,
     source_epoch: u64,
 ) -> Result<ApplicationResetSummary> {
-    super::schema::admit_memory_transaction(tx, |tx| {
+    super::schema::admit_retained_memory_transaction(tx, hook, |tx| {
         let before = Snapshot::capture(tx, oauth_schema).context("restore_snapshot_admission")?;
         fence
             .apply_in(tx, authority_schema)

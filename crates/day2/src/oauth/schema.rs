@@ -156,13 +156,17 @@ pub(crate) fn admit<T>(
     )
 }
 
-/// One owned offline-memory transaction, entered before admission begins.
-/// Refuse an existing scope rather than replacing its hook or renewing its
-/// cumulative budget. This is not a Runtime/native callback owner factory.
-pub(crate) fn admit_memory_transaction<'database, T>(
+/// One actual retained offline-memory transaction. The opaque proof comes from
+/// the continuously held configured connection, not PRAGMA or caller flags.
+/// Refuse reuse, another connection or an existing admission scope. Nested
+/// validation charges the same permanent hook without replacing/clearing it or
+/// renewing its lifetime counter. This creates no native storage authority.
+pub(crate) fn admit_retained_memory_transaction<'database, T>(
     tx: &rusqlite::Transaction<'database>,
+    hook: &crate::security_epoch::MemoryHook<'_>,
     operation: impl FnOnce(&rusqlite::Transaction<'database>) -> Result<T>,
 ) -> Result<T> {
+    hook.enter(tx)?;
     ensure!(
         !tx.is_autocommit() && tx.path().is_none_or(str::is_empty),
         "restore_owned_memory_transaction_required"
@@ -175,7 +179,7 @@ pub(crate) fn admit_memory_transaction<'database, T>(
         tx.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
         "restore_memory_temp_required"
     );
-    admit(tx, |_| operation(tx))
+    admit_with_runtime_hook(tx, |_| operation(tx))
 }
 
 pub(crate) fn admit_with_runtime_hook<T>(
@@ -600,12 +604,16 @@ mod tests {
             db.pragma_update(None, "temp_store", "MEMORY")?;
             db.execute_batch("CREATE TABLE evidence(value INTEGER)")?;
         }
-        let tx = a.transaction()?;
-        let foreign = b.transaction()?;
-        admit_memory_transaction(&tx, |tx| {
+        {
+        let owner=crate::security_epoch::MemoryAdmission::configure_for_tests(&mut a)?;
+        let other=crate::security_epoch::MemoryAdmission::configure_for_tests(&mut b)?;
+        let (tx,hook)=owner.begin_for_tests()?;
+        let (foreign,foreign_hook)=other.begin_for_tests()?;
+        assert!(admit_retained_memory_transaction(&tx,&foreign_hook, |_| Ok(())).is_err());
+        admit_retained_memory_transaction(&tx,&hook, |tx| {
             require_admission(tx)?;
-            assert!(admit_memory_transaction(tx, |_| Ok(())).is_err());
-            assert!(admit_memory_transaction(&foreign, |_| Ok(())).is_err());
+            assert!(admit_retained_memory_transaction(tx,&hook, |_| Ok(())).is_err());
+            assert!(admit_retained_memory_transaction(&foreign,&hook, |_| Ok(())).is_err());
             require_admission(tx)?;
             assert!(require_admission(&foreign).is_err());
             tx.execute("INSERT INTO evidence VALUES(1)", [])?;
@@ -613,6 +621,9 @@ mod tests {
         })?;
         tx.commit()?;
         foreign.rollback()?;
+        assert!(owner.begin_for_tests().is_err());
+        assert!(other.begin_for_tests().is_err());
+        }
         assert_eq!(
             a.query_row("SELECT count(*) FROM evidence", [], |r| r.get::<_, i64>(0))?,
             1
@@ -631,28 +642,26 @@ mod tests {
         db.pragma_update(None, "foreign_keys", true)?;
         db.pragma_update(None, "temp_store", "MEMORY")?;
         db.execute_batch("CREATE TABLE evidence(value INTEGER)")?;
-        let tx = db.transaction()?;
+        {
+        let owner=crate::security_epoch::MemoryAdmission::configure_for_tests(&mut db)?;
+        let (tx,hook)=owner.begin_for_tests()?;
         assert!(
-            admit_memory_transaction(&tx, |tx| {
+            admit_retained_memory_transaction(&tx,&hook, |tx| {
                 tx.execute("INSERT INTO evidence VALUES(1)", [])?;
                 assert!(admission_step(usize::MAX));
-                assert!(admit_memory_transaction(tx, |_| Ok(())).is_err());
+                assert!(admit_retained_memory_transaction(tx,&hook, |_| Ok(())).is_err());
                 assert!(require_admission(tx).is_err());
                 Ok(())
             })
             .is_err()
         );
         tx.commit()?;
+        assert!(owner.begin_for_tests().is_err());
+        }
         assert_eq!(
             db.query_row("SELECT count(*) FROM evidence", [], |r| r.get::<_, i64>(0))?,
             0
         );
-        let tx = db.transaction()?;
-        admit_memory_transaction(&tx, |tx| {
-            require_admission(tx)?;
-            Ok(())
-        })?;
-        tx.rollback()?;
         Ok(())
     }
 
