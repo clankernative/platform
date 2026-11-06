@@ -2,7 +2,6 @@
 //! native factory, public command, adoption or publication path exists here.
 //! The future genuine owner must PRECEDE creation and keep this same State and
 //! actual creator FD through reset, SQL close, sync and final target admission.
-use crate::managed_credentials::store::restore::{self, ResetSummary};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{Digest, credentials::Namespace};
 use ring::digest::{Context as Hash, SHA256};
@@ -31,10 +30,11 @@ trait Checks: sealed::Sealed {
     fn current(&mut self) -> Result<()>;
     /// Local current checks only, with no provider/key IO inside SQL.
     fn local_sql(&mut self) -> Result<()>;
-    /// Concrete admitted app/profile validation, mandatory BEFORE creation.
-    /// A future NativeImpl must validate the actual artifact/bundle and refuse
-    /// OAuth/callback/provider/companion state; fixture admission is unqualified.
-    fn application(&mut self, source: &Transaction<'_>) -> Result<()>;
+    /// SQL validation against the already-held admitted app/profile, BEFORE
+    /// creation. A future NativeImpl must retain that actual artifact/bundle
+    /// and lend its same prepared fence/profile/cut without doing external IO.
+    /// Fixture admission is unqualified.
+    fn application(&mut self, source: &Transaction<'_>) -> Result<application::Selection<'_>>;
     fn refuse(&mut self);
 }
 
@@ -76,7 +76,7 @@ struct Projection {
     image: Digest,
     bytes: u64,
     target_incarnation: Digest,
-    reset: ResetSummary,
+    reset: application::Summary,
 }
 
 impl State {
@@ -323,7 +323,7 @@ fn require_single_image(source: &std::path::Path) -> Result<()> {
 
 /// Fixed fresh-memory DATA builder. It accepts no raw connection or callback;
 /// the entire function is reviewed/pinned for its sole serialize operation.
-fn prepare_image<A: Checks>(owner: &mut A, image: &mut Zeroizing<Vec<u8>>) -> Result<ResetSummary> {
+fn prepare_image<A: Checks>(owner: &mut A, image: &mut Zeroizing<Vec<u8>>) -> Result<application::Summary> {
     // This is always a fresh scratch connection. No filename, physical owner,
     // database_list result or caller-supplied Connection can construct it.
     boundary(owner, |s| {
@@ -337,7 +337,7 @@ fn prepare_image<A: Checks>(owner: &mut A, image: &mut Zeroizing<Vec<u8>>) -> Re
     let reset = {
         let current = &mut *loan.owner;
         let db = loan.db.as_mut().context("restore_sql_missing")?;
-        (|| -> Result<ResetSummary> {
+        (|| -> Result<application::Summary> {
             db.pragma_update(None, "temp_store", "MEMORY")?;
             crate::store::configure_connection(db)?;
             // Safe pinned API reads a complete in-memory slice, not a fallible FD
@@ -366,9 +366,10 @@ fn prepare_image<A: Checks>(owner: &mut A, image: &mut Zeroizing<Vec<u8>>) -> Re
                 let s = current.state();
                 (s.input.namespace.clone(), s.input.source_epoch)
             };
-            restore::inspect_source(&tx, &ns, epoch)?;
-            current.application(&tx)?;
-            let reset = restore::stage_reset(&tx, &ns, epoch)?;
+            let reset = {
+                let selected = current.application(&tx)?;
+                application::reset_in(&tx, &selected, &ns, epoch)?
+            };
             #[cfg(test)]
             tests::cut(tests::Point::BeforeCommit)?;
             current.local_sql()?;

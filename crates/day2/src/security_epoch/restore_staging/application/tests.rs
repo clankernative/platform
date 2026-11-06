@@ -8,8 +8,8 @@ use rusqlite::types::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-struct Fixture {
-    db: Connection,
+pub(in crate::security_epoch::restore_staging) struct Fixture {
+    pub(in crate::security_epoch::restore_staging) db: Connection,
     namespace: Namespace,
     previous: authority_state::ActiveAuthority,
     fence: restore_authority::PreparedRestoreFence,
@@ -21,7 +21,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Result<Self> {
+    pub(in crate::security_epoch::restore_staging) fn new() -> Result<Self> {
         let mut db = Connection::open_in_memory()?;
         db.pragma_update(None, "temp_store", "MEMORY")?;
         db.pragma_update(None, "journal_mode", "MEMORY")?;
@@ -179,7 +179,7 @@ impl Fixture {
         })
     }
 
-    fn selection(&self) -> Selection<'_> {
+    pub(in crate::security_epoch::restore_staging) fn selection(&self) -> Selection<'_> {
         Selection {
             namespace: &self.namespace,
             source_epoch: 1,
@@ -189,6 +189,35 @@ impl Fixture {
             cut: &self.cut,
         }
     }
+
+    pub(in crate::security_epoch::restore_staging) fn require_image(
+        &self,
+        db: &Connection,
+        reset: bool,
+    ) -> Result<()> {
+        assert_eq!(observation(db, &self.token)?, expected(reset));
+        for table in ["day2_credential_material", "day2_credential_receipts", "day2_app_outgoing"] {
+            assert!(rows(db, table)? == rows(&self.db, table)?, "restore_history_changed");
+        }
+        let before = ledger(&self.db)?;
+        let after = ledger(db)?;
+        assert_eq!(after.ledger_id, before.ledger_id);
+        assert_eq!(after.accounts, before.accounts);
+        assert_eq!(after.known_usage, before.known_usage);
+        assert_eq!(after.unknown_usage, before.unknown_usage);
+        assert_eq!(after.outstanding_attempts, before.outstanding_attempts);
+        Ok(())
+    }
+}
+
+// Test-only outer transaction for the standalone denial conformance histories.
+// Production staging always owns its own outer unit in prepare_image.
+fn reset(db: &Connection, selected: &Selection<'_>) -> Result<Summary> {
+    ensure!(db.is_autocommit(), "test_restore_transaction_already_open");
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let result = reset_in(&tx, selected, selected.namespace, selected.source_epoch)?;
+    tx.commit()?;
+    Ok(result)
 }
 
 fn rows(db: &Connection, table: &str) -> Result<Vec<Vec<Value>>> {
@@ -333,6 +362,23 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
                 before_budget.outstanding_attempts
             );
             assert!(authority_state::is_blocked(&db, "old-work")?);
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn reset_selection_cannot_substitute_the_staging_namespace_or_source_epoch() -> Result<()> {
+    effects::scope(simulation::World::new(98314), || {
+        for wrong_epoch in [false,true] {
+            let fixture=Fixture::new()?;
+            let before=snapshot(&fixture.db)?;
+            let mut namespace=fixture.namespace.clone();
+            if !wrong_epoch {namespace.binding_generation+=1;}
+            let tx=Transaction::new_unchecked(&fixture.db,TransactionBehavior::Immediate)?;
+            assert!(reset_in(&tx,&fixture.selection(),&namespace,if wrong_epoch {2} else {1}).is_err());
+            tx.commit()?;
+            assert!(before==snapshot(&fixture.db)?);
         }
         Ok(())
     })
