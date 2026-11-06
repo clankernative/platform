@@ -192,6 +192,7 @@ fn the_service_refuses_exports_to_a_remote_source() -> Result<()> {
         security_epochs: BTreeMap::new(),
         security_bootstraps: BTreeMap::new(),
         restore_passkeys: None,
+        restore_approval_signing: None,
     };
     let service = Service::open(
         ControlScope {

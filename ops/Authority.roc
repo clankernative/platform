@@ -3,6 +3,15 @@ import Capability
 # Local operator operations. The native host verifies expected revisions and
 # commits active policy and its receipt atomically. These are never app effects.
 Authority :: [].{
+	owners! : Str, Str, Str, Str, Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	owners! = |action, instance, app_name, operator, input_json, host!| {
+		Capability.call!(
+			"app-owners",
+			Json.to_str({ action, instance, app_name, operator, input_json }),
+			host!,
+		)
+	}
+
 	admin! : Str, Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	admin! = |instance, operator, host!| {
 		Capability.call!("resource-admin-serve", Json.to_str({ instance, operator }), host!)
