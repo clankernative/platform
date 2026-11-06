@@ -8858,10 +8858,13 @@ mod tests {
 
     #[test]
     fn sql_callback_controls_pin_complete_restore_image_builder() {
-        let syntax = syn::parse_file(include_str!(
-            "../../day2/src/security_epoch/restore_staging.rs"
-        ))
-        .unwrap();
+        let source = "crates/day2/src/security_epoch/restore_staging.rs";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Compare the actual current-root function, using the same bounded
+        // regular-source reader as inventory, not an undeclared cross-crate
+        // include or a second copied positive implementation.
+        let bytes = read_regular(&root.join(source), MAX_SOURCE_BYTES).unwrap();
+        let syntax = syn::parse_file(std::str::from_utf8(&bytes).unwrap()).unwrap();
         let functions: Vec<_> = syntax
             .items
             .into_iter()
@@ -8872,7 +8875,6 @@ mod tests {
             .collect();
         assert_eq!(functions.len(), 1);
         let function = &functions[0];
-        let source = "crates/day2/src/security_epoch/restore_staging.rs";
         let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
         assert!(sql_control_function_reviewed(source, &digest));
         let refused = |source, function: &syn::ItemFn| {
