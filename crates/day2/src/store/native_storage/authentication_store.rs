@@ -12,9 +12,11 @@ fn compare(
 ) -> Result<()> {
     let actual = opened_files::held(connection)?;
     files.require_opened(
-        (actual.main.device, actual.main.inode),
-        actual.journal.map(|file| (file.device, file.inode)),
-        actual.shm.map(|file| (file.device, file.inode)),
+        (actual.main.fd, actual.main.device, actual.main.inode),
+        actual
+            .journal
+            .map(|file| (file.fd, file.device, file.inode)),
+        actual.shm.map(|file| (file.fd, file.device, file.inode)),
         complete,
     )
 }

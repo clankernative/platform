@@ -21,7 +21,7 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
     pub(in crate::security_epoch) fn admit_authentication_store(
         mut self,
         expected: &ApprovalIntent,
-    ) -> Result<AuthenticationStoreAction<'metadata, 'storage, 'role>> {
+    ) -> Result<super::AuthenticationStoreAction<'metadata, 'storage, 'role>> {
         let requested = (|| {
             expected.validate()?;
             ensure!(

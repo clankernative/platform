@@ -28,7 +28,28 @@ pub(crate) struct AuthenticationStoreFiles {
     key: Digest,
     app_cohort: SqliteCohort,
     original: NativeAcquisition,
+    opened: Option<OpenedCohort>,
     finished: bool,
+}
+
+// VFS observation DATA only: no constructor can make a native file owner.
+#[derive(PartialEq, Eq)]
+struct OpenedCohort {
+    main: (i32, u64, u64),
+    wal: Option<(i32, u64, u64)>,
+    shm: Option<(i32, u64, u64)>,
+}
+
+impl OpenedCohort {
+    fn require_continuation(&self, current: &Self) -> Result<()> {
+        ensure!(
+            self.main == current.main
+                && self.wal.is_none_or(|held| Some(held) == current.wal)
+                && self.shm.is_none_or(|held| Some(held) == current.shm),
+            "restore_auth_opened_descriptor_changed"
+        );
+        Ok(())
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -90,7 +111,7 @@ fn pin(parent: &File, name: &str, directory: bool) -> Result<File> {
     } else {
         OFlags::empty()
     };
-    Ok(File::from(rustix::fs::openat2(
+    let file = File::from(rustix::fs::openat2(
         parent,
         name,
         OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW | kind,
@@ -99,7 +120,11 @@ fn pin(parent: &File, name: &str, directory: bool) -> Result<File> {
             | ResolveFlags::NO_SYMLINKS
             | ResolveFlags::NO_MAGICLINKS
             | ResolveFlags::NO_XDEV,
-    )?))
+    )?);
+    // O_PATH|NOFOLLOW may return a final symlink descriptor. Never let
+    // that kernel exception stand in for a regular/directory admission.
+    identity(&file, directory)?;
+    Ok(file)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -200,6 +225,7 @@ impl CurrentVolumePhase<'_, '_> {
                 key,
                 app_cohort: app_cohort.clone(),
                 original,
+                opened: None,
                 finished: false,
             };
             files.check()?;
@@ -312,12 +338,16 @@ impl AuthenticationStoreFiles {
 
     pub(crate) fn require_opened(
         &mut self,
-        main: (u64, u64),
-        wal: Option<(u64, u64)>,
-        shm: Option<(u64, u64)>,
+        main: (i32, u64, u64),
+        wal: Option<(i32, u64, u64)>,
+        shm: Option<(i32, u64, u64)>,
         complete: bool,
     ) -> Result<()> {
         self.check()?;
+        let current = OpenedCohort { main, wal, shm };
+        if let Some(previous) = &self.opened {
+            previous.require_continuation(&current)?;
+        }
         let actual = [
             &self.main,
             self.wal.as_ref().unwrap_or(&self.main),
@@ -327,7 +357,7 @@ impl AuthenticationStoreFiles {
             if let Some(observed) = observed {
                 let held = identity(actual[index], false)?;
                 ensure!(
-                    observed == (held.device, held.inode),
+                    observed.0 >= 0 && (observed.1, observed.2) == (held.device, held.inode),
                     "restore_auth_sqlite_opened_foreign_file"
                 );
             }
@@ -337,8 +367,14 @@ impl AuthenticationStoreFiles {
                 || (wal.is_some() && shm.is_some() && self.wal.is_some() && self.shm.is_some()),
             "restore_auth_complete_cohort_required"
         );
-        self.app_cohort.require_disjoint_members(main, wal, shm)?;
-        self.check()
+        self.app_cohort.require_disjoint_members(
+            (main.1, main.2),
+            wal.map(|f| (f.1, f.2)),
+            shm.map(|f| (f.1, f.2)),
+        )?;
+        self.check()?;
+        self.opened = Some(current);
+        Ok(())
     }
 
     pub(crate) fn finish_checked(mut self) -> Result<()> {
@@ -429,6 +465,61 @@ mod tests {
         identity(&held, false)?;
         std::fs::hard_link(&main, temporary.path().join("alias"))?;
         assert!(identity(&held, false).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    #[test]
+    fn opened_cohort_keeps_every_actual_descriptor_even_for_same_file_identity() -> Result<()> {
+        let actual = OpenedCohort {
+            main: (10, 9, 20),
+            wal: Some((11, 9, 21)),
+            shm: Some((12, 9, 22)),
+        };
+        actual.require_continuation(&actual)?;
+        for changed in [
+            OpenedCohort {
+                main: (13, 9, 20),
+                wal: actual.wal,
+                shm: actual.shm,
+            },
+            OpenedCohort {
+                main: actual.main,
+                wal: Some((13, 9, 21)),
+                shm: actual.shm,
+            },
+            OpenedCohort {
+                main: actual.main,
+                wal: actual.wal,
+                shm: Some((13, 9, 22)),
+            },
+            OpenedCohort {
+                main: actual.main,
+                wal: None,
+                shm: actual.shm,
+            },
+            OpenedCohort {
+                main: actual.main,
+                wal: actual.wal,
+                shm: None,
+            },
+            OpenedCohort {
+                main: (10, 19, 20),
+                wal: actual.wal,
+                shm: actual.shm,
+            },
+        ] {
+            assert!(actual.require_continuation(&changed).is_err());
+        }
+        let partial = OpenedCohort {
+            main: actual.main,
+            wal: None,
+            shm: None,
+        };
+        partial.require_continuation(&actual)?;
         Ok(())
     }
 }
