@@ -89,6 +89,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_webauthn.rs",
+      "scope": "const",
+      "fingerprint": "sha256:15f3db41d58dd1d787658aa82a7223f1d7a32a05dcf7cf268c422f7b5a7426b5",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
       "scope": "const",
       "fingerprint": "sha256:0c9b68ebb6eafc44c1610d2fd60011968daa08d673c327b4a3c4d759c530f28e",
@@ -5203,6 +5209,18 @@
           "signature": "pub (in crate :: security_epoch) fn signing_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut crate :: security_epoch :: AuthenticationStoreFiles ,) , id : & Digest , unit : SigningUnit < '_ >) -> Result < () >"
         },
         {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "fn completion_snapshot (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , counter : u32) -> Result < (i64 , Digest) >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn complete_durable (self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , id : & Digest , at : i64 , assertion : & Assertion) -> Result < Option < ExecutionCompletion > >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn issue_durable (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , window : (i64 , i64)) -> Result < Digest >"
+        },
+        {
           "owner": "RegistryCeremony",
           "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
@@ -5250,6 +5268,10 @@
         },
         {
           "owner": null,
+          "signature": "pub (super) fn verified_snapshot (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , completed_counter : u32) -> Result < (i64 , Digest) >"
+        },
+        {
+          "owner": null,
           "signature": "pub (super) fn verify (key : & TrustedKey < '_ > , challenge : & Challenge , expected_request : & Digest , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
         },
         {
@@ -5279,6 +5301,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
             "module": "controller"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller/execution.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+            "module": "execution"
           }
         },
         {
@@ -5327,6 +5356,18 @@
           "signature": "pub (in crate :: security_epoch) fn signing_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut crate :: security_epoch :: AuthenticationStoreFiles ,) , id : & Digest , unit : SigningUnit < '_ >) -> Result < () >"
         },
         {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "fn completion_snapshot (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , counter : u32) -> Result < (i64 , Digest) >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn complete_durable (self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , id : & Digest , at : i64 , assertion : & Assertion) -> Result < Option < ExecutionCompletion > >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn issue_durable (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , window : (i64 , i64)) -> Result < Digest >"
+        },
+        {
           "owner": "RegistryCeremony",
           "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
         },
@@ -5355,6 +5396,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller/execution.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+            "module": "execution"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
@@ -5380,6 +5428,10 @@
         "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < Option < AssertionFacts > >"
       ],
       "factories": [
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , signed : & SignedApprovalRecord , operation : & Digest) -> Result < Self >"
+        },
         {
           "owner": "RegistryCeremony",
           "signature": "fn capture_controller (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , request : Digest , executor : & str) -> Result < Self >"
@@ -5429,6 +5481,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller/execution.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+            "module": "execution"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
@@ -5440,7 +5499,15 @@
     {
       "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
       "type_name": "ControllerCeremony",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller/execution.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+            "module": "execution"
+          }
+        }
+      ],
       "methods": [
         "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , intent : ApprovalIntent) -> Result < Self >",
         "pub (in crate :: security_epoch) fn complete_durable (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut crate :: security_epoch :: AuthenticationStoreFiles ,) , id : & Digest , completion : (& ApprovalIntent , i64 , & Assertion)) -> Result < Option < AssertionFacts > >",
@@ -5490,6 +5557,74 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller/execution.rs",
+      "type_name": "ControllerExecutionCeremony",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , signed : & SignedApprovalRecord , operation : & Digest) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn check_approval_record (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , signed : & SignedApprovalRecord) -> Result < () >",
+        "pub (in crate :: security_epoch) fn complete_durable (self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , id : & Digest , at : i64 , assertion : & Assertion) -> Result < Option < ExecutionCompletion > >",
+        "fn completion_snapshot (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , counter : u32) -> Result < (i64 , Digest) >",
+        "pub (in crate :: security_epoch) fn encoded_challenge (& self) -> Result < String >",
+        "pub (in crate :: security_epoch) fn issue_durable (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , window : (i64 , i64)) -> Result < Digest >",
+        "fn observe (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ >) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , signed : & SignedApprovalRecord , operation : & Digest) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "fn completion_snapshot (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , counter : u32) -> Result < (i64 , Digest) >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "fn observe (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn complete_durable (self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , id : & Digest , at : i64 , assertion : & Assertion) -> Result < Option < ExecutionCompletion > >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn encoded_challenge (& self) -> Result < String >"
+        },
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn issue_durable (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , window : (i64 , i64)) -> Result < Digest >"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller/execution.rs",
+      "type_name": "ExecutionCompletion",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerExecutionCeremony",
+          "signature": "pub (in crate :: security_epoch) fn complete_durable (self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , id : & Digest , at : i64 , assertion : & Assertion) -> Result < Option < ExecutionCompletion > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/serving.rs",
