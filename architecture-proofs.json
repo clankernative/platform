@@ -19,6 +19,12 @@
       "fingerprint": "sha256:f25d8487eaa3149173adb4ed2d4698ef6435823224dd3985bf430ba3bbbf97cd"
     },
     {
+      "source": "crates/day2/src/oauth/restore.rs",
+      "scope": "const",
+      "fingerprint": "sha256:efeeb2c128eec3a704c43029e4a6f5661ff3b521239b897e16d11fc4cb656c9f",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/authenticated_reads/connection.rs",
       "scope": "const",
       "fingerprint": "sha256:d720145b2ad5b62d1f97db043deb84a47ede7efdf0984b906ac6f498ffe44df7",
@@ -83,9 +89,33 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "scope": "const",
+      "fingerprint": "sha256:66c3c27701e9557d5a6b623d5cac42849f4d8418eadff9d28a298f1faaf8324a",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_authority.rs",
+      "scope": "const",
+      "fingerprint": "sha256:c96a85d06d7a68e858d065bd5bf17b2fd3e75307b22c178ca24e6c4dec23d2d2",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
       "scope": "const",
       "fingerprint": "sha256:f4d51c1c125dcf357b0e49ffe996d4cf4b8d1bd83534b00076e8bc76be2cc3d7",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_original.rs",
+      "scope": "const",
+      "fingerprint": "sha256:2a7374146dbf1f28483a721fbf47c49c28e13fcd2e6d9372d2741ee323c5a818",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f2499f9eb70a64af334461b4f9646c6eca2f78fbf54dd2c6370f27e78d04dc8f",
       "registration": null
     },
     {
@@ -137,36 +167,6 @@
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
       }
-    },
-    {
-      "source": "crates/day2/src/oauth/restore.rs",
-      "scope": "const",
-      "fingerprint": "sha256:efeeb2c128eec3a704c43029e4a6f5661ff3b521239b897e16d11fc4cb656c9f",
-      "registration": null
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
-      "scope": "const",
-      "fingerprint": "sha256:66c3c27701e9557d5a6b623d5cac42849f4d8418eadff9d28a298f1faaf8324a",
-      "registration": null
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_authority.rs",
-      "scope": "const",
-      "fingerprint": "sha256:c96a85d06d7a68e858d065bd5bf17b2fd3e75307b22c178ca24e6c4dec23d2d2",
-      "registration": null
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_original.rs",
-      "scope": "const",
-      "fingerprint": "sha256:2a7374146dbf1f28483a721fbf47c49c28e13fcd2e6d9372d2741ee323c5a818",
-      "registration": null
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
-      "scope": "const",
-      "fingerprint": "sha256:f2499f9eb70a64af334461b4f9646c6eca2f78fbf54dd2c6370f27e78d04dc8f",
-      "registration": null
     }
   ],
   "proofs": [
@@ -1353,6 +1353,44 @@
         }
       ],
       "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/oauth/restore.rs",
+      "type_name": "AppliedCut",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn closed_count (& self) -> usize",
+        "pub (crate) fn cut (& self) -> & Cut",
+        "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >",
+        "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn apply_in < 'scope , 'database , 'cut > (tx : & 'scope Transaction < 'database > , before : Snapshot , cut : & 'cut Cut , profile : & Profile) -> Result < AppliedCut < 'scope , 'database , 'cut > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn closed_count (& self) -> usize"
+        },
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn cut (& self) -> & Cut"
+        },
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >"
+        },
+        {
+          "owner": "AppliedCut < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     },
     {
       "source": "crates/day2/src/oauth/store.rs",
@@ -5123,6 +5161,99 @@
       ]
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "ConsumedRestoreApproval",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ConsumedRestoreApproval < '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >"
+        },
+        {
+          "owner": "ConsumedRestoreApproval < '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "NativeRestoreApproval",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
+        },
+        {
+          "owner": "NativeRestoreApproval < 'source >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
+      "type_name": "NativeSource",
+      "owning_children": [],
+      "methods": [
+        "fn refuse (& mut self)"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "NativeSource",
+          "signature": "fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:9e709bf1f2908884cd621e09f31eb12b03f20cca0bbc54d52e5888f37002147b"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_authority.rs",
+      "type_name": "ClosedCredentialPeers",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedRestoreFence",
+          "signature": "pub (crate) fn closed_credential_peers < 'db > (& 'db self , connection : & 'db rusqlite :: Transaction < '_ > , applied : & 'db crate :: oauth :: restore :: AppliedCut < '_ , '_ , '_ > , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < ClosedCredentialPeers < 'db > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ClosedCredentialPeers < '_ >",
+          "signature": "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
       "type_name": "UnfencedControllerClock",
       "owning_children": [],
@@ -5183,6 +5314,97 @@
         }
       ],
       "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_original.rs",
+      "type_name": "RestoreOriginalGuard",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn capture (stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : ApprovalRequest , operation : Digest) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn check_join (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & ApprovalRequest , operation : & Digest) -> Result < RestoreObservation >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "RestoreOriginalGuard",
+          "signature": "pub (in crate :: security_epoch) fn capture (stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : ApprovalRequest , operation : Digest) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoreOriginalGuard",
+          "signature": "pub (in crate :: security_epoch) fn check_join (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & ApprovalRequest , operation : & Digest) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "RestoreOriginalGuard",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:d334117fb813e2e0a6ba440e32f0edaf7c68be77720068ff9ec85507ec536c37",
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+      "type_name": "Disposition",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >",
+        "pub (in crate :: security_epoch) fn fresh () -> Self",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn require_known (& mut self , target : & Digest) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn fresh () -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >"
+        },
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn require_known (& mut self , target : & Digest) -> Result < () >"
+        }
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+      "type_name": "Flight",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& self , expected : & Digest) -> Result < () >",
+        "pub (in crate :: security_epoch) fn known (mut self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Disposition",
+          "signature": "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Flight",
+          "signature": "pub (in crate :: security_epoch) fn check (& self , expected : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "Flight",
+          "signature": "pub (in crate :: security_epoch) fn known (mut self) -> Result < () >"
+        }
+      ],
+      "destructor": "sha256:3a22a9882408f59413f93dcb5f7d735527c21cc560a12bc344a815e59208609d",
       "owning_children": []
     },
     {
@@ -7415,228 +7637,6 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/oauth/restore.rs",
-      "type_name": "AppliedCut",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn closed_count (& self) -> usize",
-        "pub (crate) fn cut (& self) -> & Cut",
-        "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >",
-        "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
-      ],
-      "factories": [
-        {
-          "owner": null,
-          "signature": "fn apply_in < 'scope , 'database , 'cut > (tx : & 'scope Transaction < 'database > , before : Snapshot , cut : & 'cut Cut , profile : & Profile) -> Result < AppliedCut < 'scope , 'database , 'cut > >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn closed_count (& self) -> usize"
-        },
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn cut (& self) -> & Cut"
-        },
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn require_connection (& self , connection : & Connection) -> Result < () >"
-        },
-        {
-          "owner": "AppliedCut < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn stage_closed_credentials (& self , fence : & crate :: security_epoch :: restore_authority :: PreparedRestoreFence , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < crate :: managed_credentials :: store :: restore :: ResetSummary >"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
-      "type_name": "ConsumedRestoreApproval",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >",
-        "pub (crate) fn refuse (& mut self)"
-      ],
-      "factories": [
-        {
-          "owner": "NativeRestoreApproval < 'source >",
-          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "ConsumedRestoreApproval < '_ >",
-          "signature": "pub (crate) fn check (& mut self) -> Result < ApprovalObservation >"
-        },
-        {
-          "owner": "ConsumedRestoreApproval < '_ >",
-          "signature": "pub (crate) fn refuse (& mut self)"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
-      "type_name": "NativeRestoreApproval",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >",
-        "pub (crate) fn refuse (& mut self)"
-      ],
-      "factories": [],
-      "material_uses": [
-        {
-          "owner": "NativeRestoreApproval < 'source >",
-          "signature": "pub (crate) fn consume (self , _expected : & ApprovalRequest , _operation : & Digest) -> Result < ConsumedRestoreApproval < 'source > >"
-        },
-        {
-          "owner": "NativeRestoreApproval < 'source >",
-          "signature": "pub (crate) fn refuse (& mut self)"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_approval/native.rs",
-      "type_name": "NativeSource",
-      "owning_children": [],
-      "methods": [
-        "fn refuse (& mut self)"
-      ],
-      "factories": [],
-      "material_uses": [
-        {
-          "owner": "NativeSource",
-          "signature": "fn refuse (& mut self)"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": [],
-      "destructor": "sha256:9e709bf1f2908884cd621e09f31eb12b03f20cca0bbc54d52e5888f37002147b"
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_authority.rs",
-      "type_name": "ClosedCredentialPeers",
-      "owning_children": [],
-      "methods": [
-        "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "PreparedRestoreFence",
-          "signature": "pub (crate) fn closed_credential_peers < 'db > (& 'db self , connection : & 'db rusqlite :: Transaction < '_ > , applied : & 'db crate :: oauth :: restore :: AppliedCut < '_ , '_ , '_ > , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < ClosedCredentialPeers < 'db > >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "ClosedCredentialPeers < '_ >",
-          "signature": "pub (crate) fn require (& self , connection : & Connection , namespace : & day2_capabilities :: credentials :: Namespace , source_epoch : u64) -> Result < () >"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_original.rs",
-      "type_name": "RestoreOriginalGuard",
-      "kind": "private_material",
-      "consuming_methods": [],
-      "methods": [
-        "pub (in crate :: security_epoch) fn capture (stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : ApprovalRequest , operation : Digest) -> Result < Self >",
-        "pub (in crate :: security_epoch) fn check_join (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & ApprovalRequest , operation : & Digest) -> Result < RestoreObservation >",
-        "pub (in crate :: security_epoch) fn refuse (& mut self)"
-      ],
-      "factories": [
-        {
-          "owner": "RestoreOriginalGuard",
-          "signature": "pub (in crate :: security_epoch) fn capture (stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : ApprovalRequest , operation : Digest) -> Result < Self >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "RestoreOriginalGuard",
-          "signature": "pub (in crate :: security_epoch) fn check_join (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & ApprovalRequest , operation : & Digest) -> Result < RestoreObservation >"
-        },
-        {
-          "owner": "RestoreOriginalGuard",
-          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
-        }
-      ],
-      "proof_uses": [],
-      "destructor": "sha256:d334117fb813e2e0a6ba440e32f0edaf7c68be77720068ff9ec85507ec536c37",
-      "owning_children": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
-      "type_name": "Disposition",
-      "kind": "private_material",
-      "consuming_methods": [],
-      "methods": [
-        "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >",
-        "pub (in crate :: security_epoch) fn fresh () -> Self",
-        "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn require_known (& mut self , target : & Digest) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "Disposition",
-          "signature": "pub (in crate :: security_epoch) fn fresh () -> Self"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "Disposition",
-          "signature": "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >"
-        },
-        {
-          "owner": "Disposition",
-          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
-        },
-        {
-          "owner": "Disposition",
-          "signature": "pub (in crate :: security_epoch) fn require_known (& mut self , target : & Digest) -> Result < () >"
-        }
-      ],
-      "owning_children": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
-      "type_name": "Flight",
-      "kind": "private_material",
-      "consuming_methods": [],
-      "methods": [
-        "pub (in crate :: security_epoch) fn check (& self , expected : & Digest) -> Result < () >",
-        "pub (in crate :: security_epoch) fn known (mut self) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "Disposition",
-          "signature": "pub (in crate :: security_epoch) fn arm (& mut self , target : & Digest) -> Result < Flight >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "Flight",
-          "signature": "pub (in crate :: security_epoch) fn check (& self , expected : & Digest) -> Result < () >"
-        },
-        {
-          "owner": "Flight",
-          "signature": "pub (in crate :: security_epoch) fn known (mut self) -> Result < () >"
-        }
-      ],
-      "destructor": "sha256:3a22a9882408f59413f93dcb5f7d735527c21cc560a12bc344a815e59208609d",
-      "owning_children": []
     }
   ],
   "buffer_destructors": [
