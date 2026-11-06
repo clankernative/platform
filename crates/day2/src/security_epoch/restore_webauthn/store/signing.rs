@@ -1,6 +1,6 @@
 //! Fixed one-attempt signing journal under the actual authentication SQL unit.
 //! Rows are DATA, never a recovered UV continuation or signing/native owner.
-use super::{TrustedKey, current};
+use super::TrustedKey;
 use crate::security_epoch::restore_approval::signed::{ApprovalStatement, SignedApprovalRecord};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
@@ -26,7 +26,7 @@ pub(in crate::security_epoch::restore_webauthn) fn prepare_signing(
     statement: &ApprovalStatement,
     verified_counter: u32,
 ) -> Result<()> {
-    let (version, counter) = current(tx, key)?;
+    let (version, counter) = crate::security_epoch::restore_webauthn::store::current(tx, key)?;
     ensure!(
         counter == verified_counter,
         "restore_issuance_counter_changed"
@@ -114,7 +114,7 @@ fn check_journal(
     statement: &ApprovalStatement,
     state: &str,
 ) -> Result<()> {
-    let (version, counter) = current(tx, key)?;
+    let (version, counter) = crate::security_epoch::restore_webauthn::store::current(tx, key)?;
     let (body, digest) = statement_data(statement)?;
     ensure!(
         tx.query_row(

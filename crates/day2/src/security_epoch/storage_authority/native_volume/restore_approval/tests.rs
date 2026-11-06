@@ -543,7 +543,7 @@ fn is_closed(source: &str) -> Result<bool> {
 
 #[test]
 fn production_data_transport_has_no_reachable_signer_factory_or_general_frame_api() -> Result<()> {
-    let source = include_str!("../kms.rs");
+    let source = include_str!("../restore_approval.rs");
     assert!(is_closed(source)?);
     for (from, to) in [
         ("struct Kms {", "pub(super) struct Kms {"),
