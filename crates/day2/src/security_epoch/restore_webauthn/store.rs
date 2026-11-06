@@ -8,8 +8,10 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 const MAX_CEREMONY_SECONDS: i64 = 300;
 
-/// Schema for the independently owned instance authentication store. Only the
-/// fixture installs it today. It is never installed in a restored app database.
+/// The one schema for the independently owned instance authentication store.
+/// Only the fixture installs it today. Existing-store admission derives its
+/// complete expected catalog from these same declarations, without installing
+/// or repairing anything. It is never installed in a restored app database.
 const DDL: &str = "
     CREATE TABLE main.restore_passkey_keys (
         credential BLOB PRIMARY KEY,
@@ -29,6 +31,73 @@ const DDL: &str = "
         expires_at INTEGER NOT NULL CHECK(expires_at>created_at AND expires_at-created_at<=300),
         state TEXT NOT NULL CHECK(state IN ('pending','claimed','verified'))
     ) STRICT;";
+
+/// SQL shape admission only. The caller must retain its actual native file
+/// owner and bracket this complete read unit with the same original's checks.
+/// Success supplies no placement, durability, key trust or approval authority.
+pub(in crate::security_epoch) fn require_existing_schema(db: &Connection) -> Result<()> {
+    ensure!(
+        db.is_autocommit(),
+        "restore_passkey_schema_transaction_open"
+    );
+    let mut expected = Vec::new();
+    for statement in DDL.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let declaration = statement
+            .strip_prefix("CREATE TABLE main.")
+            .context("restore_passkey_schema_declaration")?;
+        let (name, _) = declaration
+            .split_once('(')
+            .context("restore_passkey_schema_declaration")?;
+        let name = name.trim();
+        expected.push((
+            "table".to_owned(),
+            name.to_owned(),
+            name.to_owned(),
+            Some(format!("CREATE TABLE {declaration}")),
+        ));
+        // Both canonical tables have one non-integer PRIMARY KEY. SQLite
+        // creates exactly this internal index; no other index is admitted.
+        expected.push((
+            "index".to_owned(),
+            format!("sqlite_autoindex_{name}_1"),
+            name.to_owned(),
+            None,
+        ));
+    }
+    expected.sort();
+
+    let tx = db.unchecked_transaction()?;
+    let actual = {
+        // One row beyond the complete expected catalog makes extra objects
+        // refuse. Bounded projections cannot turn a longer name/SQL into an
+        // accepted canonical value: every expected value is shorter than its
+        // projection bound and equality is complete.
+        let mut query = tx.prepare(
+            "SELECT substr(type,1,16),substr(name,1,129),substr(tbl_name,1,129),
+                    rootpage,substr(sql,1,4097)
+             FROM main.sqlite_schema ORDER BY type,name LIMIT ?1",
+        )?;
+        let rows = query.query_map([i64::try_from(expected.len() + 1)?], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let mut actual = Vec::new();
+        for row in rows {
+            let (kind, name, table, page, sql) = row?;
+            ensure!(page > 0, "restore_passkey_schema_root_missing");
+            actual.push((kind, name, table, sql));
+        }
+        actual
+    };
+    ensure!(actual == expected, "restore_passkey_schema_changed");
+    tx.commit()?;
+    Ok(())
+}
 
 fn challenge_id(challenge: &Challenge) -> Result<Digest> {
     Digest::of(&("day2-restore-passkey-challenge-id-v1", challenge.encoded()?))

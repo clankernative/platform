@@ -60,6 +60,118 @@ fn observed(db: &Connection) -> (String, i64, u32) {
     db.query_row("SELECT c.state,k.version,k.counter FROM main.restore_passkey_challenges c CROSS JOIN main.restore_passkey_keys k",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
 }
 
+fn schema_snapshot(db: &Connection) -> Result<Vec<(String, String, String, Option<String>)>> {
+    let mut query =
+        db.prepare("SELECT type,name,tbl_name,sql FROM main.sqlite_schema ORDER BY type,name")?;
+    let rows = query.query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+#[test]
+fn existing_schema_admission_survives_real_reopen_without_changing_rows() -> Result<()> {
+    let f = fixture();
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("authentication.sqlite");
+    let mut db = Connection::open(&path)?;
+    prepare(&mut db, &f);
+    db.pragma_update(None, "journal_mode", "WAL")?;
+    let before = observed(&db);
+    let schema = schema_snapshot(&db)?;
+    require_existing_schema(&db)?;
+    assert!(db.is_autocommit());
+    assert_eq!(observed(&db), before);
+    assert_eq!(schema_snapshot(&db)?, schema);
+    drop(db);
+    let reopened = Connection::open(&path)?;
+    require_existing_schema(&reopened)?;
+    assert!(reopened.is_autocommit());
+    assert_eq!(observed(&reopened), before);
+    assert_eq!(schema_snapshot(&reopened)?, schema);
+    Ok(())
+}
+
+#[test]
+fn existing_schema_admission_never_initializes_missing_or_partial_schema() -> Result<()> {
+    for ddl in ["", DDL.split_once(';').unwrap().0] {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(ddl)?;
+        let before = schema_snapshot(&db)?;
+        assert!(require_existing_schema(&db).is_err());
+        assert!(db.is_autocommit());
+        assert_eq!(schema_snapshot(&db)?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn existing_schema_admission_refuses_extra_objects_without_repair() -> Result<()> {
+    for extra in [
+        "CREATE TABLE unexpected(value INTEGER)",
+        "CREATE VIEW unexpected AS SELECT * FROM restore_passkey_keys",
+        "CREATE INDEX unexpected ON restore_passkey_keys(counter)",
+        "CREATE TRIGGER unexpected AFTER INSERT ON restore_passkey_keys BEGIN
+             UPDATE restore_passkey_keys SET enabled=0; END",
+    ] {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(DDL)?;
+        require_existing_schema(&db)?;
+        db.execute_batch(extra)?;
+        let before = schema_snapshot(&db)?;
+        assert!(require_existing_schema(&db).is_err(), "{extra}");
+        assert!(db.is_autocommit());
+        assert_eq!(schema_snapshot(&db)?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn existing_schema_admission_refuses_changed_constraints_and_table_shapes() -> Result<()> {
+    for changed in [
+        DDL.replace("counter BETWEEN 0 AND 4294967295", "counter>=0"),
+        DDL.replace("version>0", "version>=0"),
+        DDL.replace(") STRICT", ")"),
+        DDL.replace("nonce BLOB NOT NULL", "nonce TEXT NOT NULL"),
+        DDL.replace("PRIMARY KEY", "UNIQUE"),
+    ] {
+        assert_ne!(changed, DDL);
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(&changed)?;
+        let before = schema_snapshot(&db)?;
+        assert!(require_existing_schema(&db).is_err());
+        assert!(db.is_autocommit());
+        assert_eq!(schema_snapshot(&db)?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn existing_schema_admission_cannot_use_a_temp_shadow_for_a_missing_main_table() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    db.execute_batch(&DDL.replace("main.", "temp."))?;
+    assert!(require_existing_schema(&db).is_err());
+    assert!(schema_snapshot(&db)?.is_empty());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM temp.sqlite_schema", [], |r| r
+            .get::<_, i64>(0))?,
+        4
+    );
+    Ok(())
+}
+
+#[test]
+fn existing_schema_admission_refuses_a_callers_active_transaction_without_closing_it() -> Result<()>
+{
+    let db = Connection::open_in_memory()?;
+    db.execute_batch(DDL)?;
+    db.execute_batch("BEGIN")?;
+    assert!(require_existing_schema(&db).is_err());
+    assert!(!db.is_autocommit());
+    db.execute_batch("ROLLBACK")?;
+    require_existing_schema(&db)
+}
+
 #[test]
 fn counterless_completion_is_durable_and_cannot_replay_after_reopen() {
     let f = fixture();
@@ -292,16 +404,19 @@ fn two_valid_counterless_assertions_racing_one_challenge_have_one_winner() {
     let start = std::sync::Arc::new(std::sync::Barrier::new(2));
     let mut workers = Vec::new();
     for _ in 0..2 {
-        let key = TrustedKey {
-            record: f.key.record.clone(),
-            source: super::super::KeySource::Fixture,
-        };
+        let record = f.key.record.clone();
         let request = f.challenge.request.clone();
         let assertion = f.assertion(0, 0x0d);
         let id = id.clone();
         let path = path.clone();
         let start = start.clone();
         workers.push(std::thread::spawn(move || {
+            // Only authenticator INPUT crosses threads. Construct the test-only
+            // key inside its thread; genuine native key owners stay !Send.
+            let key = TrustedKey {
+                record,
+                source: super::super::KeySource::Fixture,
+            };
             let mut db = Connection::open(path).unwrap();
             db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
             start.wait();

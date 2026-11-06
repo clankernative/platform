@@ -94,3 +94,20 @@ used by the store, not a fresh post-commit qualified-clock proof. Actual current
 admin policy, the exact SQL/FD/storage selection and fresh original-clock checks
 must fence both commits and final signing in the future producer. Neither a raw
 connection nor returned assertion facts can supply that producer's authority.
+
+## Existing authentication-store schema
+
+The closed `restore_webauthn::store::require_existing_schema` check admits only
+the complete main-database catalog derived from the store's existing canonical
+table declarations, including their implicit primary-key indexes. Missing or
+changed tables, constraints, indexes, views and triggers refuse. The check reads
+one transaction snapshot, requires no caller transaction to be open, and never
+creates, migrates or repairs the store. Temporary tables cannot replace a missing
+main table. Successful reads leave challenge/key rows unchanged.
+
+This is SQL shape admission only. Its native caller must retain the actual
+authentication-file lease, check the same original before and after the complete
+SQL unit, and withhold results on any failure. It proves neither outside-archive
+placement nor durable storage, current key trust, qualified time, single-use
+approval publication or restore authority. Native store admission and explicit
+store birth remain separate work.
