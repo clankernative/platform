@@ -20,7 +20,7 @@ macro_rules! providers {
         $provider:ident {
             kind: $kind:ident,
             $(world: $world:literal,)?
-            actions: { $($action:ident => $capability:literal ($mode:ident)),* $(,)? } $(,)?
+            actions: { $($action:ident => $capability:literal ($mode:ident, $result:ident)),* $(,)? } $(,)?
         }
     ),* $(,)?) => {
         #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,6 +66,14 @@ macro_rules! providers {
                 match self { $($(Self::$action => providers!(@destroys $mode),)*)* }
             }
 
+            /// Classification DATA only: the provider returns a bearer the
+            /// platform cannot fence after delivery. False is not stop proof
+            /// and says nothing about pending effects or other escaped rights.
+            /// Every action declares this explicitly in the one provider table.
+            pub fn returns_external_bearer(self) -> bool {
+                match self { $($(Self::$action => providers!(@bearer $result),)*)* }
+            }
+
             /// Every declared action. Coverage gates enumerate this rather than a
             /// hand-kept list that can fall behind the enum.
             pub const ALL: &'static [Action] = &[$($(Self::$action,)*)*];
@@ -101,6 +109,8 @@ macro_rules! providers {
         pub const LOCAL_PROVIDER_DATABASES: &[&str] = &[$($($world,)?)*];
     };
 
+    (@bearer data) => { false };
+    (@bearer bearer) => { true };
     (@write read) => { false };
     (@write write) => { true };
     (@write destroys) => { true };
@@ -116,9 +126,9 @@ providers! {
         kind: NotificationMailbox,
         world: "notifications.sqlite",
         actions: {
-            NotificationsResolve => "notifications.recipient.v1" (read),
-            NotificationsLatest => "notifications.latest.v1" (read),
-            NotificationsSend => "notifications.send.v1" (write),
+            NotificationsResolve => "notifications.recipient.v1" (read, data),
+            NotificationsLatest => "notifications.latest.v1" (read, data),
+            NotificationsSend => "notifications.send.v1" (write, data),
         },
     },
     // One provider for both sources. A connection without `live` reads the
@@ -128,29 +138,29 @@ providers! {
         kind: CartaIssuer,
         world: "carta.synthetic.sqlite",
         actions: {
-            CartaSnapshot => "carta.snapshot.v1" (read),
-            CartaRecord => "carta.record.v1" (read),
+            CartaSnapshot => "carta.snapshot.v1" (read, data),
+            CartaRecord => "carta.record.v1" (read, data),
         },
     },
     SyntheticGoogleDirectory {
         kind: GoogleDirectory,
         world: "google_directory.synthetic.sqlite",
         actions: {
-            GoogleDirectorySnapshot => "google_directory.snapshot.v1" (read),
-            GoogleDirectoryRecord => "google_directory.record.v1" (read),
-            GoogleDirectoryCreateUser => "google_directory.create_user.v1" (write),
-            GoogleDirectoryPatchAttributes => "google_directory.patch_attributes.v1" (write),
-            GoogleDirectoryEnsureGroupMember => "google_directory.ensure_group_member.v1" (write),
+            GoogleDirectorySnapshot => "google_directory.snapshot.v1" (read, data),
+            GoogleDirectoryRecord => "google_directory.record.v1" (read, data),
+            GoogleDirectoryCreateUser => "google_directory.create_user.v1" (write, data),
+            GoogleDirectoryPatchAttributes => "google_directory.patch_attributes.v1" (write, data),
+            GoogleDirectoryEnsureGroupMember => "google_directory.ensure_group_member.v1" (write, data),
         },
     },
     WorkspaceDirectory {
         kind: WorkspaceDirectory,
         world: "workspace_directory.simulated.sqlite",
         actions: {
-            WorkspaceDirectoryCapture => "workspace_directory.capture.v1" (read),
-            WorkspaceDirectoryUserPath => "workspace_directory.user_path.v1" (read),
-            WorkspaceDirectoryHierarchy => "workspace_directory.hierarchy.v1" (read),
-            WorkspaceDirectoryPage => "workspace_directory.page.v1" (read),
+            WorkspaceDirectoryCapture => "workspace_directory.capture.v1" (read, data),
+            WorkspaceDirectoryUserPath => "workspace_directory.user_path.v1" (read, data),
+            WorkspaceDirectoryHierarchy => "workspace_directory.hierarchy.v1" (read, data),
+            WorkspaceDirectoryPage => "workspace_directory.page.v1" (read, data),
         },
     },
     // App-to-app delegation. The "provider" is another application in this same
@@ -164,17 +174,17 @@ providers! {
         kind: AppOperation,
         world: "delegation.simulated.sqlite",
         actions: {
-            DelegateQuery => "app.query.v1" (read),
-            DelegateSend => "app.send.v1" (write),
-            DelegateStatus => "app.status.v1" (read),
+            DelegateQuery => "app.query.v1" (read, data),
+            DelegateSend => "app.send.v1" (write, data),
+            DelegateStatus => "app.status.v1" (read, data),
         },
     },
     SyntheticLinear {
         kind: LinearOrganization,
         world: "linear.synthetic.sqlite",
         actions: {
-            LinearEnsureAccess => "linear.ensure_access.v1" (write),
-            LinearSuspend => "linear.suspend.v1" (write),
+            LinearEnsureAccess => "linear.ensure_access.v1" (write, data),
+            LinearSuspend => "linear.suspend.v1" (write, data),
         },
     },
     // Work tracking, kept apart from SyntheticLinear on purpose: that provider
@@ -184,12 +194,12 @@ providers! {
         kind: LinearIssueSource,
         world: "linear_work.simulated.sqlite",
         actions: {
-            LinearWorkIssues => "linear_work.issues.v1" (read),
-            LinearWorkIssueDetail => "linear_work.issue_detail.v1" (read),
-            LinearWorkAssignableUsers => "linear_work.assignable_users.v1" (read),
+            LinearWorkIssues => "linear_work.issues.v1" (read, data),
+            LinearWorkIssueDetail => "linear_work.issue_detail.v1" (read, data),
+            LinearWorkAssignableUsers => "linear_work.assignable_users.v1" (read, data),
             // The only write. Reassignment changes who owns work in a shared
             // workspace, so it is budgeted and audited as the act it is.
-            LinearWorkReassign => "linear_work.reassign.v1" (write),
+            LinearWorkReassign => "linear_work.reassign.v1" (write, data),
         },
     },
     // GitHub Actions. Reads only: this application family watches CI, it does
@@ -199,44 +209,44 @@ providers! {
         kind: GitHubRepository,
         world: "github_actions.simulated.sqlite",
         actions: {
-            GitHubJob => "github.job.v1" (read),
+            GitHubJob => "github.job.v1" (read, data),
             // Returns the signed URL GitHub redirects to, not the log itself. A
             // build log is unbounded — it is exactly the kind of payload a
             // 64-KiB observation cannot carry — so the platform hands back an
             // authorization and stays off the data path, as object downloads do.
-            GitHubJobLog => "github.job_log.v1" (read),
+            GitHubJobLog => "github.job_log.v1" (read, bearer),
         },
     },
     GiteaActions {
         kind: GiteaOrganization,
         world: "gitea_actions.simulated.sqlite",
         actions: {
-            GiteaRuns => "gitea.runs.v1" (read),
-            GiteaRun => "gitea.run.v1" (read),
-            GiteaRunJobs => "gitea.run_jobs.v1" (read),
-            GiteaJob => "gitea.job.v1" (read),
-            GiteaJobLog => "gitea.job_log.v1" (read),
-            GiteaRunners => "gitea.runners.v1" (read),
+            GiteaRuns => "gitea.runs.v1" (read, data),
+            GiteaRun => "gitea.run.v1" (read, data),
+            GiteaRunJobs => "gitea.run_jobs.v1" (read, data),
+            GiteaJob => "gitea.job.v1" (read, data),
+            GiteaJobLog => "gitea.job_log.v1" (read, data),
+            GiteaRunners => "gitea.runners.v1" (read, data),
         },
     },
     SyntheticOperatorAlerts {
         kind: OperatorAlertDestination,
         world: "operator_alerts.synthetic.sqlite",
         actions: {
-            OperatorAlertsSend => "operator_alerts.send.v1" (write),
+            OperatorAlertsSend => "operator_alerts.send.v1" (write, data),
         },
     },
     SlackWebhook {
         kind: SlackWebhookDestination,
         world: "slack_webhook.simulated.sqlite",
-        actions: { SlackWebhookPost => "slack_webhook.post.v1" (write) },
+        actions: { SlackWebhookPost => "slack_webhook.post.v1" (write, data) },
     },
     Slack {
         kind: SlackChannel,
         world: "slack.simulated.sqlite",
         actions: {
-            SlackRead => "slack.read.v1" (read),
-            SlackPost => "slack.post.v1" (write),
+            SlackRead => "slack.read.v1" (read, data),
+            SlackPost => "slack.post.v1" (write, data),
         },
     },
     // One provider for every S3-compatible store. The instance chooses the vendor
@@ -257,41 +267,41 @@ providers! {
             // Authorizing an upload changes nothing in the store, but it is a
             // write: it admits new bytes into a bucket and must be budgeted and
             // audited as the act that did so.
-            ObjectStoreGrantUpload => "object_store.grant_upload.v1" (write),
-            ObjectStoreGrantDownload => "object_store.grant_download.v1" (read),
+            ObjectStoreGrantUpload => "object_store.grant_upload.v1" (write, bearer),
+            ObjectStoreGrantDownload => "object_store.grant_download.v1" (read, bearer),
             // Unlike the grants, these reach the store. They are still signed the
             // same way and scoped by the same grant check: the URL is the whole
             // authorization, so the secret stays local for these too.
-            ObjectStoreHead => "object_store.head.v1" (read),
+            ObjectStoreHead => "object_store.head.v1" (read, data),
             // Destroying, so no application can invoke it whatever its grant
             // says. It exists for the operator retention path, which is the only
             // thing in the platform permitted to remove anything.
-            ObjectStoreDelete => "object_store.delete.v1" (destroys),
+            ObjectStoreDelete => "object_store.delete.v1" (destroys, data),
         },
     },
     Snowflake {
         kind: SnowflakeView,
         world: "snowflake.simulated.sqlite",
         actions: {
-            SnowflakeRead => "snowflake.read.v1" (read),
+            SnowflakeRead => "snowflake.read.v1" (read, data),
         },
     },
     OpenAi {
         kind: OpenAiText,
         world: "openai.simulated.sqlite",
         actions: {
-            OpenAiGenerate => "openai.generate.v1" (write),
+            OpenAiGenerate => "openai.generate.v1" (write, data),
         },
     },
     FreetoolExecutor {
         kind: FreetoolExecutorResource,
         world: "freetool_executor.simulated.sqlite",
         actions: {
-            FreetoolFingerprint => "freetool.fingerprint.v1" (read),
-            FreetoolStatus => "freetool.status.v1" (read),
-            FreetoolResultPage => "freetool.result_page.v1" (read),
-            FreetoolRegister => "freetool.register.v1" (write),
-            FreetoolExecute => "freetool.execute.v1" (write),
+            FreetoolFingerprint => "freetool.fingerprint.v1" (read, data),
+            FreetoolStatus => "freetool.status.v1" (read, data),
+            FreetoolResultPage => "freetool.result_page.v1" (read, data),
+            FreetoolRegister => "freetool.register.v1" (write, data),
+            FreetoolExecute => "freetool.execute.v1" (write, data),
         },
     },
 }
@@ -318,3 +328,35 @@ pub static WRITES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock:
         .map(|action| action.capability())
         .collect()
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn externally_usable_bearers_are_explicit_even_when_the_action_is_read_only() {
+        let actual = Action::ALL
+            .iter()
+            .filter(|action| action.returns_external_bearer())
+            .map(|action| action.capability())
+            .collect::<BTreeSet<_>>();
+        // Independent response-contract inventory: GitHub returns a signed
+        // redirect; object grants return client-side PUT/GET authorizations.
+        assert_eq!(
+            actual,
+            BTreeSet::from([
+                "github.job_log.v1",
+                "object_store.grant_download.v1",
+                "object_store.grant_upload.v1",
+            ])
+        );
+        assert!(!Action::GitHubJobLog.is_write());
+        assert!(!Action::ObjectStoreGrantDownload.is_write());
+        assert!(Action::ObjectStoreGrantUpload.is_write());
+        // An internal signed request is not an exported bearer response. Its
+        // outstanding dispatch still needs genuine lifetime/stop accounting.
+        assert!(!Action::ObjectStoreHead.returns_external_bearer());
+        assert!(!Action::GitHubJob.returns_external_bearer());
+    }
+}
