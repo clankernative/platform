@@ -9,6 +9,7 @@ use crate::security_epoch::{restore_authority, restore_cut};
 pub(super) struct Selection<'a> {
     namespace: &'a Namespace,
     source_epoch: u64,
+    artifact: &'a crate::artifact::LoadedArtifact,
     fence: &'a restore_authority::PreparedRestoreFence,
     authority_schema: &'a restore_authority::RestoreFenceSchema,
     oauth_schema: &'a crate::oauth::restore::Profile,
@@ -38,6 +39,13 @@ pub(super) fn reset_in(
                 == "memory",
         "complete_restore_memory_configuration_required"
     );
+    selected.cut.require_artifact(selected.artifact)?;
+    ensure!(
+        crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),
+        "complete_restore_source_artifact_changed"
+    );
+    let scope = format!("{}/{}/{}",namespace.installation.as_str(),namespace.environment.as_str(),namespace.app.as_str());
+    crate::store::validate_storage_in(tx,selected.artifact,&scope)?;
     // The canonical operation's cumulative admission SAVEPOINT belongs inside
     // this same outer transaction. Only prepare_image commits, serializes and
     // closes it; no applied-cut loan or raw connection can escape this call.
