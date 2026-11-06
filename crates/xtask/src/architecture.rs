@@ -367,12 +367,13 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         ),
         // Closed offline restore DATA builder: constructs its own fresh memory
         // connection, accepts no raw Connection/callback, bounds/deserializes
-        // exact captured bytes, validates/reset/commits, then bounds/freezes the
+        // exact captured bytes, joins the prepared complete application reset
+        // in its sole outer transaction, then bounds/freezes the
         // NOCOPY image before close. No production Checks implementation or
         // native/Runtime factory exists. No borrowed SQL callback is admitted.
         (
             "crates/day2/src/security_epoch/restore_staging.rs",
-            "sha256:ebcc5f61dc7fa69ced2a7c7cff598338c0fb4b4c5123d134dca4b0bfb6b4b9da",
+            "sha256:9d0175b2c6b75ea87f3f93113c325c66069de54e4a96db0f1833bf1b5a310729",
         ),
         // Serde wire serialization, unrelated to SQLite Connection::serialize.
         (
@@ -8853,6 +8854,38 @@ mod tests {
             "crates/day2/src/impostor.rs",
             &digest
         ));
+    }
+
+    #[test]
+    fn sql_callback_controls_pin_complete_restore_image_builder() {
+        let syntax = syn::parse_file(include_str!("../../day2/src/security_epoch/restore_staging.rs")).unwrap();
+        let functions: Vec<_> = syntax.items.into_iter().filter_map(|item| match item {
+            Item::Fn(function) if function.sig.ident == "prepare_image" => Some(function),
+            _ => None,
+        }).collect();
+        assert_eq!(functions.len(), 1);
+        let function = &functions[0];
+        let source = "crates/day2/src/security_epoch/restore_staging.rs";
+        let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
+        assert!(sql_control_function_reviewed(source, &digest));
+        let refused = |source, function: &syn::ItemFn| {
+            let mut checker = SqlCallbackControls {
+                source,
+                admitted_function: false,
+                function: None,
+                errors: BTreeSet::new(),
+            };
+            checker.visit_item_fn(function);
+            !checker.errors.is_empty()
+        };
+        assert!(!refused(source, function));
+        let mut setter = function.clone();
+        setter.block.stmts.insert(0, syn::parse_quote!(borrowed.authorizer(None);));
+        assert!(refused(source, &setter));
+        let mut foreign = function.clone();
+        foreign.sig.inputs.push(syn::parse_quote!(borrowed: &Connection));
+        assert!(refused(source, &foreign));
+        assert!(refused("crates/day2/src/impostor.rs", function));
     }
 
     #[test]
