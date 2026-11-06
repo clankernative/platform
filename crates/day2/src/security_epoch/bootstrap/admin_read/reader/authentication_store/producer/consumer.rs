@@ -247,8 +247,15 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
                 &self.record,
                 &self.operation,
             )?;
-            self.ceremony
-                .check_current(&mut self.action.reader, &self.record, &self.operation)?;
+            self.ceremony.check_current(
+                &mut self.action.reader,
+                (
+                    self.action.sqlite.as_mut().context("restore_auth_sqlite_closed")?,
+                    &mut self.action.files,
+                ),
+                &self.record,
+                &self.operation,
+            )?;
             self.source.require_qualified(&self.time_operation)?;
             let time = self.source.current_time(&mut self.action)?;
             approval_window(&self.record, &time)?;
