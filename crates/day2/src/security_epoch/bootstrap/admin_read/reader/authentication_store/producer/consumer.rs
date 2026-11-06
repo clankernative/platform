@@ -2,9 +2,9 @@
 //! ceremony DATA; the authenticated result retains its actual reader, auth-store
 //! handles, qualified time and original. It is NOT a consumed grant, complete
 //! rights stop, Fenced completion, staged creator or restored writer.
-use super::seconds_ceiling;
-use super::super::RestoreAuthenticationAction;
 use super::super::super::RestoreExecutionReader;
+use super::super::RestoreAuthenticationAction;
+use super::seconds_ceiling;
 use crate::security_epoch::{
     restore_approval::signed::SignedApprovalRecord,
     restore_host_clock::HostTimeData,
@@ -30,6 +30,9 @@ pub(in crate::security_epoch) struct PendingRestoreExecution {
 
 /// The genuine UV result owns, rather than projects, its actual three source
 /// lifetimes. No boolean, signature, row or old receipt can create this type.
+/// Abandonment drops the actual action/file lease, unfinished native source
+/// and original guard; their existing terminal destructors remain responsible.
+/// This carrier neither finishes them nor publishes a positive disposition.
 pub(in crate::security_epoch) struct AuthenticatedRestoreExecution<'metadata, 'storage, 'role> {
     action: RestoreAuthenticationAction<'metadata, 'storage, 'role>,
     source: NativeApprovalSource,
@@ -281,12 +284,6 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
         self.refused = true;
         self.original.refuse();
         self.action.refuse();
-    }
-}
-
-impl Drop for AuthenticatedRestoreExecution<'_, '_, '_> {
-    fn drop(&mut self) {
-        self.refuse();
     }
 }
 
