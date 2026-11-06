@@ -2102,13 +2102,13 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest) -> Result < () >",
         "pub (in crate :: security_epoch) fn admit_counter (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn begin_serving < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose) -> Result < CurrentAppServingPhase < 'storage > >",
         "pub (in crate :: security_epoch) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
-        "pub (in crate :: security_epoch) async fn with_serving_async < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        "pub (in crate :: security_epoch) async fn with_serving_async < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
+        "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -2131,10 +2131,6 @@
         },
         {
           "owner": "ActiveAppStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest) -> Result < () >"
-        },
-        {
-          "owner": "ActiveAppStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn admit_counter (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         },
         {
@@ -2144,6 +2140,10 @@
         {
           "owner": "ActiveAppStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        },
+        {
+          "owner": "ActiveAppStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -5305,7 +5305,17 @@
         "pub (crate) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn release_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (crate) fn request (& self) -> & StoragePeerRequest"
+        "pub (crate) fn request (& self) -> & StoragePeerRequest",
+        "pub (in crate :: security_epoch) fn acknowledge_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
+        "pub (in crate :: security_epoch) fn announce_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , issuer : & mut super :: super :: FrozenRoleIssuer) -> Result < () >",
+        "pub (in crate :: security_epoch) fn await_admin_result (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < super :: super :: AdminPeerResult >",
+        "pub (in crate :: security_epoch) fn await_restore_release (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
+        "pub (in crate :: security_epoch) fn await_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < super :: super :: AuthorityStopData >",
+        "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , fenced_root : & Digest) -> Result < super :: super :: FrozenRoleIssuer >",
+        "pub (in crate :: security_epoch) fn release_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
+        "fn stop_packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , expected : Completion , next : Completion , send : bool) -> Result < () >"
       ],
       "factories": [
         {
@@ -5373,6 +5383,46 @@
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
           "signature": "pub (crate) fn request (& self) -> & StoragePeerRequest"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "fn stop_packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , expected : Completion , next : Completion , send : bool) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn acknowledge_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn announce_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , issuer : & mut super :: super :: FrozenRoleIssuer) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_admin_result (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < super :: super :: AdminPeerResult >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_release (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < super :: super :: AuthorityStopData >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , fenced_root : & Digest) -> Result < super :: super :: FrozenRoleIssuer >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn release_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -6330,11 +6380,11 @@
         }
       ],
       "methods": [
-        "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest) -> Result < () >",
         "pub (crate) fn app (mut app : super :: ActiveAppStorageContinuity , stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
         "pub (crate) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
-        "pub (crate) fn shell (peer : super :: native_enrollment :: ShellServingPeer) -> Self"
+        "pub (crate) fn shell (peer : super :: native_enrollment :: ShellServingPeer) -> Self",
+        "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -6393,15 +6443,15 @@
         },
         {
           "owner": "ServingParticipant",
-          "signature": "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest) -> Result < () >"
-        },
-        {
-          "owner": "ServingParticipant",
           "signature": "pub (crate) fn prepare_current (& mut self) -> Result < () >"
         },
         {
           "owner": "ServingParticipant",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ServingParticipant",
+          "signature": "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -6628,7 +6678,11 @@
         "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn require_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (in crate :: security_epoch) fn retain_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
+        "pub (in crate :: security_epoch) fn retain_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >",
+        "pub (in crate :: security_epoch) fn acknowledge_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >",
+        "pub (in crate :: security_epoch) fn await_admin_result (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < crate :: security_epoch :: native_enrollment :: AdminPeerResult >",
+        "pub (in crate :: security_epoch) fn await_restore_release (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -6672,6 +6726,22 @@
         {
           "owner": "CurrentAppStoragePhase < '_ >",
           "signature": "pub (in crate :: security_epoch) fn retain_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn acknowledge_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_admin_result (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < crate :: security_epoch :: native_enrollment :: AdminPeerResult >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_release (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -6693,7 +6763,11 @@
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch) fn finish_app_known (mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_controller_known (mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn announce_restore_stop (& mut self , issuer : & mut crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer) -> Result < () >",
+        "pub (in crate :: security_epoch) fn await_restore_stopped (& mut self) -> Result < crate :: security_epoch :: native_enrollment :: AuthorityStopData >",
+        "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , operation : & Digest , root : & Digest) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >",
+        "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >"
       ],
       "factories": [
         {
@@ -6753,6 +6827,22 @@
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn announce_restore_stop (& mut self , issuer : & mut crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_stopped (& mut self) -> Result < crate :: security_epoch :: native_enrollment :: AuthorityStopData >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , operation : & Digest , root : & Digest) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >"
         }
       ],
       "proof_uses": [],

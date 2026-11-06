@@ -65,6 +65,7 @@ impl ActiveAppStorageContinuity {
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
         operation: &Digest,
+        cohort: &mut crate::oauth::native_management::AppAuthorityStop<'_>,
     ) -> Result<()> {
         ensure!(self.valid, "active_app_storage_refused");
         self.valid = false;
@@ -75,27 +76,55 @@ impl ActiveAppStorageContinuity {
             let mut physical = self
                 .storage
                 .begin_admin_read(stage, binding(&self.completion, operation)?)?;
-            physical.await_known(stage)?;
-            let names = request_names(&self.store, &self.completion)?;
-            let mut observed = reads.read(stage, &self.store, &names)?;
-            check_active_snapshot(
-                &self.store,
-                &self.completion,
-                &self.activation,
-                observed.snapshot(),
-            )?;
-            reads.check_observation(stage, &mut observed)?;
-            physical.check(stage)?;
-            reads.finish(stage)?;
-            physical.finish_checked(stage)
+            match physical.await_admin_result(stage)? {
+                crate::security_epoch::native_enrollment::AdminPeerResult::Known => {
+                    let names = request_names(&self.store, &self.completion)?;
+                    let mut observed = reads.read(stage, &self.store, &names)?;
+                    check_active_snapshot(
+                        &self.store,
+                        &self.completion,
+                        &self.activation,
+                        observed.snapshot(),
+                    )?;
+                    reads.check_observation(stage, &mut observed)?;
+                    physical.check(stage)?;
+                    reads.finish(stage)?;
+                    physical.finish_checked(stage)?;
+                    Ok(true)
+                }
+                crate::security_epoch::native_enrollment::AdminPeerResult::Stop(stopped) => {
+                    // This is the actual historical App owner, not a freshly
+                    // empty ledger or a receipt. Seal BEFORE any acknowledgement.
+                    cohort.seal()?;
+                    let names = request_names(&self.store, &self.completion)?;
+                    let mut observed = reads.read(stage, &self.store, &names)?;
+                    crate::security_epoch::kernel::advance::check_fenced_initial(
+                        &self.store,
+                        &self.completion,
+                        observed.snapshot(),
+                        &stopped.root,
+                        &stopped.operation,
+                    )?;
+                    reads.check_observation(stage, &mut observed)?;
+                    physical.check(stage)?;
+                    cohort.check_drained()?;
+                    physical.acknowledge_restore_stop(stage, &stopped)?;
+                    physical.await_restore_release(stage, &stopped)?;
+                    cohort.check_drained()?;
+                    reads.finish(stage)?;
+                    physical.finish_restore_stopped(stage)?;
+                    Ok(false)
+                }
+            }
         })();
-        if result.is_ok() {
-            self.valid = true;
-        } else {
-            self.storage.refuse();
-            self.counter.refuse();
+        match &result {
+            Ok(true) => self.valid = true,
+            Ok(false) | Err(_) => {
+                self.storage.refuse();
+                self.counter.refuse();
+            }
         }
-        result
+        result.map(|_| ())
     }
 }
 
