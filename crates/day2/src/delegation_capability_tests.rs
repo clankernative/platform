@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
 };
 
-struct Granted {
+pub(crate) struct Granted {
     /// Held so the instance outlives the runtime that reads it; never read.
     _directory: tempfile::TempDir,
     caller: Runtime,
@@ -35,7 +35,7 @@ impl Granted {
     /// ordinary Rust harness execution with no fixture environment: what it exercises is
     /// the authorization path, which needs a registered operation and a resolved
     /// grant, not a worker.
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("instance.json");
         let state = directory.path().join(".state");
@@ -156,6 +156,99 @@ impl Granted {
             imported_digest,
         })
     }
+
+    pub(crate) fn for_issuance() -> Result<Self> {
+        let granted = Self::new()?;
+        granted
+            .caller
+            .accept("ask", "alice", "sql-issuance", &json!({}), 100)?;
+        Ok(granted)
+    }
+
+    pub(crate) fn ordinary_runtime(&self) -> &Runtime {
+        &self.caller
+    }
+
+    /// Classification DATA only. All SQL below still uses the fixture's real
+    /// ordinary SQLite file; this neither opens a native path nor creates an
+    /// enrolled role, storage owner, serving phase or Stop witness.
+    pub(crate) fn metadata_native_runtime(&self) -> Result<Runtime> {
+        Runtime::from_artifact_for_tests(
+            self.caller.instance_path().to_owned(),
+            self.caller.app().into(),
+            "/state/day2-native/day2-initial.sqlite".into(),
+            self.caller.artifact().clone(),
+        )
+    }
+
+    pub(crate) fn imported_instruction(&self, oversized: bool) -> Instruction {
+        Instruction {
+            kind: "observe".into(),
+            model: "app.query.v1".into(),
+            data: json!({"contract":{"operation":"callee.list","digest":self.imported_digest},
+                "input":if oversized { "x".repeat(16_384) } else { "{}".into() }})
+            .to_string(),
+            ..Instruction::default()
+        }
+    }
+
+    /// Catch the actual issuer result and COMMIT even on Err. A transaction
+    /// rollback in the harness would conceal issuance-before-error bugs.
+    pub(crate) fn caught_issuance(
+        &self,
+        runtime: &Runtime,
+        instruction: &Instruction,
+    ) -> Result<(Result<Option<String>>, i64)> {
+        let mut connection = open(self.caller.db())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let request = Request {
+            operation: "ask".into(),
+            input: "{}".into(),
+            context: crate::store::invocation_context(&tx, "sql-issuance")?,
+            observations: Vec::new(),
+        };
+        let result = if matches!(
+            instruction.model.as_str(),
+            crate::resources::BIND | crate::resources::ATTENUATE
+        ) {
+            crate::resources::host_operation(&tx, runtime, &request, instruction)
+        } else {
+            let active = crate::authority_state::current(&tx)?;
+            crate::capabilities::authorized(
+                &tx,
+                runtime,
+                &request,
+                instruction,
+                active.policy()?,
+                "ob_sql_issuance_0",
+            )
+            .map(|_| None)
+        };
+        tx.commit()?;
+        let count =
+            connection.query_row("SELECT count(*) FROM day2_resource_handles", [], |row| {
+                row.get(0)
+            })?;
+        Ok((result, count))
+    }
+}
+
+#[test]
+fn imported_issuance_can_survive_a_caught_post_issue_error_and_outer_commit() -> Result<()> {
+    let granted = Granted::for_issuance()?;
+    let (result, count) = granted.caught_issuance(
+        granted.ordinary_runtime(),
+        &granted.imported_instruction(true),
+    )?;
+    assert!(matches!(
+        result.unwrap_err().downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceLimitExceeded)
+    ));
+    assert_eq!(
+        count, 1,
+        "the real signed handle survives the caller's caught error and COMMIT"
+    );
+    Ok(())
 }
 
 #[test]

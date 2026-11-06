@@ -433,6 +433,7 @@ pub(crate) fn host_operation(
             Failure::ResourceAuthorityExpired
         );
         let root = root_in(connection, &request.context.invocation_id)?;
+        crate::oauth::native_management::record_unfenced_runtime(runtime)?;
         return Ok(Some(issue(
             connection,
             Claims {
@@ -473,6 +474,7 @@ pub(crate) fn host_operation(
         }
         ensure!(narrower(&claims.grant, &parent), Failure::ResourceForbidden);
         claims.parent = Some(attenuation.handle);
+        crate::oauth::native_management::record_unfenced_runtime(runtime)?;
         return Ok(Some(issue(connection, claims)?));
     }
     Ok(None)

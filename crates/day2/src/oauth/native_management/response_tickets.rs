@@ -407,6 +407,9 @@ const _: () = {
 };
 
 #[cfg(test)]
+mod sql_debt_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
