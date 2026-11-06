@@ -39,6 +39,7 @@ pub(super) fn reset_in(
                 == "memory",
         "complete_restore_memory_configuration_required"
     );
+    selected.artifact.require_current_api()?;
     selected.cut.require_artifact(selected.artifact)?;
     ensure!(
         crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),

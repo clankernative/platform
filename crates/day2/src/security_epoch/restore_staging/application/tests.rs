@@ -425,6 +425,25 @@ fn cut_rejects_a_foreign_artifact_or_schema_before_any_denial_write() -> Result<
 }
 
 #[test]
+fn a_matching_historical_artifact_is_not_a_current_restore_profile() -> Result<()> {
+    effects::scope(simulation::World::new(98316), || {
+        let fixture=Fixture::new()?;
+        let mut contract=fixture.artifact.contract().clone();
+        contract.format=crate::artifact::CURRENT_FORMAT-1;
+        let historical=crate::artifact::LoadedArtifact::from_contract_for_tests(fixture.artifact.id().into(),PathBuf::new(),contract);
+        // Binding equality is DATA and cannot replace current API admission.
+        fixture.cut.require_artifact(&historical)?;
+        let selected=Selection{artifact:&historical,..fixture.selection()};
+        let before=snapshot(&fixture.db)?;
+        let tx=Transaction::new_unchecked(&fixture.db,TransactionBehavior::Immediate)?;
+        assert_eq!(reset_in(&tx,&selected,&fixture.namespace,1).unwrap_err().root_cause().to_string(),"artifact_upgrade_required");
+        tx.commit()?;
+        assert!(before==snapshot(&fixture.db)?);
+        Ok(())
+    })
+}
+
+#[test]
 fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_before_cuts() {
     use quote::ToTokens as _;
     let file=syn::parse_file(include_str!("../application.rs")).unwrap();
@@ -432,6 +451,7 @@ fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_befo
     assert_eq!(functions.len(),1);
     let actual=&functions[0];
     let tail:syn::Block=syn::parse_quote!({
+        selected.artifact.require_current_api()?;
         selected.cut.require_artifact(selected.artifact)?;
         ensure!(crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),"complete_restore_source_artifact_changed");
         let scope=format!("{}/{}/{}",namespace.installation.as_str(),namespace.environment.as_str(),namespace.app.as_str());
@@ -444,8 +464,8 @@ fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_befo
     for index in 0..tail.stmts.len() {
         let mut removed=actual.clone();removed.block.stmts.remove(start+index);assert!(!valid(&removed));
     }
-    let mut late_validation=actual.clone();late_validation.block.stmts.swap(start+3,start+4);assert!(!valid(&late_validation));
-    let mut foreign=actual.clone();foreign.block.stmts[start+3]=syn::parse_quote!(crate::store::validate_storage_in(tx,foreign_artifact,&scope)?;);assert!(!valid(&foreign));
+    let mut late_validation=actual.clone();late_validation.block.stmts.swap(start+4,start+5);assert!(!valid(&late_validation));
+    let mut foreign=actual.clone();foreign.block.stmts[start+4]=syn::parse_quote!(crate::store::validate_storage_in(tx,foreign_artifact,&scope)?;);assert!(!valid(&foreign));
 }
 
 #[test]
