@@ -210,6 +210,26 @@ impl StageStatement {
         )
     }
 
+    /// Signed enrollment DATA only. The issuer's retained table and actual
+    /// requester checks remain separate; this cannot authenticate a live App
+    /// peer or replace the Controller's actual retained message process.
+    pub(super) fn validate_issuer_stage_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        issuer: &IssuerCertificate,
+        role: NativeRole,
+        now: Duration,
+    ) -> Result<()> {
+        self.validate_sender(
+            policy,
+            issuer,
+            role,
+            self.stage.data.process.process,
+            now,
+            StagePurpose::CurrentRole,
+        )
+    }
+
     fn validate_sender(
         &self,
         policy: &EnrollmentPolicy,
