@@ -17,7 +17,7 @@ use super::{
     AcquiredProviderAuthentication, CurrentVolumePhase, ProviderAuthentication, VolumeAdmission,
 };
 use crate::security_epoch::{
-    RestoreAuthenticationAction, CompletedCeremony, CurrentControllerStoragePhase,
+    CompletedCeremony, CurrentControllerStoragePhase, RestoreAuthenticationAction,
     firestore::{Budget, EpochReply, Port, Sample},
     kernel::approval_time::{Interval, Plan, Utc},
     native_enrollment::{NativeRole, SameEnrolledOwner, StagePurpose},

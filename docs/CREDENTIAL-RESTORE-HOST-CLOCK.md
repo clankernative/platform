@@ -28,8 +28,10 @@ into Controller authority, and it does not accept a bootstrap stage.
 Both fixed constructors use one private sampling implementation. The native
 kernel read, interval/rate calculation, original five-second deadline and
 permanent-refusal behavior are unchanged. The Controller object is still
-UNFENCED; a native ledger writer, initial floor installation, known conditional
-commit and actual approval/signing/publication owners remain separate work.
+UNFENCED. The [producer](CREDENTIAL-RESTORE-APPROVAL-PRODUCER.md) joins it to a
+known external floor commit and actual approval/signing/publication owners.
+Initial floor installation, accepting restore execution and native
+qualification remain separate work.
 
 Each observation brackets a real Linux REALTIME read with actual BOOTTIME
 samples and the retained native owner checks. It accounts for the final checks

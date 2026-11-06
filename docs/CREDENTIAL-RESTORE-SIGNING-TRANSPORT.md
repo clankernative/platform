@@ -2,9 +2,10 @@
 
 The private `security_epoch::storage_authority::native_volume::restore_approval` module implements the fixed
 Google KMS Ed25519 request. Its fields, constructor and methods are private even
-to the parent module. It has no production caller, route, credential acquisition
-or accepting approval factory. Tests exercise the actual HTTP implementation
-against a loopback peer using fixture credentials and clocks.
+to the parent module. The closed native producer supplies its genuine completed
+passkey owner and fixed-purpose credential. A bearer header or parsed signature
+cannot supply that owner. Loopback tests use fixture DATA and do not establish
+native authority.
 
 The request signs only the canonical complete restore-approval statement with
 the fixed `day2-restore-approval-grant-ed25519-v1` domain. Its identity includes
@@ -30,17 +31,19 @@ production. Unknown JSON shape, duplicate fields, missing checksums, a different
 version, foreign public key, wrong-purpose signature, timeout, disabled key or
 uncertain exchange refuses the attempt without retry.
 
-Opening this transport requires a separate reviewed production join. That join
-must retain genuine current registry/admin evidence, durable one-use challenge
+The [producer composition](CREDENTIAL-RESTORE-APPROVAL-PRODUCER.md) retains
+genuine current registry/admin evidence, durable one-use challenge
 and counter completion outside the archive, qualified host time after a known
 conditional high-water update, the exact current signing selection and a real
-purpose-specific signing owner. It must preserve the current/future-target
+purpose-specific signing owner. It preserves the current/future-target
 distinction and every real original/check at effects and publication. An App
 request cannot be relabelled as Controller authority. Existing issuer-birth and
 bootstrap writers are not restore signers. A statement, clock, bearer header,
 successful signature, stored completion or historical receipt cannot supply any
-of these owners. The one-hour grant and durable consumption are not implemented
-by this transport, and no production approval is available yet.
+of these owners. The transport alone supplies neither a one-hour grant nor
+consumption. Native ledger/floor birth, persistent keeper qualification and the
+accepting executor/Fenced transition remain separate. This is no deployment or
+production-readiness claim.
 
 Provider contracts: [asymmetricSign](https://docs.cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions/asymmetricSign),
 [getPublicKey](https://docs.cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions/getPublicKey),
