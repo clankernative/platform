@@ -1,6 +1,9 @@
 //! Complete offline denial inside the staging-owned transaction. This does not admit an archive,
 //! authorize restore/copy, create a native original or return a writer.
-use super::*;
+use super::{MemoryHook, memory_shape};
+use anyhow::{Result, ensure};
+use day2_capabilities::credentials::Namespace;
+use rusqlite::Transaction;
 use crate::security_epoch::{restore_authority, restore_cut};
 
 /// All selection/entropy/reference preparation precedes this SQL-only unit.
