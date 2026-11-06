@@ -196,7 +196,8 @@ mod tests {
             other.interval_data().unwrap()
         );
         assert_eq!(
-            retained.exchange_current_views(&mut other)
+            retained
+                .exchange_current_views(&mut other)
                 .unwrap_err()
                 .to_string(),
             "epoch_native_current_read_clock_changed"
