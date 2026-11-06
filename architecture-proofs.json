@@ -4695,6 +4695,22 @@
         {
           "owner": "TrustedKey < '_ >",
           "signature": "fn validate (& self) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "fn claim (db : & mut Connection , key : & TrustedKey , id : & Digest , expected : & Digest) -> Result < Claimed >"
+        },
+        {
+          "owner": null,
+          "signature": "fn current (tx : & Transaction < '_ > , key : & TrustedKey) -> Result < (i64 , u32) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn complete (db : & mut Connection , key : & TrustedKey , id : & Digest , expected_request : & Digest , at : i64 , assertion : & Assertion) -> Result < AssertionFacts >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn issue (tx : & Transaction < '_ > , key : & TrustedKey , challenge : & Challenge , created_at : i64 , expires_at : i64) -> Result < Digest >"
         }
       ],
       "proof_uses": [],
@@ -4718,6 +4734,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
             "module": "file"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn.rs",
+            "module": "store"
           }
         }
       ]
