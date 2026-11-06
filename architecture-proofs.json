@@ -45,7 +45,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
       "scope": "const",
-      "fingerprint": "sha256:6ed6ce9addf4aa1a22a543e7fbb1eee762be2d21238f891c65a1ea6842348a79"
+      "fingerprint": "sha256:40a5f64406daf3d8274824968a139799b062367450988add78faaec6845be59c"
     },
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
@@ -56,6 +56,12 @@
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
       "scope": "const",
       "fingerprint": "sha256:0d11be534347ffb526673ee2a90d4a09911a43b1fed02fdccc57b45304e4fcd4",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+      "scope": "const",
+      "fingerprint": "sha256:fc6dfeed376181dbf495a6c74f6457a415321a65140416196d41fcfe90e5e669",
       "registration": null
     },
     {
@@ -2414,6 +2420,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
             "module": "producer"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
         }
       ],
       "methods": [
@@ -2571,12 +2584,20 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
             "module": "producer"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
         }
       ],
       "methods": [
         "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >",
         "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
+        "fn check_execution_original (& mut self , original : & mut crate :: security_epoch :: restore_original :: RestoreOriginalGuard , record : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest) -> Result < () >",
         "pub (crate) fn check_registry_local (& mut self) -> Result < () >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
@@ -2615,6 +2636,10 @@
         },
         {
           "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
+          "signature": "fn check_execution_original (& mut self , original : & mut crate :: security_epoch :: restore_original :: RestoreOriginalGuard , record : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >"
         }
       ],
@@ -2623,6 +2648,49 @@
       "consuming_methods": [
         "admit_restore_authentication"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+      "type_name": "RestoreExecutionReader",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+            "module": "producer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
+          }
+        }
+      ],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_restore_execution_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , mut stage : EnrolledRoleStage < 'role > , record : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , trace : & 'storage ServingTiming) -> Result < Option < RestoreExecutionReader < 'metadata , 'storage , 'role > > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingRestoreExecution",
+          "signature": "pub (in crate :: security_epoch) fn authenticate < 'metadata , 'storage , 'role > (self , mut input : RestoreExecutionReader < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < AuthenticatedRestoreExecution < 'metadata , 'storage , 'role > > >"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
@@ -2637,9 +2705,11 @@
         "fn capture_source (& mut self) -> Result < NativeApprovalSource >",
         "pub (in crate :: security_epoch) fn check (& mut self , expected : & ApprovalIntent) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_approval_source (& mut self , source : & mut NativeApprovalSource) -> Result < () >",
+        "fn check_execution_original (& mut self , original : & mut RestoreOriginalGuard , record : & SignedApprovalRecord , operation : & Digest) -> Result < RestoreObservation >",
         "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn issue_approval (mut self , credential_id : & [u8]) -> Result < PendingApproval >",
+        "pub (in crate :: security_epoch) fn issue_execution (mut self , record : & SignedApprovalRecord , operation : & Digest , executor_credential_id : & [u8]) -> Result < PendingRestoreExecution >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)"
       ],
       "factories": [
@@ -2649,6 +2719,18 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "CompletedCeremony < 'metadata , 'storage , 'role >",
+          "signature": "fn prepare (pending : PendingApproval , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
+        },
+        {
+          "owner": "PendingApproval",
+          "signature": "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >"
+        },
+        {
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
+          "signature": "fn check_execution_original (& mut self , original : & mut RestoreOriginalGuard , record : & SignedApprovalRecord , operation : & Digest) -> Result < RestoreObservation >"
+        },
         {
           "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , expected : & ApprovalIntent) -> Result < () >"
@@ -2660,6 +2742,10 @@
         {
           "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >"
+        },
+        {
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn issue_execution (mut self , record : & SignedApprovalRecord , operation : & Digest , executor_credential_id : & [u8]) -> Result < PendingRestoreExecution >"
         },
         {
           "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
@@ -2684,14 +2770,6 @@
         {
           "owner": "RestoreAuthenticationAction < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn issue_approval (mut self , credential_id : & [u8]) -> Result < PendingApproval >"
-        },
-        {
-          "owner": "CompletedCeremony < 'metadata , 'storage , 'role >",
-          "signature": "fn prepare (pending : PendingApproval , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion , mut source : NativeApprovalSource) -> Result < Option < (Self , NativeApprovalSource) > >"
-        },
-        {
-          "owner": "PendingApproval",
-          "signature": "pub (in crate :: security_epoch) fn approve < 'metadata , 'storage , 'role > (self , mut action : RestoreAuthenticationAction < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < SignedApprovalRecord > >"
         }
       ],
       "proof_uses": [],
@@ -2701,6 +2779,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
             "module": "producer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
+            "module": "consumer"
           }
         }
       ]
@@ -2780,6 +2865,64 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+      "type_name": "AuthenticatedRestoreExecution",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& mut self) -> Result < RestoreObservation >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "PendingRestoreExecution",
+          "signature": "pub (in crate :: security_epoch) fn authenticate < 'metadata , 'storage , 'role > (self , mut input : RestoreExecutionReader < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < AuthenticatedRestoreExecution < 'metadata , 'storage , 'role > > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+      "type_name": "PendingRestoreExecution",
+      "kind": "private_material",
+      "consuming_methods": [
+        "authenticate"
+      ],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn authenticate < 'metadata , 'storage , 'role > (self , mut input : RestoreExecutionReader < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < AuthenticatedRestoreExecution < 'metadata , 'storage , 'role > > >",
+        "pub (in crate :: security_epoch) fn challenge_data (& self) -> Result < String >"
+      ],
+      "factories": [
+        {
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn issue_execution (mut self , record : & SignedApprovalRecord , operation : & Digest , executor_credential_id : & [u8]) -> Result < PendingRestoreExecution >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingRestoreExecution",
+          "signature": "pub (in crate :: security_epoch) fn authenticate < 'metadata , 'storage , 'role > (self , mut input : RestoreExecutionReader < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < AuthenticatedRestoreExecution < 'metadata , 'storage , 'role > > >"
+        },
+        {
+          "owner": "PendingRestoreExecution",
+          "signature": "pub (in crate :: security_epoch) fn challenge_data (& self) -> Result < String >"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/control_slot_io.rs",
