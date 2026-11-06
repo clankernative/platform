@@ -1,4 +1,5 @@
 use super::*;
+use std::fs::OpenOptions;
 use crate::security_epoch::restore_fencing::tests as drain;
 use std::sync::Arc;
 
