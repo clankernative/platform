@@ -692,10 +692,10 @@ mod tests {
                 continue;
             }
             for member in item.items {
-                if let syn::ImplItem::Fn(method) = member {
-                    if method.sig.ident == name {
-                        found.push(method.block);
-                    }
+                if let syn::ImplItem::Fn(method) = member
+                    && method.sig.ident == name
+                {
+                    found.push(method.block);
                 }
             }
         }
@@ -734,10 +734,10 @@ mod tests {
                 syn::visit::visit_expr_method_call(self, call);
             }
             fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                if let syn::Expr::Path(path) = &*call.func {
-                    if let Some(name) = path.path.get_ident() {
-                        self.0.push(name.to_string());
-                    }
+                if let syn::Expr::Path(path) = &*call.func
+                    && let Some(name) = path.path.get_ident()
+                {
+                    self.0.push(name.to_string());
                 }
                 syn::visit::visit_expr_call(self, call);
             }

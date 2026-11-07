@@ -1,6 +1,6 @@
 //! Local resolver/HTTP controls, not a native availability or cloud receipt.
 use super::*;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::engine::general_purpose::STANDARD;
 use std::{io::Write, net::TcpListener, thread};
 
 fn admitted() -> Result<Vec<SecurityKeySelection>> {
