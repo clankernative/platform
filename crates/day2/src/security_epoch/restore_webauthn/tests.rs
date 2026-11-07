@@ -482,3 +482,72 @@ fn production_trusted_key_requires_the_scoped_registry_origin() {
         assert!(require_closed_source(&source.replace(from, to)).is_err());
     }
 }
+
+#[test]
+fn only_actual_browser_assertion_rejections_have_the_closed_denial_type() {
+    let f = fixture();
+    let baseline = f.assertion(9, 0x0d);
+    let mut cases = Vec::new();
+    let mut altered = baseline.clone();
+    altered.credential_id.push(0);
+    cases.push((altered, 8, "restore_passkey_assertion_shape_or_identity"));
+    let mut altered = baseline.clone();
+    altered.client_data_json = b"not JSON".to_vec();
+    cases.push((altered, 8, "restore_passkey_invalid_client_data"));
+    let mut altered = baseline.clone();
+    let mut client = f.client();
+    client["origin"] = serde_json::json!("https://another.example.test");
+    altered.client_data_json = serde_json::to_vec(&client).unwrap();
+    f.sign(&mut altered);
+    cases.push((altered, 8, "restore_passkey_client_binding_changed"));
+    let mut altered = baseline.clone();
+    altered.authenticator_data[0] ^= 1;
+    f.sign(&mut altered);
+    cases.push((altered, 8, "restore_passkey_rp_changed"));
+    cases.push((
+        f.assertion(9, 0x09),
+        8,
+        "restore_passkey_flags_or_verification_changed",
+    ));
+    cases.push((baseline.clone(), 9, "restore_passkey_counter_not_advanced"));
+    for (assertion, stored, expected) in cases {
+        let error = f.verify(&assertion, stored).unwrap_err();
+        assert!(error.is::<AssertionDenied>());
+        assert_eq!(error.to_string(), expected);
+    }
+    let error = verify(
+        &f.key,
+        &f.challenge,
+        &Digest::new(b"other server intent"),
+        8,
+        &baseline,
+    )
+    .unwrap_err();
+    assert!(!error.is::<AssertionDenied>());
+    let mut key = f.key;
+    key.record.revision = 0;
+    let error = verify(&key, &f.challenge, &f.challenge.request, 8, &baseline).unwrap_err();
+    assert!(!error.is::<AssertionDenied>());
+}
+
+#[test]
+fn ambiguous_ring_signature_and_invalid_curve_key_failures_remain_terminal() {
+    let valid = fixture();
+    let mut changed = valid.assertion(9, 0x0d);
+    *changed.signature.last_mut().unwrap() ^= 1;
+    let error = valid.verify(&changed, 8).unwrap_err();
+    assert_eq!(error.to_string(), "restore_passkey_signature_invalid");
+    assert!(!error.is::<AssertionDenied>());
+
+    // The registry codec admits coordinate DATA, not a curve-validity proof.
+    // Recompute enrollment and the client challenge so key binding cannot mask
+    // Ring's actual invalid-point failure. (0,0) is not on the P-256 curve.
+    let mut invalid = fixture();
+    invalid.key.record.public_key = vec![0; 65];
+    invalid.key.record.public_key[0] = 4;
+    invalid.challenge.enrollment = invalid.key.binding().unwrap();
+    let assertion = invalid.assertion(9, 0x0d);
+    let error = invalid.verify(&assertion, 8).unwrap_err();
+    assert_eq!(error.to_string(), "restore_passkey_signature_invalid");
+    assert!(!error.is::<AssertionDenied>());
+}
