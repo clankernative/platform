@@ -2,6 +2,7 @@ use super::*;
 use crate::security_epoch::restore_webauthn::tests::{Fixture, fixture};
 use std::cell::RefCell;
 
+mod attempts;
 mod process;
 
 type Hook = Box<dyn FnMut(Cut) -> Result<()>>;

@@ -22,6 +22,21 @@ const SUPPORTED_FLAGS: u8 = USER_PRESENT | USER_VERIFIED | BACKUP_ELIGIBLE | BAC
 mod store;
 pub(super) use store::require_existing_schema;
 
+/// Shared execution-challenge DATA. This commits to the complete signed grant,
+/// operation and target intent; it supplies no authentication or send authority.
+fn execution_request(
+    record: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+    operation: &Digest,
+) -> Result<Digest> {
+    record.encode()?;
+    Digest::of(&(
+        "day2-restore-executor-assertion-v1",
+        record,
+        operation,
+        record.statement.request.intent(),
+    ))
+}
+
 /// Exact admitted registry selection, not a browser-supplied key. A future
 /// registry owner must retain current admin membership and this exact version.
 /// Private fields and a scoped native registry source prevent scalar minting.

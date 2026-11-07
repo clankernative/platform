@@ -1,7 +1,7 @@
 //! A distinct executor ceremony; an approval signature names its executor but
 //! does not authenticate the person presenting it. Only challenge DATA crosses
 //! the human wait. Every native operation borrows a fresh actual admin reader.
-use super::super::super::TrustedKey;
+use super::super::super::{TrustedKey, execution_request};
 use super::super::{Origin, RegistryCeremony};
 use super::{
     Assertion, AuthenticationBorrow, AuthenticationReader, ControllerAdminReader,
@@ -17,17 +17,6 @@ use std::{
     cell::{Cell, RefCell},
     marker::PhantomData,
 };
-
-/// This digest is request DATA, not authentication, consumption or authority.
-fn execution_request(record: &SignedApprovalRecord, operation: &Digest) -> Result<Digest> {
-    record.encode()?;
-    Digest::of(&(
-        "day2-restore-executor-assertion-v1",
-        record,
-        operation,
-        record.statement.request.intent(),
-    ))
-}
 
 // Pure checks against a complete actual snapshot supplied by the fixed native
 // caller below. This helper never creates a TrustedKey or a native origin.
