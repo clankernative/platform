@@ -325,6 +325,24 @@ pub(crate) struct SqliteCohort {
 }
 
 impl SqliteCohort {
+    /// Comparison DATA only, before lazy SQLite WAL/SHM activation. Missing
+    /// sidecars do not prove a complete cohort; every present member must match.
+    pub(crate) fn require_opened_members(
+        &self,
+        main: (u64, u64),
+        wal: Option<(u64, u64)>,
+        shm: Option<(u64, u64)>,
+    ) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            main == self.main
+                && wal.is_none_or(|actual| actual == self.wal)
+                && shm.is_none_or(|actual| actual == self.shm),
+            "storage_admin_opened_sqlite_member_changed"
+        );
+        Ok(())
+    }
+
     pub(crate) fn from_identities(
         main: (u64, u64),
         wal: (u64, u64),

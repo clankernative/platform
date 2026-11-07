@@ -321,6 +321,35 @@ fn real_reader_wiring_closes_sql_before_reobservation_and_acceptance() {
     }
 }
 
+fn opened_before_configuration(loan: &str, single: &str, retained: &str) -> bool {
+    let bind = calls(loan, "ControllerAdminReadLoan", "retain_reader");
+    let single = calls(single, "InitialStoreMetadata", "controller_admin_data");
+    let retained = calls(retained, "ControllerAdminSqlite", "open");
+    before(&bind, "check_opened_database", "retain_reader")
+        && before(&single, "check_opened_database", "configure_connection")
+        && before(&retained, "retain_reader", "configure_connection")
+}
+
+#[test]
+fn both_actual_reader_entries_check_opened_members_before_configuration() {
+    let loan = include_str!("../admin_read.rs");
+    let single = include_str!("../../../store/native_storage/controller_admins.rs");
+    let retained = include_str!("../../../store/native_storage/controller_admins/reader.rs");
+    assert!(opened_before_configuration(loan, single, retained));
+    let changed = loan.replacen("self.check_opened_database(db)?;", "", 1);
+    assert_ne!(loan, changed);
+    assert!(!opened_before_configuration(&changed, single, retained));
+    let changed = single.replacen("loan.check_opened_database(db)?;", "", 1);
+    assert_ne!(single, changed);
+    assert!(!opened_before_configuration(loan, &changed, retained));
+    let read = calls(single, "InitialStoreMetadata", "controller_admin_data");
+    assert!(before(&read, "check_database", "project"));
+    assert!(
+        read.iter().rposition(|call| call == "check_database")
+            > read.iter().position(|call| call == "project")
+    );
+}
+
 fn final_order(source: &str) -> bool {
     let finish = calls(source, "ControllerAdminReadLoan", "finish_checked");
     let refresh = calls(source, "ControllerAdminReadLoan", "refresh");

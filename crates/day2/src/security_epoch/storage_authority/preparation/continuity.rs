@@ -592,6 +592,22 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
         result
     }
 
+    pub(in crate::security_epoch::storage_authority) fn check_opened_admin_database(
+        &mut self,
+        db: &rusqlite::Connection,
+        cohort: &crate::security_epoch::native_enrollment::SqliteCohort,
+    ) -> Result<()> {
+        self.check()?;
+        let requested =
+            crate::store::check_controller_sqlite_opened_files(db, self.inner.file, cohort);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch::storage_authority) fn check_admin_database(
         &mut self,
         db: &rusqlite::Connection,

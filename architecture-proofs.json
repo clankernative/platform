@@ -2090,6 +2090,7 @@
         "pub (crate) fn check_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
         "pub (crate) fn check_local (& mut self) -> Result < () >",
         "pub (crate) fn check_metadata (& mut self , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >",
+        "pub (crate) fn check_opened_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
         "pub (crate) fn close_reader (& mut self , db : Box < rusqlite :: Connection >) -> Result < () >",
         "pub (crate) fn end_retained_sql (& mut self , db : & rusqlite :: Connection , completed : & Result < () >) -> Result < () >",
         "pub (crate) fn end_sql (& mut self , closed : & Result < () >) -> Result < () >",
@@ -2133,6 +2134,10 @@
         {
           "owner": "ControllerAdminReadLoan < 'storage , 'role >",
           "signature": "pub (crate) fn check_metadata (& mut self , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >"
+        },
+        {
+          "owner": "ControllerAdminReadLoan < 'storage , 'role >",
+          "signature": "pub (crate) fn check_opened_database (& mut self , db : & rusqlite :: Connection) -> Result < () >"
         },
         {
           "owner": "ControllerAdminReadLoan < 'storage , 'role >",
@@ -5141,6 +5146,7 @@
         "pub (in crate :: security_epoch) fn app_request (& self) -> Result < & StoragePeerRequest >",
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_admin_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_opened_admin_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch) fn finish_app_known (mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_controller_known (mut self) -> Result < () >",
@@ -5176,6 +5182,10 @@
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn check_admin_database (& mut self , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn check_opened_admin_database (& mut self , db : & rusqlite :: Connection) -> Result < () >"
         },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
@@ -5874,6 +5884,7 @@
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >",
+        "pub (in crate :: security_epoch :: storage_authority) fn check_opened_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch :: storage_authority) fn controller_stage_after_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
@@ -5909,6 +5920,10 @@
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_opened_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >"
         },
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
