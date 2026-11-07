@@ -13,6 +13,25 @@ fn intent() -> Result<ApprovalIntent> {
 }
 
 #[test]
+fn request_and_bounded_decoder_share_the_exact_challenge_intent() -> Result<()> {
+    let original = intent()?;
+    let request = original.request_data(100)?;
+    let from_request = request.intent();
+    let decoded = super::super::ApprovalIntent::decode(&serde_json::to_vec(&from_request)?)?;
+    decoded.require_exact(&original)?;
+    decoded.require_request(&request)?;
+    assert_eq!(decoded.commitment()?, original.commitment()?);
+    let mut changed = decoded.clone();
+    changed.executor.subject.push_str("-changed");
+    assert!(decoded.require_exact(&changed).is_err());
+    assert!(changed.require_request(&request).is_err());
+    let mut oversized = serde_json::to_vec(&original)?;
+    oversized.resize(MAX_REQUEST_BYTES + 1, b' ');
+    assert!(super::super::ApprovalIntent::decode(&oversized).is_err());
+    Ok(())
+}
+
+#[test]
 fn challenge_has_no_premature_approval_clock_and_final_request_keeps_fixed_hour() -> Result<()> {
     let intent = intent()?;
     let before = intent.commitment()?;

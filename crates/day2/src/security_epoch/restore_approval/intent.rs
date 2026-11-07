@@ -1,7 +1,10 @@
 //! The server challenge commits to the restore intent before human interaction.
 //! Approval timestamps are added only after genuine completion. This entire
 //! module is DATA: it supplies neither a clock nor signing/current authority.
-use super::{AdminIdentity, ApprovalRequest, RESTORE_APPROVAL_LIFETIME_SECONDS, TargetBinding};
+use super::{
+    AdminIdentity, ApprovalRequest, MAX_REQUEST_BYTES, RESTORE_APPROVAL_LIFETIME_SECONDS,
+    TargetBinding,
+};
 use anyhow::{Result, ensure};
 use day2_capabilities::{BindingRef, Digest};
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,17 @@ impl ApprovalIntent {
     pub(crate) fn validate(&self) -> Result<()> {
         self.executor.validate()?;
         self.target.validate()
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            bytes.len() <= MAX_REQUEST_BYTES,
+            "restore_approval_intent_bound"
+        );
+        let intent: Self = crate::json::decode(bytes)
+            .map_err(|_| anyhow::anyhow!("restore_approval_intent_encoding"))?;
+        intent.validate()?;
+        Ok(intent)
     }
 
     /// Every known request field is committed, with a domain distinct from the
