@@ -46,6 +46,7 @@ impl World {
             apps: BTreeMap::from([(
                 "relational".into(),
                 AppBinding {
+                    managed_secrets: None,
                     retention: Default::default(),
                     journal: None,
                     security: None,

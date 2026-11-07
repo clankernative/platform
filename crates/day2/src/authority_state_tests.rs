@@ -611,6 +611,7 @@ fn exhaustion_autocommit_and_tampered_history_guards_fail_closed() -> Result<()>
 
 fn document() -> AuthorityDocument {
     AuthorityDocument {
+        managed_secrets: None,
         security: None,
         hosted_domain: None,
         resources: Default::default(),

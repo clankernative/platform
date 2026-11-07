@@ -10,6 +10,8 @@ mod admission;
 mod api_docs;
 mod app_contract;
 mod app_inference;
+mod app_secret_live;
+mod app_secret_management;
 mod artifact_hardening;
 mod assets;
 mod authority;

@@ -3,9 +3,9 @@
 An app's owners are exactly `policy.admins` in its active authority document.
 There is no separate registry, global owner role or mutable desired-file grant.
 The shared native `owners::authorize_in` guard covers `audit.read`,
-`secrets.list`, `secrets.read` and `sqlite.download`. Audit reads already use
-this guard. The secret and snapshot names establish the permission boundary for
-future control operations; no value reveal or snapshot export endpoint is added.
+`secrets.list`, `secrets.read`, `secrets.create`, `secrets.rotate` and
+`sqlite.download`. Audit reads and [app secret storage](APP-SECRETS.md) use this
+guard. Secret reveal and snapshot export remain future operations.
 
 Checks require an enabled app, current validated authority, the exact installation
 and artifact binding, current hosted-domain selection and applicable native
@@ -16,8 +16,10 @@ actor and call the guard inside the actual read/export admission transaction.
 It must also resolve only that app's approved secret bindings or snapshot identity;
 ownership grants no access to arbitrary shared/platform secrets or other apps.
 
-Owners retain the existing admin row behavior. They gain no additional app
-operation, membership, resource, provider or installation permissions. Readers,
+Owners retain the existing admin row behavior. Secret writes are confined to the
+operator-activated app namespace; ownership grants no arbitrary provider or
+installation authority. Owners gain no additional app operation, membership or
+resource grants. Readers,
 writers, service principals and installation operators do not become owners.
 An operator needs an explicit app owner entry to pass an owner permission check.
 
@@ -55,7 +57,7 @@ All commands emit one JSON object on success:
 Native errors follow the platform CLI's existing stderr/nonzero-exit contract.
 No secret material or private replay evidence belongs in these results.
 `list` returns `stamp`, `enabled`, active `owners`, `desired_owners`,
-`desired_matches_active` and the four permission names. It never includes the
+`desired_matches_active` and the six permission names. It never includes the
 rest of the app policy or provider bindings. `check` returns the requested
 `actor`, `permission` and `allowed` boolean. False is a diagnostic denial, not a
 failure to evaluate the command. The standalone Rust CLI maps it to exit code 3.

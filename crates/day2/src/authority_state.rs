@@ -40,6 +40,8 @@ pub struct AuthorityStamp {
 #[serde(from = "StoredDocument")]
 pub struct AuthorityDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_secrets: Option<day2_capabilities::app_secrets::Namespace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<crate::security_admission::Requirements>,
     pub enabled: bool,
     /// The hosted domain the installation's `google_iap` edge verified every
@@ -86,6 +88,8 @@ pub struct ActiveCredentialFamily {
 #[serde(deny_unknown_fields)]
 struct StoredDocument {
     #[serde(default)]
+    managed_secrets: Option<day2_capabilities::app_secrets::Namespace>,
+    #[serde(default)]
     security: Option<crate::security_admission::Requirements>,
     enabled: bool,
     #[serde(default)]
@@ -104,6 +108,7 @@ struct StoredDocument {
 impl From<StoredDocument> for AuthorityDocument {
     fn from(stored: StoredDocument) -> Self {
         Self {
+            managed_secrets: stored.managed_secrets,
             security: stored.security,
             enabled: stored.enabled,
             hosted_domain: stored.hosted_domain,
@@ -119,6 +124,7 @@ impl From<StoredDocument> for AuthorityDocument {
 impl AuthorityDocument {
     pub fn from_binding(binding: &AppBinding, hosted_domain: Option<&str>) -> Self {
         Self {
+            managed_secrets: binding.managed_secrets.clone(),
             security: binding.security.clone(),
             enabled: true,
             hosted_domain: hosted_domain.map(str::to_owned),
@@ -215,6 +221,9 @@ impl AuthorityDocument {
     }
 
     pub fn validate(&self, artifact: &LoadedArtifact) -> Result<()> {
+        if let Some(namespace) = &self.managed_secrets {
+            namespace.validate()?;
+        }
         if let Some(requirements) = &self.security {
             requirements.validate(artifact)?;
         }

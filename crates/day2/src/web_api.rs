@@ -109,7 +109,9 @@ mod cache_expiry_tests {
 }
 
 pub(crate) fn is_json(path: &str) -> bool {
-    path.starts_with(crate::managed_credentials::ingress::PREFIX)
+    path == crate::app_secrets::PATH
+        || path.starts_with("/api/app-secrets/")
+        || path.starts_with(crate::managed_credentials::ingress::PREFIX)
         || path == "/api"
         || path.starts_with(openapi::API_PREFIX)
         || path == openapi::SPEC_PATH

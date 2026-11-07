@@ -850,6 +850,9 @@ impl SchemaInitialization<'_> {
         crate::execution::upgrade(tx)?;
         upgrade_selection_cursors(tx)?;
         crate::authority_state::upgrade(tx)?;
+        if !exists {
+            crate::app_secrets::install(tx)?;
+        }
         crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
             // GoLinks' persisted links are the one data migration AGENTS.md
             // allows; this replaces only an empty version-1 credential unit.

@@ -958,6 +958,7 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
     binding.readers.clear();
     binding.writers.clear();
     binding.authority = None;
+    binding.managed_secrets = None;
     binding.resource_policies.clear();
     let path = output.join("instance.json");
     fs::write(&path, serde_json::to_vec_pretty(&instance)?)?;

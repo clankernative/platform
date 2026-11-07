@@ -1,0 +1,50 @@
+{
+  "source": "sha256:06b7f8c1d93a47381a164b43b6646104ca5a839e3b9a6aac654a9ff79d4031ab",
+  "transitions": [
+    {
+      "operation": "create",
+      "phase": "admitted",
+      "step": "create_container"
+    },
+    {
+      "operation": "create",
+      "phase": "container_created",
+      "step": "add_version"
+    },
+    {
+      "operation": "rotate",
+      "phase": "admitted",
+      "step": "add_version"
+    },
+    {
+      "operation": "create",
+      "phase": "stored",
+      "step": "complete"
+    },
+    {
+      "operation": "rotate",
+      "phase": "stored",
+      "step": "complete"
+    },
+    {
+      "operation": "create",
+      "phase": "refused",
+      "step": "complete"
+    },
+    {
+      "operation": "rotate",
+      "phase": "refused",
+      "step": "complete"
+    },
+    {
+      "operation": "create",
+      "phase": "unknown",
+      "step": "complete"
+    },
+    {
+      "operation": "rotate",
+      "phase": "unknown",
+      "step": "complete"
+    }
+  ]
+}
