@@ -538,7 +538,14 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     architecture::check(root)?;
     architecture_dependencies::check(root)?;
     architecture_proofs::check(root)?;
-    let snapshot = verification_snapshot(root, if scope == "all" { "verify" } else { recipe })?;
+    let snapshot = verification_snapshot(
+        root,
+        if ["all", "linux"].contains(&scope) {
+            "verify"
+        } else {
+            recipe
+        },
+    )?;
     let runner = workflows::build(root)?;
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
@@ -1154,7 +1161,6 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         "verify"
         | "verify-prepare"
         | "verify-prepare-join"
-        | "verify-compose"
         | "verify-mac"
         | "verify-private-build-probe"
         | "verify-prepare-part-inputs"
@@ -1167,6 +1173,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         {
             Ok("all")
         }
+        "verify-compose" => Ok("linux"),
         "control-verify" => Ok("control"),
         _ => bail!("unknown verification recipe: {recipe}"),
     }
@@ -1200,6 +1207,7 @@ fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, St
     let mut hashes = build_native::platform_sources(root)?;
     for pin in [
         ".github/workflows/ci.yml",
+        ".github/workflows/mac-compatibility.yml",
         ".github/temporal.sha256",
         ".github/temporal-linux.sha256",
     ] {
@@ -1277,7 +1285,7 @@ fn verification_source_file(label: &str, relative: &Path) -> bool {
 }
 
 fn ensure_stable(root: &Path, recipe: &str, expected: &str) -> Result<()> {
-    let recipe = if recipe_scope(recipe)? == "all" {
+    let recipe = if ["all", "linux"].contains(&recipe_scope(recipe)?) {
         "verify"
     } else {
         recipe
@@ -1920,6 +1928,16 @@ fn receipt(
     total_ms: u64,
 ) -> Result<()> {
     let required = required_steps(scope)?;
+    if scope == "linux" {
+        ensure!(
+            std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
+            "Linux release receipt requires its native host"
+        );
+        ensure!(
+            *passed == required.iter().map(|step| (*step).into()).collect(),
+            "Linux release receipt requires exactly its declared effects"
+        );
+    }
     ensure!(
         required.iter().all(|step| passed.contains(*step)),
         "incomplete verification receipt"
@@ -2049,8 +2067,14 @@ fn receipt(
     Ok(())
 }
 
-fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
-    Ok(match scope {
+fn required_steps(scope: &str) -> Result<Vec<&'static str>> {
+    if scope == "linux" {
+        return Ok(required_steps("all")?
+            .into_iter()
+            .filter(|step| !["test-isolated-build", "test-installation-build"].contains(step))
+            .collect());
+    }
+    let steps: &[&str] = match scope {
         "fast" => &["format-all", "lint", "test-fast-libraries"],
         "control" => &[
             "control-simulation",
@@ -2115,7 +2139,8 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "test-installation-build",
         ],
         _ => bail!("unknown receipt scope"),
-    })
+    };
+    Ok(steps.to_vec())
 }
 
 #[cfg(test)]
@@ -2213,6 +2238,63 @@ mod tests {
     }
 
     #[test]
+    fn preparation_cache_eviction_cannot_select_outputs_or_skip_current_admission() {
+        let job = ci_job("verify-prepare");
+        assert!(job.contains("timeout-minutes: 20"));
+        for name in [
+            "Download retained compiler actions for preparation admission",
+            "Retry retained preparation compiler action download once",
+        ] {
+            let download = ci_step(&job, name);
+            assert!(download.contains("continue-on-error: true"));
+            assert!(download.contains("timeout-minutes: 2"));
+            assert!(download.contains("digest-mismatch: error"));
+            assert!(download.contains("repository: clankernative/platform"));
+            assert!(download.contains("run-id: ${{ github.run_id }}"));
+            assert!(download.contains(
+                "name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}"
+            ));
+            assert!(!download.contains("pattern:") && !download.contains("DAY2_CACHE_ORIGIN"));
+        }
+        let first = ci_step(
+            &job,
+            "Download retained compiler actions for preparation admission",
+        );
+        let retry = ci_step(
+            &job,
+            "Retry retained preparation compiler action download once",
+        );
+        assert!(retry.contains(
+            "if: ${{ !cancelled() && steps.preparation_actions_download.outcome == 'failure' }}"
+        ));
+        assert_eq!(
+            first.split_once("        with:\n").unwrap().1.trim(),
+            retry.split_once("        with:\n").unwrap().1.trim()
+        );
+        let extract = "Restore retained compiler actions before preparation admission";
+        let bootstrap = "Bootstrap the current source artifact admission guard";
+        let context = "Establish the mandatory bounded native Linux compiler context";
+        let select = "Select authenticated artifacts from successful producer attempts";
+        let admit = "Admit all three preparation parts";
+        assert!(job.find(extract).unwrap() < job.find(bootstrap).unwrap());
+        assert!(job.find(bootstrap).unwrap() < job.find(context).unwrap());
+        assert!(job.find(context).unwrap() < job.find(select).unwrap());
+        assert!(job.find(select).unwrap() < job.find(admit).unwrap());
+        let restore = ci_step(&job, extract);
+        assert!(restore.contains("continue-on-error: true"));
+        assert!(restore.contains("-C \"$HOME/.cache/bazel-disk\""));
+        assert!(!restore.contains("$GITHUB_WORKSPACE") && !restore.contains("build-out/"));
+        for mandatory in [bootstrap, context, select, admit] {
+            assert!(
+                !ci_step(&job, mandatory).contains("        if:"),
+                "{mandatory}"
+            );
+        }
+        assert!(ci_step(&job, bootstrap).contains("//crates/xtask:xtask -- install-verifier"));
+        assert!(ci_step(&job, admit).contains("run: build-out/bin/xtask verify-prepare-join"));
+    }
+
+    #[test]
     fn hosted_shard_context_is_retained_after_tests_with_exact_compressed_capture_allowlist() {
         let shards = ci_job("verify-shards");
         assert!(
@@ -2261,6 +2343,7 @@ mod tests {
             ".dockerignore",
             "build-dependencies/clanker-ui.json",
             ".github/workflows/ci.yml",
+            ".github/workflows/mac-compatibility.yml",
             ".github/temporal.sha256",
             ".github/temporal-linux.sha256",
         ] {
@@ -2337,7 +2420,18 @@ mod tests {
     }
 
     fn ci_job(name: &str) -> String {
-        include_str!("../../../.github/workflows/ci.yml")
+        let workflow = if [
+            "verify-mac-compatibility",
+            "admit-mac-acquisition-retry",
+            "retry-mac-compatibility",
+        ]
+        .contains(&name)
+        {
+            include_str!("../../../.github/workflows/mac-compatibility.yml")
+        } else {
+            include_str!("../../../.github/workflows/ci.yml")
+        };
+        workflow
             .split_once(&format!("\n  {name}:\n"))
             .expect("CI job exists")
             .1
@@ -2435,6 +2529,19 @@ mod tests {
                     assert!(inputs.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
                     assert!(inputs.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
                     assert!(inputs.contains("path: /tmp/day2-bazel-linux-bootstrap-actions"));
+                    continue;
+                }
+                if step.starts_with(
+                    "name: Download retained compiler actions for preparation admission\n",
+                ) || step
+                    .starts_with("name: Retry retained preparation compiler action download once\n")
+                {
+                    assert_eq!(name, "verify-prepare");
+                    assert!(inputs.contains("repository: clankernative/platform"));
+                    assert!(inputs.contains("github-token: ${{ github.token }}"));
+                    assert!(inputs.contains("run-id: ${{ github.run_id }}"));
+                    assert!(inputs.contains("name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}"));
+                    assert!(inputs.contains("path: /tmp/day2-preparation-compiler-actions"));
                     continue;
                 }
                 assert!(inputs.contains("repository: clankernative/platform"));
@@ -2542,10 +2649,14 @@ mod tests {
 
     #[test]
     fn tool_bootstrap_retries_only_downloads_and_checks_pins_before_installation() {
-        let ci = include_str!("../../../.github/workflows/ci.yml");
-        assert!(!ci.contains("opentofu/setup-opentofu@"));
-        assert!(!ci.contains("bazelisk-cache: true"));
-        for step in ci.split("      - ") {
+        let workflows = [
+            include_str!("../../../.github/workflows/ci.yml"),
+            include_str!("../../../.github/workflows/mac-compatibility.yml"),
+        ]
+        .join("\n");
+        assert!(!workflows.contains("opentofu/setup-opentofu@"));
+        assert!(!workflows.contains("bazelisk-cache: true"));
+        for step in workflows.split("      - ") {
             if step.contains("name: Download the pinned Linux Bazel executable")
                 || step.contains("name: Download the pinned Mac Bazel executable")
                 || step.contains("name: Install the pinned OpenTofu CLI")
@@ -2687,6 +2798,51 @@ mod tests {
     }
 
     #[test]
+    fn linux_release_and_mac_developer_workflows_are_independent() -> Result<()> {
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        let mac = include_str!("../../../.github/workflows/mac-compatibility.yml");
+        assert!(!ci.contains("runs-on: macos") && !ci.contains("verify-mac-compatibility"));
+        assert!(ci.contains("  merge_group:"));
+        assert!(
+            !mac.contains("merge_group")
+                && !mac.contains("verify-queue-receipt")
+                && !mac.contains("needs.verify.result")
+        );
+        for event in ["  push:", "  pull_request:", "  workflow_dispatch:"] {
+            assert!(mac.contains(event));
+        }
+        assert!(mac.contains("needs: [mac-secrets, mac-dependencies]"));
+        assert!(mac.contains("steps: *mac_verification_steps"));
+        assert!(ci_job("verify").contains(
+            "needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards]"
+        ));
+        assert_eq!(recipe_scope("verify-compose")?, "linux");
+        let linux: BTreeSet<_> = required_steps("linux")?.into_iter().collect();
+        let all: BTreeSet<_> = required_steps("all")?.into_iter().collect();
+        assert_eq!(
+            all.difference(&linux).copied().collect::<Vec<_>>(),
+            ["test-installation-build", "test-isolated-build"]
+        );
+        let directory = tempfile::tempdir()?;
+        let passed = linux.into_iter().map(String::from).collect();
+        assert!(
+            receipt(
+                directory.path(),
+                "all",
+                &BTreeMap::new(),
+                &passed,
+                "snapshot",
+                &BTreeMap::new(),
+                0
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete verification receipt")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn remote_bazel_cache_cannot_publish_shared_pr_outputs_or_skip_fresh_mac_checks() {
         let job = ci_job("verify-mac-compatibility");
         let cache = ci_step(&job, "Restore Bazel compilation and repository caches");
@@ -2700,63 +2856,16 @@ mod tests {
         let native_at = job
             .find("      - run: build-out/bin/xtask verify-mac\n")
             .unwrap();
-        let archive_at = job
-            .find("      - name: Archive only completed Mac compiler actions\n")
+        let publish_at = job
+            .find("      - name: Publish completed Mac compiler actions\n")
             .unwrap();
-        assert!(native_at < archive_at);
-        let archive = ci_step(&job, "Archive only completed Mac compiler actions");
-        assert!(archive.contains("-C \"$HOME/.cache/bazel-disk\" ."));
-        assert!(!archive.contains("always()") && !archive.contains("artifacts/"));
-        let upload = ci_step(
-            &job,
-            "Retain Mac compiler actions for trusted main publication",
-        );
-        assert!(upload.contains(
-            "name: day2-bazel-mac-actions-${{ github.run_id }}-${{ github.run_attempt }}"
-        ));
-        assert!(upload.contains("steps.mac_actions_archive.outcome == 'success'"));
-
-        let publisher = ci_job("publish-mac-actions");
-        assert!(job.contains("runs-on: macos-15"));
-        assert!(publisher.contains("runs-on: ubuntu-24.04"));
-        assert!(
-            publisher.contains("needs: [verify, verify-queue-receipt, verify-mac-compatibility, retry-mac-compatibility]")
-        );
-        assert!(publisher.contains("!cancelled() && needs.verify.result == 'success'"));
-        assert!(publisher.contains("needs.verify-mac-compatibility.result == 'success'"));
-        let admitted = "needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true'";
-        for origin in ["DAY2_CACHE_ORIGIN_RUN:", "DAY2_CACHE_ORIGIN_ATTEMPT:"] {
-            let selected = publisher
-                .lines()
-                .find(|line| line.contains(origin))
-                .unwrap();
-            assert!(selected.contains(admitted));
-            assert!(selected.contains("|| github.run_"));
-        }
-        for name in [
-            "Download compiler actions from the admitted origin",
-            "Retry compiler action download once",
-        ] {
-            let download = ci_step(&publisher, name);
-            assert!(download.contains("repository: clankernative/platform"));
-            assert!(download.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-            assert!(download.contains("name: day2-bazel-mac-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
-            assert!(download.contains("timeout-minutes: 2"));
-        }
-        let compression = ci_step(&publisher, "Require Mac-compatible cache compression");
-        assert!(compression.contains("zstd --quiet --version"));
-        let directory = ci_step(&publisher, "Create the compiler cache directory");
-        assert!(directory.contains("steps.actions_compression.outcome == 'success'"));
-        let publish = ci_step(&publisher, "Publish compiler actions in this branch scope");
-        assert!(publish.contains("steps.actions_extract.outcome == 'success'"));
+        assert!(native_at < publish_at);
+        let publish = ci_step(&job, "Publish completed Mac compiler actions");
         assert!(publish.contains("path: ~/.cache/bazel-disk"));
-        assert!(publish.contains("key: day2-bazel-mac-actions-v2-macOS-ARM64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"));
-        assert!(publisher.contains("contents: read") && publisher.contains("actions: read"));
-        assert!(!publisher.contains("contents: write") && !publisher.contains("actions: write"));
+        assert!(publish.contains("key: ${{ steps.bazel_actions.outputs.cache-primary-key }}"));
+        assert!(!publish.contains("always()") && !publish.contains("artifacts/"));
         let main = ci_job("verify-queue-receipt");
         assert!(main.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
-        assert!(main.contains("cache_run: ${{ steps.admit.outputs.run }}"));
-        assert!(main.contains("cache_attempt: ${{ steps.admit.outputs.attempt }}"));
         let bootstrap = ci_step(&main, "Publish completed Linux bootstrap actions");
         assert!(bootstrap.contains("path: ~/.cache/bazel-disk"));
         assert!(bootstrap.contains("key: ${{ steps.bazel_actions.outputs.cache-primary-key }}"));
@@ -2786,6 +2895,9 @@ mod tests {
         }
         let final_join = ci_job("verify");
         assert!(final_join.contains("timeout-minutes: 20"));
+        let admitted = "needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true'";
+        assert!(main.contains("cache_run: ${{ steps.admit.outputs.run }}"));
+        assert!(main.contains("cache_attempt: ${{ steps.admit.outputs.attempt }}"));
         for origin in ["DAY2_CACHE_ORIGIN_RUN:", "DAY2_CACHE_ORIGIN_ATTEMPT:"] {
             let selected = final_join
                 .lines()
@@ -2830,7 +2942,7 @@ mod tests {
                 .contains("Restore compiled actions from this run preparation only")
         );
         assert!(cache.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
-        assert!(cache.contains("github.event_name == 'merge_group'"));
+        assert!(!cache.contains("merge_group"));
         assert!(cache.contains(
             "github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')"
         ));
@@ -3163,7 +3275,7 @@ mod tests {
         ] {
             assert!(required.contains(&obligation));
         }
-        for omitted in required {
+        for omitted in &required {
             let directory = tempfile::tempdir()?;
             let passed = required
                 .iter()

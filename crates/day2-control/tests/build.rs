@@ -87,6 +87,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         "Cargo.toml",
         "Cargo.lock",
         ".github/workflows/ci.yml",
+        ".github/workflows/mac-compatibility.yml",
         ".bazelrc",
         ".bazelversion",
         "BUILD.bazel",
@@ -188,6 +189,30 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
 }
 
 #[test]
+fn isolated_platform_snapshot_retains_every_pinned_workflow_source() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    platform(directory.path())?;
+    let root = directory.path().join("platform");
+    for (name, bytes) in day2::automation::SOURCES {
+        write(&root.join(name), bytes, false)?;
+    }
+    let approved = PlatformInputs::capture(&root, &directory.path().join(".toolchains"))?;
+    let job = directory.path().join("job");
+    fs::create_dir(&job)?;
+    approved.materialize(&job)?;
+    for (name, bytes) in day2::automation::SOURCES {
+        assert_eq!(
+            fs::read(job.join("platform").join(name)).with_context(|| format!(
+                "isolated platform is missing pinned workflow source: {name}"
+            ))?,
+            *bytes,
+            "isolated workflow source changed: {name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> Result<()> {
     for policy in [
         "architecture-rules.json",
@@ -195,6 +220,7 @@ fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> 
         "architecture-proofs.json",
         "architecture/clippy.toml",
         ".github/workflows/ci.yml",
+        ".github/workflows/mac-compatibility.yml",
     ] {
         let directory = tempfile::tempdir()?;
         let approved = platform(directory.path())?;

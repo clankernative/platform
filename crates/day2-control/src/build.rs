@@ -128,6 +128,7 @@ impl PlatformInputs {
             "Cargo.toml",
             "Cargo.lock",
             ".github/workflows/ci.yml",
+            ".github/workflows/mac-compatibility.yml",
             ".bazelrc",
             ".bazelversion",
             "BUILD.bazel",

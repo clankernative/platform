@@ -63,7 +63,9 @@ discovered or included by either command. Company acceptance suites run in their
 own private repos against the platform version they deploy.
 
 [Bazel build and cache details](docs/BAZEL.md) explain the declared targets,
-compiler profiles, focused tests and private builder.
+compiler profiles, focused tests and private builder. Hosted CI requires Linux
+release qualification through `verify`; [Mac developer compatibility](docs/CI-CACHING.md#hosted-verification-campaigns)
+runs independently on PRs and main without blocking Linux releases.
 
 Both gates check the reviewed [platform structural rules](docs/PLATFORM-STRUCTURAL-RULES.md).
 Use `bazel run //crates/xtask:xtask -- architecture-check` for focused feedback.
