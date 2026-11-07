@@ -67,7 +67,7 @@ fn run_history(steps: &[Step]) -> Result<Vec<(bool, bool)>> {
     let mut observed = Vec::new();
     for (index, step) in steps.iter().copied().enumerate() {
         let expected = model.step(step);
-        let result = match step {
+        let result: Result<()> = match step {
             Step::Reopen => { drop(db); db = Connection::open(&path)?; Ok(()) }
             Step::Remove => db.execute("UPDATE main.restore_passkey_keys SET enabled=0", []).map(|_| ()).map_err(Into::into),
             Step::Replace => db.execute("UPDATE main.restore_passkey_keys SET version=version+1", []).map(|_| ()).map_err(Into::into),
