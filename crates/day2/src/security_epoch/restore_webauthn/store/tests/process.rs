@@ -176,17 +176,32 @@ fn execution_attempt_child(config: &Config) -> Result<()> {
     let pause = || -> Result<()> {
         std::io::stderr().write_all(&marker(config.cut))?;
         std::io::stderr().flush()?;
-        if config.exit_at_cut { std::process::exit(0); }
+        if config.exit_at_cut {
+            std::process::exit(0);
+        }
         let mut release = [0];
         std::io::stdin().read_exact(&mut release)?;
         anyhow::bail!("execution_attempt_released_without_death")
     };
-    if config.cut == 11 { pause()?; }
+    if config.cut == 11 {
+        pause()?;
+    }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    mark_may_execute(&tx, &f.key, &f.challenge, &signed, &operation, (7, completion.0, &completion.1))?;
-    if config.cut == 12 { pause()?; }
+    mark_may_execute(
+        &tx,
+        &f.key,
+        &f.challenge,
+        &signed,
+        &operation,
+        (7, completion.0, &completion.1),
+    )?;
+    if config.cut == 12 {
+        pause()?;
+    }
     tx.commit()?;
-    if config.cut == 13 { pause()?; }
+    if config.cut == 13 {
+        pause()?;
+    }
     anyhow::bail!("execution_attempt_missing_checkpoint")
 }
 
@@ -313,15 +328,24 @@ async fn signing_journal_real_child_death_preserves_attempt_state_without_recons
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn execution_grant_attempt_real_child_death_prevents_fresh_login_reuse_after_commit() -> Result<()> {
+async fn execution_grant_attempt_real_child_death_prevents_fresh_login_reuse_after_commit()
+-> Result<()> {
     for cut in 11..=13 {
         let root = tempfile::tempdir()?;
-        let config = Config { database: root.path().join("outside-restore.sqlite"), cut, exit_at_cut: false };
+        let config = Config {
+            database: root.path().join("outside-restore.sqlite"),
+            cut,
+            exit_at_cut: false,
+        };
         let input = root.path().join("execution-cut.json");
         std::fs::write(&input, serde_json::to_vec(&config)?)?;
         require_death(&execute(&config, &input, true).await?, cut)?;
         let mut db = Connection::open(&config.database)?;
-        let stored: i64 = db.query_row("SELECT count(*) FROM main.restore_approval_execution_attempts", [], |row| row.get(0))?;
+        let stored: i64 = db.query_row(
+            "SELECT count(*) FROM main.restore_approval_execution_attempts",
+            [],
+            |row| row.get(0),
+        )?;
         // Independent commit-cut table, not the child's result/reconciliation.
         // Before known claim commit the native sender cannot have started. A
         // durable claim remains spent even if no provider reply was recorded.
@@ -332,12 +356,26 @@ async fn execution_grant_attempt_real_child_death_prevents_fresh_login_reuse_aft
         let operation = Digest::new(b"new login and operation after child death");
         let completion = super::attempts::fresh_execution(&mut db, &mut f, &signed, &operation)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let marked = mark_may_execute(&tx, &f.key, &f.challenge, &signed, &operation, (8, completion.0, &completion.1));
+        let marked = mark_may_execute(
+            &tx,
+            &f.key,
+            &f.challenge,
+            &signed,
+            &operation,
+            (8, completion.0, &completion.1),
+        );
         assert_eq!(marked.is_ok(), !spent, "cut {cut}");
         tx.commit()?;
         // The primitive returns only (); no row can recover the lost native
         // completion, original, stopped cohort or delivery/commit permission.
-        assert_eq!(db.query_row("SELECT count(*) FROM main.restore_approval_execution_attempts", [], |row| row.get::<_,i64>(0))?, 1);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM main.restore_approval_execution_attempts",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
     }
     Ok(())
 }
@@ -345,13 +383,24 @@ async fn execution_grant_attempt_real_child_death_prevents_fresh_login_reuse_aft
 #[tokio::test(flavor = "current_thread")]
 async fn execution_attempt_child_success_is_not_accepted_as_requested_death() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let config = Config { database: root.path().join("outside-restore.sqlite"), cut: 13, exit_at_cut: true };
+    let config = Config {
+        database: root.path().join("outside-restore.sqlite"),
+        cut: 13,
+        exit_at_cut: true,
+    };
     let input = root.path().join("not-a-death.json");
     std::fs::write(&input, serde_json::to_vec(&config)?)?;
     let exit = execute(&config, &input, false).await?;
     assert!(require_death(&exit, 13).is_err());
     let db = Connection::open(&config.database)?;
-    assert_eq!(db.query_row("SELECT count(*) FROM main.restore_approval_execution_attempts", [], |row| row.get::<_,i64>(0))?, 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM main.restore_approval_execution_attempts",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
     Ok(())
 }
 

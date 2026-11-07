@@ -473,9 +473,16 @@ pub(super) fn check_may_execute(
         "SELECT count(*) FROM main.restore_approval_execution_attempts
          WHERE grant_id=?1 AND signed_digest=?2 AND operation=?3 AND challenge_id=?4
            AND binding=?5 AND key_version=?6 AND counter=?7 AND completion_digest=?8",
-        params![signed.statement.request.grant_id.as_str(),signed_digest.as_str(),
-            operation.as_str(),id.as_str(),key.binding()?.as_str(),completed.1,
-            completed.0,completed.2.as_str()],
+        params![
+            signed.statement.request.grant_id.as_str(),
+            signed_digest.as_str(),
+            operation.as_str(),
+            id.as_str(),
+            key.binding()?.as_str(),
+            completed.1,
+            completed.0,
+            completed.2.as_str()
+        ],
         |row| row.get::<_, i64>(0),
     );
     let checked = key.check_sqlite(tx);
