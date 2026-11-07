@@ -89,6 +89,7 @@ locals {
         length(var.resource_policies) == 0 ? {} : { resource_policies = var.resource_policies },
         length(var.schedules) == 0 ? {} : { schedules = var.schedules },
         length(var.ingress) == 0 ? {} : { ingress = var.ingress },
+        local.managed_secret_binding,
       var.journal_trace_hours == null ? {} : { journal = { trace_hours = var.journal_trace_hours } })
     }
     }, var.resource_catalog == null ? {} : { resources = var.resource_catalog }, var.security_shell_contract == null ? {} : {
@@ -131,7 +132,7 @@ locals {
 }
 
 resource "kubernetes_config_map_v1" "instance" {
-  depends_on = [terraform_data.oauth_admission, terraform_data.native_admission]
+  depends_on = [terraform_data.oauth_admission, terraform_data.native_admission, terraform_data.managed_secret_admission]
   metadata {
     name      = "${local.workload_name}-instance"
     namespace = var.namespace
@@ -345,6 +346,41 @@ resource "kubernetes_stateful_set_v1" "day2" {
             volume_mount {
               name       = "state"
               mount_path = local.state_dir
+            }
+          }
+        }
+
+        dynamic "init_container" {
+          for_each = var.managed_secrets == null ? [] : [true]
+          content {
+            name    = "managed-secret-token"
+            image   = var.state_ownership_image
+            command = ["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0600", "${local.managed_secret_source}/access-token", "${local.managed_secret_dir}/access-token"]
+            security_context {
+              run_as_non_root            = false
+              run_as_user                = 0
+              run_as_group               = 0
+              allow_privilege_escalation = false
+              read_only_root_filesystem  = true
+              privileged                 = false
+              capabilities {
+                drop = ["ALL"]
+                add  = ["CHOWN", "FOWNER"]
+              }
+              seccomp_profile { type = "RuntimeDefault" }
+            }
+            resources {
+              requests = { cpu = "50m", memory = "32Mi", ephemeral-storage = "16Mi" }
+              limits   = { cpu = "100m", memory = "32Mi", ephemeral-storage = "16Mi" }
+            }
+            volume_mount {
+              name       = "managed-secret-source"
+              mount_path = local.managed_secret_source
+              read_only  = true
+            }
+            volume_mount {
+              name       = "managed-secret-token"
+              mount_path = local.managed_secret_dir
             }
           }
         }
@@ -673,6 +709,15 @@ resource "kubernetes_stateful_set_v1" "day2" {
             mount_path = local.state_dir
           }
 
+          dynamic "volume_mount" {
+            for_each = var.managed_secrets == null ? [] : [true]
+            content {
+              name       = "managed-secret-token"
+              mount_path = local.managed_secret_dir
+              read_only  = true
+            }
+          }
+
           volume_mount {
             name       = "tmp"
             mount_path = "/tmp"
@@ -813,6 +858,33 @@ resource "kubernetes_stateful_set_v1" "day2" {
 
           persistent_volume_claim {
             claim_name = local.pvc_name
+          }
+        }
+
+        dynamic "volume" {
+          for_each = var.managed_secrets == null ? [] : [var.managed_secrets]
+          content {
+            name = "managed-secret-source"
+            secret {
+              secret_name  = volume.value.token_secret_name
+              default_mode = "0400"
+              optional     = false
+              items {
+                key  = "access-token"
+                path = "access-token"
+              }
+            }
+          }
+        }
+
+        dynamic "volume" {
+          for_each = var.managed_secrets == null ? [] : [true]
+          content {
+            name = "managed-secret-token"
+            empty_dir {
+              medium     = "Memory"
+              size_limit = "1Mi"
+            }
           }
         }
 
