@@ -498,6 +498,7 @@ pub fn queue_receipt(root: &Path, recipe: &str) -> Result<()> {
 impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
+            "fast-libraries" => 900,
             "all-runtime" => 9000,
             "workspace-runtime"
             | "workspace-day2"
@@ -2996,6 +2997,7 @@ mod tests {
     #[test]
     fn test_campaign_budget_defaults_and_aggregate_override_are_bounded() -> Result<()> {
         for suite in [
+            "fast-libraries",
             "all-runtime",
             "workspace-runtime",
             "parallel-runtime",
@@ -3009,6 +3011,9 @@ mod tests {
             assert_eq!(campaign.budget()?.as_secs(), 600);
         }
         for (suite, seconds) in [
+            ("fast-libraries", 1),
+            ("fast-libraries", 600),
+            ("fast-libraries", 900),
             ("all-runtime", 3600),
             ("all-runtime", 9000),
             ("workspace-runtime", 12600),
@@ -3029,6 +3034,9 @@ mod tests {
             assert_eq!(campaign.budget()?.as_secs(), seconds);
         }
         for (suite, seconds) in [
+            ("fast-libraries", 0),
+            ("fast-libraries", 901),
+            ("fast-libraries", u64::MAX),
             ("all-runtime", 0),
             ("all-runtime", 9001),
             ("all-runtime", u64::MAX),
