@@ -454,6 +454,23 @@ mod tests {
             && borrow.to_token_stream().to_string() == expected_borrow.to_token_stream().to_string()
     }
 
+    fn token_shape(tokens: proc_macro2::TokenStream) -> Vec<String> {
+        let mut shape = Vec::new();
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Group(group) => {
+                    shape.push(format!("group:{:?}", group.delimiter()));
+                    shape.extend(token_shape(group.stream()));
+                    shape.push("end-group".to_owned());
+                }
+                proc_macro2::TokenTree::Ident(ident) => shape.push(format!("ident:{ident}")),
+                proc_macro2::TokenTree::Literal(literal) => shape.push(format!("literal:{literal}")),
+                proc_macro2::TokenTree::Punct(punct) => shape.push(format!("punct:{}", punct.as_char())),
+            }
+        }
+        shape
+    }
+
     fn guarded_owner_check(block: &syn::Block) -> bool {
         // The complete production method is closed, including the mandatory
         // post on Err and primary-before-post propagation. The pending/UV
@@ -487,7 +504,11 @@ mod tests {
             requested?;
             checked
         }};
-        block.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        // syn preserves lexical punctuation spacing inside ensure! input,
+        // whereas quote constructs separate `!` and `*` tokens. Preserve every
+        // delimiter, identifier, literal and punctuation character, ignoring
+        // only that joint/alone spacing in the already-parsed Rust block.
+        token_shape(block.to_token_stream()) == token_shape(expected.to_token_stream())
     }
 
     fn requested_body(block: &mut syn::Block) -> &mut syn::Block {
@@ -527,6 +548,15 @@ mod tests {
         assert!(!guarded_owner_route(delegate, &substituted));
         let actual = actual_owner_method(&leaf, "ExecutionSourceLoan", "check")?;
         assert!(guarded_owner_check(actual));
+        let joint: proc_macro2::TokenStream = "!*self.refused".parse()
+            .map_err(|_| anyhow::anyhow!("consumer_joint_punctuation_fixture"))?;
+        let separate: proc_macro2::TokenStream = "! * self . refused".parse()
+            .map_err(|_| anyhow::anyhow!("consumer_separate_punctuation_fixture"))?;
+        assert_eq!(token_shape(joint), token_shape(separate));
+        let mut changed = actual.clone();
+        requested_body(&mut changed).stmts[0] =
+            syn::parse_quote! { ensure!(false, "restore_executor_refused"); };
+        assert!(!guarded_owner_check(&changed));
         for cut in [2, 3, 4, 5] {
             let mut changed = actual.clone();
             requested_body(&mut changed).stmts.remove(cut);
