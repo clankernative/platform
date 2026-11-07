@@ -218,6 +218,28 @@ impl CredentialMaterial {
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
         let body = br#"{"scope":["https://www.googleapis.com/auth/datastore"],"lifetime":"300s"}"#;
+        Self::mint_body(source, selected, http, acquisition, body)
+    }
+
+    /// Closed restore-only signer credential. Its actual native caller must
+    /// retain the verified completion/time owner; no arbitrary scope is public.
+    pub(super) fn mint_restore_signer(
+        source: &Self,
+        selected: &EpochIam,
+        http: &NativeHttp,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let body = br#"{"scope":["https://www.googleapis.com/auth/cloudkms"],"lifetime":"300s"}"#;
+        Self::mint_body(source, selected, http, acquisition, body)
+    }
+
+    fn mint_body(
+        source: &Self,
+        selected: &EpochIam,
+        http: &NativeHttp,
+        acquisition: &mut NativeAcquisition,
+        body: &[u8],
+    ) -> Result<Self> {
         let mut bytes = Zeroizing::new(http.request(
             Route::GoogleMint(selected),
             &source.authorization()?,

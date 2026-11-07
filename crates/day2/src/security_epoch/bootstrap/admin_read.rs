@@ -15,6 +15,7 @@ use anyhow::{Context, Result, ensure};
 use std::{marker::PhantomData, rc::Rc};
 
 mod reader;
+pub(in crate::security_epoch) use reader::{CompletedCeremony, RestoreAuthenticationAction};
 pub(crate) use reader::{ControllerAdminReader, ControllerRegistryData};
 
 pub(crate) struct ControllerAdminReadLoan<'storage, 'role> {

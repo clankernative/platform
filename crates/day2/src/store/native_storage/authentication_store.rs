@@ -77,16 +77,17 @@ mod tests {
     #[test]
     fn fixed_rw_open_never_creates_or_follows_a_main_symlink() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let absent = directory.path().join("absent.sqlite");
+        let root = directory.path().canonicalize()?;
+        let absent = root.join("absent.sqlite");
         assert!(open_existing(&absent).is_err());
         assert!(!absent.exists());
-        let actual = directory.path().join("actual.sqlite");
+        let actual = root.join("actual.sqlite");
         let db = Connection::open(&actual)?;
         db.execute_batch("CREATE TABLE actual(value INTEGER)")?;
-        let link = directory.path().join("link.sqlite");
+        let link = root.join("link.sqlite");
         std::os::unix::fs::symlink(&actual, &link)?;
         assert!(open_existing(&link).is_err());
-        let memory = directory.path().join("file:missing?mode=memory");
+        let memory = root.join("file:missing?mode=memory");
         assert!(open_existing(&memory).is_err());
         Ok(())
     }
@@ -94,7 +95,7 @@ mod tests {
     #[test]
     fn existing_profile_admission_refuses_journal_mode_without_switching_it() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("ledger.sqlite");
+        let path = directory.path().canonicalize()?.join("ledger.sqlite");
         let creator = Connection::open(&path)?;
         creator.execute_batch("CREATE TABLE ledger(value INTEGER)")?;
         let mut db = open_existing(&path)?;

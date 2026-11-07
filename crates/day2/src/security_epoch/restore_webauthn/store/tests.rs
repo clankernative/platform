@@ -157,7 +157,7 @@ fn existing_schema_admission_cannot_use_a_temp_shadow_for_a_missing_main_table()
     assert_eq!(
         db.query_row("SELECT count(*) FROM temp.sqlite_schema", [], |r| r
             .get::<_, i64>(0))?,
-        4
+        6
     );
     Ok(())
 }

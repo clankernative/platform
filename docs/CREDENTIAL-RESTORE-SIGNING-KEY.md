@@ -17,9 +17,10 @@ external call and final publication.
 
 The identity commitment includes both the full version resource and public
 bytes. Re-importing the same public material at another version is a different
-selection. The final approval statement and accepting owner must bind the exact
-version as well as the public key before production signing is enabled. The
-current signature DATA component is not an accepting KMS factory.
+selection. The final approval statement commits to the full selected version and public
+key; signature verification compares that exact pair. The accepting owner must
+still qualify its actual current selection before production signing. Signature
+DATA is not an accepting KMS factory.
 
 This is a separate restore-only key selection. No fallback to issuer-birth or
 OAuth session/view keys is permitted. An omitted selection means restore signing
