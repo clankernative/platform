@@ -278,7 +278,7 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
             Some("sha256:ae6dbc9c0169b91c8620dd1565c53da320aa16a861e4bb3d63bb5758ee3e2306")
         }
         "crates/day2/src/oauth/schema.rs" => {
-            Some("sha256:52cd6e2c6e18eb6679c0af8decd20708c7886bdea2c1da223aad5ec3a7a0f452")
+            Some("sha256:80e6ed96bdeef65e14f0f3149a6ae86d40c61c2c55d2ef3a6b21c35e01f82a94")
         }
         // Closed control construction only, not the large accounting module.
         "crates/day2/src/budget/atomic_control.rs" => {
@@ -367,12 +367,13 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         ),
         // Closed offline restore DATA builder: constructs its own fresh memory
         // connection, accepts no raw Connection/callback, bounds/deserializes
-        // exact captured bytes, validates/reset/commits, then bounds/freezes the
+        // exact captured bytes, joins the prepared complete application reset
+        // in its sole outer transaction, then bounds/freezes the
         // NOCOPY image before close. No production Checks implementation or
         // native/Runtime factory exists. No borrowed SQL callback is admitted.
         (
             "crates/day2/src/security_epoch/restore_staging.rs",
-            "sha256:ebcc5f61dc7fa69ced2a7c7cff598338c0fb4b4c5123d134dca4b0bfb6b4b9da",
+            "sha256:f73ae712603edd27110f77f43b29c13a2f77512b14324b7cf792781e0fb5eee3",
         ),
         // Serde wire serialization, unrelated to SQLite Connection::serialize.
         (
@@ -8853,6 +8854,53 @@ mod tests {
             "crates/day2/src/impostor.rs",
             &digest
         ));
+    }
+
+    #[test]
+    fn sql_callback_controls_pin_complete_restore_image_builder() {
+        let source = "crates/day2/src/security_epoch/restore_staging.rs";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Compare the actual current-root function, using the same bounded
+        // regular-source reader as inventory, not an undeclared cross-crate
+        // include or a second copied positive implementation.
+        let bytes = read_regular(&root.join(source), MAX_SOURCE_BYTES).unwrap();
+        let syntax = syn::parse_file(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let functions: Vec<_> = syntax
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Fn(function) if function.sig.ident == "prepare_image" => Some(function),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(functions.len(), 1);
+        let function = &functions[0];
+        let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
+        assert!(sql_control_function_reviewed(source, &digest));
+        let refused = |source, function: &syn::ItemFn| {
+            let mut checker = SqlCallbackControls {
+                source,
+                admitted_function: false,
+                function: None,
+                errors: BTreeSet::new(),
+            };
+            checker.visit_item_fn(function);
+            !checker.errors.is_empty()
+        };
+        assert!(!refused(source, function));
+        let mut setter = function.clone();
+        setter
+            .block
+            .stmts
+            .insert(0, syn::parse_quote!(borrowed.authorizer(None);));
+        assert!(refused(source, &setter));
+        let mut foreign = function.clone();
+        foreign
+            .sig
+            .inputs
+            .push(syn::parse_quote!(borrowed: &Connection));
+        assert!(refused(source, &foreign));
+        assert!(refused("crates/day2/src/impostor.rs", function));
     }
 
     #[test]

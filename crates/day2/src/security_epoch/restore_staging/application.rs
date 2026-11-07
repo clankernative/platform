@@ -1,50 +1,74 @@
-//! One atomic offline denial transaction. This does not admit an archive,
+//! Complete offline denial inside the staging-owned transaction. This does not admit an archive,
 //! authorize restore/copy, create a native original or return a writer.
-use super::*;
+use super::{MemoryHook, memory_shape};
 use crate::security_epoch::{restore_authority, restore_cut};
+use anyhow::{Result, ensure};
+use day2_capabilities::credentials::Namespace;
+use rusqlite::Transaction;
 
 /// All selection/entropy/reference preparation precedes this SQL-only unit.
 /// The future accepting caller separately retains actual approval/exclusion,
 /// complete artifact/model admission and the same creator-file owner.
-struct Selection<'a> {
+pub(super) struct Selection<'a> {
     namespace: &'a Namespace,
     source_epoch: u64,
+    artifact: &'a crate::artifact::LoadedArtifact,
     fence: &'a restore_authority::PreparedRestoreFence,
     authority_schema: &'a restore_authority::RestoreFenceSchema,
     oauth_schema: &'a crate::oauth::restore::Profile,
     cut: &'a restore_cut::Cut,
 }
 
-type Summary = crate::oauth::restore::ApplicationResetSummary;
+pub(super) type Summary = crate::oauth::restore::ApplicationResetSummary;
 
-fn reset(db: &Connection, selected: &Selection<'_>) -> Result<Summary> {
+pub(super) fn reset_in(
+    tx: &Transaction<'_>,
+    hook: &MemoryHook<'_>,
+    selected: &Selection<'_>,
+    namespace: &Namespace,
+    source_epoch: u64,
+) -> Result<Summary> {
     ensure!(
-        db.is_autocommit(),
+        !tx.is_autocommit(),
         "complete_restore_requires_owned_transaction"
     );
-    memory_shape(db, None)?;
     ensure!(
-        db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))?
-            && db.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?
+        selected.namespace == namespace && selected.source_epoch == source_epoch,
+        "complete_restore_staging_input_changed"
+    );
+    memory_shape(tx, None)?;
+    ensure!(
+        tx.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))?
+            && tx.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?
                 == "memory",
         "complete_restore_memory_configuration_required"
     );
-    // Begin outside admission: its SAVEPOINT belongs inside this outer TX.
-    // The called concrete operation owns one cumulative rollback scope and
-    // cannot return an applied-cut loan or a raw connection.
-    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
-    let summary = crate::oauth::restore::reset_application_in(
-        &tx,
+    selected.artifact.require_current_api()?;
+    selected.cut.require_artifact(selected.artifact)?;
+    ensure!(
+        crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),
+        "complete_restore_source_artifact_changed"
+    );
+    let scope = format!(
+        "{}/{}/{}",
+        namespace.installation.as_str(),
+        namespace.environment.as_str(),
+        namespace.app.as_str()
+    );
+    crate::store::validate_storage_in(tx, selected.artifact, &scope)?;
+    // The canonical operation's cumulative admission SAVEPOINT belongs inside
+    // this same outer transaction. Only prepare_image commits, serializes and
+    // closes it; no applied-cut loan or raw connection can escape this call.
+    crate::oauth::restore::reset_application_in(
+        (tx, hook),
         selected.fence,
         selected.authority_schema,
         selected.oauth_schema,
         selected.cut,
         selected.namespace,
         selected.source_epoch,
-    )?;
-    tx.commit()?;
-    Ok(summary)
+    )
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

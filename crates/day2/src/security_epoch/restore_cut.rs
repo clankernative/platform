@@ -84,6 +84,22 @@ impl Cut {
         &self.record.inventory
     }
 
+    /// Exact historical artifact/schema DATA binding. The ordinary storage
+    /// validator also admits selected rollout artifacts; that alternative is
+    /// not an exact archive binding and cannot replace this comparison.
+    /// Loading/admitting the actual artifact happens outside the SQL unit.
+    pub(in crate::security_epoch) fn require_artifact(
+        &self,
+        artifact: &crate::artifact::LoadedArtifact,
+    ) -> Result<()> {
+        ensure!(
+            self.record.intent.archive.artifact.as_str() == artifact.id()
+                && self.record.intent.archive.schema.as_str() == artifact.contract().schema_digest,
+            "restore_cut_artifact_changed"
+        );
+        Ok(())
+    }
+
     pub(crate) fn encoded(&self) -> Result<String> {
         Ok(serde_json::to_string(&self.record)?)
     }
