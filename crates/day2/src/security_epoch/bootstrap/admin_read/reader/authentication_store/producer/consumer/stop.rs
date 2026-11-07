@@ -3,8 +3,9 @@
 //! grant-use/root-fence send/readback and the complete real peer/issuer stop.
 use super::super::super::super::super::ControllerAdminReadLoan;
 use super::super::super::super::ControllerAdminReader;
-use super::{AuthenticatedRestoreExecution, approval_window};
+use super::approval_window;
 use crate::security_epoch::{
+    bootstrap::AuthenticatedRestoreExecution,
     kernel::{self, restore::approval_use},
     native_enrollment::{AuthorityStopData, FrozenRoleIssuer},
     restore_original::RestoreObservation,
