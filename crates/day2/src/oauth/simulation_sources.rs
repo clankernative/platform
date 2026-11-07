@@ -59,6 +59,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         "native_management/response_tickets.rs",
         include_str!("native_management/response_tickets.rs"),
     ),
+    (
+        "native_management/response_tickets/sql_debt_tests.rs",
+        include_str!("native_management/response_tickets/sql_debt_tests.rs"),
+    ),
     ("native_original.rs", include_str!("native_original.rs")),
     ("outbound.rs", include_str!("outbound.rs")),
     ("profiles.rs", include_str!("profiles.rs")),
@@ -450,7 +454,16 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         ("native_http", &["response_io.rs"][..]),
         (
             "native_management",
-            &["request.rs", "response.rs", "response_tickets.rs"][..],
+            &[
+                "request.rs",
+                "response.rs",
+                "response_tickets",
+                "response_tickets.rs",
+            ][..],
+        ),
+        (
+            "native_management/response_tickets",
+            &["sql_debt_tests.rs"][..],
         ),
         ("security_shell", &["passkey_export.rs"][..]),
     ] {

@@ -53,7 +53,7 @@ mod supply_tests;
 // directly, as every in-crate fixture does, and those fields are this module's.
 #[cfg(test)]
 #[path = "delegation_capability_tests.rs"]
-mod delegation_capability_tests;
+pub(crate) mod delegation_capability_tests;
 
 #[cfg(test)]
 #[path = "delegation_status_tests.rs"]
