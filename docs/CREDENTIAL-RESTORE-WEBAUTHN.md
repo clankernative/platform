@@ -47,3 +47,50 @@ authenticate an ordinary IAP session as a passkey ceremony.
 
 References: [WebAuthn assertion verification](https://www.w3.org/TR/webauthn-3/#sctn-verifying-assertion)
 and [signature counters](https://www.w3.org/TR/webauthn-3/#sctn-sign-counter).
+
+## Durable challenge store (closed source)
+
+The private store accepts only the verifier's closed trusted-key input. It adds
+no production installer, database path, global credential database or native
+authority factory. Its real SQLite fixtures use a separate instance-auth store,
+never a restored app database. Production still requires actual owned-handle,
+filesystem, SQL, current-policy and qualified-clock admission.
+
+Pending challenges are create-only and bind the complete request/enrollment
+digests, nonce, exact key storage version/counter and a bounded ceremony interval
+of at most five minutes. This ceremony interval is separate from the signed
+approval's fixed one-hour lifetime and does not extend an HTTP original.
+
+Completion first commits a pending-to-claimed tombstone under the exact active
+key/version condition. Only then does it verify the assertion and its observed
+time. Failed signatures, equality at expiry, rewind, death or unknown completion
+cannot make that challenge pending again. A lost in-memory continuation cannot
+be reconstructed from a claimed or verified row.
+
+After signature verification, a second transaction freshly compares the active
+key binding, storage version and counter. It atomically increments that version,
+updates the counter and changes the challenge to verified. Key removal, changed
+stored enrollment bindings and equal-value rewrites with a new version refuse. Counterless
+passkeys also advance the storage version. Two valid assertions racing one
+challenge have at most one successful durable completion.
+
+The store refuses memory/off journals and synchronous modes weaker than FULL.
+These settings are not native or power-loss qualification. Results and all
+claimed/verified rows are DATA: they do not sign approval, authenticate a current
+admin, construct VerifiedApproval, renew clocks or authorize a restore. A future
+producer must retain the real current authority and check it after known commits
+and before signing. An error after a commit withholds the result without
+pretending that durable writes rolled back.
+
+All ledger DDL, reads and writes explicitly name `main`, as do the durability
+PRAGMAs. TEMP tables cannot substitute current-key data or absorb a claim that
+disappears on close; an attached database is never a fallback for missing main
+state. The conformance controls inspect the complete main snapshot after reopen.
+
+The stored binding/version/enabled checks do not themselves authenticate a
+current `policy.admins` member. The registry-change test changes stored binding
+DATA, not a genuine policy owner. Likewise the scalar time is an observation
+used by the store, not a fresh post-commit qualified-clock proof. Actual current
+admin policy, the exact SQL/FD/storage selection and fresh original-clock checks
+must fence both commits and final signing in the future producer. Neither a raw
+connection nor returned assertion facts can supply that producer's authority.
