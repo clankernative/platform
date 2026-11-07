@@ -2524,6 +2524,59 @@ mod tests {
     }
 
     #[test]
+    fn tool_bootstrap_retries_only_downloads_and_checks_pins_before_installation() {
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        assert!(!ci.contains("opentofu/setup-opentofu@"));
+        assert!(!ci.contains("bazelisk-cache: true"));
+        for step in ci.split("      - ") {
+            if step.contains("name: Download the pinned Linux Bazel executable")
+                || step.contains("name: Download the pinned Mac Bazel executable")
+                || step.contains("name: Install the pinned OpenTofu CLI")
+            {
+                for required in [
+                    "timeout-minutes: 4",
+                    "--fail",
+                    "--retry 4",
+                    "--retry-delay 5",
+                    "--retry-max-time 120",
+                    "--connect-timeout 15",
+                    "--max-time 60",
+                    "--proto '=https'",
+                    "--proto-redir '=https'",
+                ] {
+                    assert!(step.contains(required), "missing {required}");
+                }
+                assert!(!step.contains("--insecure") && !step.contains("--retry-all-errors"));
+            }
+            if step.contains("name: Install the pinned OpenTofu CLI") {
+                assert!(step.contains("/download/v1.11.5/tofu_1.11.5_"));
+                let expected = if step.contains("darwin_arm64.zip") {
+                    "ce81702643dcdea497259b4de4639d9ee73746560683b9d2b778aae8f7d62827"
+                } else {
+                    assert!(step.contains("linux_amd64.zip"));
+                    "901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13"
+                };
+                assert!(step.contains(expected));
+                assert!(step.find("--check").unwrap() < step.find("unzip ").unwrap());
+                assert!(step.find("unzip ").unwrap() < step.find("GITHUB_PATH").unwrap());
+            }
+        }
+        let mac = ci_job("verify-mac-compatibility");
+        let checked = mac.find("name: Verify the pinned Mac Bazel bytes").unwrap();
+        let installed = mac
+            .find("name: Install the pinned Mac Bazel executable")
+            .unwrap();
+        let invoked = mac
+            .find("name: Compile and install the current verifier with Bazel")
+            .unwrap();
+        assert!(checked < installed && installed < invoked);
+        assert!(
+            ci_step(&mac, "Verify the pinned Mac Bazel bytes")
+                .contains("f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a")
+        );
+    }
+
+    #[test]
     fn single_file_verifier_archive_materializes_hard_links_without_restoring_outputs() -> Result<()>
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};

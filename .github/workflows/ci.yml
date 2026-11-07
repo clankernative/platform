@@ -91,9 +91,11 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -111,7 +113,7 @@ jobs:
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
@@ -217,9 +219,11 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -237,7 +241,7 @@ jobs:
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
@@ -278,10 +282,14 @@ jobs:
           compression-level: 0
           retention-days: 3
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
+          echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
@@ -481,15 +489,30 @@ jobs:
           persist-credentials: false
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
       - name: Install the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Download the pinned Mac Bazel executable
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-darwin-arm64
+      - name: Verify the pinned Mac Bazel bytes
+        run: echo 'f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a  /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64' | shasum -a 256 --check
+      - name: Install the pinned Mac Bazel executable
+        run: |
+          mkdir -p /tmp/day2-bazel-tools/bin
+          install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64 /tmp/day2-bazel-tools/bin/bazel
+          echo /tmp/day2-bazel-tools/bin >> "$GITHUB_PATH"
       - name: Restore checksum-addressed Bazel source downloads
         continue-on-error: true
         timeout-minutes: 3
@@ -501,7 +524,7 @@ jobs:
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
@@ -517,10 +540,14 @@ jobs:
             day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-mac --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_darwin_arm64.zip
+          echo 'ce81702643dcdea497259b4de4639d9ee73746560683b9d2b778aae8f7d62827  /tmp/day2-opentofu/tofu.zip' | shasum -a 256 --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
@@ -954,9 +981,11 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -974,7 +1003,7 @@ jobs:
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
@@ -1210,9 +1239,11 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -1230,7 +1261,7 @@ jobs:
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
@@ -1252,10 +1283,14 @@ jobs:
           path: ~/.cache/bazel-disk
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
+          echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1585,9 +1620,11 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -1605,7 +1642,7 @@ jobs:
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
@@ -1904,9 +1941,11 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -1924,7 +1963,7 @@ jobs:
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: false
           disk-cache: false
           cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
@@ -1943,10 +1982,14 @@ jobs:
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
+          echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1998,10 +2041,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
+          echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: tofu fmt -check -recursive deploy/gke/stacks
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -2027,10 +2074,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
+          echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: tofu fmt -check -recursive deploy/integrations
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -2059,10 +2110,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
+          echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: tofu fmt -check -recursive deploy/integrations/firestore-security-epoch
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -2088,10 +2143,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
+          echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
       - run: tofu fmt -check -recursive deploy/integrations/gke-security-epoch-access
       - name: Restore lockfile-keyed OpenTofu providers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
