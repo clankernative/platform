@@ -140,12 +140,16 @@ fn before(calls: &[String], first: &str, last: &str) -> bool {
 fn wired(reader: &str, resource: &str, loan: &str) -> bool {
     let accept = calls(reader, "ControllerAdminReader", "capture");
     let open = calls(resource, "ControllerAdminSqlite", "open");
-    let read = calls(resource, "ControllerAdminSqlite", "read");
+    let read = calls(resource, "ControllerAdminSqlite", "read_unit");
+    let active = calls(resource, "ControllerAdminSqlite", "read");
+    let fenced = calls(resource, "ControllerAdminSqlite", "read_fenced");
     let finish = calls(reader, "ControllerAdminReader", "finish_checked");
     let forward_close = calls(resource, "ControllerAdminSqlite", "close");
     let close = calls(loan, "ControllerAdminReadLoan", "close_reader");
     let final_peer = calls(loan, "ControllerAdminReadLoan", "finish_checked");
-    before(&accept, "check_action", "open")
+    active == ["Active", "read_unit"]
+        && fenced == ["Fenced", "read_unit"]
+        && before(&accept, "check_action", "open")
         && before(&open, "retain_reader", "configure_connection")
         && before(&read, "begin_retained_sql", "transaction")
         && before(&read, "check_database", "project")
@@ -189,6 +193,24 @@ fn production_reader_never_releases_peer_from_autocommit_or_unclosed_sql() {
         assert!(!wired(&changed, resource, loan), "must reject {old}");
     }
     for (old, new) in [
+        // Both fixed callers must enter that SAME real SQL unit through their
+        // actual closed borrower; neither may bypass it or swap authority.
+        (
+            "self.read_unit(ReadLoan::Active(loan), metadata)",
+            "unreachable!()",
+        ),
+        (
+            "self.read_unit(ReadLoan::Fenced(loan), metadata)",
+            "unreachable!()",
+        ),
+        (
+            "self.read_unit(ReadLoan::Active(loan), metadata)",
+            "self.read_unit(ReadLoan::Fenced(loan), metadata)",
+        ),
+        (
+            "self.read_unit(ReadLoan::Fenced(loan), metadata)",
+            "self.read_unit(ReadLoan::Active(loan), metadata)",
+        ),
         ("loan.retain_reader(&connection)?;", ""),
         (
             "loan.begin_retained_sql(\n            self.connection\n                .as_ref()\n                .context(\"controller_admin_reader_closed\")?,\n        )?;",

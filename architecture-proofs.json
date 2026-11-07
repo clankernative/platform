@@ -37,6 +37,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/bootstrap.rs",
+      "scope": "const",
+      "fingerprint": "sha256:8c3e8bb23b254e0a29dc0870530370d3a21ef00d03ff56a0c0030a8d7473b85d",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
       "scope": "const",
       "fingerprint": "sha256:783ad55850ae3c501006cf32c591c13e6c15211e765a2cafdc63dff998385e01",
@@ -62,6 +68,12 @@
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
       "scope": "const",
       "fingerprint": "sha256:fc6dfeed376181dbf495a6c74f6457a415321a65140416196d41fcfe90e5e669",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f8eb9a96aaf8206b66b21681ed27120601d885cb888b387313e20f646b46f8e6",
       "registration": null
     },
     {
@@ -2087,6 +2099,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -2187,6 +2206,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
           }
         },
         {
@@ -2293,6 +2319,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -2385,6 +2418,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
           }
         },
         {
@@ -2522,6 +2562,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
         }
       ],
       "methods": [
@@ -2648,6 +2695,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
         }
       ],
       "methods": [
@@ -2692,6 +2746,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
           }
         }
       ],
@@ -2776,6 +2837,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
           }
         }
       ],
@@ -2889,6 +2957,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
         }
       ]
     },
@@ -2901,6 +2976,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
           }
         }
       ],
@@ -2954,6 +3036,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
             "module": "consumer"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
         }
       ],
       "methods": [
@@ -2989,7 +3078,15 @@
       "type_name": "AuthenticatedRestoreExecution",
       "kind": "private_material",
       "consuming_methods": [],
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
+        }
+      ],
       "methods": [
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < RestoreObservation >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)"
@@ -3019,7 +3116,15 @@
       "consuming_methods": [
         "authenticate"
       ],
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+            "module": "stop"
+          }
+        }
+      ],
       "methods": [
         "pub (in crate :: security_epoch) fn authenticate < 'metadata , 'storage , 'role > (self , mut input : RestoreExecutionReader < 'metadata , 'storage , 'role > , assertion : & Assertion) -> Result < Option < AuthenticatedRestoreExecution < 'metadata , 'storage , 'role > > >",
         "pub (in crate :: security_epoch) fn challenge_data (& self) -> Result < String >"
@@ -3041,6 +3146,190 @@
         }
       ],
       "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "FencedReadUnit",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (crate) fn begin_retained_sql (& mut self , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (crate) fn check_current (& mut self) -> Result < () >",
+        "pub (crate) fn check_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (crate) fn check_local (& mut self) -> Result < () >",
+        "pub (crate) fn check_metadata (& mut self , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >",
+        "pub (crate) fn end_retained_sql (& mut self , db : & rusqlite :: Connection , completed : & Result < () >) -> Result < () >",
+        "pub (crate) fn end_sql (& mut self , completed : & Result < () >) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "FencedRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn registry_data (& mut self) -> Result < crate :: security_epoch :: ControllerRegistryData >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn begin_retained_sql (& mut self , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_current (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_database (& mut self , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_metadata (& mut self , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >"
+        },
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn end_retained_sql (& mut self , db : & rusqlite :: Connection , completed : & Result < () >) -> Result < () >"
+        },
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn end_sql (& mut self , completed : & Result < () >) -> Result < () >"
+        },
+        {
+          "owner": "FencedReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "FencedRegistryLoan",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn registry_data (& mut self) -> Result < crate :: security_epoch :: ControllerRegistryData >"
+      ],
+      "factories": [
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "fn check_current_inner (& mut self) -> Result < RestoreObservation >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "FencedRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "FencedRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "FencedRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn registry_data (& mut self) -> Result < crate :: security_epoch :: ControllerRegistryData >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "FencedRestoreContinuation",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn borrow_write (& mut self) -> Result < RestoreWriteLoan < '_ , 'metadata , 'storage , 'role > >",
+        "fn check_current (& mut self) -> Result < RestoreObservation >",
+        "fn check_current_inner (& mut self) -> Result < RestoreObservation >",
+        "fn check_local (& mut self) -> Result < () >",
+        "fn check_local_inner (& mut self) -> Result < () >",
+        "fn refuse (& mut self)"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "fn check_current (& mut self) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "fn check_current_inner (& mut self) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "fn check_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "fn check_local_inner (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn borrow_write (& mut self) -> Result < RestoreWriteLoan < '_ , 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "LostRestoreLoan",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn borrow_write (& mut self) -> Result < RestoreWriteLoan < '_ , 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "owning_children": [],
+      "destructor": "sha256:ff86d3827decf4c697e13e9d9944ae3b265085d59a0cb243d771e2288fce7942"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "RestoreWriteLoan",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check_current (& mut self) -> Result < RestoreObservation >",
+        "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "FencedRestoreContinuation < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn borrow_write (& mut self) -> Result < RestoreWriteLoan < '_ , 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check_current (& mut self) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RestoreWriteLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
     },
     {
       "source": "crates/day2/src/security_epoch/control_slot_io.rs",
@@ -5922,6 +6211,10 @@
         {
           "owner": "ControllerExecutionCeremony",
           "signature": "pub (in crate :: security_epoch) fn issue_durable (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , window : (i64 , i64)) -> Result < Digest >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
         }
       ],
       "material_uses": [
@@ -5980,6 +6273,10 @@
         {
           "owner": "TrustedKey < '_ >",
           "signature": "fn validate (& self) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "fn verified_completion_snapshot (db : & mut rusqlite :: Connection , key : & TrustedKey < '_ > , challenge : & super :: super :: super :: Challenge , counter : u32) -> Result < (i64 , Digest) >"
         }
       ],
       "proof_uses": [],
@@ -6069,6 +6366,10 @@
         {
           "owner": "ControllerExecutionCeremony",
           "signature": "pub (in crate :: security_epoch) fn issue_durable (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , window : (i64 , i64)) -> Result < Digest >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
         }
       ],
       "material_uses": [
@@ -6305,7 +6606,8 @@
       "consuming_methods": [],
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
       ],
       "factories": [
         {
@@ -6317,6 +6619,10 @@
         {
           "owner": "ExecutionCompletion",
           "signature": "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
         }
       ],
       "proof_uses": []
@@ -7295,7 +7601,8 @@
         "pub (in crate :: security_epoch) fn qualify_time (& mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ > , operation : Digest) -> Result < HostTimeData >",
         "fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn require_qualified (& mut self , operation : & Digest) -> Result < () >",
-        "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >"
+        "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >",
+        "pub (in crate :: security_epoch) fn current_fenced_time (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >"
       ],
       "factories": [
         {
@@ -7339,6 +7646,10 @@
         {
           "owner": "PortOwner < '_ , '_ , '_ , '_ >",
           "signature": "fn check (& mut self , source : & mut NativeApprovalSource) -> Result < () >"
+        },
+        {
+          "owner": "NativeApprovalSource",
+          "signature": "pub (in crate :: security_epoch) fn current_fenced_time (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >"
         }
       ],
       "proof_uses": [],
@@ -8125,7 +8436,9 @@
         "pub (crate) fn check_handles (& self) -> Result < () >",
         "pub (crate) fn close (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < () >",
         "pub (crate) fn open (loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < Self >",
-        "pub (crate) fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
+        "pub (crate) fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >",
+        "pub (crate) fn read_fenced (& mut self , loan : & mut crate :: security_epoch :: FencedReadUnit < '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >",
+        "fn read_unit (& mut self , mut loan : ReadLoan < '_ , '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
       ],
       "factories": [
         {
@@ -8145,6 +8458,14 @@
         {
           "owner": "ControllerAdminSqlite",
           "signature": "pub (crate) fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
+        },
+        {
+          "owner": "ControllerAdminSqlite",
+          "signature": "fn read_unit (& mut self , mut loan : ReadLoan < '_ , '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
+        },
+        {
+          "owner": "ControllerAdminSqlite",
+          "signature": "pub (crate) fn read_fenced (& mut self , loan : & mut crate :: security_epoch :: FencedReadUnit < '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
         }
       ],
       "proof_uses": [],

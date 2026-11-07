@@ -10,8 +10,10 @@ use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 
 mod authentication_store;
+pub(crate) use authentication_store::FencedReadUnit;
 pub(in crate::security_epoch) use authentication_store::{
-    CompletedCeremony, RestoreAuthenticationAction,
+    CompletedCeremony, FencedRegistryLoan, FencedRestoreContinuation, RestoreAuthenticationAction,
+    RestoreWriteLoan,
 };
 
 /// Fields drop in declaration order: SQLite closes before the actual native

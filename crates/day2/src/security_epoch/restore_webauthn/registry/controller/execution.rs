@@ -4,8 +4,9 @@
 use super::super::super::TrustedKey;
 use super::super::{Origin, RegistryCeremony};
 use super::{
-    Assertion, AuthenticationBorrow, ControllerAdminReader, ControllerRegistryData, Instance,
-    KeyRecord, KeySource, controller_record, file, settle_verification,
+    Assertion, AuthenticationBorrow, AuthenticationReader, ControllerAdminReader,
+    ControllerRegistryData, Instance, KeyRecord, KeySource, controller_record, file,
+    settle_verification,
 };
 use crate::security_epoch::{
     AuthenticationStoreFiles, restore_approval::signed::SignedApprovalRecord,
@@ -292,7 +293,7 @@ impl ControllerExecutionCeremony {
             self.observe(reader)?;
             let challenge = self.ceremony.challenge()?;
             let mut borrow = AuthenticationBorrow {
-                reader: &mut *reader,
+                reader: AuthenticationReader::Active(&mut *reader),
                 held: &self.ceremony.held,
                 files: &mut *files,
             };
@@ -348,7 +349,7 @@ impl ControllerExecutionCeremony {
             self.ceremony.begin_attempt()?;
             self.observe(reader)?;
             let mut borrow = AuthenticationBorrow {
-                reader: &mut *reader,
+                reader: AuthenticationReader::Active(&mut *reader),
                 held: &self.ceremony.held,
                 files: &mut *files,
             };
@@ -409,7 +410,7 @@ impl ControllerExecutionCeremony {
             self.observe(reader)?;
             let challenge = self.ceremony.challenge()?;
             let mut borrow = AuthenticationBorrow {
-                reader: &mut *reader,
+                reader: AuthenticationReader::Active(&mut *reader),
                 held: &self.ceremony.held,
                 files: &mut *files,
             };
@@ -419,16 +420,7 @@ impl ControllerExecutionCeremony {
                     owner: RefCell::new(&mut borrow),
                 }),
             };
-            key.check_sqlite(db)?;
-            let tx = db.transaction()?;
-            let snapshot =
-                super::super::super::store::verified_snapshot(&tx, &key, &challenge, counter)?;
-            key.check_sqlite(&tx)?;
-            let committed = tx.commit();
-            let checked = key.check_sqlite(db);
-            committed?;
-            checked?;
-            Ok(snapshot)
+            verified_completion_snapshot(db, &key, &challenge, counter)
         })();
         let held = crate::store::check_authentication_sqlite(files, db);
         let native = reader.check_registry_local();
@@ -449,6 +441,25 @@ impl ControllerExecutionCeremony {
     }
 }
 
+// The exact verified-row unit is shared; only its actual native read owner
+// differs. No alternate verifier or callback can manufacture a completion.
+fn verified_completion_snapshot(
+    db: &mut rusqlite::Connection,
+    key: &TrustedKey<'_>,
+    challenge: &super::super::super::Challenge,
+    counter: u32,
+) -> Result<(i64, Digest)> {
+    key.check_sqlite(db)?;
+    let tx = db.transaction()?;
+    let snapshot = super::super::super::store::verified_snapshot(&tx, key, challenge, counter)?;
+    key.check_sqlite(&tx)?;
+    let committed = tx.commit();
+    let checked = key.check_sqlite(db);
+    committed?;
+    checked?;
+    Ok(snapshot)
+}
+
 /// An in-memory completion from this exact verified SQL/native unit, not a
 /// consumed approval or native execution owner. It cannot be recovered from
 /// the persisted verified row. The accepting owner must retain the actual
@@ -462,6 +473,88 @@ pub(in crate::security_epoch) struct ExecutionCompletion {
 }
 
 impl ExecutionCompletion {
+    pub(in crate::security_epoch) fn check_fenced(
+        &self,
+        reader: &mut crate::security_epoch::bootstrap::FencedRegistryLoan<'_, '_, '_, '_>,
+        sql: (&mut rusqlite::Connection, &mut AuthenticationStoreFiles),
+        signed: &SignedApprovalRecord,
+        operation: &Digest,
+    ) -> Result<()> {
+        let (db, files) = sql;
+        let observe = |reader: &mut crate::security_epoch::bootstrap::FencedRegistryLoan<
+            '_,
+            '_,
+            '_,
+            '_,
+        >|
+         -> Result<()> {
+            ensure!(
+                !self.ceremony.ceremony.refused.get(),
+                "restore_registry_ceremony_refused"
+            );
+            let context = reader.registry_data()?;
+            let held = &self.ceremony.ceremony.held;
+            held.require_path(&context.selector)?;
+            let instance = Instance::from_bytes(&held.read()?)
+                .map_err(|_| anyhow::anyhow!("restore_registry_config_invalid"))?;
+            ensure!(
+                executor_record(
+                    &instance,
+                    &context,
+                    held.binding()?,
+                    &self.ceremony.ceremony.record.credential_id,
+                    signed
+                )? == self.ceremony.ceremony.record,
+                "restore_registry_selection_changed"
+            );
+            held.check_local()?;
+            reader.check_local()
+        };
+        let requested = (|| {
+            ensure!(
+                std::ptr::eq(self.database, std::ptr::from_ref(db))
+                    && signed == &self.ceremony.signed
+                    && operation == &self.ceremony.operation,
+                "restore_executor_completion_owner_changed"
+            );
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            observe(reader)?;
+            let challenge = self.ceremony.ceremony.challenge()?;
+            let mut borrow = AuthenticationBorrow {
+                reader: AuthenticationReader::Fenced(&mut *reader),
+                held: &self.ceremony.ceremony.held,
+                files: &mut *files,
+            };
+            let key = TrustedKey {
+                record: self.ceremony.ceremony.record.clone(),
+                source: KeySource::Registry(Origin {
+                    owner: RefCell::new(&mut borrow),
+                }),
+            };
+            let current = verified_completion_snapshot(db, &key, &challenge, self.counter)?;
+            ensure!(
+                current.0 == self.version && current.1 == self.snapshot,
+                "restore_executor_completion_changed"
+            );
+            Ok(())
+        })();
+        let held = crate::store::check_authentication_sqlite(files, db);
+        let native = reader.check_local();
+        let checked = (|| {
+            held?;
+            native?;
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            observe(reader)
+        })();
+        if requested.is_err() || checked.is_err() {
+            self.ceremony.ceremony.refused.set(true);
+            files.refuse();
+            reader.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn check_current(
         &self,
         reader: &mut ControllerAdminReader<'_, '_, '_>,

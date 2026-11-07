@@ -191,6 +191,33 @@ impl NativeApprovalSource {
         requested
     }
 
+    pub(in crate::security_epoch) fn current_fenced_time(
+        &mut self,
+        phase: &mut CurrentControllerStoragePhase<'_, '_>,
+    ) -> Result<HostTimeData> {
+        let requested = (|| {
+            self.check_phase(phase)?;
+            let time = self.clock.observe(phase)?;
+            let qualified = self
+                .qualified
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("restore_approval_time_not_qualified"))?;
+            ensure!(
+                time.lower >= qualified.upper,
+                "restore_approval_qualified_time_rewound"
+            );
+            Ok(time)
+        })();
+        let checked = self.check_phase(phase);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            phase.refuse();
+        }
+        let time = requested?;
+        checked?;
+        Ok(time)
+    }
+
     pub(in crate::security_epoch) fn qualify_time(
         &mut self,
         action: &mut RestoreAuthenticationAction<'_, '_, '_>,

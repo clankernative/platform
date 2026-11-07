@@ -661,3 +661,25 @@ fenced writer continuation and actual target-writer transitions remain separate.
 Additional issuer history and unsupported escaping authority refuse rather than
 being silently omitted. Portable wire/ledger/source controls do not qualify
 native process death, concurrent drain or operational restore.
+
+
+### Private fenced continuation boundary
+
+The private continuation representation retains the whole authenticated executor,
+authorization-store files, unchanged original, frozen issuer, exact reservation
+plan and known Fenced snapshot. Its sole writer borrow is spent before checking.
+A nongeneric lost-loan guard refuses that same retained owner on abandonment;
+checks mark refusal before work and restore availability only after actual success.
+A caught panic, dropped successful loan or failed postcheck cannot reopen it.
+
+Fenced policy reads borrow a distinct closed reader and use the existing retained
+SQLite unit with its complete MAIN/WAL/SHM and transaction checks. The old Active
+path stays Active-only; no caller phase flag, raw owner/descriptor getter or
+provider work inside SQL is added. Current executor/passkey registry selection,
+qualified time, original interval, peer and exact Fenced read set are checked.
+
+There is deliberately no accepting constructor. It requires the actual known
+approval-use/Fenced conditional send and readback plus genuine historical-key
+availability under current custody. A plan, receipt, archive key list or public
+observation cannot supply those. Fixed target-writer transitions, new-generation
+serving adoption and deployed restore qualification remain separate work.
