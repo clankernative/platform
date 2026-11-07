@@ -47,3 +47,95 @@ authenticate an ordinary IAP session as a passkey ceremony.
 
 References: [WebAuthn assertion verification](https://www.w3.org/TR/webauthn-3/#sctn-verifying-assertion)
 and [signature counters](https://www.w3.org/TR/webauthn-3/#sctn-sign-counter).
+
+## Durable challenge store (closed source)
+
+The private store accepts only the verifier's closed trusted-key input. It adds
+no production installer, database path, global credential database or native
+authority factory. Its real SQLite fixtures use a separate instance-auth store,
+never a restored app database. Production still requires actual owned-handle,
+filesystem, SQL, current-policy and qualified-clock admission.
+
+Pending challenges are create-only and bind the complete request/enrollment
+digests, nonce, exact key storage version/counter and a bounded ceremony interval
+of at most five minutes. This ceremony interval is separate from the signed
+approval's fixed one-hour lifetime and does not extend an HTTP original.
+
+Completion first commits a pending-to-claimed tombstone under the exact active
+key/version condition. Only then does it verify the assertion and its observed
+time. Failed signatures, equality at expiry, rewind, death or unknown completion
+cannot make that challenge pending again. A lost in-memory continuation cannot
+be reconstructed from a claimed or verified row.
+
+After signature verification, a second transaction freshly compares the active
+key binding, storage version and counter. It atomically increments that version,
+updates the counter and changes the challenge to verified. Key removal, changed
+stored enrollment bindings and equal-value rewrites with a new version refuse. Counterless
+passkeys also advance the storage version. Two valid assertions racing one
+challenge have at most one successful durable completion.
+
+The store refuses memory/off journals and synchronous modes weaker than FULL.
+These settings are not native or power-loss qualification. Results and all
+claimed/verified rows are DATA: they do not sign approval, authenticate a current
+admin, construct VerifiedApproval, renew clocks or authorize a restore. A future
+producer must retain the real current authority and check it after known commits
+and before signing. An error after a commit withholds the result without
+pretending that durable writes rolled back.
+
+All ledger DDL, reads and writes explicitly name `main`, as do the durability
+PRAGMAs. TEMP tables cannot substitute current-key data or absorb a claim that
+disappears on close; an attached database is never a fallback for missing main
+state. The conformance controls inspect the complete main snapshot after reopen.
+
+The stored binding/version/enabled checks do not themselves authenticate a
+current `policy.admins` member. The registry-change test changes stored binding
+DATA, not a genuine policy owner. Likewise the scalar time is an observation
+used by the store, not a fresh post-commit qualified-clock proof. Actual current
+admin policy, the exact SQL/FD/storage selection and fresh original-clock checks
+must fence both commits and final signing in the future producer. Neither a raw
+connection nor returned assertion facts can supply that producer's authority.
+
+## Existing authentication-store schema
+
+The closed `restore_webauthn::store::require_existing_schema` check admits only
+the complete main-database catalog derived from the store's existing canonical
+table declarations, including their implicit primary-key indexes. Missing or
+changed tables, constraints, indexes, views and triggers refuse. The check reads
+one transaction snapshot, requires no caller transaction to be open, and never
+creates, migrates or repairs the store. Temporary tables cannot replace a missing
+main table. Successful reads leave challenge/key rows unchanged.
+
+This is SQL shape admission only. Its native caller must retain the actual
+authentication-file lease, check the same original before and after the complete
+SQL unit, and withhold results on any failure. It proves neither outside-archive
+placement nor durable storage, current key trust, qualified time, single-use
+approval publication or restore authority. Native store admission and explicit
+store birth remain separate work.
+
+### Existing native authentication-ledger admission
+
+The current-reader admission consumes the actual accepting admin reader and keeps
+its unchanged original, App exclusion, native volume and counter/peer lifetime.
+It performs genuine provider/attachment and WAL/FULL filesystem qualification
+for the fixed authority-keyed sibling ledger, then compares SQLite's actual MAIN
+before configuration and retains the complete actual MAIN/WAL/SHM descriptor
+identities. The producer's canonical schema validator refuses missing, unknown
+or changed state; this path never creates or repairs a ledger.
+
+Full checks first inspect the actual authentication connection's autocommit
+state. Checks inside its SQL units are local owned-resource/original checks;
+policy/config/provider work happens only outside the unit. Completion closes the
+actual connection, runs native/file postchecks even on a close failure, releases
+the file pins, and only then settles the same reader. A later failed postcheck
+withholds results and makes no rollback promise.
+
+The first Linux profile uses O_PATH pins, so dropping a metadata pin does not
+close a regular alias that could release another connection's POSIX locks.
+Last-connection SQLite close may unlink WAL/SHM; that case refuses the retained
+postclose cohort check. This does not supply a standalone persistent keeper,
+PERSIST_WAL support, ledger birth, whole-volume rollback protection, approval,
+complete old-rights fencing or a new App writer. Genuine initialization with an
+external create-only birth record remains a separate operation. Target binding
+generation is committed DATA here; this admission does not invent a current
+namespace-generation producer or equate proposed target epoch/incarnation with
+the incumbent.

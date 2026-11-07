@@ -24,6 +24,7 @@ pub(crate) use initial::{
     CurrentControllerStoragePhase, CurrentStorageBootstrapPhase, InitialStorageContinuity,
     InitialStorageOutcome,
 };
+pub(crate) use native_volume::AuthenticationStoreFiles;
 use native_volume::NativeVolumeObservation;
 mod persistent_disk;
 pub(in crate::security_epoch) use persistent_disk::PersistentDiskSelection;

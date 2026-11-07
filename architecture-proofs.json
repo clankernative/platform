@@ -37,6 +37,11 @@
       "fingerprint": "sha256:6ed6ce9addf4aa1a22a543e7fbb1eee762be2d21238f891c65a1ea6842348a79"
     },
     {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+      "scope": "const",
+      "fingerprint": "sha256:053d8528c554666043a3ca2e51cba2133a81f486494ea01925fa4cefc21b8bad"
+    },
+    {
       "source": "crates/day2/src/security_epoch/credential_material.rs",
       "scope": "const",
       "fingerprint": "sha256:10d5afa272f4b447e9b29d5e934ea00fc853003d091eaf134498827b5ab66491",
@@ -77,6 +82,11 @@
       "scope": "const",
       "fingerprint": "sha256:5722fc840604c24fc0bba2020f0c7c8b028266eba9e5e625d07eafb731f54736",
       "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+      "scope": "const",
+      "fingerprint": "sha256:a09d9354f4b941f4a903252f336d2bbeb1bb5f4d92a4269706d5461fad682e31"
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
@@ -1735,6 +1745,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -1817,6 +1834,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -1894,6 +1918,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap.rs",
@@ -1965,6 +1996,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
             "module": "reader"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
           }
         },
         {
@@ -2081,6 +2119,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
             "module": "reader"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
+          }
         }
       ],
       "methods": [
@@ -2186,6 +2231,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/admin_read.rs",
             "module": "reader"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
+          }
         }
       ],
       "methods": [
@@ -2210,8 +2262,17 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
       "type_name": "ControllerAdminReader",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader.rs",
+            "module": "authentication_store"
+          }
+        }
+      ],
       "methods": [
+        "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >",
         "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
         "pub (crate) fn check_registry_local (& mut self) -> Result < () >",
@@ -2249,11 +2310,56 @@
         {
           "owner": "ControllerAdminReader < '_ , '_ , '_ >",
           "signature": "pub (crate) fn registry_data (& mut self) -> Result < ControllerRegistryData >"
+        },
+        {
+          "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
-      "consuming_methods": []
+      "consuming_methods": [
+        "admit_authentication_store"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
+      "type_name": "AuthenticationStoreAction",
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
+      ],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& mut self , expected : & ApprovalIntent) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , expected : & ApprovalIntent) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/control_slot_io.rs",
@@ -4646,6 +4752,22 @@
       "material_uses": [
         {
           "owner": null,
+          "signature": "fn claim (db : & mut Connection , key : & TrustedKey , id : & Digest , expected : & Digest) -> Result < Claimed >"
+        },
+        {
+          "owner": null,
+          "signature": "fn current (tx : & Transaction < '_ > , key : & TrustedKey) -> Result < (i64 , u32) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn complete (db : & mut Connection , key : & TrustedKey , id : & Digest , expected_request : & Digest , at : i64 , assertion : & Assertion) -> Result < AssertionFacts >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn issue (tx : & Transaction < '_ > , key : & TrustedKey , challenge : & Challenge , created_at : i64 , expires_at : i64) -> Result < Digest >"
+        },
+        {
+          "owner": null,
           "signature": "pub (super) fn verify (key : & TrustedKey < '_ > , challenge : & Challenge , expected_request : & Digest , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
         },
         {
@@ -4678,6 +4800,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
             "module": "file"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn.rs",
+            "module": "store"
           }
         }
       ]
@@ -4983,6 +5112,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
@@ -5225,6 +5361,7 @@
       "type_name": "CurrentControllerStoragePhase",
       "owning_children": [],
       "methods": [
+        "pub (in crate :: security_epoch) fn admit_authentication_store (& mut self) -> Result < AuthenticationStoreFiles >",
         "pub (in crate :: security_epoch) fn announce_and_read_app_consumed (& mut self , reads : & mut CounterRequest < '_ > , selection : & EpochStore , names : & Names , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < EpochObservation >",
         "pub (in crate :: security_epoch) fn app_request (& self) -> Result < & StoragePeerRequest >",
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >",
@@ -5250,6 +5387,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn admit_authentication_store (& mut self) -> Result < AuthenticationStoreFiles >"
+        },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn announce_and_read_app_consumed (& mut self , reads : & mut CounterRequest < '_ > , selection : & EpochStore , names : & Names , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < EpochObservation >"
@@ -5446,9 +5587,18 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
       "type_name": "CurrentVolumePhase",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "authentication_store"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition",
+        "pub (in crate :: security_epoch :: storage_authority) fn admit_authentication_store (& mut self , app : & File , anchor : & super :: super :: DirectoryIdentity , app_cohort : & SqliteCohort) -> Result < AuthenticationStoreFiles >",
         "pub (super) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >",
         "pub (super) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >",
         "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
@@ -5485,6 +5635,10 @@
       "material_uses": [
         {
           "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn admit_authentication_store (& mut self , app : & File , anchor : & super :: super :: DirectoryIdentity , app_cohort : & SqliteCohort) -> Result < AuthenticationStoreFiles >"
+        },
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
           "signature": "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition"
         },
         {
@@ -5519,7 +5673,15 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
       "type_name": "NativeVolumeContinuity",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "authentication_store"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentVolumePhase < 'volume , 'role > >",
         "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
@@ -5567,7 +5729,15 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
       "type_name": "NativeVolumeObservation",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "authentication_store"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < Self >",
         "pub (super) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
@@ -5619,6 +5789,56 @@
       "consuming_methods": [
         "retain_resources"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+      "type_name": "AuthenticationStoreFiles",
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
+      ],
+      "methods": [
+        "pub (crate) fn capture_cohort (& mut self) -> Result < () >",
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn finish_checked (mut self) -> Result < () >",
+        "pub (crate) fn path (& self) -> Result < PathBuf >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn require_opened (& mut self , main : (i32 , u64 , u64) , wal : Option < (i32 , u64 , u64) > , shm : Option < (i32 , u64 , u64) > , complete : bool) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn admit_authentication_store (& mut self , app : & File , anchor : & super :: super :: DirectoryIdentity , app_cohort : & SqliteCohort) -> Result < AuthenticationStoreFiles >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AuthenticationStoreFiles",
+          "signature": "pub (crate) fn capture_cohort (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticationStoreFiles",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticationStoreFiles",
+          "signature": "pub (crate) fn finish_checked (mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticationStoreFiles",
+          "signature": "pub (crate) fn path (& self) -> Result < PathBuf >"
+        },
+        {
+          "owner": "AuthenticationStoreFiles",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "AuthenticationStoreFiles",
+          "signature": "pub (crate) fn require_opened (& mut self , main : (i32 , u64 , u64) , wal : Option < (i32 , u64 , u64) > , shm : Option < (i32 , u64 , u64) > , complete : bool) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:7fe1a587517a979955f118f4925b6566039c88a1304f66be4fa57af08d4ad8e0"
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
@@ -5965,6 +6185,7 @@
       "type_name": "CurrentPhysicalFilePhase",
       "owning_children": [],
       "methods": [
+        "pub (in crate :: security_epoch :: storage_authority) fn admit_authentication_store (& mut self , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < AuthenticationStoreFiles >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_opened_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >",
@@ -5999,6 +6220,10 @@
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn admit_authentication_store (& mut self , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < AuthenticationStoreFiles >"
         },
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
@@ -6212,6 +6437,13 @@
       "type_name": "NativeSqliteKeeper",
       "owning_children": [
         {
+          "source": "crates/day2/src/store/native_storage/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
           "source": "crates/day2/src/store/native_storage/controller_admins.rs",
           "registration": {
             "source": "crates/day2/src/store/native_storage.rs",
@@ -6337,6 +6569,13 @@
       ],
       "proof_uses": [],
       "owning_children": [
+        {
+          "source": "crates/day2/src/store/native_storage/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "authentication_store"
+          }
+        },
         {
           "source": "crates/day2/src/store/native_storage/controller_admins.rs",
           "registration": {

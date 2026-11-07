@@ -14,7 +14,8 @@ use crate::security_epoch::{
     controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     storage_authority::{
-        DirectoryIdentity, ReviewedStorageSelection, native_volume::NativeVolumeContinuity,
+        AuthenticationStoreFiles, DirectoryIdentity, ReviewedStorageSelection,
+        native_volume::NativeVolumeContinuity,
     },
 };
 use anyhow::{Result, ensure};
@@ -590,6 +591,25 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
             self.inner.disposition.refuse();
         }
         result
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn admit_authentication_store(
+        &mut self,
+        cohort: &crate::security_epoch::native_enrollment::SqliteCohort,
+    ) -> Result<AuthenticationStoreFiles> {
+        self.check()?;
+        let requested = self.inner.phase.admit_authentication_store(
+            self.inner.directory,
+            self.inner.anchor,
+            cohort,
+        );
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let files = requested?;
+        checked?;
+        Ok(files)
     }
 
     pub(in crate::security_epoch::storage_authority) fn check_opened_admin_database(
