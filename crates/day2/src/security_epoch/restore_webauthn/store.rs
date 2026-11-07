@@ -1,12 +1,16 @@
 //! Durable challenge transitions behind the closed trusted-key input. No path,
 //! global database, production installer or native authority factory is added.
-//! A future native owner must supply its actual outside-restore SQL connection.
+//! The fixed native producer supplies its actual outside-restore connection and
+//! fences every complete unit with that connection's real native file owner.
 use super::{Assertion, AssertionFacts, Challenge, TrustedKey, verify};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::Digest;
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 const MAX_CEREMONY_SECONDS: i64 = 300;
+
+mod signing;
+pub(super) use signing::{check_may_sign, mark_may_sign, prepare_signing, record_publication};
 
 /// The one schema for the independently owned instance authentication store.
 /// Only the fixture installs it today. Existing-store admission derives its
@@ -30,6 +34,20 @@ const DDL: &str = "
         created_at INTEGER NOT NULL CHECK(created_at>=0),
         expires_at INTEGER NOT NULL CHECK(expires_at>created_at AND expires_at-created_at<=300),
         state TEXT NOT NULL CHECK(state IN ('pending','claimed','verified'))
+    ) STRICT;
+    CREATE TABLE main.restore_approval_issuance (
+        grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=71),
+        challenge_id TEXT NOT NULL CHECK(length(challenge_id)=71),
+        statement TEXT NOT NULL CHECK(length(statement)<=16384),
+        statement_digest TEXT NOT NULL CHECK(length(statement_digest)=71),
+        key_version INTEGER NOT NULL CHECK(key_version>0),
+        counter INTEGER NOT NULL CHECK(counter BETWEEN 0 AND 4294967295),
+        approved_at INTEGER NOT NULL CHECK(approved_at>=0),
+        expires_at INTEGER NOT NULL CHECK(expires_at-approved_at=3600),
+        state TEXT NOT NULL CHECK(state IN ('prepared','may_sign','published')),
+        signed_record TEXT,
+        CHECK((state='published' AND signed_record IS NOT NULL) OR
+              (state!='published' AND signed_record IS NULL))
     ) STRICT;";
 
 /// SQL shape admission only. The caller must retain its actual native file
@@ -99,11 +117,12 @@ pub(in crate::security_epoch) fn require_existing_schema(db: &Connection) -> Res
     Ok(())
 }
 
-fn challenge_id(challenge: &Challenge) -> Result<Digest> {
+pub(super) fn challenge_id(challenge: &Challenge) -> Result<Digest> {
     Digest::of(&("day2-restore-passkey-challenge-id-v1", challenge.encoded()?))
 }
 
 fn current(tx: &Transaction<'_>, key: &TrustedKey) -> Result<(i64, u32)> {
+    key.check_sqlite(tx)?;
     key.validate()?;
     // PRAGMAs refuse non-durable storage; they do not attest its actual FD,
     // filesystem/profile or outside-restore placement. The native owner must.
@@ -171,7 +190,7 @@ pub(super) fn issue(
         );
         Ok(id)
     })();
-    result.map_err(|_| anyhow::anyhow!("restore_passkey_challenge_issue_refused"))
+    result.context("restore_passkey_challenge_issue_refused")
 }
 
 struct Claimed {
@@ -186,6 +205,7 @@ struct Claimed {
 /// tombstone even when later verification fails or the process dies. A replay
 /// cannot reconstruct this in-memory continuation from the persisted row.
 fn claim(db: &mut Connection, key: &TrustedKey, id: &Digest, expected: &Digest) -> Result<Claimed> {
+    key.check_sqlite(db)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (version, counter) = current(&tx, key)?;
     let (request, binding, nonce, key_version, saved_counter, created_at, expires_at): (
@@ -235,7 +255,11 @@ fn claim(db: &mut Connection, key: &TrustedKey, id: &Digest, expected: &Digest) 
         )? == 1,
         "restore_passkey_challenge_already_used"
     );
-    tx.commit()?;
+    key.check_sqlite(&tx)?;
+    let committed = tx.commit();
+    let checked = key.check_sqlite(db);
+    committed?;
+    checked?;
     Ok(Claimed {
         challenge,
         key_version,
@@ -310,11 +334,15 @@ pub(super) fn complete(
             params![id.as_str(),version,counter,claimed.challenge.enrollment.as_str(),expected_request.as_str(),claimed.challenge.nonce.as_slice(),claimed.created_at,claimed.expires_at],
         )?==1, "restore_passkey_completion_conflict");
         checkpoint(Cut::BeforeCommit)?;
-        tx.commit()?;
+        key.check_sqlite(&tx)?;
+        let committed = tx.commit();
+        let checked = key.check_sqlite(db);
+        committed?;
+        checked?;
         checkpoint(Cut::AfterCommit)?;
         Ok(facts)
     })();
-    result.map_err(|_| anyhow::anyhow!("restore_passkey_completion_refused"))
+    result.context("restore_passkey_completion_refused")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

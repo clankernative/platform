@@ -44,10 +44,13 @@ identity do not prove that a passkey was used. `LocalOperator::assert_local`
 explicitly supplies no production authentication. A client-selected key, CLI
 flag, boolean or saved record cannot fill these boundaries.
 
-The producer will retain the real verified approval and provide fresh authority
-and cheap local original-clock checks. The consumer must borrow that same owner
-and the actual external storage owner through drain, staging and writer work.
-Only a known atomic commit plus actual postchecks may create a consumed grant.
+The [native producer composition](CREDENTIAL-RESTORE-APPROVAL-PRODUCER.md) retains
+its actual short-action owner through verification, signing and publication.
+No native owner survives the human wait or is reconstructed from a signed
+record. The accepting executor needs its own fresh authenticated native action,
+current registry/time/target checks and actual external storage owner through
+drain, staging and writer work. Only a known atomic commit plus actual
+postchecks may create a consumed grant.
 Consumption must be keyed by the grant identifier outside the restored app's
 rollback domain, joined to the restore reservation/epoch transition. An uncertain
 send or historical receipt cannot reconstruct permission or justify a retry.

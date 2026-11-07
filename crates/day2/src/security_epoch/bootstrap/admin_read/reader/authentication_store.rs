@@ -10,6 +10,9 @@ use crate::security_epoch::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 
+mod producer;
+pub(in crate::security_epoch) use producer::CompletedCeremony;
+
 // SQLite closes first on unwinding; the unfinished file guard then poisons the
 // same shared original before the actual reader/peer/counter owner is released.
 pub(in crate::security_epoch) struct RestoreAuthenticationAction<'metadata, 'storage, 'role> {

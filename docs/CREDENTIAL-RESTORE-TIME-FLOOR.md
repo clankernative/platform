@@ -25,13 +25,13 @@ lost native/time owner, qualify approval time, rearm a send or renew a grant.
 Another writer, changed current root, partial write or foreign receipt cannot
 be treated as this operation's positive result.
 
-The real sampler, pre-fence storage owner, known May journal, conditional sender
-and fresh postchecks must still be joined. Completion must choose its fixed
-approval start conservatively from actual qualified time, with expiry exactly
-one hour later; consumption requires a fresh qualified upper bound strictly
-before expiry. Those signing/approval owners and the initial outside-archive
-floor installation are not provided here. Absence refuses rather than silently
-installing zero.
+The [native producer](CREDENTIAL-RESTORE-APPROVAL-PRODUCER.md) joins the real
+sampler, current storage owner, known signing-attempt journal, conditional sender
+and fresh postchecks. It chooses the fixed approval start conservatively from
+qualified time, with expiry exactly one hour later. Consumption still requires
+its own fresh qualified upper bound strictly before expiry. Initial
+outside-archive floor installation and accepting-executor qualification remain
+separate. Absence refuses rather than silently installing zero.
 
 Tests use real SQLite conditional transactions, reopen and deterministic injected
 cuts, plus an independent integer-time model with generated histories and
@@ -43,8 +43,8 @@ Positive historical readback additionally requires BOTH changed documents to
 have the same provider update version, strictly newer than the prior floor.
 The floor always changes its operation and the receipt is create-only, so the
 unchanged-write exception cannot qualify either write. Equal bodies at
-different versions, a later floor rewrite or old metadata refuse. The future
-Firestore adapter must retain and validate these actual provider fields; row
+different versions, a later floor rewrite or old metadata refuse. The fixed
+Firestore adapter retains and validates these actual provider fields; row
 contents alone are insufficient. Provider versions remain concurrency metadata,
 never host/approval time. This follows the transaction commit-time model in
 [Firestore transaction isolation](https://firebase.google.com/docs/firestore/transaction-data-contention)

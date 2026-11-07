@@ -90,22 +90,33 @@ pub(in crate::security_epoch) struct Receipt {
 }
 
 impl Receipt {
+    pub(in crate::security_epoch) fn operation_data(&self) -> Digest {
+        self.operation.clone()
+    }
+
     pub(in crate::security_epoch) fn key(&self, selected: &EpochStore) -> Result<Digest> {
         ensure!(
             self.format == Format::Day2RestoreTimeReceiptV1
                 && self.authority == selected.authority_key()?,
             "restore_time_receipt_binding"
         );
-        Digest::of(&(
-            "day2-restore-time-receipt-key-v1",
-            &self.authority,
-            &self.operation,
-        ))
+        receipt_key(selected, &self.operation)
     }
 }
 
 pub(in crate::security_epoch) fn key(selected: &EpochStore) -> Result<Digest> {
     Digest::of(&("day2-restore-time-floor-key-v1", selected.authority_key()?))
+}
+
+pub(in crate::security_epoch) fn receipt_key(
+    selected: &EpochStore,
+    operation: &Digest,
+) -> Result<Digest> {
+    Digest::of(&(
+        "day2-restore-time-receipt-key-v1",
+        selected.authority_key()?,
+        operation,
+    ))
 }
 
 fn current(selected: &EpochStore, observed: &Snapshot) -> Result<()> {
