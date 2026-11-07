@@ -120,6 +120,7 @@ impl Pair {
             security_epochs: BTreeMap::new(),
             security_bootstraps: BTreeMap::new(),
             restore_passkeys: None,
+            restore_approval_signing: None,
         });
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         self.caller = Runtime::load(&path, "caller")?;

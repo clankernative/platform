@@ -278,7 +278,7 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
             Some("sha256:bc444ba9efb2666e59b10ef6b1118aa910ffe6514be638355811c78a6c795378")
         }
         "crates/day2/src/oauth/schema.rs" => {
-            Some("sha256:bbe7e34f8f8b5802705c3ec26959a23eaa825a5926c985cc81fd16a6413c3a6e")
+            Some("sha256:04cff5d94bce96918c8de4aae27e9cbfc189c12c7803257592681027e8a10e59")
         }
         // Closed control construction only, not the large accounting module.
         "crates/day2/src/budget/atomic_control.rs" => {
@@ -322,10 +322,10 @@ fn sql_control_name(name: &str) -> bool {
     )
 }
 
-// Exact preexisting functions whose connection-control operations act only on
+// Exact reviewed functions whose connection-control operations act only on
 // their own fresh/raw connection, or are Serde's unrelated serialize method.
 // Pin the entire function, not the call: moving an identical setter into a
-// borrowed callback is not admitted. New/changed sites have no allowance path.
+// borrowed callback is not admitted. Unreviewed sites have no allowance path.
 fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
     const REVIEWED: &[(&str, &str)] = &[
         // The sole fixed accounting wrapper delegates to the closed module;
@@ -364,6 +364,15 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         (
             "crates/day2/src/security_epoch/preparation_image.rs",
             "sha256:ef460385d60ac63ff2e48de9bd43a5d69a35c8b6b4a2fdc021c567bae9f9d668",
+        ),
+        // Closed offline restore DATA builder: constructs its own fresh memory
+        // connection, accepts no raw Connection/callback, bounds/deserializes
+        // exact captured bytes, validates/reset/commits, then bounds/freezes the
+        // NOCOPY image before close. No production Checks implementation or
+        // native/Runtime factory exists. No borrowed SQL callback is admitted.
+        (
+            "crates/day2/src/security_epoch/restore_staging.rs",
+            "sha256:ebcc5f61dc7fa69ced2a7c7cff598338c0fb4b4c5123d134dca4b0bfb6b4b9da",
         ),
         // Serde wire serialization, unrelated to SQLite Connection::serialize.
         (

@@ -2569,6 +2569,7 @@ pub fn require_no_managed_credential_restore_state(connection: &Connection) -> R
         !connection.is_autocommit(),
         "credential_restore_requires_transaction"
     );
+    crate::oauth::restore::require_no_history(connection)?;
     crate::managed_credentials::store::require_no_restore_state(connection)
 }
 

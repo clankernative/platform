@@ -20,9 +20,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Download the pinned Linux Bazel executable
-        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
       - name: Install the pinned Linux Bazel executable
