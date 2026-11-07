@@ -207,10 +207,11 @@ fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
     let (copy, replaced) = rehearse(&world, Some(&version_1_unit))?;
     succeeded(&replaced)?;
     let store = copy.path().join(".state/reports.sqlite");
+    let app_models = &world.runtime.artifact().contract().schema.models;
     let app = |store: &std::path::Path| -> Result<Vec<(String, Vec<String>)>> {
         Ok(store_rows(store)?
             .into_iter()
-            .filter(|(table, _)| !table.starts_with("day2_"))
+            .filter(|(table, _)| app_models.contains_key(table))
             .collect())
     };
     let reports = app(world.runtime.db())?;
@@ -277,6 +278,14 @@ fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     assert!(!columns.iter().any(|name| name == "verifier_revision"));
+    assert_eq!(
+        rusqlite::Connection::open(&store)?.query_row(
+            "SELECT count(*) FROM native_fresh_owners",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        1
+    );
     assert_eq!(app(&store)?, reports);
 
     // A version-1 unit holding credential state, and any other unit version:
