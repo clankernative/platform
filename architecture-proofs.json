@@ -1177,6 +1177,8 @@
       "owning_children": [],
       "methods": [
         "pub (super) fn new () -> Self",
+        "pub (super) fn seal_issuance (& mut self) -> Result < () >",
+        "pub (super) fn require_drained (& self) -> Result < () >",
         "fn register (& self , response : & ResponseIdentity) -> Result < Ticket >"
       ],
       "factories": [
@@ -1193,6 +1195,14 @@
         {
           "owner": "ResponseTickets",
           "signature": "pub (super) fn prepare_native (& self , response : & ResponseIdentity , owner : & ResponseRights) -> Result < Terminal >"
+        },
+        {
+          "owner": "ResponseRights",
+          "signature": "pub (super) fn seal_issuance (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ResponseRights",
+          "signature": "pub (super) fn require_drained (& self) -> Result < () >"
         }
       ],
       "proof_uses": [],

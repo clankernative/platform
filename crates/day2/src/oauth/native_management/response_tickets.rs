@@ -26,6 +26,7 @@ struct Record {
 
 struct Ledger {
     closed: Cell<bool>,
+    issuance_sealed: Cell<bool>,
     records: RefCell<Vec<Rc<Record>>>,
 }
 
@@ -40,13 +41,48 @@ impl ResponseRights {
         Self {
             ledger: Rc::new(Ledger {
                 closed: Cell::new(false),
+                issuance_sealed: Cell::new(false),
                 records: RefCell::new(Vec::new()),
             }),
         }
     }
 
-    fn register(&self, response: &ResponseIdentity) -> Result<Ticket> {
+    /// Terminal exclusion of NEW response issuance on this same retained owner.
+    /// Existing tickets still need their actual transport terminal; sealing is
+    /// neither their completion nor a complete Stop of other authority classes.
+    pub(super) fn seal_issuance(&mut self) -> Result<()> {
         ensure!(!self.ledger.closed.get(), "response_rights_owner_closed");
+        ensure!(
+            !self.ledger.issuance_sealed.get(),
+            "response_rights_already_sealed"
+        );
+        self.ledger.issuance_sealed.set(true);
+        Ok(())
+    }
+
+    /// Check only this owner's response cohort. Empty/open, abandoned, or
+    /// unknown cohorts cannot become drained by a timer, receipt or Drop. The
+    /// eventual native stop must additionally retain/check EVERY other right.
+    pub(super) fn require_drained(&self) -> Result<()> {
+        ensure!(
+            !self.ledger.closed.get() && self.ledger.issuance_sealed.get(),
+            "response_rights_not_sealed"
+        );
+        let records = self.ledger.records.try_borrow()?;
+        ensure!(
+            records
+                .iter()
+                .all(|record| record.state.get() == State::Complete),
+            "response_rights_outstanding"
+        );
+        Ok(())
+    }
+
+    fn register(&self, response: &ResponseIdentity) -> Result<Ticket> {
+        ensure!(
+            !self.ledger.closed.get() && !self.ledger.issuance_sealed.get(),
+            "response_rights_owner_closed"
+        );
         let mut records = self.ledger.records.try_borrow_mut()?;
         // Only a real known terminal transition can free a slot. Unknown,
         // abandoned and still-preparing records are never pruned or expired.
@@ -380,6 +416,184 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn sealed_issuance_waits_for_every_actual_terminal_and_cannot_reopen() -> Result<()> {
+        let (mut rights, response, tickets) = fixture();
+        let second = ResponseIdentity::new();
+        let other = ResponseTickets::new();
+        other.tickets.borrow_mut().push(rights.register(&second)?);
+        assert!(rights.require_drained().is_err());
+        rights.seal_issuance()?;
+        assert!(rights.register(&ResponseIdentity::new()).is_err());
+        assert!(rights.seal_issuance().is_err());
+        assert!(rights.require_drained().is_err());
+        tickets.prepare_native(&response, &rights)?.complete();
+        assert!(rights.require_drained().is_err());
+        other.prepare_native(&second, &rights)?.complete();
+        rights.require_drained()?;
+        assert!(rights.register(&ResponseIdentity::new()).is_err());
+        // The surviving actual owner is still required after sealing. Neither
+        // old terminal handles nor an empty replacement authenticate a Stop.
+        let ledger = rights.ledger.clone();
+        drop(rights);
+        assert!(ledger.closed.get());
+        assert!(ResponseRights::new().require_drained().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sealing_unknown_preparing_or_lost_rights_never_counts_as_completion() -> Result<()> {
+        for lost in [false, true] {
+            let (mut rights, response, tickets) = fixture();
+            let terminal = tickets.prepare_native(&response, &rights)?;
+            rights.seal_issuance()?;
+            assert!(rights.require_drained().is_err());
+            if lost {
+                drop(terminal);
+            } else {
+                tickets.refuse();
+                terminal.complete();
+            }
+            assert!(rights.require_drained().is_err());
+            assert!(states(&rights) == [State::Unknown]);
+            assert!(rights.register(&ResponseIdentity::new()).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn owner_death_after_sealing_cannot_settle_a_prepared_winner() -> Result<()> {
+        let (mut rights, response, tickets) = fixture();
+        let terminal = tickets.prepare_native(&response, &rights)?;
+        rights.seal_issuance()?;
+        let ledger = rights.ledger.clone();
+        drop(rights);
+        terminal.complete();
+        assert!(ledger.closed.get());
+        assert!(ledger.records.borrow()[0].state.get() == State::Unknown);
+        assert!(tickets.prepare(&response).is_err());
+        Ok(())
+    }
+
+    fn sealed_boundary(source: &str) -> bool {
+        use quote::ToTokens;
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let expected: [(&str, syn::Block); 3] = [
+            (
+                "seal_issuance",
+                syn::parse_quote!({
+                    ensure!(!self.ledger.closed.get(), "response_rights_owner_closed");
+                    ensure!(
+                        !self.ledger.issuance_sealed.get(),
+                        "response_rights_already_sealed"
+                    );
+                    self.ledger.issuance_sealed.set(true);
+                    Ok(())
+                }),
+            ),
+            (
+                "require_drained",
+                syn::parse_quote!({
+                    ensure!(
+                        !self.ledger.closed.get() && self.ledger.issuance_sealed.get(),
+                        "response_rights_not_sealed"
+                    );
+                    let records = self.ledger.records.try_borrow()?;
+                    ensure!(
+                        records
+                            .iter()
+                            .all(|record| record.state.get() == State::Complete),
+                        "response_rights_outstanding"
+                    );
+                    Ok(())
+                }),
+            ),
+            (
+                "register",
+                syn::parse_quote!({
+                    ensure!(
+                        !self.ledger.closed.get() && !self.ledger.issuance_sealed.get(),
+                        "response_rights_owner_closed"
+                    );
+                }),
+            ),
+        ];
+        let mut found = 0;
+        for item in &file.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            if item.self_ty.to_token_stream().to_string() != "ResponseRights" {
+                continue;
+            }
+            for item in &item.items {
+                let syn::ImplItem::Fn(method) = item else {
+                    continue;
+                };
+                let Some((name, wanted)) =
+                    expected.iter().find(|(name, _)| method.sig.ident == *name)
+                else {
+                    continue;
+                };
+                let count = if *name == "register" {
+                    1
+                } else {
+                    method.block.stmts.len()
+                };
+                if method.block.stmts.len() < count
+                    || count != wanted.stmts.len()
+                    || !method
+                        .block
+                        .stmts
+                        .iter()
+                        .take(count)
+                        .zip(&wanted.stmts)
+                        .all(|(a, b)| {
+                            a.to_token_stream().to_string() == b.to_token_stream().to_string()
+                        })
+                {
+                    return false;
+                }
+                found += 1;
+            }
+        }
+        found == expected.len()
+    }
+
+    #[test]
+    fn actual_seal_precedes_observation_and_rejects_regrant_or_uncertain_retirement() {
+        let source = include_str!("response_tickets.rs");
+        assert!(sealed_boundary(source));
+        for (old, new) in [
+            (
+                "self.ledger.issuance_sealed.set(true);",
+                "self.ledger.issuance_sealed.set(false);",
+            ),
+            (
+                "!self.ledger.closed.get() && !self.ledger.issuance_sealed.get()",
+                "!self.ledger.closed.get()",
+            ),
+            (
+                "let records = self.ledger.records.try_borrow()?;",
+                "let records = self.ledger.records.try_borrow()?; self.ledger.issuance_sealed.set(true);",
+            ),
+            (
+                "record.state.get() == State::Complete",
+                "record.state.get() != State::Live",
+            ),
+            (
+                "!self.ledger.closed.get() && self.ledger.issuance_sealed.get()",
+                "self.ledger.issuance_sealed.get()",
+            ),
+        ] {
+            let mutant = source.replacen(old, new, 1);
+            assert_ne!(source, mutant);
+            assert!(!sealed_boundary(&mutant));
+        }
+    }
+
     fn native_terminal_tail(source: &str) -> bool {
         use quote::ToTokens;
         let Ok(file) = syn::parse_file(source) else {
@@ -703,14 +917,17 @@ mod tests {
         Publish,
         LostPublication,
         Abort,
+        SealIssuance,
+        LateCapture,
     }
 
     // Independent expectation: retirement needs the original's completion AND
     // a known final publication, with no prior uncertainty. The oracle never
     // reads production State, registration records or the terminal's fields.
     fn replay(history: &[Event]) -> Result<Vec<bool>> {
-        let (rights, response, tickets) = fixture();
+        let (mut rights, response, tickets) = fixture();
         let mut terminal = None;
+        let mut sealed = false;
         let mut original_finished = false;
         let mut prepared = false;
         let mut uncertain = false;
@@ -718,6 +935,20 @@ mod tests {
         let mut observations = Vec::new();
         for event in history {
             match event {
+                Event::SealIssuance => {
+                    ensure!(
+                        rights.seal_issuance().is_ok() == !sealed,
+                        "response_history_seal"
+                    );
+                    sealed = true;
+                }
+                Event::LateCapture if sealed => {
+                    ensure!(
+                        rights.register(&ResponseIdentity::new()).is_err(),
+                        "response_history_closed_capture"
+                    );
+                }
+                Event::LateCapture => {}
                 Event::PeerKnown => {}
                 Event::OriginalFinished => {
                     original_finished = true;
@@ -762,6 +993,10 @@ mod tests {
             }
             let actual = states(&rights) == [State::Complete];
             ensure!(actual == completed, "response_history_terminal");
+            ensure!(
+                rights.require_drained().is_ok() == (sealed && completed),
+                "response_history_drain"
+            );
             observations.push(actual);
         }
         Ok(observations)
@@ -770,7 +1005,7 @@ mod tests {
     #[test]
     fn generated_response_histories_match_independent_expectations_and_replay_twice() -> Result<()>
     {
-        const EVENTS: [Event; 7] = [
+        const EVENTS: [Event; 9] = [
             Event::PeerKnown,
             Event::OriginalFinished,
             Event::Prepare,
@@ -778,6 +1013,8 @@ mod tests {
             Event::Publish,
             Event::LostPublication,
             Event::Abort,
+            Event::SealIssuance,
+            Event::LateCapture,
         ];
         for seed in 0..256_u64 {
             let mut random = seed + 1;
