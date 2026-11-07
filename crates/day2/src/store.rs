@@ -702,6 +702,12 @@ impl InitialStoreMetadata {
         &self.artifact
     }
 
+    /// Published selector and admitted content DATA only. The native registry
+    /// reader still retains its actual admin loan and configuration handles.
+    pub(crate) fn restore_registry_selector_data(&self) -> (PathBuf, day2_capabilities::Digest) {
+        (self.instance_selector.clone(), self.instance_digest.clone())
+    }
+
     /// The caller owns the fresh in-memory transaction and original native
     /// phase. Metadata admission grants neither persistent storage nor serving.
     pub(crate) fn initialize_in_transaction(&self, tx: &Transaction<'_>) -> Result<()> {

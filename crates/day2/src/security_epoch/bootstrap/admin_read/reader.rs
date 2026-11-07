@@ -27,6 +27,20 @@ struct AdminSelection {
     authority: crate::authority_state::AuthorityStamp,
 }
 
+/// Snapshot DATA for the closed registry selector. It cannot construct a key
+/// source: verification still borrows this same actual native reader.
+pub(crate) struct ControllerRegistryData {
+    pub(crate) selector: std::path::PathBuf,
+    pub(crate) instance: Digest,
+    pub(crate) scope: String,
+    pub(crate) app: String,
+    pub(crate) artifact: String,
+    pub(crate) authority: crate::authority_state::AuthorityStamp,
+    pub(crate) operation: Digest,
+    pub(crate) approver: String,
+    pub(crate) executor: String,
+}
+
 impl AdminSelection {
     fn capture(
         data: &ControllerAdminData,
@@ -133,6 +147,42 @@ impl<'metadata, 'storage, 'role> ControllerAdminReader<'metadata, 'storage, 'rol
 }
 
 impl ControllerAdminReader<'_, '_, '_> {
+    /// Full current policy/metadata observation outside any SQL unit owned by
+    /// the authentication store. No native owner or permission is returned.
+    pub(crate) fn registry_data(&mut self) -> Result<ControllerRegistryData> {
+        let operation = self.selected.operation.clone();
+        let approver = self.selected.approver.clone();
+        let executor = self.selected.executor.clone();
+        self.check(self.metadata, &operation, &approver, &executor)?;
+        let (selector, instance) = self.metadata.restore_registry_selector_data();
+        let value = ControllerRegistryData {
+            selector,
+            instance,
+            scope: self.metadata.scope().to_owned(),
+            app: self.metadata.app().to_owned(),
+            artifact: self.metadata.artifact().id().to_owned(),
+            authority: self.selected.authority.clone(),
+            operation,
+            approver,
+            executor,
+        };
+        self.check_registry_local()?;
+        Ok(value)
+    }
+
+    /// SQL-safe retained-resource check for the short closed TrustedKey loan.
+    /// No provider/configuration read, policy SQL, new stage or clock is added.
+    pub(crate) fn check_registry_local(&mut self) -> Result<()> {
+        self.loan.check_local()?;
+        let requested = self.sqlite.check_handles();
+        let checked = self.loan.check_local();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(crate) fn check(
         &mut self,
         metadata: &InitialStoreMetadata,

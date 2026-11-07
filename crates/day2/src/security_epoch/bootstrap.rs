@@ -23,7 +23,9 @@ use std::{cell::RefCell, rc::Rc};
 
 mod admin_read;
 mod app_serving;
-pub(crate) use admin_read::ControllerAdminReadLoan;
+pub(crate) use admin_read::{
+    ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData,
+};
 mod controller_serving;
 
 /// Historical result DATA, returned only after the actual consumer ACK,

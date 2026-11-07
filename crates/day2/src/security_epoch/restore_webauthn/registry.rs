@@ -13,10 +13,11 @@ use std::{
     marker::PhantomData,
     rc::Rc,
 };
+mod controller;
 mod file;
 
-// Not a public extension point. The only production implementor retains the
-// actual native RuntimeSql borrow; an ordinary Runtime cannot supply it.
+// Not a public extension point. The fixed production implementors retain an
+// actual native RuntimeSql or Controller admin reader; DATA cannot supply one.
 trait NativeBorrow {
     fn check_local(&mut self) -> Result<()>;
 }
