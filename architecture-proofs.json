@@ -6485,6 +6485,18 @@
         {
           "owner": null,
           "signature": "fn verified_completion_snapshot (db : & mut rusqlite :: Connection , key : & TrustedKey < '_ > , challenge : & super :: super :: super :: Challenge , counter : u32) -> Result < (i64 , Digest) >"
+        },
+        {
+          "owner": null,
+          "signature": "fn execution_attempt_binding (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < (Digest , Digest) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn check_may_execute (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn mark_may_execute (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < () >"
         }
       ],
       "proof_uses": [],
