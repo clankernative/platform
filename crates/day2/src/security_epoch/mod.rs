@@ -32,6 +32,7 @@ pub(crate) mod restore_cut;
 mod restore_fencing;
 mod restore_host_clock;
 mod restore_staging;
+mod restore_webauthn;
 mod runtime_profile;
 mod seed_core;
 mod self_check_profile;
