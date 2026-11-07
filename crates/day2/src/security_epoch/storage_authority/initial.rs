@@ -253,7 +253,7 @@ impl InitialStorageContinuity {
         let pending = self.file.begin_pending_initial_phase()?;
         let rendezvous = trace
             .measure(Operation::BootstrapReady, || {
-                self.peer.prepare_current(&mut stage, binding.purpose)
+                self.peer.prepare_current(&mut stage, binding.purpose())
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapReady, error))?;
         // Read-only authentication overlaps the App's fresh role acquisition
@@ -350,6 +350,35 @@ impl InitialStorageContinuity {
         };
         let mut phase = phase;
         trace.measure(ServingStep::PhysicalCheck, || phase.check())?;
+        Ok((phase, reads))
+    }
+
+    pub(in crate::security_epoch) fn begin_app_admin_read<'storage, 'role>(
+        &'storage mut self,
+        mut stage: EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
+        selection: &EpochStore,
+        counter: &'storage mut CounterConnectionSlot,
+        binding: &Digest,
+    ) -> Result<(
+        CurrentControllerStoragePhase<'storage, 'role>,
+        CounterRequest<'storage>,
+    )> {
+        ensure!(self.ready, "controller_storage_continuation_refused");
+        self.ready = false;
+        let reads = counter.request(&mut stage, policy, selection, NativeRole::EpochController)?;
+        let pending = self.file.begin_pending_physical_phase()?;
+        let rendezvous = self
+            .peer
+            .prepare_current(&mut stage, StoragePeerPurpose::AdminRead)?;
+        let mut file = pending.acquire(stage)?;
+        let peer = rendezvous.accept_admin_read(file.controller_stage_after_check()?, binding)?;
+        let mut phase = CurrentControllerStoragePhase {
+            file,
+            peer: PeerFence::Current(Box::new(peer)),
+            continuation: &mut self.ready,
+        };
+        phase.check()?;
         Ok((phase, reads))
     }
 
@@ -548,10 +577,7 @@ fn request_binding(
             StoragePeerPurpose::BootstrapComplete
         }
     };
-    Ok(StoragePeerRequest {
-        purpose,
-        binding: request.digest()?,
-    })
+    StoragePeerRequest::operation(purpose, request.digest()?)
 }
 
 /// Test access to the existing pure request/holder binding, never a peer or
@@ -610,7 +636,7 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
             );
             self.file.check()?;
             ensure!(
-                self.peer.request().binding == self.request.digest()?,
+                *self.peer.request().binding() == self.request.digest()?,
                 "initial_storage_peer_request_changed"
             );
             self.peer.check(self.file.controller_stage()?)?;
@@ -739,7 +765,7 @@ impl AppInitialStorageContinuity {
     ) -> Result<CurrentAppStoragePhase<'storage>> {
         let queued = self.ready.begin()?;
         ensure!(
-            request.purpose == StoragePeerPurpose::CurrentServing,
+            request.purpose() == StoragePeerPurpose::CurrentServing,
             "app_storage_serving_purpose_required"
         );
         self.file.check_current(stage)?;
@@ -761,6 +787,26 @@ impl AppInitialStorageContinuity {
             "app_initial_storage_continuation_refused"
         );
         Ok(self.peer.initial_projection().initial_core().clone())
+    }
+
+    /// Closed App half: the same exclusive file/peer borrow stays Busy until
+    /// Controller SQL, acceptance, cleanup and the final ACK/release complete.
+    pub(in crate::security_epoch) fn begin_admin_read<'storage>(
+        &'storage mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        binding: Digest,
+    ) -> Result<CurrentAppStoragePhase<'storage>> {
+        let queued = self.ready.begin()?;
+        let cohort = self.file.sqlite_cohort(stage)?;
+        let request = StoragePeerRequest::AdminRead { binding, cohort };
+        let peer = self.peer.begin_current(queued, stage, request)?;
+        let mut phase = CurrentAppStoragePhase {
+            file: &mut self.file,
+            peer,
+            continuation: &mut self.ready,
+        };
+        phase.check(stage)?;
+        Ok(phase)
     }
 
     pub(in crate::security_epoch) fn first_holder_data(&self) -> Result<Holder> {
@@ -982,6 +1028,18 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         self.file.controller_stage_after_check()
     }
 
+    pub(in crate::security_epoch) fn check_admin_database(
+        &mut self,
+        db: &rusqlite::Connection,
+    ) -> Result<()> {
+        self.check()?;
+        let cohort = self.app_request()?.admin_cohort()?.clone();
+        let requested = self.file.check_admin_database(db, &cohort);
+        let checked = self.check();
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn app_request(&self) -> Result<&StoragePeerRequest> {
         match &self.peer {
             PeerFence::Current(peer) => Ok(peer.request()),
@@ -1091,8 +1149,8 @@ mod tests {
         let create = epoch_tests::create();
         let expected = create.bootstrap().clone();
         let binding = request_binding(&expected, &first(), &selection, &create).unwrap();
-        assert!(binding.purpose == StoragePeerPurpose::BootstrapCreate);
-        assert_eq!(binding.binding, create.digest().unwrap());
+        assert!(binding.purpose() == StoragePeerPurpose::BootstrapCreate);
+        assert_eq!(*binding.binding(), create.digest().unwrap());
         let mut changed = expected.clone();
         changed.manifest.artifact = Digest::new(b"other artifact");
         assert!(
@@ -1136,8 +1194,8 @@ mod tests {
             holder: holder.clone(),
         };
         let binding = request_binding(create.bootstrap(), &holder, &selection, &request).unwrap();
-        assert!(binding.purpose == StoragePeerPurpose::BootstrapComplete);
-        assert_eq!(binding.binding, request.digest().unwrap());
+        assert!(binding.purpose() == StoragePeerPurpose::BootstrapComplete);
+        assert_eq!(*binding.binding(), request.digest().unwrap());
         let mut other = holder.clone();
         other.ephemeral_key = Digest::new(b"other process key");
         assert!(request_binding(create.bootstrap(), &other, &selection, &request).is_err());

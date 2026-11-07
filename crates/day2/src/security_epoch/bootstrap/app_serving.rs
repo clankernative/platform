@@ -4,7 +4,7 @@ use super::{
     request_names,
 };
 use crate::security_epoch::{
-    native_enrollment::{EnrolledRoleStage, StoragePeerPurpose, StoragePeerRequest},
+    native_enrollment::{EnrolledRoleStage, StoragePeerRequest},
     serving::CurrentServingPhase,
 };
 use anyhow::{Result, ensure};
@@ -35,8 +35,7 @@ impl ActiveAppStorageContinuity {
         ensure!(self.valid, "active_app_storage_refused");
         self.valid = false;
         let seed = self.storage.bootstrap_core()?;
-        let request = StoragePeerRequest {
-            purpose: StoragePeerPurpose::CurrentServing,
+        let request = StoragePeerRequest::CurrentServing {
             binding: Digest::of(&(
                 "day2-current-active-app-storage-v1",
                 self.completion.digest()?,
@@ -50,7 +49,7 @@ impl ActiveAppStorageContinuity {
                 &self.store,
             ))?,
             stage.incarnation_data()?,
-            request.binding.clone(),
+            request.binding().clone(),
             purpose,
         );
         // The admitted credential's fixed ceiling meets the actual stage

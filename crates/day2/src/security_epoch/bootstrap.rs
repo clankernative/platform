@@ -21,7 +21,9 @@ use day2_capabilities::{
 };
 use std::{cell::RefCell, rc::Rc};
 
+mod admin_read;
 mod app_serving;
+pub(crate) use admin_read::ControllerAdminReadLoan;
 mod controller_serving;
 
 /// Historical result DATA, returned only after the actual consumer ACK,

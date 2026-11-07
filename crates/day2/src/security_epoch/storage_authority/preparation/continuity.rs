@@ -592,6 +592,18 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
         result
     }
 
+    pub(in crate::security_epoch::storage_authority) fn check_admin_database(
+        &mut self,
+        db: &rusqlite::Connection,
+        cohort: &crate::security_epoch::native_enrollment::SqliteCohort,
+    ) -> Result<()> {
+        self.check()?;
+        let requested = crate::store::check_controller_sqlite_files(db, self.inner.file, cohort);
+        let checked = self.check();
+        requested?;
+        checked
+    }
+
     pub(crate) fn controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
         self.check()?;
         self.controller_stage_after_check()

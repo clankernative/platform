@@ -1446,6 +1446,22 @@ impl RuntimeConsumer<'_, '_> {
     }
 }
 
+/// Closed App endpoint for the corresponding Controller admin loan. No
+/// business callback or ordinary SQL facade is lent while OWNERS is borrowed.
+pub(crate) fn await_controller_admin_read(
+    runtime: &crate::store::Runtime,
+    operation: &day2_capabilities::Digest,
+) -> Result<()> {
+    ensure!(
+        runtime.uses_native_storage(),
+        "native_admin_read_storage_required"
+    );
+    let scope = runtime_response_scope(runtime)?.context("native_admin_read_owner_required")?;
+    with_app_participant(&scope, |participant, stage| {
+        participant.admin_read(stage, operation)
+    })
+}
+
 pub(super) fn with_runtime_consumer<T>(
     runtime: &crate::store::Runtime,
     phase: RuntimePhase,
