@@ -209,13 +209,18 @@ fn result_body(method: &syn::ImplItemFn) -> Option<&syn::Block> {
 }
 
 fn bound<'a>(body: &'a syn::Block, name: &str) -> Option<&'a syn::Expr> {
+    fn selected(pat: &syn::Pat, name: &str) -> bool {
+        match pat {
+            syn::Pat::Ident(p) => p.ident == name,
+            syn::Pat::Type(p) => selected(&p.pat, name),
+            _ => false,
+        }
+    }
     let values: Vec<_> = body
         .stmts
         .iter()
         .filter_map(|stmt| match stmt {
-            syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident==name) => {
-                l.init.as_ref().map(|i| &*i.expr)
-            }
+            syn::Stmt::Local(l) if selected(&l.pat, name) => l.init.as_ref().map(|i| &*i.expr),
             _ => None,
         })
         .collect();
@@ -367,16 +372,275 @@ fn wiring(file: &syn::File) -> bool {
     let Some(capture) = methods.get("capture") else {
         return false;
     };
+    let Some(shared_capture) = methods.get("capture_checked_current") else {
+        return false;
+    };
     let mut calls = Calls::default();
     calls.visit_block(&observe.block);
     let mut factory = Calls::default();
     factory.visit_block(&capture.block);
+    factory.visit_block(&shared_capture.block);
     checked_flow(observe)
         && !calls.forbidden
         && !factory.forbidden
+        && matches!(shared_capture.vis, syn::Visibility::Inherited)
         && calls.ordered == ["meet", "sample", "realtime", "sample", "meet", "sample"]
         && matches!(capture.block.stmts.first(),Some(syn::Stmt::Expr(syn::Expr::Try(t),Some(_)))
             if matches!(&*t.expr,syn::Expr::MethodCall(c) if c.method=="check_for"))
+}
+
+fn controller_method<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ImplItemFn> {
+    file.items.iter().find_map(|item| {
+        let syn::Item::Impl(item) = item else { return None; };
+        if !matches!(&*item.self_ty, syn::Type::Path(p) if p.path.is_ident("UnfencedControllerClock")) { return None; }
+        item.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(f) if f.sig.ident == name => Some(f),
+            _ => None,
+        })
+    })
+}
+
+fn is_name(value: &syn::Expr, name: &str) -> bool {
+    matches!(unparen(value), syn::Expr::Path(p) if p.path.is_ident(name))
+}
+
+fn tried(value: &syn::Expr) -> Option<&syn::Expr> {
+    match unparen(value) {
+        syn::Expr::Try(t) => Some(&t.expr),
+        _ => None,
+    }
+}
+
+fn named_closure<'a>(body: &'a syn::Block, name: &str) -> Option<&'a syn::Expr> {
+    let syn::Expr::Call(call) = unparen(bound(body, name)?) else {
+        return None;
+    };
+    let syn::Expr::Closure(closure) = unparen(&call.func) else {
+        return None;
+    };
+    Some(unparen(&closure.body))
+}
+
+fn phase_call(value: &syn::Expr, name: &str) -> bool {
+    matches!(unparen(value),syn::Expr::MethodCall(c) if c.method==name && c.args.is_empty() && is_name(&c.receiver,"phase"))
+}
+
+fn returned_name(body: &syn::Block, name: &str) -> bool {
+    matches!(body.stmts.last(),Some(syn::Stmt::Expr(syn::Expr::Call(c),None))
+        if matches!(&*c.func,syn::Expr::Path(p) if p.path.is_ident("Ok"))
+        && c.args.len()==1 && c.args.first().is_some_and(|e|is_name(e,name)))
+}
+
+fn final_refusal(method: &syn::ImplItemFn, target: &str, argument: bool) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::If(failed), None)) = method.block.stmts.iter().rev().nth(1)
+    else {
+        return false;
+    };
+    if !matches!(&*failed.cond,syn::Expr::MethodCall(c) if c.method=="is_err" && c.args.is_empty() && is_name(&c.receiver,"result"))
+    {
+        return false;
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_))) =
+        failed.then_branch.stmts.first()
+    else {
+        return false;
+    };
+    call.method == "refuse"
+        && is_name(&call.receiver, target)
+        && if argument {
+            call.args.len() == 1 && call.args.first().is_some_and(|e| is_name(e, "phase"))
+        } else {
+            call.args.is_empty()
+        }
+}
+
+fn controller_wiring(file: &syn::File) -> bool {
+    let Some(capture) = controller_method(file, "capture") else {
+        return false;
+    };
+    let Some(observe) = controller_method(file, "observe") else {
+        return false;
+    };
+    // Each public fixed entry requires the actual physical Controller phase,
+    // never a role enum, bare stage, cached scalar or caller-selected source.
+    for method in [capture, observe] {
+        let typed: Vec<_> = method
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Typed(arg) => Some(arg),
+                _ => None,
+            })
+            .collect();
+        let Some(arg) = typed.first() else {
+            return false;
+        };
+        if !matches!(&*arg.pat,syn::Pat::Ident(p) if p.ident=="phase")
+            || !matches!(&*arg.ty,syn::Type::Reference(r) if r.mutability.is_some()
+                && matches!(&*r.elem,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="CurrentControllerStoragePhase")))
+            || typed.len() != if method.sig.ident == "capture" { 2 } else { 1 }
+        {
+            return false;
+        }
+        if !bound(&method.block, "checked").is_some_and(|e| phase_call(e, "check")) {
+            return false;
+        }
+        if !matches!(method.block.stmts.last(),Some(syn::Stmt::Expr(e,None)) if is_name(e,"result"))
+        {
+            return false;
+        }
+    }
+    let Some(syn::Expr::Block(captured)) = named_closure(&capture.block, "captured") else {
+        return false;
+    };
+    let Some(stage) = bound(&captured.block, "stage").and_then(tried) else {
+        return false;
+    };
+    if !phase_call(stage, "controller_stage") {
+        return false;
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::Try(role), Some(_))) = captured.block.stmts.get(1) else {
+        return false;
+    };
+    if !matches!(&*role.expr,syn::Expr::MethodCall(c) if c.method=="check_for"
+        && is_name(&c.receiver,"stage") && c.args.len()==2
+        && c.args.first().is_some_and(|e|is_name(e,"scope"))
+        && matches!(c.args.last(),Some(syn::Expr::Path(p)) if p.path.segments.len()==2 && p.path.segments[0].ident=="NativeRole" && p.path.segments[1].ident=="EpochController"))
+    {
+        return false;
+    }
+    let Some(syn::Expr::Call(factory)) = bound(&captured.block, "clock").and_then(tried) else {
+        return false;
+    };
+    if !matches!(&*factory.func,syn::Expr::Path(p) if p.path.segments.len()==2
+        && p.path.segments[0].ident=="UnfencedHostClock" && p.path.segments[1].ident=="capture_checked_current")
+        || factory.args.len() != 1
+        || !factory.args.first().is_some_and(|e| is_name(e, "stage"))
+    {
+        return false;
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::Call(output), None)) = captured.block.stmts.last() else {
+        return false;
+    };
+    if !matches!(&*output.func,syn::Expr::Path(p) if p.path.is_ident("Ok"))
+        || output.args.len() != 1
+        || !matches!(output.args.first(),Some(syn::Expr::Struct(s)) if s.path.is_ident("Self") && s.rest.is_none() && s.fields.len()==1
+            && s.fields.first().is_some_and(|f|matches!(&f.member,syn::Member::Named(n) if n=="clock") && is_name(&f.expr,"clock")))
+    {
+        return false;
+    }
+    let Some(syn::Expr::Block(result)) = named_closure(&capture.block, "result") else {
+        return false;
+    };
+    if !bound(&result.block, "value")
+        .and_then(tried)
+        .is_some_and(|e| is_name(e, "captured"))
+        || !returned_name(&result.block, "value")
+    {
+        return false;
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::If(failed), None)) = result.block.stmts.get(1) else {
+        return false;
+    };
+    if !matches!(&*failed.cond,syn::Expr::Let(l) if is_name(&l.expr,"checked")
+        && matches!(&*l.pat,syn::Pat::TupleStruct(p) if p.path.is_ident("Err")))
+    {
+        return false;
+    }
+    if !matches!(failed.then_branch.stmts.first(),Some(syn::Stmt::Expr(syn::Expr::MethodCall(c),Some(_)))
+        if c.method=="refuse" && c.args.is_empty()
+        && matches!(&*c.receiver,syn::Expr::Field(f) if matches!(&f.member,syn::Member::Named(n) if n=="clock") && is_name(&f.base,"value")))
+    {
+        return false;
+    }
+    if !matches!(failed.then_branch.stmts.last(),Some(syn::Stmt::Expr(syn::Expr::Return(r),Some(_)))
+        if matches!(r.expr.as_deref(),Some(syn::Expr::Call(c)) if matches!(&*c.func,syn::Expr::Path(p) if p.path.is_ident("Err")) && c.args.len()==1 && c.args.first().is_some_and(|e|is_name(e,"error"))))
+    {
+        return false;
+    }
+    let Some(syn::Expr::MethodCall(sample)) = named_closure(&observe.block, "observed") else {
+        return false;
+    };
+    if sample.method != "observe"
+        || !self_field(&sample.receiver, "clock")
+        || sample.args.len() != 1
+        || !sample
+            .args
+            .first()
+            .and_then(tried)
+            .is_some_and(|e| phase_call(e, "controller_stage"))
+    {
+        return false;
+    }
+    let Some(syn::Expr::Block(result)) = named_closure(&observe.block, "result") else {
+        return false;
+    };
+    if !bound(&result.block, "value")
+        .and_then(tried)
+        .is_some_and(|e| is_name(e, "observed"))
+        || !matches!(result.block.stmts.get(1),Some(syn::Stmt::Expr(syn::Expr::Try(t),Some(_))) if is_name(&t.expr,"checked"))
+        || !returned_name(&result.block, "value")
+    {
+        return false;
+    }
+    // Both calls must execute before either Result is propagated. Moving the
+    // physical check into the result closure would skip it on sample refusal.
+    final_refusal(capture, "phase", false)
+        && final_refusal(observe, "self", true)
+        && local_index(&capture.block, "captured") < local_index(&capture.block, "checked")
+        && local_index(&capture.block, "checked") < local_index(&capture.block, "result")
+        && local_index(&observe.block, "observed") < local_index(&observe.block, "checked")
+        && local_index(&observe.block, "checked") < local_index(&observe.block, "result")
+}
+
+#[test]
+fn actual_controller_factory_retains_its_physical_phase_and_actual_sample_results() -> Result<()> {
+    let source = include_str!("../restore_host_clock.rs");
+    assert!(controller_wiring(&syn::parse_file(source)?));
+    for (from, to) in [
+        (
+            "stage.check_for(scope, NativeRole::EpochController)?;",
+            "stage.check_for(scope, NativeRole::AppHost)?;",
+        ),
+        (
+            "let stage = phase.controller_stage()?;",
+            "let stage = phase.controller_stage();",
+        ),
+        (
+            "UnfencedHostClock::capture_checked_current(stage)?",
+            "UnfencedHostClock::capture(stage, scope)?",
+        ),
+        (
+            "self.clock.observe(phase.controller_stage()?)",
+            "self.clock.observe(phase.controller_stage())",
+        ),
+        (
+            "let value = observed?;",
+            "let value = observed.unwrap_or(HostTimeData { domain: Digest::new(b\"forged\"), lower: Duration::ZERO, upper: Duration::ZERO, observed_at: Duration::ZERO });",
+        ),
+    ] {
+        assert_eq!(source.matches(from).count(), 1, "actual mutation target");
+        assert!(
+            !controller_wiring(&syn::parse_file(&source.replacen(from, to, 1))?),
+            "{from}"
+        );
+    }
+    assert_eq!(source.matches("let checked = phase.check();").count(), 2);
+    for selected in 0..2 {
+        let positions: Vec<_> = source
+            .match_indices("let checked = phase.check();")
+            .map(|p| p.0)
+            .collect();
+        let mut changed = source.to_owned();
+        let start = positions[selected];
+        changed.replace_range(
+            start..start + "let checked = phase.check();".len(),
+            "let checked = Ok::<(), anyhow::Error>(());",
+        );
+        assert!(!controller_wiring(&syn::parse_file(&changed)?));
+    }
+    Ok(())
 }
 
 fn unparen_mut(value: &mut syn::Expr) -> &mut syn::Expr {

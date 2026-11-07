@@ -25,6 +25,7 @@ pub(crate) use initial::{
     InitialStorageOutcome,
 };
 pub(crate) use native_volume::AuthenticationStoreFiles;
+pub(crate) use native_volume::NativeApprovalSource;
 use native_volume::NativeVolumeObservation;
 mod persistent_disk;
 pub(in crate::security_epoch) use persistent_disk::PersistentDiskSelection;

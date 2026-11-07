@@ -283,25 +283,58 @@ fn typed_intent_wiring(source: &str) -> bool {
         )
 }
 
+fn mutate_method(
+    source: &str,
+    owner: &str,
+    name: &str,
+    change: impl FnOnce(&mut syn::ImplItemFn),
+) -> String {
+    let mut file = syn::parse_file(source).unwrap();
+    let mut selected=file.items.iter_mut().filter_map(|item|match item {syn::Item::Impl(item)=>Some(item),_=>None})
+        .filter(|item|matches!(item.self_ty.as_ref(),syn::Type::Path(path) if path.path.is_ident(owner)))
+        .flat_map(|item|item.items.iter_mut()).filter_map(|item|match item {syn::ImplItem::Fn(f) if f.sig.ident==name=>Some(f),_=>None});
+    let method = selected.next().expect("actual production method");
+    assert!(selected.next().is_none());
+    change(method);
+    file.into_token_stream().to_string()
+}
+
+fn replace_in_method(source: &str, owner: &str, name: &str, old: &str, new: &str) -> String {
+    mutate_method(source, owner, name, |method| {
+        let tokens = method.to_token_stream().to_string();
+        assert_eq!(tokens.matches(old).count(), 1, "{owner}::{name}: {old}");
+        *method = syn::parse_str(&tokens.replacen(old, new, 1)).unwrap();
+    })
+}
+
 #[test]
 fn actual_controller_entry_requires_complete_intent_before_crypto_and_hides_digest_helpers() {
     let source = include_str!("../controller.rs");
     assert!(typed_intent_wiring(source));
-    for (old, new) in [
-        ("self.intent.require_exact(expected)?;", ""),
-        ("&intent.executor.email", "&String::new()"),
-        ("&self.intent.executor.email", "&String::new()"),
+    for (name, old, new) in [
         (
-            "fn capture_controller(",
-            "pub(crate) fn capture_controller(",
+            "verify_current",
+            "self . intent . require_exact (expected) ? ;",
+            "",
         ),
         (
-            "fn verify_current_controller(",
-            "pub(crate) fn verify_current_controller(",
+            "capture",
+            "& intent . executor . email",
+            "& String :: new ()",
+        ),
+        (
+            "verify_current",
+            "& self . intent . executor . email",
+            "& String :: new ()",
         ),
     ] {
-        assert_eq!(source.matches(old).count(), 1);
-        let mutant = source.replace(old, new);
+        let mutant = replace_in_method(source, "ControllerCeremony", name, old, new);
+        assert!(!typed_intent_wiring(&mutant));
+    }
+    for name in ["capture_controller", "verify_current_controller"] {
+        let mutant = mutate_method(source, "RegistryCeremony", name, |method| {
+            method.vis = syn::parse_quote!(pub(crate))
+        });
         assert!(!typed_intent_wiring(&mutant));
     }
 }
@@ -387,26 +420,38 @@ fn actual_controller_denial_conversion_happens_only_after_the_mandatory_postchec
     assert!(denial_wiring(source));
     for (old, new) in [
         (
-            "let checked = self.observe_controller(reader, executor);",
-            "let checked = Ok(());",
+            "let checked = self . observe_controller (reader , executor) ;",
+            "let checked = Ok (()) ;",
         ),
         (
-            "settle_verification(requested, checked)",
-            "settle_verification(requested, Ok(()))",
+            "settle_verification (requested , checked)",
+            "settle_verification (requested , Ok (()))",
         ),
+        (
+            "} else if matches ! (& result , Ok (None)) {",
+            "} else if false {",
+        ),
+    ] {
+        let mutant = replace_in_method(
+            source,
+            "RegistryCeremony",
+            "verify_current_controller",
+            old,
+            new,
+        );
+        syn::parse_file(&mutant).unwrap();
+        assert!(!denial_wiring(&mutant));
+    }
+    // The shared free denial classifier remains unique; it serves both the
+    // stateless and new durable callers without bypassing either postcheck.
+    for (old, new) in [
         ("checked?;\n            Ok(None)", "Ok(None)"),
         (
             "error.is::<super::super::AssertionDenied>()",
             "error.to_string() == \"restore_passkey_signature_invalid\"",
         ),
-        (
-            "} else if matches!(&result, Ok(None)) {",
-            "} else if false {",
-        ),
     ] {
         assert_eq!(source.matches(old).count(), 1);
-        let mutant = source.replace(old, new);
-        syn::parse_file(&mutant).unwrap();
-        assert!(!denial_wiring(&mutant));
+        assert!(!denial_wiring(&source.replacen(old, new, 1)));
     }
 }
