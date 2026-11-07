@@ -3446,14 +3446,14 @@ impl Session {
     fn close(&mut self) -> Result<bool> {
         self.tools.cluster.unstoppable();
         let mut failures = Vec::new();
-        if let Some(job) = self.state.backup_job.clone() {
-            if let Err(error) = self.kubectl(
+        if let Some(job) = self.state.backup_job.clone()
+            && let Err(error) = self.kubectl(
                 &["delete", "job", &job, "--ignore-not-found", "--wait=true"],
                 None,
                 Duration::from_secs(300),
-            ) {
-                failures.push(format!("deleting backup {job}: {error:#}"));
-            }
+            )
+        {
+            failures.push(format!("deleting backup {job}: {error:#}"));
         }
         let mut pods = Vec::new();
         if self.state.probe {
