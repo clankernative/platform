@@ -202,6 +202,7 @@ pub(super) fn store_binding(
 }
 
 pub(super) fn load_binding(db: &Connection, attempt: &str) -> Result<Option<ExchangeBinding>> {
+    super::restore::require_open(db, super::restore::Kind::Connect, attempt)?;
     let encoded: Option<String> = db
         .query_row(
             "SELECT binding FROM oauth_exchange_bindings WHERE attempt = ?1",
@@ -401,6 +402,7 @@ fn authorize_in(
     now: i64,
     guard: Option<&super::management::app::FinishGuard<'_>>,
 ) -> Result<Option<CheckedExchangeDispatch>> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, &input.intent.attempt)?;
     if let Some(guard) = guard {
         guard.check(tx, now)?;
     }

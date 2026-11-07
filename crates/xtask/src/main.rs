@@ -417,8 +417,16 @@ fn main() -> Result<()> {
             bazel::dependency_inputs(&root)?;
         }
         "verify-linux-context" => {
-            ensure!(args.next().is_none(), "CI context accepts no overrides");
-            verification::linux_context(&root)?;
+            let purpose = verification::LinuxContext::parse(
+                &args
+                    .next()
+                    .context("CI context requires one fixed purpose")?,
+            )?;
+            ensure!(
+                args.next().is_none(),
+                "CI context accepts one fixed purpose"
+            );
+            verification::linux_context(&root, purpose)?;
         }
         "architecture-check" => {
             ensure!(

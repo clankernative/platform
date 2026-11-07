@@ -74,6 +74,8 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         "registration_tests.rs",
         include_str!("registration_tests.rs"),
     ),
+    ("restore.rs", include_str!("restore.rs")),
+    ("restore_tests.rs", include_str!("restore_tests.rs")),
     ("schema.rs", include_str!("schema.rs")),
     ("security_shell", ""),
     ("security_shell.rs", include_str!("security_shell.rs")),
