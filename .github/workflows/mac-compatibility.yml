@@ -1,0 +1,269 @@
+name: Mac developer compatibility
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      compilation_cache:
+        description: Reuse admitted compiled outputs, or measure with empty compiled-output caches
+        type: choice
+        options: [reuse, empty]
+        default: reuse
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+# Developer-host qualification is visible on PRs and main, independently of the
+# required Linux release gate. Merge groups never allocate a Mac runner.
+jobs:
+  mac-secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: gh release download v8.30.1 --repo gitleaks/gitleaks --pattern gitleaks_8.30.1_linux_x64.tar.gz --dir /tmp/scanners
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: sha256sum --check "$GITHUB_WORKSPACE/.github/gitleaks.sha256"
+        working-directory: /tmp/scanners
+      - run: tar -xzf /tmp/scanners/gitleaks_8.30.1_linux_x64.tar.gz -C /tmp/scanners
+      - run: /tmp/scanners/gitleaks dir . --redact=100 --config .gitleaks.toml
+      - run: /tmp/scanners/gitleaks git . --redact=100 --config .gitleaks.toml
+
+  mac-dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: gh release download cargo-audit/v0.22.2 --repo RustSec/rustsec --pattern cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz --dir /tmp/scanners
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: sha256sum --check "$GITHUB_WORKSPACE/.github/cargo-audit.sha256"
+        working-directory: /tmp/scanners
+      - run: tar -xzf /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -C /tmp/scanners
+      - run: /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit audit --deny warnings
+
+  verify-mac-compatibility:
+    # Reject known security failures before allocating compilation runners.
+    needs: [mac-secrets, mac-dependencies]
+    if: ${{ !cancelled() && needs.mac-secrets.result == 'success' && needs.mac-dependencies.result == 'success' }}
+    runs-on: macos-15
+    timeout-minutes: 360
+    env: &mac_verification_environment
+      # Keep compilation parallelism within the standard Mac runner's CPU budget.
+      # Preserve compiler statistics through the long runtime campaigns.
+      DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
+    steps: &mac_verification_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the pinned Mac Bazel executable
+        timeout-minutes: 4
+        run: >-
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
+          --output /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64
+          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-darwin-arm64
+      - name: Verify the pinned Mac Bazel bytes
+        run: echo 'f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a  /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64' | shasum -a 256 --check
+      - name: Install the pinned Mac Bazel executable
+        run: |
+          mkdir -p /tmp/day2-bazel-tools/bin
+          install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64 /tmp/day2-bazel-tools/bin/bazel
+          echo /tmp/day2-bazel-tools/bin >> "$GITHUB_PATH"
+      - name: Restore checksum-addressed Bazel source downloads
+        continue-on-error: true
+        timeout-minutes: 3
+        id: bazel_repositories
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+      - name: Restore Bazel compilation and repository caches
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: false
+          repository-cache: false
+          disk-cache: false
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
+      - name: Restore source-keyed compiled actions
+        id: bazel_actions
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
+          path: ~/.cache/bazel-disk
+          key: day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-
+            day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-
+      - name: Compile and install the current verifier with Bazel
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-mac --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
+      - name: Install the pinned OpenTofu CLI
+        timeout-minutes: 4
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_darwin_arm64.zip
+          echo 'ce81702643dcdea497259b4de4639d9ee73746560683b9d2b778aae8f7d62827  /tmp/day2-opentofu/tofu.zip' | shasum -a 256 --check
+          unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
+          chmod 0555 /tmp/day2-opentofu/bin/tofu
+          echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
+      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
+        working-directory: /tmp/day2-tools
+      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
+      - name: Restore completed fixture builds
+        id: fixture_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # v4
+        with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
+          key: day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', '.github/workflows/mac-compatibility.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          restore-keys: |
+            day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', '.github/workflows/mac-compatibility.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
+          path: |
+            artifacts/all-verification-cache.json
+            artifacts/????????????????????????????????????????????????????????????????
+      - name: Restore completed test executables
+        id: test_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # v4
+        with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
+          key: day2-test-outputs-v2-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', '.github/workflows/mac-compatibility.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
+            build-out/tests/*
+      - run: build-out/bin/xtask source-check
+      - run: build-out/bin/xtask notices
+      - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
+      - run: build-out/bin/xtask bootstrap
+      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
+      - run: build-out/bin/xtask configure-tofu
+      - run: build-out/bin/xtask verify-mac
+        id: native_preparation
+      - name: Retain current Mac compiler failure metadata without private stdout
+        if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: day2-compiler-failure-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/bazel/failures/*/outcome.json
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Retain real Mac native preparation, exact cases and both build campaigns
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-mac-compatibility.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain the separate native Mac compiler inventory
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: day2-mac-compiler-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-binaries.json
+            artifacts/bazel-compiler-inputs.json
+          if-no-files-found: error
+          retention-days: 14
+      # Capture the restore-time key so generated files cannot change it.
+      - name: Save completed fixture builds
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # v4
+        if: ${{ steps.fixture_cache.outputs.cache-hit != 'true' }}
+        with:
+          key: ${{ steps.fixture_cache.outputs.cache-primary-key }}
+          path: |
+            artifacts/all-verification-cache.json
+            artifacts/????????????????????????????????????????????????????????????????
+      - name: Save completed test executables
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # v4
+        if: ${{ steps.test_cache.outputs.cache-hit != 'true' }}
+        with:
+          key: ${{ steps.test_cache.outputs.cache-primary-key }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
+            build-out/tests/*
+
+      - name: Publish completed Mac compiler actions
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-disk
+          key: ${{ steps.bazel_actions.outputs.cache-primary-key }}
+      - name: Publish checksum-addressed Bazel source downloads
+        if: ${{ steps.bazel_repositories.outputs.cache-hit != 'true' && steps.bazel_repositories.outputs.cache-primary-key != '' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-repo/content_addressable
+          key: ${{ steps.bazel_repositories.outputs.cache-primary-key }}
+
+  admit-mac-acquisition-retry:
+    # GitHub can cancel an unacquired hosted job after fifteen minutes. A fresh
+    # allocation may retry that infrastructure failure, never an executed test.
+    needs: [verify-mac-compatibility]
+    # Scheduler needs.result can disagree with an unacquired job's API state.
+    # Preserve workflow cancellation, then decide from the exact job record.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+    steps:
+      - name: Admit only one current unacquired Mac allocation
+        id: admit
+        run: >-
+          gh api --hostname github.com --method GET
+          --header 'Cache-Control: no-cache'
+          'repos/clankernative/platform/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs?per_page=100'
+          --jq '
+          if (.jobs | type) == "array" and .total_count == (.jobs | length) and .total_count <= 100
+          then [.jobs[] | select(.name == "verify-mac-compatibility")] |
+          if length == 1 then .[0] |
+          if .run_id == ${{ github.run_id }} and .run_attempt == ${{ github.run_attempt }}
+          and .head_sha == "${{ github.event.pull_request.head.sha || github.sha }}"
+          and .status == "completed" and .labels == ["macos-15"]
+          then if .conclusion == "cancelled"
+          and .runner_id == 0 and .runner_name == ""
+          and (.steps | type) == "array" and (.steps | length) == 0
+          then "admitted=true"
+          elif .conclusion == "success" or .conclusion == "failure"
+          or .conclusion == "skipped" or .conclusion == "cancelled"
+          then "admitted=false"
+          else error("Mac acquisition retry refused: terminal outcome required") end
+          else error("Mac acquisition retry refused: current completed job required") end
+          else error("Mac acquisition retry refused: unique original job required") end
+          else error("Mac acquisition retry refused: complete job inventory required") end'
+          >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  retry-mac-compatibility:
+    needs: [admit-mac-acquisition-retry]
+    if: ${{ !cancelled() && needs.admit-mac-acquisition-retry.result == 'success' && needs.admit-mac-acquisition-retry.outputs.admitted == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 360
+    env: *mac_verification_environment
+    # The identical recipe and receipt upload run once, after an allocation
+    # failure that executed none of these steps. There is no second retry.
+    steps: *mac_verification_steps

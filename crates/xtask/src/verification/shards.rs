@@ -1285,23 +1285,22 @@ fn validate_receipt(prepared: &Prepared, receipt: &Receipt, shard: &str) -> Resu
     Ok(())
 }
 
-fn admit_join(
-    prepared: &Prepared,
-    receipts: &[Receipt],
-    mac: Option<&mac::Proof>,
-) -> Result<BTreeMap<String, u64>> {
-    ensure!(
-        prepared.identity.host != "linux" || mac.is_some(),
-        "Linux full verification requires real Mac domain"
-    );
-    let selected: Vec<_> = SHARDS
+fn linux_shards() -> impl Iterator<Item = &'static str> {
+    SHARDS
         .iter()
         .copied()
-        .filter(|shard| mac.is_none() || !["isolated-build", "installation-build"].contains(shard))
-        .collect();
+        .filter(|shard| !["isolated-build", "installation-build"].contains(shard))
+}
+
+fn admit_join(prepared: &Prepared, receipts: &[Receipt]) -> Result<BTreeMap<String, u64>> {
+    ensure!(
+        prepared.identity.host == "linux" && prepared.identity.architecture == "x86_64",
+        "Linux release qualification requires native Linux preparation"
+    );
+    let selected: Vec<_> = linux_shards().collect();
     ensure!(
         receipts.len() == selected.len(),
-        "exact complete native shard receipt set required"
+        "exact complete Linux shard receipt set required"
     );
     let mut timings = prepared.timings_ms.clone();
     for shard in &selected {
@@ -1330,16 +1329,6 @@ fn admit_join(
             .context("complete day2 partition evidence required")
     };
     cases::validate_join(prepared, part("workspace-day2")?, part(cases::RUNTIME)?)?;
-    if let Some(proof) = mac {
-        for receipt in mac::campaigns(proof) {
-            for (step, elapsed) in &receipt.timings_ms {
-                ensure!(
-                    timings.insert(step.clone(), *elapsed).is_none(),
-                    "duplicate native campaign effect"
-                );
-            }
-        }
-    }
     let mut workspace = 0u64;
     for step in [
         "test-binaries",
@@ -1365,11 +1354,11 @@ fn admit_join(
     let passed: BTreeSet<_> = timings.keys().cloned().collect();
     ensure!(
         passed
-            == required_steps("all")?
+            == required_steps("linux")?
                 .iter()
                 .map(|step| (*step).into())
                 .collect(),
-        "joined receipt must cover exactly the ordinary full recipe"
+        "joined receipt must cover exactly the complete Linux recipe"
     );
     Ok(timings)
 }
@@ -1382,28 +1371,10 @@ pub(super) fn join(
         prepared.identity.host == "linux" && prepared.identity.architecture == "x86_64",
         "hosted full composition requires Linux portable domain"
     );
-    let mac_path = root.join(mac::PATH);
-    ensure!(
-        mac_path.canonicalize()? == mac_path
-            && fs::symlink_metadata(&mac_path)?.is_file()
-            && fs::metadata(&mac_path)?.len() <= 1024 * 1024,
-        "bounded regular native Mac proof required"
-    );
-    let mac: mac::Proof = day2::json::decode(&fs::read(&mac_path)?)?;
     let current = identity(root, &prepared.identity.snapshot)?;
     let selected = artifacts::read(&current)?;
     artifacts::refresh(root, &selected)?;
-    mac::admit(
-        &mac,
-        &artifacts::origin(&current, &selected, artifacts::Role::Mac)?,
-        &super::verification_snapshot_for(root, "verify", "macos", "aarch64")?,
-        &build_identity(root, &prepared.identity.snapshot)?,
-        &compiler_targets(root)?,
-    )?;
-    let portable: Vec<_> = SHARDS
-        .iter()
-        .filter(|shard| !["isolated-build", "installation-build"].contains(shard))
-        .collect();
+    let portable: Vec<_> = linux_shards().collect();
     let files = fs::read_dir(root.join(RESULTS))?.collect::<std::io::Result<Vec<_>>>()?;
     ensure!(
         files.len() == portable.len(),
@@ -1415,7 +1386,7 @@ pub(super) fn join(
             root.join(RESULTS).join(format!("{shard}.json")),
         )?)?);
     }
-    let timings = admit_join(prepared, &receipts, Some(&mac))?;
+    let timings = admit_join(prepared, &receipts)?;
     let part = |shard: &str| -> Result<&cases::Evidence> {
         receipts
             .iter()
@@ -1435,7 +1406,7 @@ pub(super) fn join(
         root.join("artifacts/ci-verification.json"),
         serde_json::to_vec_pretty(&json!({
             "identity":prepared.identity,"prepared_digest":digest(&serde_json::to_vec(prepared)?),
-            "shards":receipts,"mac":mac,"effects":passed,"timings_ms":timings,
+            "shards":receipts,"effects":passed,"timings_ms":timings,
             "timing_scope":"sum of admitted campaign work; use hosted job timestamps for critical-path duration"
         }))?,
     )?;

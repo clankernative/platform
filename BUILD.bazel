@@ -11,6 +11,7 @@ exports_files([
     ".bazelrc",
     ".bazelversion",
     ".github/workflows/ci.yml",
+    ".github/workflows/mac-compatibility.yml",
     "Cargo.lock",
     "Cargo.toml",
     "MODULE.bazel",

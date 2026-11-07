@@ -603,6 +603,14 @@ pub(in super::super) fn finish(
             .context("native Mac case timing missing")?,
         campaigns,
     };
+    // This independent developer-host proof must be complete before publication.
+    admit(
+        &proof,
+        &identity(root, &proof.prepared.identity.snapshot)?,
+        &proof.prepared.identity.snapshot,
+        &proof.compiler,
+        &compiler_targets(root)?,
+    )?;
     fs::write(root.join(PATH), serde_json::to_vec_pretty(&proof)?)?;
     Ok(())
 }
@@ -740,10 +748,6 @@ fn valid_digest(value: &str) -> bool {
     value
         .strip_prefix("sha256:")
         .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
-}
-
-pub(super) fn campaigns(proof: &Proof) -> &[Receipt] {
-    &proof.campaigns
 }
 
 #[cfg(test)]

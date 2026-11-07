@@ -26,7 +26,10 @@ Roc still owns verification and operational recipe order. The Rust backend
 builds the declared targets and admits their actual configured outputs, then the
 ordinary recipes execute the current campaigns. A compiled harness is not a
 successful test run. Full verification still requires its fixtures, ignored
-native build campaigns, genuine Mac checks and complete evidence.
+native build campaigns, genuine Mac checks and complete evidence. Hosted Linux
+release qualification has its own `scope: linux` receipt and required `verify`
+check; the separate Mac workflow retains developer-host compatibility without
+blocking Linux merges on Mac availability.
 
 For a focused Rust test, use the checked harness entry point. It builds the
 selected test and supporting programs, then runs from the workspace directory:
@@ -162,19 +165,21 @@ compiled actions, including when a previous immutable snapshot was partial. A Ru
 without discarding reusable prior actions. Valid compiled actions may be saved
 after a later fresh-runtime failure, while cancelled runs do not save them.
 The native preparation builders, main's Linux verifier bootstrap and the
-post-verification Linux and Mac cache publishers write these snapshots; consumer jobs restore them. Each runner restores its OS/architecture partition into
+post-verification Linux publisher and independent Mac compatibility job write these snapshots;
+consumer jobs restore them. Each runner restores its OS/architecture partition into
 the local content-addressed disk cache. Trusted main/merge-group runs may save
 shared outputs. PRs can read trusted base caches and save only their own
 GitHub-isolated pull-request cache scope; they cannot seed the main branch. There is no new cache server, bucket
 or paid storage setting. Eviction within the existing repository allowance can
 reduce hits.
 
-When main reuses exact queue proof, the publishers transfer only compiler
-actions from that fully admitted origin run and attempt. Other events publish
-their own completed actions after the full gate. Linux consumers prefer completed
-test compilation over a bootstrap-only fallback. Missing or failed cache
-transport is a cache miss, never an alternative verification result. See
-[cache publication](CI-CACHING.md) for the branch boundary.
+When main reuses exact Linux queue proof, the Linux publisher transfers only compiler actions from
+that fully admitted origin run and attempt. Other events publish their own completed Linux actions
+after verification. Linux consumers prefer completed test compilation over a bootstrap-only
+fallback. The independent Mac workflow publishes its own completed actions after native
+compatibility admission; it never allocates a Mac runner for merge groups. Missing or failed cache
+transport loses optional acceleration and cannot supply a verification result. See [cache
+publication](CI-CACHING.md).
 
 The ordinary Roc verification recipes execute the complete patched compiler-wrapper
 control module on Linux and Mac. The Mac campaign also executes the actual trusted

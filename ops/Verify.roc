@@ -226,12 +226,12 @@ Verify :: [].{
 	compose! : (Str => Try(Str, Str)) => Try(Str, Str)
 	compose! = |host!| {
 		_ = Capability.call!("verify-join", "{}", host!)?
-		Capability.call!("verify-receipt", Json.to_str({ scope: "all" }), host!)
+		Capability.call!("verify-receipt", Json.to_str({ scope: "linux" }), host!)
 	}
 
 	# Mandatory native guards bind authenticated GitHub proof to the exact main
 	# checkout. Absence selects the ordinary full workflow; downloaded proof is
-	# never executed and every PR/merge-group still runs the full recipe.
+	# never executed and every PR/merge-group still runs Linux qualification.
 	queue_find! : (Str => Try(Str, Str)) => Try(Str, Str)
 	queue_find! = |host!| Capability.call!("verify-queue-find", "{}", host!)
 
