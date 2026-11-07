@@ -135,6 +135,27 @@ claim, before its commit and after its commit. They do not establish a native
 execution owner, live-provider behavior or power-loss durability. Missing or old
 schema shapes refuse; no migration or repair path is supplied.
 
+The native pre-send composition keeps the actual completed executor, boxed
+connection, file lease and current registry selection across the fixed claim
+unit. It enters an in-progress state before SQL and reaches claimed only after
+the actual commit and all native/file/registry postchecks succeed. An error or
+unwind cannot return it to verified. Later current checks compare the exact
+marker; the distinct fenced registry path also requires the claimed phase and
+the same row. No transaction remains open across provider work.
+
+The private attempt factory consumes the genuine authenticated executor, first
+requires its complete retained key material, and runs the original's mandatory
+postcheck even when the claim fails. It publishes the private owner only after
+both succeed. Loss drops that actual executor and its existing terminal original
+and source guards; a caught check panic leaves its refusal latch armed. There is
+no executor, clock or database getter, and no recovery from the persisted row.
+
+This is a pre-send phase only. The complete incumbent/issuer/escaping-rights
+stop, observation-only self-CAS interval, known external settlement, peer
+confirmation, P3/writer admission and accepting native constructor remain
+separate. Current native formatting, compiled controls and ordinary fast gates
+for this composition remain pending; no native or live qualification is claimed.
+
 ### Existing native authentication-ledger admission
 
 The current-reader admission consumes the actual accepting admin reader and keeps
