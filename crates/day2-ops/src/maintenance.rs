@@ -204,6 +204,22 @@ pub struct Target {
     pub probe: Option<day2::rollout::ProbeDefinition>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OffsiteBackup {
+    pub cronjob: String,
+    pub bucket: String,
+    pub service_account: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    pub controller_uid: String,
+    pub pvc_uid: String,
+    pub node: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadKind {
@@ -244,6 +260,14 @@ pub struct Request {
     pub request_id: Option<String>,
     #[serde(default)]
     pub target: Option<Target>,
+    /// Reviewed namespace backup identity and destination. Required for rolling
+    /// releases; the source image takes an online snapshot before preparation.
+    #[serde(default)]
+    pub offsite_backup: Option<OffsiteBackup>,
+    /// Captured before selecting a release; recovery never adopts a replacement
+    /// controller or claim that happens to have the same name.
+    #[serde(default)]
+    pub placement: Option<Placement>,
     /// Skip the typed confirmation; recorded in the journal.
     #[serde(default)]
     pub yes: bool,
@@ -259,6 +283,36 @@ impl Request {
     }
 
     pub fn validate(&self, operation: Operation) -> Result<()> {
+        match (&self.placement, operation) {
+            (Some(placement), Operation::Rollout) => {
+                for uid in [&placement.controller_uid, &placement.pvc_uid] {
+                    ensure!(
+                        !uid.is_empty()
+                            && uid.len() <= 128
+                            && uid
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+                        "invalid rolling placement UID"
+                    );
+                }
+                ensure!(dns_label(&placement.node), "invalid rolling placement node");
+            }
+            (None, Operation::Rollout) => bail!("rolling_release_requires_captured_placement"),
+            (None, _) => {}
+            (Some(_), _) => bail!("placement requires rollout"),
+        }
+        match (&self.offsite_backup, operation) {
+            (Some(backup), Operation::Rollout) => {
+                ensure!(
+                    dns_label(&backup.cronjob) && dns_label(&backup.service_account),
+                    "invalid rolling backup identity"
+                );
+                crate::offsite::validate_bucket(&backup.bucket)?;
+            }
+            (None, Operation::Rollout) => bail!("rolling_release_requires_offsite_backup"),
+            (None, _) => {}
+            (Some(_), _) => bail!("offsite_backup requires rollout"),
+        }
         for (field, value) in [
             ("namespace", &self.namespace),
             ("statefulset", &self.statefulset),
@@ -942,6 +996,8 @@ fn private(path: &Path) -> Result<()> {
 
 #[derive(Default)]
 struct State {
+    offsite_backup: Option<Value>,
+    backup_job: Option<String>,
     resumed: bool,
     candidate_observed: bool,
     probe_verified: bool,
@@ -1203,6 +1259,16 @@ impl Session {
             None
         };
         if operation == Operation::Rollout {
+            let expected = request
+                .placement
+                .as_ref()
+                .context("captured placement required")?;
+            ensure!(
+                statefulset["metadata"]["uid"] == expected.controller_uid
+                    && pvc_uid.as_deref() == Some(expected.pvc_uid.as_str())
+                    && online_node.as_deref() == Some(expected.node.as_str()),
+                "rollout_captured_placement_changed"
+            );
             let others: Value = serde_json::from_str(&kubectl(&[
                 "get",
                 "pods",
@@ -1351,14 +1417,35 @@ impl Session {
             }
             fetched.push(receipt);
         }
+        // Reconciliation may have updated the mutable bootstrap ConfigMap
+        // after completion but before CI recorded ready. The owned target's
+        // selected instance remains exact; never reconstruct or replan it.
+        let released = self.operation == Operation::Rollout
+            && self.controller["metadata"]["annotations"]["day2.dev/rollout"].as_str()
+                == self.request.request_id.as_deref()
+            && self.request.target.as_ref().is_some_and(|target| {
+                self.controller["spec"]["template"]["spec"]["containers"]
+                    .as_array()
+                    .is_some_and(|containers| {
+                        containers
+                            .iter()
+                            .any(|c| c["name"] == "day2" && c["image"] == target.app_image)
+                    })
+            });
+        let current_configmap = if released {
+            self.controller["spec"]["template"]["spec"]["volumes"]
+                .as_array()
+                .context("released volumes")?
+                .iter()
+                .find(|volume| volume["name"] == "instance")
+                .and_then(|volume| volume["configMap"]["name"].as_str())
+                .context("released instance ConfigMap")?
+                .to_owned()
+        } else {
+            self.request.configmap.clone()
+        };
         let configmap: Value = serde_json::from_str(&self.kubectl(
-            &[
-                "get",
-                "configmap",
-                &self.request.configmap.clone(),
-                "-o",
-                "json",
-            ],
+            &["get", "configmap", &current_configmap, "-o", "json"],
             None,
             Duration::from_secs(60),
         )?)?;
@@ -1368,12 +1455,19 @@ impl Session {
                 format!("ConfigMap {} has no instance.json", self.request.configmap)
             })?;
         let value: Value = serde_json::from_str(current).context("current instance is not JSON")?;
-        ensure!(
-            value["apps"][&self.request.app]["artifact"]
-                == format!("artifacts/{}", self.request.artifact_id),
-            "the ConfigMap's instance does not bind {} to artifact_id",
-            self.request.app
-        );
+        if released {
+            ensure!(
+                Some(current) == self.target_instance.as_deref(),
+                "rollout_current_instance_changed"
+            );
+        } else {
+            ensure!(
+                value["apps"][&self.request.app]["artifact"]
+                    == format!("artifacts/{}", self.request.artifact_id),
+                "the ConfigMap's instance does not bind {} to artifact_id",
+                self.request.app
+            );
+        }
         fs::write(self.work.path().join("current-instance.json"), current)?;
         if let Some(text) = &self.target_instance {
             fs::write(self.work.path().join("instance.json"), text)?;
@@ -2305,6 +2399,233 @@ impl Session {
         Ok(json!({"resuming":true}))
     }
 
+    /// Start only the namespace's reviewed backup recipe, bound to the exact
+    /// incumbent image, instance and PVC. No serving replica is stopped.
+    pub fn offsite_backup(&mut self) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Rollout
+                && self.state.pod
+                && self.state.backup.is_some()
+                && !self.state.resumed
+                && self.state.offsite_backup.is_none(),
+            "rolling_backup_preconditions_required"
+        );
+        let backup = self
+            .request
+            .offsite_backup
+            .clone()
+            .context("offsite backup required")?;
+        let cronjob: Value = serde_json::from_str(&self.kubectl(
+            &["get", "cronjob", &backup.cronjob, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        let mut template = cronjob["spec"]["jobTemplate"]["spec"]["template"].clone();
+        let spec = &template["spec"];
+        let containers = spec["containers"].as_array().context("backup containers")?;
+        ensure!(
+            containers.len() == 1
+                && containers[0]["name"] == "backup"
+                && containers[0]["image"] == self.request.app_image
+                && containers[0]["command"] == json!(["/usr/local/bin/day2-backup"])
+                && containers[0]["args"]
+                    == json!([
+                        "/srv/day2/instance.json",
+                        self.request.app,
+                        "/backup/snapshot",
+                        "--upload-gcs",
+                        backup.bucket,
+                        "--object-prefix",
+                        self.request.app
+                    ])
+                && spec["serviceAccountName"] == backup.service_account
+                && spec["automountServiceAccountToken"] == false
+                && spec["restartPolicy"] == "Never"
+                && spec["initContainers"].as_array().is_none_or(Vec::is_empty)
+                && spec["ephemeralContainers"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+                && spec["hostNetwork"].as_bool() != Some(true)
+                && spec["hostPID"].as_bool() != Some(true)
+                && spec["hostIPC"].as_bool() != Some(true)
+                && containers[0]["securityContext"]["allowPrivilegeEscalation"] == false
+                && containers[0]["securityContext"]["privileged"] == false
+                && containers[0]["securityContext"]["readOnlyRootFilesystem"] == true
+                && containers[0]["securityContext"]["capabilities"]["drop"] == json!(["ALL"]),
+            "rolling_backup_source_or_identity_changed"
+        );
+        let volumes = spec["volumes"].as_array().context("backup volumes")?;
+        ensure!(
+            volumes.len() == 4
+                && volumes.iter().any(|v| v["name"] == "state"
+                    && v["persistentVolumeClaim"]["claimName"] == self.request.pvc)
+                && volumes
+                    .iter()
+                    .any(|v| v["name"] == "instance"
+                        && v["configMap"]["name"] == self.request.configmap)
+                && volumes.iter().all(|v| match v["name"].as_str() {
+                    Some("state") => v["persistentVolumeClaim"].is_object(),
+                    Some("instance") => v["configMap"].is_object(),
+                    Some("backup" | "tmp") => v["emptyDir"].is_object(),
+                    _ => false,
+                }),
+            "rolling_backup_instance_or_claim_changed"
+        );
+        let labels = template["metadata"]["labels"]
+            .as_object()
+            .context("backup labels")?;
+        let services: Value = serde_json::from_str(&self.kubectl(
+            &["get", "services", "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        ensure!(
+            services["items"]
+                .as_array()
+                .context("namespace services")?
+                .iter()
+                .all(|service| !service["spec"]["selector"]
+                    .as_object()
+                    .is_some_and(|selector| !selector.is_empty()
+                        && selector
+                            .iter()
+                            .all(|(key, value)| labels.get(key) == Some(value)))),
+            "backup_pod_must_not_match_a_service"
+        );
+        let prefix = format!("rollouts/{}", &self.request_digest[7..]);
+        template["spec"]["containers"][0]["args"][6] = json!(prefix);
+        template["spec"]["nodeName"] = json!(self.online_node);
+        template["metadata"]["annotations"] =
+            json!({"day2.dev/rollout-request":self.request_digest});
+        // A failed or interrupted job cannot restart indefinitely, and a stale
+        // helper cannot escape its original source identity through retries.
+        let name = format!("day2-release-backup-{}", self.stamp.to_ascii_lowercase());
+        let job = json!({"apiVersion":"batch/v1","kind":"Job",
+            "metadata":{"name":name,"namespace":self.request.namespace,
+                "labels":template["metadata"]["labels"],
+                "annotations":{"day2.dev/rollout-request":self.request_digest}},
+            "spec":{"backoffLimit":0,"activeDeadlineSeconds":1200,
+                "ttlSecondsAfterFinished":3600,"template":template}});
+        self.record("offsite-backup-start", json!({"job":name,"image":self.request.app_image,
+            "instance":self.request.configmap,"pvc_uid":self.pvc_uid,"bucket":backup.bucket,"prefix":prefix}))?;
+        self.kubectl(
+            &["create", "-f", "-"],
+            Some(&serde_json::to_vec(&job)?),
+            Duration::from_secs(60),
+        )?;
+        self.state.backup_job = Some(name.clone());
+        let started = Instant::now();
+        let completed: Value = loop {
+            let observed: Value = serde_json::from_str(&self.kubectl(
+                &["get", "job", &name, "-o", "json"],
+                None,
+                Duration::from_secs(60),
+            )?)?;
+            let condition = |kind: &str| {
+                observed["status"]["conditions"]
+                    .as_array()
+                    .is_some_and(|conditions| {
+                        conditions
+                            .iter()
+                            .any(|c| c["type"] == kind && c["status"] == "True")
+                    })
+            };
+            ensure!(
+                !condition("Failed")
+                    && !condition("FailureTarget")
+                    && observed["status"]["failed"].as_u64().unwrap_or(0) == 0,
+                "offsite_backup_job_failed"
+            );
+            if condition("Complete") {
+                break observed;
+            }
+            ensure!(
+                started.elapsed() < Duration::from_secs(1200),
+                "offsite_backup_job_deadline"
+            );
+            std::thread::sleep(Duration::from_secs(2));
+        };
+        let uid = completed["metadata"]["uid"]
+            .as_str()
+            .context("backup Job UID")?;
+        let pods: Value = serde_json::from_str(&self.kubectl(
+            &[
+                "get",
+                "pods",
+                "-l",
+                &format!("batch.kubernetes.io/job-name={name}"),
+                "-o",
+                "json",
+            ],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        let pods = pods["items"].as_array().context("backup pods")?;
+        ensure!(pods.len() == 1, "one_exact_backup_pod_required");
+        let pod = &pods[0];
+        ensure!(
+            pod["metadata"]["ownerReferences"]
+                .as_array()
+                .is_some_and(
+                    |owners| owners.iter().any(|owner| owner["controller"] == true
+                        && owner["kind"] == "Job"
+                        && owner["uid"] == uid)
+                )
+                && pod["metadata"]["annotations"]["day2.dev/rollout-request"]
+                    == self.request_digest
+                && pod["spec"]["nodeName"].as_str() == self.online_node.as_deref()
+                && pod["spec"]["containers"][0]["image"] == self.request.app_image
+                && pod["status"]["phase"] == "Succeeded"
+                && pod["status"]["containerStatuses"]
+                    .as_array()
+                    .is_some_and(|statuses| statuses.iter().any(|status| status["name"]
+                        == "backup"
+                        && status["state"]["terminated"]["exitCode"] == 0
+                        && status["imageID"]
+                            .as_str()
+                            .is_some_and(|image| image.ends_with(&format!(
+                                "@{}",
+                                self.request.app_image.split_once('@').unwrap().1
+                            ))))),
+            "backup_pod_owner_image_or_completion_changed"
+        );
+        let pod_name = pod["metadata"]["name"]
+            .as_str()
+            .context("backup pod name")?;
+        let raw = self.kubectl(
+            &["logs", pod_name, "-c", "backup", "--tail=1"],
+            None,
+            Duration::from_secs(60),
+        )?;
+        ensure!(raw.len() <= 65_536, "backup receipt byte budget");
+        let summary: Value = day2::json::decode(raw.trim().as_bytes())?;
+        let uploaded = &summary["upload"];
+        let uploaded_prefix = uploaded["prefix"]
+            .as_str()
+            .context("uploaded backup prefix")?;
+        let suffix = uploaded_prefix
+            .strip_prefix(&format!("{prefix}/"))
+            .context("backup prefix changed")?;
+        ensure!(
+            summary["verified"] == true
+                && summary["app"] == self.request.app
+                && summary["artifact"] == format!("sha256:{}", self.request.artifact_id)
+                && uploaded["bucket"] == backup.bucket
+                && !suffix.is_empty()
+                && !suffix.contains('/')
+                && uploaded["complete"]
+                    == format!("gs://{}/{uploaded_prefix}/COMPLETE", backup.bucket)
+                && uploaded["objects"].as_u64().is_some_and(|count| count >= 3)
+                && uploaded["bytes"].as_u64().is_some_and(|bytes| bytes > 0),
+            "offsite_backup_completion_required"
+        );
+        let receipt = json!({"job":name,"source_image":self.request.app_image,
+            "source_artifact":summary["artifact"],"upload":uploaded});
+        self.record("offsite-backup-complete", receipt.clone())?;
+        self.state.offsite_backup = Some(receipt.clone());
+        Ok(receipt)
+    }
+
     fn rollout_transition(&mut self, expected: &str, next: &str) -> Result<Value> {
         let app = self.request.app.clone();
         let id = self.request.request_id.clone().context("release id")?;
@@ -2377,6 +2698,10 @@ impl Session {
         match step {
             "prepare" => {
                 if state["id"] != id {
+                    ensure!(
+                        self.state.offsite_backup.is_some(),
+                        "offsite_backup_completion_required"
+                    );
                     let source_image = self.request.app_image.clone();
                     let raw = self.exec(
                         &[
@@ -3121,6 +3446,15 @@ impl Session {
     fn close(&mut self) -> Result<bool> {
         self.tools.cluster.unstoppable();
         let mut failures = Vec::new();
+        if let Some(job) = self.state.backup_job.clone() {
+            if let Err(error) = self.kubectl(
+                &["delete", "job", &job, "--ignore-not-found", "--wait=true"],
+                None,
+                Duration::from_secs(300),
+            ) {
+                failures.push(format!("deleting backup {job}: {error:#}"));
+            }
+        }
         let mut pods = Vec::new();
         if self.state.probe {
             pods.push(self.probe());

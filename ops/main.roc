@@ -18,6 +18,7 @@ package
 		NativeEnrollment,
 		SecretRetirement,
 		UiDependency,
+		Tooling,
 	]
 	{
 		infra: "../infra/main.roc",

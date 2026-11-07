@@ -19,7 +19,10 @@ RUN ["install", "-D", "-m", "0644", "crates/worker/generated/roc_platform_abi.rs
 RUN ["bazel", "--batch", "--output_base=/workspace/platform/.cache/bazel-executor", "run", "//crates/xtask:xtask", "--", "install-verifier"]
 RUN ["build-out/bin/xtask", "build-tooling-image"]
 RUN ["build-out/bin/xtask", "bootstrap"]
-RUN ["build-out/bin/xtask", "cli"]
+RUN ["build-out/bin/xtask", "export-tooling"]
+# App builds verify and link the precompiled native archive. Missing or stale
+# distribution bytes are a release error, never permission to compile Platform.
+ENV DAY2_PRECOMPILED_TOOLING=1
 # One-shot operator tooling uses the same non-root state-volume ownership as
 # the runtime, including when provisioning is the volume's first consumer.
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/srv/day2/.state"]

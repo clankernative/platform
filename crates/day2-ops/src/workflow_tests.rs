@@ -1198,6 +1198,7 @@ fn rolling_release_proves_candidate_before_promotion_without_an_offline_fence() 
             expected.extend([
                 "workflow:backup",
                 "copy-backup",
+                "offsite-backup",
                 "migration:plan",
                 "admission",
                 "confirm",

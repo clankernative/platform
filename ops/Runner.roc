@@ -24,6 +24,7 @@ import ops.GkeRelease
 import ops.NativeEnrollment
 import ops.SecretRetirement
 import ops.UiDependency
+import ops.Tooling
 
 # Only the native supervisor launches this executable. Its stdout is a bounded
 # request/response pipe, never a terminal or an app-accessible effect channel.
@@ -75,6 +76,7 @@ run! = |args| match args {
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
 	["ui-dependency"] => UiDependency.install!(call!)
 	["cli"] => Verify.cli!(call!)
+	["export-tooling"] => Tooling.run!(call!)
 	["verify-fast"] => Verify.fast!(call!)
 	["verify-reports"] => Verify.reports!(call!)
 	["verify"] => Verify.all!(call!)

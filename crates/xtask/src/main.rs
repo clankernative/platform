@@ -27,6 +27,7 @@ mod native_toolchain;
 mod provider_conformance;
 mod roc_packages;
 mod tooling;
+mod tooling_distribution;
 mod ui_assembly;
 mod ui_dependency;
 mod verification;
@@ -324,6 +325,7 @@ fn main() -> Result<()> {
     let _lock = if [
         "linux-runtime-evidence",
         "linux-artifact-evidence",
+        "linux-artifact-security",
         "linux-runtime-package",
         "linux-strict-denial",
         "linux-provision-package",
@@ -374,6 +376,13 @@ fn main() -> Result<()> {
                 "package input admission accepts no overrides"
             );
             roc_packages::admit(&root)?;
+        }
+        "export-tooling" => {
+            ensure!(
+                args.next().is_none(),
+                "tooling distribution accepts no overrides"
+            );
+            tooling_distribution::execute(&root)?;
         }
         "build-tooling-image" => {
             ensure!(
@@ -1110,6 +1119,21 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 linux_runtime_qualification::native_evidence(&instance)?
+            );
+        }
+        "linux-artifact-security" => {
+            let artifact = PathBuf::from(args.next().context("Linux artifact required")?);
+            let receipt = PathBuf::from(args.next().context("qualified Linux receipt required")?);
+            ensure!(
+                cfg!(target_os = "linux") && args.next().is_none(),
+                "native Linux artifact security accepts an artifact and qualified receipt"
+            );
+            let artifact = day2::artifact::LoadedArtifact::load(&artifact)?;
+            println!(
+                "{}",
+                serde_json::to_string(&day2::security_admission::review_linux(
+                    &artifact, &receipt
+                )?)?
             );
         }
         "linux-artifact-evidence" => {

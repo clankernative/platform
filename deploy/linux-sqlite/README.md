@@ -12,6 +12,28 @@ There are no app Dockerfiles, entrypoints, package installers or deployment scri
 The app artifact contains its Roc worker, admitted HTML/CSS/JS and assets.
 Company configuration and branding remain independent instance inputs.
 
+Tooling images export their compiled native worker archive and a fixed operator
+CLI package through `ops/Tooling.roc`. Application checks verify the archived
+worker's source, target, workflow and byte identities before linking it. The
+image's `DAY2_PRECOMPILED_TOOLING=1` setting makes a missing or stale distribution
+an error; application jobs never fall back to compiling Platform Rust targets.
+App-specific Roc types, generated bindings, linking and verification still run.
+
+The native qualification output includes `tooling-distribution.json` and
+`operator.tar.gz`; its receipt binds both digests to the tested images. Publish
+those exact bytes with the digest-pinned runtime/tooling images and reuse them
+across apps. The operator package contains `cli/day2`, `day2-host`,
+`day2-workflows`, its identity metadata and the Platform license/notices/inventory.
+It supports maintenance without a
+source checkout or compiler; it requires the tooling image's native OS/architecture
+and compatible system libraries (the Linux images use Debian 13/glibc).
+It does not replace the full build tooling image or qualify production identity.
+
+`xtask linux-artifact-security ARTIFACT QUALIFICATION_RECEIPT` produces the
+artifact-specific review document from a completed native receipt. Native
+admission validates the artifact inventory against that receipt. Instance-owned
+protected configuration still controls which qualified release is approved.
+
 ## Existing Workflows
 
 `ops/Build.roc` still owns build order. `ops/Check.roc` still owns examples,
