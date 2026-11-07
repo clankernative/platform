@@ -19,6 +19,8 @@ use zeroize::Zeroizing;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
+mod application;
+
 mod sealed {
     pub(super) trait Sealed {}
 }

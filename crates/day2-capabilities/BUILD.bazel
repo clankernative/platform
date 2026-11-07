@@ -27,7 +27,9 @@ platform_rust_test(
 )
 
 exports_files([
+    "BUILD.bazel",
     "Cargo.toml",
+    "src/credentials.rs",
     "src/lib.rs",
     "src/oauth.rs",
     "src/security_epoch.rs"

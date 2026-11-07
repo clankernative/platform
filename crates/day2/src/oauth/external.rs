@@ -245,8 +245,7 @@ pub(crate) fn load_pending_external(
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
                     profile, registration, callback, consent, expires_at,
-                    state, account, scope_evidence
-             FROM oauth_connect_attempts WHERE attempt = ?1",
+                    state, account, scope_evidence,generation_floor FROM oauth_connect_attempts WHERE attempt = ?1",
             [&current.intent.attempt],
             |row| {
                 Ok((
@@ -255,7 +254,7 @@ pub(crate) fn load_pending_external(
                         slot: row.get(0)?,
                         expected_generation: row.get(1)?,
                         expected_epoch: row.get(2)?,
-                        proposed_generation: row.get(3)?,
+                        proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?,
                         owner: row.get(4)?,
                         profile: row.get(5)?,
                         registration: row.get(6)?,

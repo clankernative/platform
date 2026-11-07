@@ -2,7 +2,7 @@
 //! provider rollback, a restored writer or a way to recover an old permit.
 //! Existing outcomes/material stay intact; exact old continuations are fenced.
 use crate::security_epoch::restore_cut::Cut;
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 use ring::digest::{Context as Hash, SHA256};
 use rusqlite::{Connection, Transaction, params, types::ValueRef};
@@ -32,8 +32,10 @@ impl Kind {
     }
 }
 
+const VERSION: i64 = 2;
+
 pub(crate) fn install(db: &Connection) -> Result<()> {
-    super::schema::install_current(db, "oauth_restore_schema_version", 1,
+    super::schema::install_current(db, "oauth_restore_schema_version", VERSION,
         "CREATE TABLE IF NOT EXISTS oauth_restore_schema_version(version INTEGER PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS oauth_restore_cuts(
              digest TEXT PRIMARY KEY, binding TEXT NOT NULL, inventory TEXT NOT NULL
@@ -42,15 +44,35 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
              kind TEXT NOT NULL, id TEXT NOT NULL,
              cut TEXT NOT NULL REFERENCES oauth_restore_cuts(digest), PRIMARY KEY(kind,id)
          );
+         CREATE TABLE IF NOT EXISTS oauth_restore_slot_floors(
+             slot TEXT PRIMARY KEY, generation INTEGER NOT NULL,
+             cut TEXT NOT NULL REFERENCES oauth_restore_cuts(digest)
+         );
+         CREATE TRIGGER IF NOT EXISTS oauth_restore_floor_no_update BEFORE UPDATE ON oauth_restore_slot_floors
+             BEGIN SELECT RAISE(ABORT,'immutable restore floor'); END;
+         CREATE TRIGGER IF NOT EXISTS oauth_restore_floor_no_delete BEFORE DELETE ON oauth_restore_slot_floors
+             BEGIN SELECT RAISE(ABORT,'restore floor retained'); END;
+         CREATE TRIGGER IF NOT EXISTS oauth_restore_floor_no_replace BEFORE INSERT ON oauth_restore_slot_floors
+             WHEN EXISTS(SELECT 1 FROM oauth_restore_slot_floors WHERE slot=NEW.slot)
+             BEGIN SELECT RAISE(ABORT,'immutable restore floor'); END;
          CREATE TRIGGER IF NOT EXISTS oauth_restore_cut_no_update BEFORE UPDATE ON oauth_restore_cuts
              BEGIN SELECT RAISE(ABORT,'immutable restore cut'); END;
          CREATE TRIGGER IF NOT EXISTS oauth_restore_cut_no_delete BEFORE DELETE ON oauth_restore_cuts
              BEGIN SELECT RAISE(ABORT,'restore cut retained'); END;
+         CREATE TRIGGER IF NOT EXISTS oauth_restore_cut_no_replace BEFORE INSERT ON oauth_restore_cuts
+             WHEN EXISTS(SELECT 1 FROM oauth_restore_cuts WHERE digest=NEW.digest)
+             BEGIN SELECT RAISE(ABORT,'immutable restore cut'); END;
          CREATE TRIGGER IF NOT EXISTS oauth_restore_closed_no_update BEFORE UPDATE ON oauth_restore_closed
              BEGIN SELECT RAISE(ABORT,'immutable restore closure'); END;
          CREATE TRIGGER IF NOT EXISTS oauth_restore_closed_no_delete BEFORE DELETE ON oauth_restore_closed
-             BEGIN SELECT RAISE(ABORT,'restore closure retained'); END;",
-        &[super::schema::Invariant { table: "oauth_restore_cuts", predicate:
+             BEGIN SELECT RAISE(ABORT,'restore closure retained'); END;
+         CREATE TRIGGER IF NOT EXISTS oauth_restore_closed_no_replace BEFORE INSERT ON oauth_restore_closed
+             WHEN EXISTS(SELECT 1 FROM oauth_restore_closed WHERE kind=NEW.kind AND id=NEW.id)
+             BEGIN SELECT RAISE(ABORT,'immutable restore closure'); END;",
+        &[super::schema::Invariant { table: "oauth_restore_slot_floors", predicate:
+            "length(slot) BETWEEN 1 AND 160 AND generation>0 AND generation<9223372036854775807
+             AND length(cut)=71 AND EXISTS(SELECT 1 FROM oauth_restore_cuts c WHERE c.digest=cut)" },
+          super::schema::Invariant { table: "oauth_restore_cuts", predicate:
             "length(digest)=71 AND substr(digest,1,7)='sha256:' AND substr(digest,8) NOT GLOB '*[^0-9a-f]*'
              AND length(binding) BETWEEN 1 AND 32768 AND json_valid(binding) AND json_type(binding)='object'
              AND length(inventory)=71 AND substr(inventory,1,7)='sha256:' AND substr(inventory,8) NOT GLOB '*[^0-9a-f]*'" },
@@ -71,19 +93,65 @@ fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_current_unit(db: &Connection) -> Result<()> {
+    let current: bool = db.query_row(
+        "SELECT count(*)=1 AND min(version)=?1 FROM main.oauth_restore_schema_version",
+        [VERSION],
+        |row| row.get(0),
+    )?;
+    ensure!(current, "restore_current_cut_unit_required");
+    Ok(())
+}
+
+/// Immutable allocation DATA, never a connect or provider permission. Absence
+/// is meaningful only in this complete current unit, not a missing old schema.
+pub(crate) fn generation_floor(db: &Connection, slot: &str) -> Result<Option<i64>> {
+    validate_id(slot)?;
+    require_current_unit(db)?;
+    let mut statement = db.prepare(
+        "SELECT f.generation,k.binding,k.digest FROM main.oauth_restore_slot_floors f
+        LEFT JOIN main.oauth_restore_cuts k ON k.digest=f.cut
+        LEFT JOIN main.oauth_restore_closed c ON c.id=f.slot AND c.kind='connect'
+        WHERE f.slot=?1",
+    )?;
+    let mut rows = statement.query([slot])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let generation = row.get::<_, i64>(0)?;
+    let binding = row.get_ref(1)?.as_str()?;
+    let digest = row.get_ref(2)?.as_str()?;
+    ensure!(
+        binding.len() <= 32768 && digest.len() == 71 && generation > 0 && generation < i64::MAX,
+        "restore_slot_floor_invalid"
+    );
+    Cut::validate_record(binding, digest)?;
+    ensure!(rows.next()?.is_none(), "restore_slot_floor_ambiguous");
+    Ok(Some(generation))
+}
+
+/// Arithmetic DATA only, shared by captured views and actual SQL row checks.
+pub(super) fn next_generation(current: Option<i64>, floor: i64) -> Result<i64> {
+    ensure!(
+        current.is_none_or(|generation| generation > 0) && (0..i64::MAX).contains(&floor),
+        "invalid_connect_generation"
+    );
+    current
+        .unwrap_or(0)
+        .max(floor)
+        .checked_add(1)
+        .filter(|next| *next < i64::MAX)
+        .ok_or_else(|| anyhow::anyhow!("connect_generation_exhausted"))
+}
+
 /// Absence in a CURRENT installed unit is only absence of this denial. All
 /// existing authentication, current epoch, purpose and owner checks still run.
 /// A missing/partial unit is an error, never an implicit pre-restore fallback.
 pub(crate) fn require_open(db: &Connection, kind: Kind, id: &str) -> Result<()> {
     validate_id(id)?;
-    let current: bool = db.query_row(
-        "SELECT count(*)=1 AND min(version)=1 FROM main.oauth_restore_schema_version",
-        [],
-        |row| row.get(0),
-    )?;
-    ensure!(current, "restore_current_cut_unit_required");
+    require_current_unit(db)?;
     let closed: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.oauth_restore_closed c LEFT JOIN main.oauth_restore_cuts k ON k.digest=c.cut WHERE c.kind=?1 AND c.id=?2)",
+        "SELECT EXISTS(SELECT 1 FROM main.oauth_restore_closed c LEFT JOIN main.oauth_restore_cuts k ON k.digest=c.cut LEFT JOIN main.oauth_restore_slot_floors f ON f.slot=c.id AND f.cut=k.digest WHERE c.kind=?1 AND c.id=?2)",
         params![kind.text(), id], |row| row.get(0))?;
     ensure!(!closed, "pre_restore_authority_closed");
     Ok(())
@@ -134,7 +202,11 @@ const UNITS: &[(&str, &[&str])] = &[
     ),
     (
         "oauth_restore_schema_version",
-        &["oauth_restore_cuts", "oauth_restore_closed"],
+        &[
+            "oauth_restore_cuts",
+            "oauth_restore_closed",
+            "oauth_restore_slot_floors",
+        ],
     ),
 ];
 
@@ -328,7 +400,8 @@ fn identities(table: &str) -> Result<Option<(Kind, usize)>> {
         "oauth_connection_slots"
         | "oauth_private_tokens"
         | "oauth_restore_cuts"
-        | "oauth_restore_closed" => None,
+        | "oauth_restore_closed"
+        | "oauth_restore_slot_floors" => None,
         value if UNITS.iter().any(|(version, _)| value == *version) => None,
         _ => anyhow::bail!("restore_unclassified_oauth_table"),
     })
@@ -361,6 +434,7 @@ pub(crate) struct Snapshot {
     digest: Digest,
     identities: BTreeSet<(Kind, String)>,
     tables: BTreeSet<String>,
+    generations: BTreeMap<String, i64>,
 }
 impl Snapshot {
     pub(crate) fn digest(&self) -> &Digest {
@@ -455,7 +529,13 @@ impl Snapshot {
                     .all(|name| present(name)),
                     "restore_oauth_dependency_missing"
                 );
-                super::connect::install_schema(db)?;
+                // A current Use unit's canonical installer begins with this
+                // same complete Connect validation. No effect or wait occurs
+                // before that call, and all unit/version/dependency checks
+                // above still precede either route. Validate it exactly once.
+                if !present("oauth_use_schema_version") {
+                    super::connect::install_schema(db)?;
+                }
             } else {
                 ensure!(
                     ![
@@ -514,15 +594,53 @@ impl Snapshot {
                 hash_value(&mut hash, row.get_ref(1)?);
             }
             let mut identities_set = BTreeSet::new();
+            let mut generations = BTreeMap::<String, i64>::new();
             for table in &tables {
                 let selector = identities(table)?;
                 hash.update(&(table.len() as u64).to_be_bytes());
                 hash.update(table.as_bytes());
                 let mut statement =
                     db.prepare(&format!("SELECT * FROM main.{table} ORDER BY rowid"))?;
+                let columns = statement.column_names();
+                let floor_columns = match table.as_str() {
+                    "oauth_connection_slots"
+                    | "oauth_private_tokens"
+                    | "oauth_external_quarantine"
+                    | "oauth_refresh_attempts" => Some(("slot", "generation")),
+                    "oauth_connect_attempts" => Some(("slot", "proposed_generation")),
+                    _ => None,
+                }
+                .map(|(slot, generation)| -> Result<(usize, usize)> {
+                    Ok((
+                        columns
+                            .iter()
+                            .position(|name| *name == slot)
+                            .ok_or_else(|| anyhow::anyhow!("restore_slot_column_missing"))?,
+                        columns
+                            .iter()
+                            .position(|name| *name == generation)
+                            .ok_or_else(|| anyhow::anyhow!("restore_generation_column_missing"))?,
+                    ))
+                })
+                .transpose()?;
+                drop(columns);
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
                     super::schema::materialize(row)?;
+                    if let Some((slot_index, generation_index)) = floor_columns {
+                        let slot = row.get_ref(slot_index)?.as_str()?;
+                        super::connect::identifier(slot)?;
+                        let generation = row.get::<_, i64>(generation_index)?;
+                        ensure!(
+                            generation > 0 && generation < i64::MAX,
+                            "restore_generation_exhausted"
+                        );
+                        generations
+                            .entry(slot.into())
+                            .and_modify(|value| *value = (*value).max(generation))
+                            .or_insert(generation);
+                        ensure!(generations.len() <= 8192, "restore_slot_count_bound");
+                    }
                     hash.update(&[255]);
                     hash.update(&(row.as_ref().column_count() as u64).to_be_bytes());
                     for index in 0..row.as_ref().column_count() {
@@ -553,6 +671,7 @@ impl Snapshot {
                 digest,
                 identities: identities_set,
                 tables,
+                generations,
             })
         })
     }
@@ -561,12 +680,19 @@ impl Snapshot {
 /// Atomic denial phase inside the private reset transaction. The caller must
 /// already own genuine exclusion and the unpublished target. No outer commit,
 /// external request, secret deletion, custody change or owner is produced.
-pub(crate) fn close_in(
+fn close_in(
     tx: &mut Transaction<'_>,
     before: Snapshot,
     cut: &Cut,
     profile: &Profile,
 ) -> Result<usize> {
+    let savepoint = tx.savepoint()?;
+    let count = close_rows(&savepoint, before, cut, profile)?;
+    savepoint.commit()?;
+    Ok(count)
+}
+
+fn close_rows(tx: &Connection, before: Snapshot, cut: &Cut, profile: &Profile) -> Result<usize> {
     cut.check_storage_metadata(tx)?;
     ensure!(
         tx.pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))?,
@@ -577,15 +703,20 @@ pub(crate) fn close_in(
         "restore_cut_inventory_changed"
     );
     let fresh = Snapshot::capture(tx, profile)?;
-    ensure!(fresh.digest == before.digest, "restore_snapshot_changed");
-    let savepoint = tx.savepoint()?;
-    let occupied: bool = savepoint.query_row(
+    ensure!(
+        fresh.digest == before.digest
+            && fresh.generations == before.generations
+            && fresh.identities == before.identities
+            && fresh.tables == before.tables,
+        "restore_snapshot_changed"
+    );
+    let occupied: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.oauth_restore_cuts)",
         [],
         |r| r.get(0),
     )?;
     ensure!(!occupied, "restore_cut_already_present");
-    savepoint.execute(
+    tx.execute(
         "INSERT INTO main.oauth_restore_cuts(digest,binding,inventory) VALUES(?1,?2,?3)",
         params![
             cut.digest().as_str(),
@@ -594,31 +725,167 @@ pub(crate) fn close_in(
         ],
     )?;
     for (kind, id) in &before.identities {
-        savepoint.execute(
+        tx.execute(
             "INSERT INTO main.oauth_restore_closed(kind,id,cut) VALUES(?1,?2,?3)",
             params![kind.text(), id, cut.digest().as_str()],
         )?;
     }
+    for (slot, generation) in &before.generations {
+        tx.execute(
+            "INSERT INTO main.oauth_restore_slot_floors(slot,generation,cut) VALUES(?1,?2,?3)",
+            params![slot, generation, cut.digest().as_str()],
+        )?;
+    }
+    if before.tables.contains("oauth_management_dispatch_slots") {
+        // This barrier is released only by the actual restore cut, never by an
+        // ordinary retry. Both exact old originals remain permanently closed.
+        let unsupported:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_management_dispatch_slots d
+            WHERE NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='management' AND c.id=d.attempt AND c.cut=?1)
+               OR NOT EXISTS(SELECT 1 FROM main.oauth_restore_closed c WHERE c.kind='connect' AND c.id=d.attempt AND c.cut=?1)
+               OR NOT EXISTS(SELECT 1 FROM main.oauth_connect_attempts a WHERE a.attempt=d.attempt AND a.slot=d.slot))",
+            [cut.digest().as_str()],|row|row.get(0))?;
+        ensure!(!unsupported, "restore_dispatch_claim_not_closed");
+        tx.execute(
+            "DELETE FROM main.oauth_management_dispatch_slots WHERE attempt IN
+            (SELECT id FROM main.oauth_restore_closed WHERE kind='management' AND cut=?1)",
+            [cut.digest().as_str()],
+        )?;
+    }
     if before.tables.contains("oauth_connection_slots") {
-        let exhausted:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_connection_slots WHERE security_epoch=9223372036854775807)",[],|r|r.get(0))?;
+        let exhausted:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_connection_slots WHERE security_epoch=9223372036854775807)",[],|r|r.get(0))?;
         ensure!(!exhausted, "restore_local_epoch_exhausted");
-        savepoint.execute("UPDATE main.oauth_connection_slots SET status='reauth_required',security_epoch=security_epoch+1",[])?;
+        tx.execute("UPDATE main.oauth_connection_slots SET status='reauth_required',security_epoch=security_epoch+1",[])?;
     }
     if before.tables.contains("oauth_inbound_grants") {
-        let exhausted:bool=savepoint.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_inbound_grants WHERE epoch=9223372036854775807)",[],|r|r.get(0))?;
+        let exhausted:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.oauth_inbound_grants WHERE epoch=9223372036854775807)",[],|r|r.get(0))?;
         ensure!(!exhausted, "restore_inbound_epoch_exhausted");
-        savepoint.execute("UPDATE main.oauth_inbound_grants SET status='revoked',epoch=epoch+1 WHERE status='active'",[])?;
-        savepoint.execute(
+        tx.execute("UPDATE main.oauth_inbound_grants SET status='revoked',epoch=epoch+1 WHERE status='active'",[])?;
+        tx.execute(
             "UPDATE main.oauth_inbound_refresh SET state='revoked' WHERE state='active'",
             [],
         )?;
     }
     if before.tables.contains("native_fresh_owners") {
-        savepoint.execute("UPDATE main.native_fresh_owners SET stage='refused' WHERE stage IN ('allocated','offered')",[])?;
+        tx.execute("UPDATE main.native_fresh_owners SET stage='refused' WHERE stage IN ('allocated','offered')",[])?;
     }
     let count = before.identities.len();
-    savepoint.commit()?;
     Ok(count)
+}
+
+/// Actual successful local denial result, not a native owner or copy/writer
+/// permission. Stored cut DATA alone cannot manufacture this value.
+pub(crate) struct AppliedCut<'scope, 'database, 'cut> {
+    cut: &'cut Cut,
+    transaction: &'scope Transaction<'database>,
+    count: usize,
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait AmbiguousIfImpl<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $bound> AmbiguousIfImpl<u8> for T {}
+            let _ = <AppliedCut<'static, 'static, 'static> as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(std::ops::Deref);
+    assert_not_impl!(AsRef<Connection>);
+    assert_not_impl!(std::borrow::Borrow<Connection>);
+};
+
+impl AppliedCut<'_, '_, '_> {
+    pub(crate) fn cut(&self) -> &Cut {
+        self.cut
+    }
+
+    pub(crate) fn closed_count(&self) -> usize {
+        self.count
+    }
+
+    pub(crate) fn require_connection(&self, connection: &Connection) -> Result<()> {
+        ensure!(
+            std::ptr::eq(connection, &**self.transaction) && !connection.is_autocommit(),
+            "restore_applied_cut_connection_changed"
+        );
+        super::schema::require_admission(connection)
+    }
+
+    /// Concrete SQL revocation continuation only. The held transaction is not
+    /// exposed, and commit cannot occur while this actual cut loan is live.
+    pub(crate) fn stage_closed_credentials(
+        &self,
+        fence: &crate::security_epoch::restore_authority::PreparedRestoreFence,
+        namespace: &day2_capabilities::credentials::Namespace,
+        source_epoch: u64,
+    ) -> Result<crate::managed_credentials::store::restore::ResetSummary> {
+        let peers =
+            fence.closed_credential_peers(self.transaction, self, namespace, source_epoch)?;
+        crate::managed_credentials::store::restore::stage_closed_reset(
+            self.transaction,
+            namespace,
+            source_epoch,
+            &peers,
+        )
+    }
+}
+
+fn apply_in<'scope, 'database, 'cut>(
+    tx: &'scope Transaction<'database>,
+    before: Snapshot,
+    cut: &'cut Cut,
+    profile: &Profile,
+) -> Result<AppliedCut<'scope, 'database, 'cut>> {
+    super::schema::require_admission(tx)?;
+    let count = close_rows(tx, before, cut, profile)?;
+    Ok(AppliedCut {
+        cut,
+        transaction: tx,
+        count,
+    })
+}
+
+/// Counts only; this is not image admission, maintenance or writer authority.
+pub(crate) struct ApplicationResetSummary {
+    pub(crate) credentials: crate::managed_credentials::store::restore::ResetSummary,
+    pub(crate) closed_oauth_originals: usize,
+}
+
+/// One rollback-owning admission inside the caller's existing memory-only
+/// transaction. The applied-cut loan cannot escape this concrete continuation.
+pub(crate) fn reset_application_in(
+    tx: &Transaction<'_>,
+    fence: &crate::security_epoch::restore_authority::PreparedRestoreFence,
+    authority_schema: &crate::security_epoch::restore_authority::RestoreFenceSchema,
+    oauth_schema: &Profile,
+    cut: &Cut,
+    namespace: &day2_capabilities::credentials::Namespace,
+    source_epoch: u64,
+) -> Result<ApplicationResetSummary> {
+    super::schema::admit_memory_transaction(tx, |tx| {
+        let before = Snapshot::capture(tx, oauth_schema).context("restore_snapshot_admission")?;
+        fence
+            .apply_in(tx, authority_schema)
+            .context("restore_authority_fence")?;
+        let applied = apply_in(tx, before, cut, oauth_schema).context("restore_oauth_cut")?;
+        let credentials = applied
+            .stage_closed_credentials(fence, namespace, source_epoch)
+            .context("restore_credential_cut")?;
+        Ok(ApplicationResetSummary {
+            credentials,
+            closed_oauth_originals: applied.closed_count(),
+        })
+    })
 }
 
 #[cfg(test)]

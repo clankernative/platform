@@ -55,6 +55,39 @@ impl PreparedRestoreFence {
         self.disabled
     }
 
+    fn require_applied_in(&self, connection: &Connection) -> Result<()> {
+        require_transaction(connection)?;
+        crate::oauth::schema::require_admission(connection)?;
+        ensure!(
+            authority_state::current(connection)? == self.disabled
+                && !self.disabled.document.enabled
+                && self.disabled.stamp.epoch != self.previous.stamp.epoch,
+            "restore_disabled_authority_changed"
+        );
+        Ok(())
+    }
+
+    /// Nonescaping SQL-denial context for the complete reset, minted only after
+    /// both actual local cuts. It is not approval, exclusion or IO authority.
+    pub(crate) fn closed_credential_peers<'db>(
+        &'db self,
+        connection: &'db rusqlite::Transaction<'_>,
+        applied: &'db crate::oauth::restore::AppliedCut<'_, '_, '_>,
+        namespace: &day2_capabilities::credentials::Namespace,
+        source_epoch: u64,
+    ) -> Result<ClosedCredentialPeers<'db>> {
+        applied.require_connection(connection)?;
+        let context = ClosedCredentialPeers {
+            connection,
+            fence: self,
+            cut: applied.cut(),
+            namespace: namespace.clone(),
+            source_epoch,
+        };
+        context.require(connection, namespace, source_epoch)?;
+        Ok(context)
+    }
+
     /// SQL only. No clock, entropy, artifact/provider IO, outer commit or
     /// readiness is produced. The enclosing complete reset owns rollback.
     pub(crate) fn apply_in(
@@ -85,6 +118,61 @@ impl PreparedRestoreFence {
             "restore-fence",
         )?;
         authority_state::discard_restored_sessions_in(connection)
+    }
+}
+
+/// Permission to retain already admitted peer rows as historical DATA while
+/// revoking the credential unit in this exact transaction. This has no native
+/// factory, serialization or ability to authorize issue/reveal/serving.
+pub(crate) struct ClosedCredentialPeers<'db> {
+    connection: &'db Connection,
+    fence: &'db PreparedRestoreFence,
+    cut: &'db super::restore_cut::Cut,
+    namespace: day2_capabilities::credentials::Namespace,
+    source_epoch: u64,
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait AmbiguousIfImpl<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $bound> AmbiguousIfImpl<u8> for T {}
+            let _ = <ClosedCredentialPeers<'static> as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(std::ops::Deref);
+    assert_not_impl!(AsRef<Connection>);
+    assert_not_impl!(std::borrow::Borrow<Connection>);
+};
+
+impl ClosedCredentialPeers<'_> {
+    pub(crate) fn require(
+        &self,
+        connection: &Connection,
+        namespace: &day2_capabilities::credentials::Namespace,
+        source_epoch: u64,
+    ) -> Result<()> {
+        ensure!(
+            std::ptr::eq(connection, self.connection)
+                && namespace == &self.namespace
+                && source_epoch == self.source_epoch,
+            "restore_closed_peer_owner_changed"
+        );
+        self.fence.require_applied_in(connection)?;
+        self.cut
+            .require_credential_binding(namespace, source_epoch)?;
+        self.cut.require_applied_in(connection)
     }
 }
 
