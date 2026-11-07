@@ -1004,6 +1004,7 @@ impl World {
             apps: BTreeMap::from([(
                 "things".into(),
                 AppBinding {
+                    managed_secrets: None,
                     retention: Default::default(),
                     journal: None,
                     security: None,
@@ -1060,6 +1061,7 @@ impl World {
                 (
                     "links".into(),
                     AppBinding {
+                        managed_secrets: None,
                         retention: Default::default(),
                         journal: None,
                         security: None,
@@ -1081,6 +1083,7 @@ impl World {
                 (
                     "other".into(),
                     AppBinding {
+                        managed_secrets: None,
                         retention: Default::default(),
                         journal: None,
                         security: None,

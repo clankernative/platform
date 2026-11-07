@@ -60,6 +60,7 @@ mod release_binding;
 #[allow(dead_code)]
 mod oauth;
 pub use oauth::declaration as connection_declaration;
+pub mod app_secrets;
 pub mod connection_codegen;
 pub mod openapi;
 pub mod operation_catalog;
@@ -88,6 +89,7 @@ pub mod schedules;
 pub mod schema;
 pub mod sdk;
 pub mod security_admission;
+mod web_app_secrets;
 // Private external-epoch protocol; live enrollment producers remain unqualified.
 #[allow(dead_code)]
 mod security_epoch;

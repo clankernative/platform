@@ -3037,6 +3037,7 @@ fn instance_for_artifact(
         apps: BTreeMap::from([(
             "app".into(),
             AppBinding {
+                managed_secrets: None,
                 security: None,
                 runtime: None,
                 artifact: artifact_path

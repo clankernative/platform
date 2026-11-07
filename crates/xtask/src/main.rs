@@ -1193,6 +1193,29 @@ fn main() -> Result<()> {
             );
             println!("{}", linux_provisioning_fixture::inspect(&instance)?);
         }
+        "app-secrets-table" => {
+            let check = match args.next().as_deref() {
+                None => false,
+                Some("--check") => true,
+                _ => bail!("app-secrets-table accepts only --check"),
+            };
+            ensure!(args.next().is_none(), "unexpected argument");
+            let runner = workflows::build(&root)?;
+            let transitions = day2::automation::run(&runner, &["app-secret-table"], |_| {
+                bail!("pure secret recipe requested an effect")
+            })?;
+            let source = digest(&fs::read(root.join("ops/AppSecrets.roc"))?);
+            let mut bytes = serde_json::to_vec_pretty(
+                &serde_json::json!({"source":source,"transitions":transitions}),
+            )?;
+            bytes.push(b'\n');
+            let path = root.join("crates/day2/src/app_secrets/steps.json");
+            if check {
+                ensure!(fs::read(path)? == bytes, "secret recipe table is stale");
+            } else {
+                fs::write(path, bytes)?;
+            }
+        }
         "workflows" => {
             ensure!(args.next().is_none(), "workflows accepts no arguments");
             workflows::build(&root)?;

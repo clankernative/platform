@@ -23,6 +23,7 @@ import ops.Release
 import ops.GkeRelease
 import ops.NativeEnrollment
 import ops.SecretRetirement
+import ops.AppSecrets
 import ops.UiDependency
 
 # Only the native supervisor launches this executable. Its stdout is a bounded
@@ -73,6 +74,9 @@ run! = |args| match args {
 	["native-enrollment"] => NativeEnrollment.run!(call!)
 	["native-enrollment-qualify"] => NativeEnrollment.qualify!(call!)
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
+	["app-secret-step", snapshot] => AppSecrets.run(snapshot)
+	["app-secret-table"] => Ok(AppSecrets.table({}))
+	["app-secret-canary"] => AppSecrets.canary!(call!)
 	["ui-dependency"] => UiDependency.install!(call!)
 	["cli"] => Verify.cli!(call!)
 	["verify-fast"] => Verify.fast!(call!)

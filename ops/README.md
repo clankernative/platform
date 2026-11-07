@@ -14,6 +14,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 | [Backup.roc](Backup.roc) | Take a consistent snapshot → verify the bundle; verify → restore into a new directory |
 | [UiDependency.roc](UiDependency.roc) | Inspect verified installation → fetch pinned Clanker release → bounded extraction → verify full closure → atomic publication |
 | [Authority.roc](Authority.roc) | Inspect active authority; explicitly activate desired grants or an artifact with an expected stamp and retry identity |
+| [AppSecrets.roc](AppSecrets.roc) | Owner-managed create/rotate transition table embedded in the runtime; opt-in synthetic provider canaries with guarded cleanup |
 | [Infra.roc](Infra.roc) | Construct the resource graph → prepare → version → init → validate → plan → show → receipt |
 | [Ci.roc](Ci.roc) | Source-event trigger policy and the mandatory isolated build/admission/check/evidence recipe |
 | [Verify.roc](Verify.roc) | Platform fixture selection, regression suites, CLI compilation and verification receipts |
