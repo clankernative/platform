@@ -145,6 +145,11 @@ impl<T> std::ops::DerefMut for Registry<T> {
 }
 
 impl<T> Registry<T> {
+    pub(super) fn require_unleased(&self) -> Result<()> {
+        ensure!(self.reserved.is_empty(), "response_rights_scope_leased");
+        Ok(())
+    }
+
     /// Negative admission DATA only. The actual owner must still be acquired
     /// and checked; a retired reservation cannot become a retryable busy one.
     pub(super) fn excludes_unstarted_operation(&self, key: &str) -> Result<bool> {
@@ -584,6 +589,9 @@ impl Sink {
         // The actual request is consumed only after physical completion and
         // all Current/original postchecks. The role/storage leases remain
         // unknown unless the following result publication also succeeds.
+        let terminal = self
+            .response_tickets
+            .prepare_native(&self.identity, &owners.response_rights)?;
         request_owner.finish(role.owner())?;
         // A rejected/lost result publication remains terminally unknown.
         // No await or fallible operation follows the positive disposition.
@@ -591,6 +599,7 @@ impl Sink {
         role.known = true;
         lease.known = true;
         self.state.set(SinkState::Complete);
+        terminal.complete();
         Ok(())
     }
 }
