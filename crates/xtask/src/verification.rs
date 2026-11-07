@@ -151,7 +151,10 @@ fn validate_linux_context(
     );
     ensure!(
         swap.trim() == "0",
-        "Linux CI compiler swap must remain disabled"
+        "Linux CI compiler swap must remain disabled: memory.swap.max={}; memory.max={}; purpose={}",
+        linux_quota_diagnostic(swap),
+        linux_quota_diagnostic(memory),
+        purpose.name()
     );
     ensure!(
         cgroup.trim() == "0::/",
@@ -166,6 +169,19 @@ fn validate_linux_context(
         "Linux compiler cgroup exceeds its fixed workflow-purpose allowance"
     );
     Ok(())
+}
+
+fn linux_quota_diagnostic(value: &str) -> &str {
+    let value = value.trim();
+    if value == "max"
+        || (!value.is_empty()
+            && value.len() <= 20
+            && value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        value
+    } else {
+        "<invalid>"
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2942,7 +2958,7 @@ mod tests {
                 assert!(result.is_err());
             }
         }
-        for swap in ["max", "1", "-1", ""] {
+        for swap in ["max", "1", "-1", "", "00", "+0", "-0", "0x0"] {
             let result = validate_linux_context(
                 preparation,
                 "verify-prepare-parts",
@@ -2958,6 +2974,38 @@ mod tests {
         LinuxContext::parse("standard")?;
         LinuxContext::parse("test-preparation")?;
         Ok(())
+    }
+
+    #[test]
+    fn linux_context_swap_refusal_reports_bounded_current_quotas() {
+        for (purpose, memory, swap) in [
+            (LinuxContext::Standard, "4096\n", "max\n"),
+            (LinuxContext::TestPreparation, "8589934592\n", "1048576\n"),
+        ] {
+            let error =
+                validate_linux_context(purpose, "verify-prepare-parts", "0::/", memory, swap)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("Linux CI compiler swap must remain disabled"));
+            assert!(error.contains(&format!("memory.swap.max={};", swap.trim())));
+            assert!(error.contains(&format!("memory.max={};", memory.trim())));
+            assert!(error.contains(&format!("purpose={}", purpose.name())));
+        }
+        for invalid in ["invalid\nquota".to_owned(), "9".repeat(21)] {
+            let error = validate_linux_context(
+                LinuxContext::Standard,
+                "verify-shards",
+                "0::/",
+                &invalid,
+                &invalid,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("memory.swap.max=<invalid>; memory.max=<invalid>"));
+            assert!(!error.contains(&invalid));
+            assert!(!error.contains('\n'));
+            assert!(error.len() < 256);
+        }
     }
 
     #[test]
