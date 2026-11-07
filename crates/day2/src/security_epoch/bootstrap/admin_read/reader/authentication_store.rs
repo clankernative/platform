@@ -13,8 +13,7 @@ use rusqlite::Connection;
 mod producer;
 pub(crate) use producer::FencedReadUnit;
 pub(in crate::security_epoch) use producer::{
-    AuthenticatedRestoreExecution, CompletedCeremony, FencedRegistryLoan,
-    FencedRestoreContinuation, RestoreWriteLoan,
+    CompletedCeremony, FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
 };
 
 // SQLite closes first on unwinding; the unfinished file guard then poisons the
