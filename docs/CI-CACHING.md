@@ -17,7 +17,7 @@ those entries cannot seed main or another PR. Existing repository storage limits
 and eviction apply. No paid cache allowance is enabled.
 
 Main publishes the Linux bootstrap actions it already compiled. Its queue-proof
-fast path skips native preparation, so separate Linux and Mac publishers download only
+fast path skips native preparation, so the separate Linux publisher downloads only
 the compiler-action archives from the exact origin run and attempt admitted by
 the existing full-proof guard. The origin identifiers are emitted only after
 source, latest-attempt, checks and receipt admission succeed. On ordinary full
@@ -50,9 +50,19 @@ ordinary compilation path in place. The archive contains only content-addressed
 compiler data, never a verifier to install directly or a reusable test outcome.
 Bazel still builds the current source verifier, and native-output selection,
 source/byte/mode admission and complete receipt composition still follow it.
-The other Linux consumers retain their existing same-run cache restore.
+The Linux preparation join also restores the completed test compiler archive
+from its own run and attempt before building its current verifier. This protects
+its unchanged twenty-minute budget when cache-service entries were evicted after
+the tests lane finished. Download and extraction remain optional, with bounded
+transport and one retry. Missing data, including an earlier-attempt producer on a
+failed-jobs-only rerun, falls back to current-source compilation. The archive is
+extracted only into the content-addressed compiler cache; current-source bootstrap,
+native context, authenticated preparation selection and all three-part admission
+remain mandatory. Runtime shards retain their existing same-run cache restore.
 
-Both platforms retain their OS/architecture partition and source/run/attempt keys.
+The independent Mac compatibility workflow publishes its own completed compiler actions directly
+after native admission in that existing Mac job; no second Mac allocation or queue artifact is
+needed. Both platforms retain their OS/architecture partition and source/run/attempt keys.
 The publisher runs in the caller's GitHub cache scope: PRs still cannot write
 main's cache. The trusted main push is what makes its snapshot available to
 later PRs and merge groups. Artifact download has a two-minute deadline and one automatic retry;
@@ -75,8 +85,16 @@ they receive no outer action cache or cache-service credentials.
 
 Secret scanning and dependency auditing finish before ordinary native work.
 Independent diagnostics can collect repair facts but cannot replace required
-checks. The required `verify` job rejects missing, failed or skipped preparation,
-portable campaigns or Mac obligations.
+checks. The required `verify` job qualifies Linux releases and rejects missing, failed
+or skipped preparation and any of the six Linux campaigns. Its receipt has
+`scope: linux` in `linux-verification.json`; it makes no claim about native Mac
+builds. The required check names and branch protection remain unchanged.
+
+`mac-compatibility.yml` runs independently on pull requests, main pushes and
+manual dispatch. It is visible but not required for Linux merges/releases, and
+never runs on a merge group. Its separate security jobs use distinct check names.
+Mac failure or unavailable runner capacity cannot delay Linux `verify`, artifact
+selection or exact-commit queue receipt reuse.
 
 Preparation runs inputs, fixtures and tests jobs concurrently. Inputs retains
 formatting, CLI compilation, eight fixture builds, browser checks
@@ -90,7 +108,7 @@ executable inventory. Missing, swapped, duplicated or foreign parts refuse the
 join, including an incomplete second fixture set. Permission-preserving transport records its original run
 and producer attempt; it is separate from persistent build caches.
 
-Five Linux campaigns execute the disjoint day2, control and remaining-package
+Six Linux campaigns execute the two day2 partitions, control and remaining-package
 suites, control simulation and the reviewed parallel compiler probes. The three
 Linux sandbox/compilation launchers are a separate mandatory inventory. Their
 current bytes, permissions and native target are admitted before installation
@@ -116,18 +134,11 @@ confinement and ELF/glibc/loader admission remain mandatory. This is separate
 from the production Mac private builder; no Linux production builder is added.
 
 The native join binds checkout/tree, source catalog, workflow, run/attempt and
-all required Linux and Mac evidence. Snapshots, compiler/configuration identities,
+all required Linux evidence. Snapshots, compiler/configuration identities,
 workspace paths and executable digests remain host-specific. The original
 campaign budgets and coverage remain required. Retried jobs can consume successful
 outputs from earlier attempts of the same run and exact source. They never consume
 another run's preparation or substitute a different prepared executable set.
-
-A Mac allocation rescued by `retry-mac-compatibility` retains that actual
-producer's job and check IDs. Selection admits it only when the unique original
-Mac job in that same run/attempt/head was cancelled without a runner or steps,
-and the unique retry succeeded on `macos-15`. An executed failure, failed latest
-retry, foreign original or retry, duplicate producer or original-job check cannot
-supply its artifact. The complete native Mac receipt remains mandatory.
 
 ### Rerunning sharded verification
 
@@ -170,13 +181,13 @@ process arguments, environments, API values or private output.
 consumer and each original producer attempt, job, check, artifact ID and digest.
 Earlier receipts retain their execution identity; a retry does not claim that
 successful campaigns executed again. The selector rechecks live metadata before
-joining all unchanged Linux and Mac obligations. If a required artifact has
+joining all Linux obligations. If a required artifact has
 expired, use **Re-run all jobs** to regenerate the complete run.
 
 ### Mac runner acquisition
 
 GitHub can cancel a `macos-15` allocation before any runner starts, independently
-of the job's six-hour execution timeout. Platform CI requests one new allocation
+of the job's six-hour execution timeout. The independent Mac workflow requests one new allocation
 only after a read-only API guard authenticates the unique original job in the
 same run, attempt and head, cancelled with runner ID zero, an empty runner name,
 and no steps. The cheap guard reads the actual API state after the original job
@@ -189,14 +200,12 @@ and executed failures refuse the retry. Cancelling the entire workflow also
 prevents it. The retry uses the identical steps, runner, verification recipe,
 cache policy, and source/run/attempt-bound Mac receipt as the original job.
 
-The required `verify` join still needs successful Linux verification and a
-complete current native Mac receipt. A second acquisition failure fails the
-join; test failures and execution timeouts are not automatically retried. This
-adds no runner, paid service, branch-protection change, or verification bypass.
-It cannot reserve GitHub capacity or guarantee that the second request succeeds.
-The existing exact-success queue-reuse guard remains conservative: a rescued
-run with a cancelled original Mac job does not qualify for main's receipt reuse,
-so main executes ordinary verification instead.
+A second acquisition failure leaves Mac compatibility incomplete; test failures
+and execution timeouts are not automatically retried. These results remain
+visible in the Mac workflow and do not affect Linux release qualification.
+`verify-mac` still requires every native case, fixture and both real build
+campaigns before publishing `ci-mac-compatibility.json`. The local `verify` full
+recipe retains its Mac build campaigns; Linux evidence cannot replace them.
 
 ## Completed build outputs
 
@@ -265,26 +274,26 @@ separate evidence.
 
 ## Exact merge-group receipt reuse
 
-PR and merge-group workflows execute the complete gate. A main push may instead
-look up the latest successful merge-group attempt of this repository's active
-`ci.yml` workflow at the exact checked-out SHA and tree. Tree equality under a
-different SHA is insufficient. Current GitHub run/job/check identities, required
-conclusions, the genuine Mac runner label, Actions app pin and immutable receipt
+PR and merge-group `ci.yml` workflows execute complete Linux qualification. A
+main push may instead look up the latest successful merge-group attempt of this
+repository's active `ci.yml` workflow at the exact checked-out SHA and tree. Tree
+equality under a different SHA is insufficient. Current GitHub run/job/check
+identities, required conclusions, Actions app pin and immutable Linux receipt
 artifact must all authenticate. The read-only job accepts no caller-selected
 repository, URL, workflow, run, artifact or source override.
 
-The bounded JSON receipt carries preparation, compiler/output inventory, complete
-campaign joins and original full evidence. Current source independently derives
-the package/target and Mac-case requirements. It requires exact snapshot,
-Roc/CI workflow, host/compiler/configuration, exhaustive fixtures/campaigns,
-original timings and budgets. Downloaded executables are never run. API identities
-are checked again after admission. A Linux-only receipt cannot stand for the
-complete native gate.
+The bounded JSON receipt carries preparation, compiler/output inventory, all
+six Linux campaign joins and `scope: linux` evidence. Current source independently
+derives the package/target requirements. It requires exact snapshot, Roc/CI
+workflow, host/compiler/configuration, exhaustive fixtures/campaigns, original
+timings and budgets. Downloaded executables are never run. API identities are
+checked again after admission. Mac evidence belongs to the independent developer
+workflow and is neither required nor claimed by Linux receipt reuse.
 
 Any missing, expired, changed, incomplete or unavailable proof, lookup/setup/
 download/admission/upload failure selects ordinary complete preparation and
 fresh campaigns. Independent cheap checks always execute on current source.
-Authenticated reuse is named `reused-trusted-merge-group-full`; it retains the
+Authenticated reuse is named `reused-trusted-merge-group-linux`; it retains the
 original receipts and explicitly records that the main push did not run fresh
 runtime campaigns. A passing PR or synthetic test does not establish actual
 main-push reuse or a performance result.

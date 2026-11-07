@@ -96,6 +96,14 @@ pub const SOURCES: &[(&str, &[u8])] = &[
         "ops/SecretRetirement.roc",
         include_bytes!("../../../ops/SecretRetirement.roc"),
     ),
+    (
+        ".github/workflows/ci.yml",
+        include_bytes!("../../../.github/workflows/ci.yml"),
+    ),
+    (
+        ".github/workflows/mac-compatibility.yml",
+        include_bytes!("../../../.github/workflows/mac-compatibility.yml"),
+    ),
     ("infra/main.roc", include_bytes!("../../../infra/main.roc")),
     (
         "infra/Stack.roc",

@@ -8,6 +8,8 @@ filegroup(name = "font_fixture_bytes", srcs = ["tests/fixtures/fonts/test-subset
 COMPILE_INPUTS = [
     "//build/bazel:roc-packages.json",
     ":font_fixture_bytes",
+    "//:.github/workflows/ci.yml",
+    "//:.github/workflows/mac-compatibility.yml",
     "//crates/worker:src/first_request.rs",
     "//:Cargo.lock",
     "//:Cargo.toml",
