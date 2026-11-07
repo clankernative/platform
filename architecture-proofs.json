@@ -39,7 +39,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
       "scope": "const",
-      "fingerprint": "sha256:053d8528c554666043a3ca2e51cba2133a81f486494ea01925fa4cefc21b8bad"
+      "fingerprint": "sha256:aaba537978858c171020af93083641207ce44e1282fb759a9344fc3e7b518433"
     },
     {
       "source": "crates/day2/src/security_epoch/credential_material.rs",
@@ -2272,7 +2272,7 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >",
         "fn capture (metadata : & 'metadata InitialStoreMetadata , mut loan : ControllerAdminReadLoan < 'storage , 'role > , operation : & Digest , approver : & str , executor : & str) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (crate) fn check (& mut self , metadata : & InitialStoreMetadata , operation : & Digest , approver : & str , executor : & str) -> Result < () >",
         "pub (crate) fn check_registry_local (& mut self) -> Result < () >",
@@ -2313,18 +2313,18 @@
         },
         {
           "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": [
-        "admit_authentication_store"
+        "admit_restore_authentication"
       ]
     },
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
-      "type_name": "AuthenticationStoreAction",
+      "type_name": "RestoreAuthenticationAction",
       "kind": "private_material",
       "consuming_methods": [
         "finish_checked"
@@ -2338,24 +2338,24 @@
       "factories": [
         {
           "owner": "ControllerAdminReader < 'metadata , 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn admit_authentication_store (mut self , expected : & ApprovalIntent) -> Result < AuthenticationStoreAction < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn admit_restore_authentication (mut self , expected : & ApprovalIntent) -> Result < RestoreAuthenticationAction < 'metadata , 'storage , 'role > >"
         }
       ],
       "material_uses": [
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , expected : & ApprovalIntent) -> Result < () >"
         },
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >"
         },
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >"
         },
         {
-          "owner": "AuthenticationStoreAction < '_ , '_ , '_ >",
+          "owner": "RestoreAuthenticationAction < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
         }
       ],
