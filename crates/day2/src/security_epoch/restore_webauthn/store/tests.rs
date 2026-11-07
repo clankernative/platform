@@ -249,10 +249,12 @@ fn existing_schema_admission_cannot_use_a_temp_shadow_for_a_missing_main_table()
     db.execute_batch(&DDL.replace("main.", "temp."))?;
     assert!(require_existing_schema(&db).is_err());
     assert!(schema_snapshot(&db)?.is_empty());
+    // Four canonical tables and their four implicit primary-key indexes exist
+    // only in TEMP; none may replace the missing main catalog.
     assert_eq!(
         db.query_row("SELECT count(*) FROM temp.sqlite_schema", [], |r| r
             .get::<_, i64>(0))?,
-        6
+        8
     );
     Ok(())
 }
