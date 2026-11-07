@@ -4,14 +4,35 @@
 use super::{
     CREDENTIAL_PEER_TABLES, CREDENTIAL_TABLES, install_schema, namespace_key, stage_revoke,
 };
+#[cfg(test)]
+use super::{
+    IngressVerification, PublicReceipt, VerifiedHumanPost, authorize_reveal, prepare_issue,
+    stage_issue, verify_ingress,
+};
 use crate::oauth::schema;
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::credentials::Namespace;
+#[cfg(test)]
+use rusqlite::Connection;
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 
 const MAX_LINEAGES: usize = 1024;
 const MAX_VERSIONS: i64 = 4096;
+
+enum PeerAdmission<'proof, 'db> {
+    Empty,
+    Closed(&'proof crate::security_epoch::restore_authority::ClosedCredentialPeers<'db>),
+}
+
+impl PeerAdmission<'_, '_> {
+    fn require(&self, tx: &Transaction<'_>, namespace: &Namespace, epoch: i64) -> Result<()> {
+        match self {
+            Self::Empty => Ok(()),
+            Self::Closed(context) => context.require(tx, namespace, u64::try_from(epoch)?),
+        }
+    }
+}
 
 /// Counts only. No credential, material, key, permit or native owner escapes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +55,27 @@ pub(crate) fn stage_reset(
     namespace: &Namespace,
     source_epoch: u64,
 ) -> Result<ResetSummary> {
+    stage_with_peers(tx, namespace, source_epoch, PeerAdmission::Empty)
+}
+
+/// Complete-application denial profile only. Unlike the credential-only entry,
+/// historical peers may remain after the same transaction's authority and
+/// OAuth cuts. No pending record is reissued, migrated or used as permission.
+pub(crate) fn stage_closed_reset(
+    tx: &Transaction<'_>,
+    namespace: &Namespace,
+    source_epoch: u64,
+    peers: &crate::security_epoch::restore_authority::ClosedCredentialPeers<'_>,
+) -> Result<ResetSummary> {
+    stage_with_peers(tx, namespace, source_epoch, PeerAdmission::Closed(peers))
+}
+
+fn stage_with_peers(
+    tx: &Transaction<'_>,
+    namespace: &Namespace,
+    source_epoch: u64,
+    peers: PeerAdmission<'_, '_>,
+) -> Result<ResetSummary> {
     ensure!(!tx.is_autocommit(), "restore_reset_requires_transaction");
     ensure!(
         tx.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))?,
@@ -45,14 +87,19 @@ pub(crate) fn stage_reset(
     let selected = namespace_key(namespace)?;
     // This adapter owns the temporary hook only on an offline target. Nested
     // schema calls share the same cumulative debit rather than renewing it.
-    schema::admit(tx, |_| reset_in(tx, namespace, &selected, source_epoch))
+    schema::admit(tx, |_| {
+        reset_in(tx, namespace, &selected, source_epoch, &peers)
+    })
 }
 
 fn inspect_in(
     tx: &Transaction<'_>,
+    namespace: &Namespace,
     selected: &str,
     epoch: i64,
+    peers: &PeerAdmission<'_, '_>,
 ) -> Result<(Vec<String>, usize, i64)> {
+    peers.require(tx, namespace, epoch)?;
     // Require a complete EXISTING unit. The installer below validates it; it
     // must never turn an absent/partial imported unit into current state.
     for table in CREDENTIAL_TABLES {
@@ -63,22 +110,30 @@ fn inspect_in(
         )?;
         ensure!(present, "restore_reset_existing_unit_required");
     }
-    install_schema(tx)?;
-    // This first profile refuses all peer history, even terminal entries. A
-    // later owner-reviewed reset must invalidate pending intents explicitly.
-    for table in CREDENTIAL_PEER_TABLES {
-        let present: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?1)",
-            [table],
-            |r| r.get(0),
-        )?;
-        if present {
-            let occupied: bool = tx.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM main.{table})"),
-                [],
+    #[cfg(test)]
+    note_work(tx, "credential_pre_before");
+    let installed = install_schema(tx);
+    #[cfg(test)]
+    note_work(tx, "credential_pre_after");
+    installed.context("restore_credential_pre_admission")?;
+    // The credential-only profile still refuses all peer history. The complete
+    // profile has already proved both cuts on this same transaction; the actual
+    // installer above still validates every retained peer row and relationship.
+    if matches!(peers, PeerAdmission::Empty) {
+        for table in CREDENTIAL_PEER_TABLES {
+            let present: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?1)",
+                [table],
                 |r| r.get(0),
             )?;
-            ensure!(!occupied, "restore_reset_peer_history_unsupported");
+            if present {
+                let occupied: bool = tx.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM main.{table})"),
+                    [],
+                    |r| r.get(0),
+                )?;
+                ensure!(!occupied, "restore_reset_peer_history_unsupported");
+            }
         }
     }
     let mut query = tx.prepare(
@@ -133,7 +188,7 @@ pub(crate) fn inspect_source(
     let selected = namespace_key(namespace)?;
     let epoch = i64::try_from(source_epoch)?;
     schema::admit(tx, |_| {
-        inspect_in(tx, &selected, epoch)?;
+        inspect_in(tx, namespace, &selected, epoch, &PeerAdmission::Empty)?;
         Ok(())
     })
 }
@@ -143,24 +198,154 @@ fn reset_in(
     namespace: &Namespace,
     selected: &str,
     epoch: i64,
+    peers: &PeerAdmission<'_, '_>,
 ) -> Result<ResetSummary> {
-    let (active, lineages, versions) = inspect_in(tx, selected, epoch)?;
+    let (active, lineages, versions) = inspect_in(tx, namespace, selected, epoch, peers)?;
     // No epoch, grant, selector, verifier, custody envelope, receipt or origin
     // is rewritten. Reuse the canonical active->revoked transition exactly.
+    #[cfg(test)]
+    note_work(tx, "credential_revoke_before");
     for lineage in &active {
         ensure!(
             stage_revoke(tx, namespace, lineage)?,
             "restore_reset_lineage_changed"
         );
     }
-    install_schema(tx)?;
+    #[cfg(test)]
+    note_work(tx, "credential_revoke_after");
+    let installed = install_schema(tx);
+    #[cfg(test)]
+    note_work(tx, "credential_post_after");
+    installed.context("restore_credential_post_admission")?;
     let unreset:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_credential_lineages WHERE state!='revoked') OR EXISTS(SELECT 1 FROM day2_credential_versions WHERE state!='revoked') OR EXISTS(SELECT 1 FROM day2_credential_deliveries WHERE state!='closed')",[],|r|r.get(0))?;
     ensure!(!unreset, "restore_reset_terminal_postcondition");
+    peers.require(tx, namespace, epoch)?;
     Ok(ResetSummary {
         lineages,
         newly_revoked: active.len(),
         versions: versions.try_into()?,
     })
+}
+
+#[cfg(test)]
+fn note_work(db: &Connection, step: &'static str) {
+    eprintln!(
+        "restore_test_work step={step} remaining={:?}",
+        schema::remaining_work_for_tests(db)
+    );
+}
+
+/// Create genuine encrypted epoch-one material through the ordinary store
+/// functions. The test selection is synthetic, not native or human authority.
+#[cfg(test)]
+pub(crate) fn seed_first_epoch_for_tests(
+    db: &mut Connection,
+) -> Result<(PublicReceipt, zeroize::Zeroizing<String>)> {
+    let mut intent = super::tests::issue("invocation-1");
+    intent.security_epoch = 1;
+    let prepared = prepare_issue(&super::tests::lease(), &super::tests::family(), intent)?;
+    let tx = db.transaction()?;
+    let receipt = stage_issue(&tx, prepared)?.public_identity().clone();
+    tx.commit()?;
+    let post = VerifiedHumanPost {
+        namespace: super::tests::namespace(),
+        version: receipt.version.clone().context("fixture_version")?,
+        recipient: "issuer/human-1".into(),
+        session: "session-1".into(),
+        attempt: "before-restore".into(),
+        now: 1100,
+        security_epoch: 1,
+    };
+    let token = authorize_reveal(db, post)?
+        .context("fixture_delivery_missing")?
+        .into_response_body(&super::tests::lease())?;
+    Ok((receipt, zeroize::Zeroizing::new(token)))
+}
+
+#[cfg(test)]
+pub(crate) fn first_epoch_ingress_for_tests(
+    db: &Connection,
+    token: &str,
+    current_epoch: u64,
+) -> Result<bool> {
+    let grant = super::tests::issue("unused").ceiling;
+    let family = super::tests::family();
+    Ok(verify_ingress(
+        db,
+        &super::tests::lease(),
+        IngressVerification {
+            namespace: &super::tests::namespace(),
+            family: family.id.as_str(),
+            family_contract: &family.contract,
+            security_epoch: current_epoch,
+            now: 1100,
+            operation: &grant.roots["SubmitTranscription"],
+        },
+        token,
+    )?
+    .is_some())
+}
+
+/// Canonical stored-record conformance DATA only. This seed contains no
+/// authentication signature and cannot construct a native or human owner.
+#[cfg(test)]
+pub(crate) fn seed_historical_peers_for_tests(
+    db: &rusqlite::Connection,
+    scope: &str,
+    authority: &crate::authority_state::AuthorityStamp,
+    artifact: &str,
+    source_epoch: u64,
+) -> Result<(String, String)> {
+    let source = super::tests::restored_peer_database()?;
+    let raw: String =
+        source.query_row("SELECT intent FROM day2_credential_browser", [], |row| {
+            row.get(0)
+        })?;
+    let mut pending: super::super::browser::Pending = crate::json::decode(raw.as_bytes())?;
+    pending.authority = authority.clone();
+    pending.artifact = artifact.into();
+    let raw: String = source.query_row(
+        "SELECT confirmation FROM day2_credential_confirmations",
+        [],
+        |row| row.get(0),
+    )?;
+    let record = super::super::issuance::decode_record(&pending.invocation, raw.as_bytes())?;
+    let mut confirmation = record.confirmation;
+    confirmation.authority = authority.clone();
+    confirmation.artifact = artifact.into();
+    confirmation.security_epoch = source_epoch;
+    let super::super::issuance::ConfirmationOrigin::Credential(mut original) = record.original
+    else {
+        anyhow::bail!("test_expected_credential_history")
+    };
+    original.scope = scope.into();
+    original.app = scope
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("test_scope"))?
+        .into();
+    original.artifact = artifact.into();
+    original.pending_challenge = pending.challenge()?;
+    let pending_json = serde_json::to_string(&pending)?;
+    let confirmation_json = super::super::issuance::encode_record(
+        confirmation,
+        super::super::issuance::ConfirmationOrigin::Credential(original),
+    )?;
+    super::super::issuance::install(db)?;
+    db.execute(
+        "INSERT INTO day2_credential_browser VALUES(?1,?2,?3,?4)",
+        params![
+            pending.invocation,
+            pending.attempt,
+            pending_json,
+            pending.expires_at
+        ],
+    )?;
+    db.execute(
+        "INSERT INTO day2_credential_confirmations VALUES(?1,?2)",
+        params![pending.invocation, confirmation_json],
+    )?;
+    Ok((pending_json, confirmation_json))
 }
 
 #[cfg(test)]

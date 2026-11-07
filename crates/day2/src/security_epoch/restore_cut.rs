@@ -110,6 +110,43 @@ impl Cut {
         Ok(())
     }
 
+    /// SQL denial binding only. This does not admit a credential issuer,
+    /// maintenance original, physical owner or restored writer.
+    pub(in crate::security_epoch) fn require_credential_binding(
+        &self,
+        namespace: &Namespace,
+        source_epoch: u64,
+    ) -> Result<()> {
+        namespace.validate()?;
+        ensure!(
+            namespace == &self.record.namespace
+                && source_epoch == self.record.intent.archive.security_epoch,
+            "restore_credential_cut_binding_changed"
+        );
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn require_applied_in(
+        &self,
+        db: &rusqlite::Connection,
+    ) -> Result<()> {
+        ensure!(!db.is_autocommit(), "restore_cut_transaction_required");
+        crate::oauth::schema::require_admission(db)?;
+        self.check_storage_metadata(db)?;
+        let (binding, inventory): (String, String) = db.query_row(
+            "SELECT binding,inventory FROM main.oauth_restore_cuts WHERE digest=?1",
+            [self.digest.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        ensure!(
+            binding.len() <= 32768
+                && binding == self.encoded()?
+                && inventory == self.inventory().as_str(),
+            "restore_applied_cut_changed"
+        );
+        Ok(())
+    }
+
     pub(crate) fn validate_record(encoded: &str, digest: &str) -> Result<()> {
         ensure!(encoded.len() <= 32768, "restore_cut_record_bound");
         let record: Record = crate::json::decode(encoded.as_bytes())
@@ -148,6 +185,17 @@ pub(crate) fn fixture_for_storage(
     scope: &str,
     schema: Digest,
 ) -> Result<Cut> {
+    fixture_for_storage_epoch(inventory, seed, scope, schema, 1)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_for_storage_epoch(
+    inventory: Digest,
+    seed: u64,
+    scope: &str,
+    schema: Digest,
+    source_epoch: u64,
+) -> Result<Cut> {
     use super::kernel::restore::{Backup, ExactKey};
     let mut selected = super::tests::selection();
     let parts: Vec<_> = scope.split('/').collect();
@@ -171,7 +219,7 @@ pub(crate) fn fixture_for_storage(
             scope: selected.scope.clone(),
             authority: selected.authority_key()?,
             source_incarnation: Digest::new(b"old-db"),
-            security_epoch: 1,
+            security_epoch: source_epoch,
             image: Digest::new(b"archive-sqlite"),
             schema,
             artifact: Digest::new(b"artifact"),
