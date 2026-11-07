@@ -347,6 +347,16 @@
           "target": "cfg(target_os = \"linux\")"
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "dev",
+          "local_path": null,
+          "name": "quote",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
           "default_features": false,
           "features": [
             "blocking",

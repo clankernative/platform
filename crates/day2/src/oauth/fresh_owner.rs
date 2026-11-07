@@ -355,6 +355,7 @@ fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>> {
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
+    super::restore::install(db)?;
     super::schema::admit(db, |db| {
         replace_empty_historical_unit(db)?;
         install_current(db)
@@ -514,6 +515,11 @@ pub(super) fn claim(
     owner: &Digest,
     now: i64,
 ) -> Result<AllocationData> {
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     ensure!(
         !db.is_autocommit(),
         "native fresh original app transaction required"
@@ -582,6 +588,11 @@ pub(super) fn publish(
     request: &[u8],
     now: i64,
 ) -> Result<Digest> {
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     ensure!(
         !db.is_autocommit(),
         "native fresh original app transaction required"
@@ -647,6 +658,11 @@ pub(super) fn consume_in_current_app_transaction(
     result: &Digest,
     now: i64,
 ) -> Result<()> {
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     ensure!(
         !db.is_autocommit(),
         "native fresh final app transaction required"
@@ -671,6 +687,11 @@ pub(super) fn terminal_history(
     intent: &FreshIntent,
     owner: &Digest,
 ) -> Result<Option<Digest>> {
+    super::restore::require_open(
+        db,
+        super::restore::Kind::Fresh,
+        intent.commitment()?.as_str(),
+    )?;
     let value: Option<String> = db
         .query_row(
             "SELECT result_digest FROM native_fresh_owners
@@ -1174,6 +1195,74 @@ mod tests {
         changed.push(b' ');
         assert!(publish(&tx, &intent, &owner, &changed, 3).is_err());
         tx.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_cut_closes_actual_allocated_offered_and_consumed_originals_without_regrant()
+    -> Result<()> {
+        for stage in 0..3 {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("app.sqlite");
+            let mut db = crate::oauth::restore::tests::database(&path)?;
+            let original = intent()?;
+            let owner = Digest::new(b"real SQL fixture owner");
+            let result = Digest::new(b"verified result fixture DATA");
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            claim(&tx, &original, &owner, 1)?;
+            let request = if stage > 0 {
+                Some(publish(&tx, &original, &owner, &options(), 2)?)
+            } else {
+                None
+            };
+            if stage == 2 {
+                consume_in_current_app_transaction(
+                    &tx,
+                    &original,
+                    &owner,
+                    request.as_ref().unwrap(),
+                    &result,
+                    3,
+                )?;
+            }
+            tx.commit()?;
+            if stage == 2 {
+                assert_eq!(
+                    terminal_history(&db, &original, &owner)?,
+                    Some(result.clone())
+                );
+            }
+            let old: (String, Option<String>, Option<String>, Option<String>) = db.query_row(
+                "SELECT context,request,request_digest,result_digest FROM native_fresh_owners",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            crate::oauth::restore::tests::apply_for_storage(&mut db, 90 + stage)?;
+            for _ in 0..2 {
+                drop(db);
+                db = Connection::open(&path)?;
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                assert!(claim(&tx, &original, &owner, 1).is_err());
+                assert!(publish(&tx, &original, &owner, &options(), 2).is_err());
+                assert!(
+                    consume_in_current_app_transaction(
+                        &tx,
+                        &original,
+                        &owner,
+                        request.as_ref().unwrap_or(&Digest::new(b"no publication")),
+                        &result,
+                        3
+                    )
+                    .is_err()
+                );
+                assert!(terminal_history(&tx, &original, &owner).is_err());
+                assert_eq!(tx.query_row("SELECT context,request,request_digest,result_digest FROM native_fresh_owners",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?)))?,old);
+                let state: String =
+                    tx.query_row("SELECT stage FROM native_fresh_owners", [], |r| r.get(0))?;
+                assert_eq!(state, if stage == 2 { "consumed" } else { "refused" });
+                tx.commit()?;
+            }
+        }
         Ok(())
     }
 

@@ -102,6 +102,73 @@ impl ActiveAppStorageContinuity {
     }
 }
 impl<'storage> CurrentAppServingPhase<'storage> {
+    pub(in crate::security_epoch) fn begin_runtime_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        metadata: &crate::store::InitialStoreMetadata,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_runtime_selection(stage, metadata)?;
+            ensure!(
+                self.disposition == ServingDisposition::Armed,
+                "native_sqlite_birth_before_arm"
+            );
+            self.physical.begin_sqlite(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn check_runtime_opened_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        db: &rusqlite::Connection,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check(stage)?;
+            ensure!(
+                matches!(
+                    self.purpose,
+                    crate::security_epoch::serving::ScopePurpose::Runtime(
+                        crate::security_epoch::serving::RuntimeServingUse::InitialStorage
+                    )
+                ) && self.disposition == ServingDisposition::Armed,
+                "native_sqlite_birth_purpose_required"
+            );
+            self.physical.check_opened_sqlite(stage, db)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn retain_runtime_database(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        keeper: crate::store::NativeSqliteKeeper,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check(stage)?;
+            ensure!(
+                matches!(
+                    self.purpose,
+                    crate::security_epoch::serving::ScopePurpose::Runtime(
+                        crate::security_epoch::serving::RuntimeServingUse::InitialStorage
+                    )
+                ) && self.disposition == ServingDisposition::Armed,
+                "native_sqlite_birth_purpose_required"
+            );
+            self.physical.retain_sqlite(stage, keeper)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn reobserve(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -240,6 +307,16 @@ impl<'storage> CurrentAppServingPhase<'storage> {
         ) {
             self.refuse();
             anyhow::bail!("native_serving_result_already_recorded");
+        }
+        if matches!(
+            self.purpose,
+            crate::security_epoch::serving::ScopePurpose::Runtime(
+                crate::security_epoch::serving::RuntimeServingUse::InitialStorage
+            )
+        ) && let Err(error) = self.physical.require_sqlite(stage)
+        {
+            self.refuse();
+            return Err(error);
         }
         self.disposition = ServingDisposition::Known;
         self.check(stage)

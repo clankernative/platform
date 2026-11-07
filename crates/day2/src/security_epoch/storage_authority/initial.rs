@@ -874,6 +874,40 @@ impl CurrentAppStorageBootstrapPhase<'_> {
 }
 
 impl CurrentAppStoragePhase<'_> {
+    pub(in crate::security_epoch) fn begin_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.file.begin_sqlite(stage)
+    }
+
+    pub(in crate::security_epoch) fn check_opened_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        db: &rusqlite::Connection,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.file.check_opened_sqlite(stage, db)
+    }
+
+    pub(in crate::security_epoch) fn retain_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        keeper: crate::store::NativeSqliteKeeper,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.file.retain_sqlite(stage, keeper)
+    }
+
+    pub(in crate::security_epoch) fn require_sqlite(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.file.require_sqlite(stage)
+    }
+
     pub(in crate::security_epoch) fn check(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
