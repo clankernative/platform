@@ -23,6 +23,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
         "build/bazel/roc-packages.json",
         include_bytes!("../../../build/bazel/roc-packages.json"),
     ),
+    (
+        "ops/AppSecrets.roc",
+        include_bytes!("../../../ops/AppSecrets.roc"),
+    ),
     ("ops/Runner.roc", include_bytes!("../../../ops/Runner.roc")),
     ("ops/main.roc", include_bytes!("../../../ops/main.roc")),
     (

@@ -45,6 +45,7 @@ impl World {
             apps: BTreeMap::from([(
                 "links".into(),
                 AppBinding {
+                    managed_secrets: None,
                     security: None,
                     resource_policies: Vec::new(),
                     credential_families: Default::default(),

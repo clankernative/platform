@@ -168,6 +168,7 @@ mod tests {
 
     fn authority_document(admin: &str) -> crate::authority_state::AuthorityDocument {
         crate::authority_state::AuthorityDocument {
+            managed_secrets: None,
             security: None,
             enabled: true,
             hosted_domain: None,

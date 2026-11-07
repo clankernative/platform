@@ -19,14 +19,20 @@ pub enum Permission {
     SecretsList,
     #[serde(rename = "secrets.read")]
     SecretsRead,
+    #[serde(rename = "secrets.create")]
+    SecretsCreate,
+    #[serde(rename = "secrets.rotate")]
+    SecretsRotate,
     #[serde(rename = "sqlite.download")]
     SqliteDownload,
 }
 
-pub const PERMISSIONS: [Permission; 4] = [
+pub const PERMISSIONS: [Permission; 6] = [
     Permission::AuditRead,
     Permission::SecretsList,
     Permission::SecretsRead,
+    Permission::SecretsCreate,
+    Permission::SecretsRotate,
     Permission::SqliteDownload,
 ];
 
@@ -53,7 +59,7 @@ pub struct Inspection {
     pub owners: BTreeSet<String>,
     pub desired_owners: BTreeSet<String>,
     pub desired_matches_active: bool,
-    pub permissions: [Permission; 4],
+    pub permissions: [Permission; 6],
 }
 
 fn operator_instance(runtime: &Runtime, operator: &LocalOperator) -> Result<Instance> {

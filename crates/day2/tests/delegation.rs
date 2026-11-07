@@ -36,6 +36,7 @@ impl Pair {
             "../../../fixtures/authority-policies/reports.json"
         ))?;
         let binding = |artifact: &PathBuf| AppBinding {
+            managed_secrets: None,
             security: None,
             runtime: None,
             retention: Default::default(),
