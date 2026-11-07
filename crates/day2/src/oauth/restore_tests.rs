@@ -31,6 +31,7 @@ fn intent(id: &str) -> connect::ConnectIntent {
         expected_generation: None,
         expected_epoch: 1,
         proposed_generation: 1,
+        generation_floor: 0,
         owner: "human_1".into(),
         profile: "google_calendar_v1".into(),
         registration: "registration_1".into(),
@@ -118,6 +119,156 @@ fn histories(db: &Connection) -> Result<(ConnectHistory, RefreshHistory)> {
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok((connects, refresh))
+}
+
+#[test]
+fn restored_generation_floors_preserve_pending_history_and_refuse_raw_adoption() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("generation-floors.sqlite");
+    let mut db = database(&path)?;
+    seed(&mut db)?;
+    assert_eq!(super::generation_floor(&db, "refresh_slot_0")?, None);
+    let mut higher = intent("higher_pending");
+    higher.slot = "refresh_slot_0".into();
+    higher.expected_generation = Some(1);
+    higher.proposed_generation = 2;
+    assert!(connect::begin(&mut db, &higher, 1)?);
+    let history = histories(&db)?;
+    assert_eq!(cut(&mut db, &Profile::prepare()?, 93)?, 8);
+    drop(db);
+    for _ in 0..2 {
+        let mut db = Connection::open(&path)?;
+        db.pragma_update(None, "foreign_keys", true)?;
+        assert_eq!(histories(&db)?, history);
+        for (slot, expected) in [
+            ("refresh_slot_0", 2),
+            ("refresh_slot_1", 1),
+            ("slot_pending", 1),
+            ("slot_sent", 1),
+        ] {
+            assert_eq!(super::generation_floor(&db, slot)?, Some(expected));
+        }
+        assert_eq!(super::generation_floor(&db, "unused_slot")?, None);
+        // Historical rows retain their captured floor; current schema admission
+        // must not reinterpret them against the newly published floor.
+        connect::install_schema(&db)?;
+        assert_eq!(db.query_row("SELECT generation_floor,proposed_generation FROM oauth_connect_attempts WHERE attempt='higher_pending'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?,(0,2));
+        let mut copied = higher.clone();
+        copied.attempt = "raw_new_id".into();
+        copied.expected_epoch = 2;
+        copied.generation_floor = 2;
+        copied.proposed_generation = 3;
+        assert!(!connect::begin(&mut db, &copied, 4)?);
+        assert!(connect::state(&db, &copied.attempt)?.is_none());
+        for statement in [
+            "UPDATE oauth_restore_slot_floors SET generation=3 WHERE slot='refresh_slot_0'",
+            "DELETE FROM oauth_restore_slot_floors WHERE slot='refresh_slot_0'",
+            "INSERT OR REPLACE INTO oauth_restore_slot_floors SELECT slot,3,cut FROM oauth_restore_slot_floors WHERE slot='refresh_slot_0'",
+            "INSERT OR REPLACE INTO oauth_restore_cuts SELECT digest,binding,inventory FROM oauth_restore_cuts",
+            "INSERT OR REPLACE INTO oauth_restore_closed SELECT kind,id,cut FROM oauth_restore_closed WHERE kind='connect' AND id='higher_pending'",
+        ] {
+            assert!(db.execute(statement, []).is_err(), "{statement}");
+        }
+        assert_eq!(super::generation_floor(&db, "refresh_slot_0")?, Some(2));
+        assert!(require_open(&db, Kind::Connect, "higher_pending").is_err());
+        assert_eq!(histories(&db)?, history);
+    }
+    assert_eq!(super::next_generation(Some(1), 2)?, 3);
+    assert_eq!(super::next_generation(None, 9)?, 10);
+    for (current, floor) in [
+        (Some(0), 0),
+        (Some(-1), 0),
+        (None, -1),
+        (None, i64::MAX),
+        (Some(i64::MAX), 0),
+        (None, i64::MAX - 1),
+    ] {
+        assert!(super::next_generation(current, floor).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn each_imported_generation_source_contributes_its_own_conservative_floor() -> Result<()> {
+    // Imported bounded DATA may be undecipherable or inconsistent with a live
+    // slot. It is not a valid provider credential, grant or publication proof.
+    // It must still reserve its generation so fresh authorization cannot adopt
+    // it or collide with old material. Expected values are independent literals.
+    for (source, slot, expected) in [
+        ("slot", "refresh_slot_0", 9),
+        ("refresh", "refresh_slot_0", 10),
+        ("pending", "slot_pending", 11),
+        ("token", "opaque_token_slot", 12),
+        ("quarantine", "opaque_quarantine_slot", 13),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("source.sqlite");
+        let mut db = database(&path)?;
+        seed(&mut db)?;
+        match source {
+            "slot" => {
+                db.execute(
+                    "UPDATE oauth_connection_slots SET generation=9 WHERE slot='refresh_slot_0'",
+                    [],
+                )?;
+            }
+            "refresh" => {
+                db.execute(
+                    "UPDATE oauth_refresh_attempts SET generation=10 WHERE attempt='refresh_0'",
+                    [],
+                )?;
+            }
+            "pending" => {
+                db.execute("UPDATE oauth_connect_attempts SET expected_generation=10,proposed_generation=11 WHERE attempt='pending'",[])?;
+            }
+            "token" => {
+                db.execute("INSERT INTO oauth_private_tokens VALUES('opaque_reference','opaque_token_slot',12,'account','opaque_digest','version',zeroblob(12),zeroblob(16))",[])?;
+            }
+            "quarantine" => {
+                db.execute("INSERT INTO oauth_external_quarantine VALUES('pending','opaque_quarantine_slot',13,'account','scope','challenge',1,'reference','token_digest','version',zeroblob(12),zeroblob(16),'identity_digest','version',zeroblob(12),zeroblob(16))",[])?;
+            }
+            _ => unreachable!(),
+        }
+        cut(&mut db, &Profile::prepare()?, 98)?;
+        drop(db);
+        for _ in 0..2 {
+            let db = Connection::open(&path)?;
+            assert_eq!(
+                super::generation_floor(&db, slot)?,
+                Some(expected),
+                "{source}"
+            );
+            assert_eq!(super::next_generation(None, expected)?, expected + 1);
+            if source == "token" {
+                assert_eq!(db.query_row("SELECT generation,hex(ciphertext) FROM oauth_private_tokens WHERE reference='opaque_reference'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?,(12,"00".repeat(16)));
+            }
+            if source == "quarantine" {
+                assert_eq!(db.query_row("SELECT generation,hex(token_ciphertext) FROM oauth_external_quarantine WHERE attempt='pending'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?,(13,"00".repeat(16)));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn allocation_floor_requires_the_whole_current_unit_without_repair() -> Result<()> {
+    for damaged in [
+        "UPDATE oauth_restore_schema_version SET version=1",
+        "DROP TABLE oauth_restore_slot_floors",
+        "DROP TABLE oauth_restore_closed",
+        "DROP TABLE oauth_restore_cuts",
+    ] {
+        let dir = tempfile::tempdir()?;
+        let db = database(&dir.path().join("partial.sqlite"))?;
+        db.execute_batch(damaged)?;
+        let before:String=db.query_row("SELECT group_concat(name||':'||coalesce(sql,''),'|') FROM (SELECT name,sql FROM sqlite_master ORDER BY name)",[],|r|r.get(0))?;
+        assert!(
+            super::generation_floor(&db, "unknown_slot").is_err(),
+            "{damaged}"
+        );
+        assert_eq!(db.query_row("SELECT group_concat(name||':'||coalesce(sql,''),'|') FROM (SELECT name,sql FROM sqlite_master ORDER BY name)",[],|r|r.get::<_,String>(0))?,before);
+    }
+    Ok(())
 }
 
 #[test]
@@ -415,7 +566,7 @@ fn changed_row_or_identity_inventory_refuses_without_repair() -> Result<()> {
                 )?;
             }
             _ => {
-                tx.execute("INSERT INTO main.oauth_connect_attempts SELECT 'new_identity',slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,code_ref,account,scope_evidence FROM main.oauth_connect_attempts WHERE attempt='pending'",[])?;
+                tx.execute("INSERT INTO main.oauth_connect_attempts SELECT 'new_identity',slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,code_ref,account,scope_evidence,generation_floor FROM main.oauth_connect_attempts WHERE attempt='pending'",[])?;
             }
         }
         assert!(close_in(&mut tx, before, &cut, &profile).is_err());
@@ -494,7 +645,7 @@ fn missing_partial_shadow_and_unknown_units_refuse_before_any_cut() -> Result<()
             3 => db.execute_batch("CREATE TEMP TABLE day2_meta(key TEXT,value TEXT)")?,
             4 => db.execute_batch("ATTACH ':memory:' AS foreign_state")?,
             _ => {
-                db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization')",["invalid\noriginal"])?;
+                db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,generation_floor) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization',0)",["invalid\noriginal"])?;
             }
         }
         let tx = db.transaction()?;
@@ -970,6 +1121,15 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     for name in ["code_exists", "verifier_exists"] {
         specs.push((custody, name, None, "", "Connect", "tx", "&intent.attempt"));
     }
+    specs.push((
+        custody,
+        "delete_attempt_material",
+        None,
+        "",
+        "Connect",
+        "tx",
+        "attempt",
+    ));
     for name in ["load_code", "load_verifier", "load_bundle"] {
         specs.push((custody, name, None, "", "Connect", "db", "&intent.attempt"));
     }
@@ -1013,7 +1173,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             id,
         ));
     }
-    assert_eq!(specs.len(), 38);
+    assert_eq!(specs.len(), 39);
     for (source, name, owner, prefix, kind, db, id) in specs {
         let root = if owner.is_some() {
             "crate::oauth::restore"
