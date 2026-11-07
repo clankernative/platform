@@ -1,4 +1,19 @@
 use super::*;
+
+#[test]
+fn bounded_intent_decode_preserves_exact_fields_and_refuses_premature_timestamps() -> Result<()> {
+    let expected = intent()?;
+    let bytes = serde_json::to_vec(&expected)?;
+    ApprovalIntent::decode(&bytes)?.require_exact(&expected)?;
+    let mut unknown = serde_json::to_value(&expected)?;
+    unknown["approved_at"] = serde_json::json!(1);
+    assert!(ApprovalIntent::decode(&serde_json::to_vec(&unknown)?).is_err());
+    let mut oversized = bytes;
+    oversized.resize(MAX_REQUEST_BYTES + 1, b' ');
+    let error = ApprovalIntent::decode(&oversized).unwrap_err();
+    assert!(error.to_string().contains("restore_approval_intent_bound"));
+    Ok(())
+}
 use serde_json::json;
 
 fn intent() -> Result<ApprovalIntent> {

@@ -355,8 +355,8 @@ fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>> {
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
-    super::restore::install(db)?;
     super::schema::admit(db, |db| {
+        super::restore::install(db)?;
         replace_empty_historical_unit(db)?;
         install_current(db)
     })
@@ -1377,6 +1377,58 @@ mod tests {
     }
 
     #[test]
+    fn empty_historical_admission_preserves_restore_cuts_and_denies_closed_originals() -> Result<()>
+    {
+        let mut db = historical_unit()?;
+        super::super::restore::install(&db)?;
+        let original = intent()?;
+        let cut = Digest::new(b"restore cut fixture DATA");
+        let inventory = Digest::new(b"restore inventory fixture DATA");
+        db.execute(
+            "INSERT INTO oauth_restore_cuts(digest,binding,inventory) VALUES(?1,'{}',?2)",
+            params![cut.as_str(), inventory.as_str()],
+        )?;
+        db.execute(
+            "INSERT INTO oauth_restore_closed(kind,id,cut) VALUES('fresh',?1,?2)",
+            params![original.commitment()?.as_str(), cut.as_str()],
+        )?;
+        for _ in 0..2 {
+            install(&db)?;
+            let retained: (String, String, String) = db.query_row(
+                "SELECT digest,binding,inventory FROM oauth_restore_cuts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(
+                retained,
+                (cut.as_str().into(), "{}".into(), inventory.as_str().into())
+            );
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let error = format!(
+                "{:#}",
+                claim(&tx, &original, &Digest::new(b"owner DATA"), 1)
+                    .err()
+                    .context("closed original accepted")?
+            );
+            assert!(error.contains("pre_restore_authority_closed"), "{error}");
+            assert_eq!(
+                tx.query_row("SELECT count(*) FROM native_fresh_owners", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                tx.query_row("SELECT count(*) FROM oauth_restore_closed", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))?,
+                1
+            );
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn occupied_historical_unit_is_refused_without_losing_owner_history() -> Result<()> {
         let db = historical_unit()?;
         let digest = Digest::new(b"historical fresh owner DATA");
@@ -1407,6 +1459,7 @@ mod tests {
     #[test]
     fn changed_or_incomplete_historical_units_are_refused_without_mutation() -> Result<()> {
         for change in [
+            "CREATE TABLE oauth_restore_cuts(unreviewed TEXT)",
             "CREATE TABLE native_fresh_unknown(value TEXT)",
             "CREATE INDEX native_fresh_extra ON native_fresh_owners(owner)",
             "DROP TABLE native_fresh_schema_version",
