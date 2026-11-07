@@ -290,6 +290,11 @@ fn install_schema_in(db: &Connection) -> Result<()> {
 /// The historical GoLinks unit is frozen independently of the current layout.
 const VERSION_1_UNIT: &str = include_str!("../../fixtures/credential-schema-v1.sql");
 
+// Before verifier revisions were introduced, version 2 installed this exact
+// unit even in apps that declared no credentials. Keep the historical layout
+// independent of the current installer and its invariant generators.
+const EMPTY_VERSION_2_UNIT: &str = include_str!("../../fixtures/credential-schema-v2-empty.sql");
+
 /// Tables every version-1 installer created together. Version 1 later gained
 /// `day2_credential_revocations` and the three peer tables in place, so a
 /// version-1 unit may lack them.
@@ -306,7 +311,7 @@ const VERSION_1_REQUIRED: &[&str] = &[
 ];
 
 /// Children before the tables their foreign keys reference.
-const VERSION_1_DROP_ORDER: &[&str] = &[
+const HISTORICAL_UNIT_DROP_ORDER: &[&str] = &[
     "day2_credential_reveals",
     "day2_credential_revocations",
     "day2_credential_receipts",
@@ -320,22 +325,15 @@ const VERSION_1_DROP_ORDER: &[&str] = &[
     "day2_credential_schema_version",
 ];
 
-/// The one data migration AGENTS.md allows: GoLinks' persisted links.
-///
-/// Builds before the version-2 credential unit installed a version-1 unit in
-/// every store, whether or not the app declares managed credentials, so the
-/// GoLinks store holds one beside its links and `install_schema` refuses it.
-/// This removes a version-1 unit only when it holds no row at all; the ordinary
-/// fresh installation that follows in the same admission and caller transaction
-/// creates the version-2 unit. It is not an upgrade path for credential state:
-/// a version-1 unit holding any row, or any object a version-1 installer did not
-/// create, is refused, and every other version is left to `install_schema`,
-/// which refuses it. Delete this once GoLinks runs a build that includes it.
-pub(crate) fn replace_empty_version_1_unit(db: &Connection) -> Result<()> {
-    crate::oauth::schema::admit(db, replace_empty_version_1_unit_in)
+/// Replace only known, entirely empty historical credential units, preserving
+/// the application's rows. Fresh installation follows in the same admission
+/// and caller transaction. Existing credential state is never converted or
+/// discarded; unknown layouts remain refused by ordinary admission.
+pub(crate) fn replace_empty_historical_unit(db: &Connection) -> Result<()> {
+    crate::oauth::schema::admit(db, replace_empty_historical_unit_in)
 }
 
-fn replace_empty_version_1_unit_in(db: &Connection) -> Result<()> {
+fn replace_empty_historical_unit_in(db: &Connection) -> Result<()> {
     use crate::oauth::schema;
     let mut owned = Vec::new();
     let mut statement = db.prepare("SELECT type,name,tbl_name FROM sqlite_master")?;
@@ -373,16 +371,27 @@ fn replace_empty_version_1_unit_in(db: &Connection) -> Result<()> {
     }
     drop(rows);
     drop(statement);
-    if versions != [1] {
+    let old_version_2 = versions == [2]
+        && !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('day2_credential_versions') WHERE name='verifier_revision')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+    if versions != [1] && !old_version_2 {
         return Ok(());
     }
-    // Compare the original tables with the frozen GoLinks installer. The
-    // current IF NOT EXISTS batches add only the later optional tables and
-    // peers; they must not redefine the historical versions table.
+    // Version 2 is one complete frozen layout. Version 1 also permits the
+    // optional peers later installers added without redefining its tables.
     let expected = Connection::open_in_memory()?;
-    expected.execute_batch(VERSION_1_UNIT)?;
-    expected.execute_batch(CREDENTIAL_DDL)?;
-    super::issuance::install(&expected)?;
+    let (version, required) = if old_version_2 {
+        expected.execute_batch(EMPTY_VERSION_2_UNIT)?;
+        (2, HISTORICAL_UNIT_DROP_ORDER)
+    } else {
+        expected.execute_batch(VERSION_1_UNIT)?;
+        expected.execute_batch(CREDENTIAL_DDL)?;
+        super::issuance::install(&expected)?;
+        (1, VERSION_1_REQUIRED)
+    };
     for (kind, name, table) in &owned {
         let known: bool = expected.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2 AND tbl_name=?3)",
@@ -391,16 +400,40 @@ fn replace_empty_version_1_unit_in(db: &Connection) -> Result<()> {
         )?;
         ensure!(
             known,
-            "unsupported credential schema version 1 object {name}"
+            "unsupported credential schema version {version} object {name}"
         );
+        // A familiar trigger name must not authorize a different body. Tables
+        // and indexes are compared below by the owning schema's exact checker.
+        if old_version_2 && kind == "trigger" {
+            ensure!(
+                schema::schema_sql(db, "trigger", name)?
+                    == schema::schema_sql(&expected, "trigger", name)?,
+                "unsupported historical credential trigger {name}"
+            );
+        }
     }
-    for required in VERSION_1_REQUIRED {
+    for required in required {
         ensure!(
             owned.iter().any(|(_, name, _)| name == required),
-            "incomplete credential schema version 1 unit: missing {required}"
+            "incomplete credential schema version {version} unit: missing {required}"
         );
     }
-    for &table in VERSION_1_DROP_ORDER {
+    if old_version_2 {
+        let guards: i64 = expected.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            owned
+                .iter()
+                .filter(|(kind, _, _)| kind == "trigger")
+                .count()
+                == usize::try_from(guards)?,
+            "incomplete historical credential invariant guards"
+        );
+    }
+    for &table in HISTORICAL_UNIT_DROP_ORDER {
         if !owned
             .iter()
             .any(|(kind, name, _)| kind == "table" && name == table)
@@ -418,10 +451,10 @@ fn replace_empty_version_1_unit_in(db: &Connection) -> Result<()> {
         )?;
         ensure!(
             !occupied,
-            "unsupported credential schema version 1: {table} holds credential state, and only an empty version-1 unit is replaced"
+            "unsupported credential schema version {version}: {table} holds credential state, and only an empty historical unit is replaced"
         );
     }
-    for &table in VERSION_1_DROP_ORDER {
+    for &table in HISTORICAL_UNIT_DROP_ORDER {
         if owned
             .iter()
             .any(|(kind, name, _)| kind == "table" && name == table)
@@ -3176,7 +3209,7 @@ mod tests {
     /// The credential sequence of `Runtime::initialize`, as one admission.
     fn open_credentials(db: &Connection) -> Result<()> {
         crate::oauth::schema::admit(db, |db| {
-            replace_empty_version_1_unit(db)?;
+            replace_empty_historical_unit(db)?;
             install_schema(db)?;
             super::super::issuance::install(db)?;
             install_schema(db)
@@ -3224,6 +3257,102 @@ mod tests {
             let replaced = database_snapshot(&db)?;
             open_credentials(&db)?;
             assert_eq!(database_snapshot(&db)?, replaced);
+        }
+        Ok(())
+    }
+
+    fn empty_version_2_store() -> Result<Connection> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE day2_invocations(id TEXT PRIMARY KEY);
+            CREATE TABLE links(path TEXT PRIMARY KEY, destination TEXT NOT NULL) STRICT;
+            INSERT INTO links VALUES('docs','https://example.com/docs'),('wiki','https://example.com/wiki');",
+        )?;
+        db.execute_batch(EMPTY_VERSION_2_UNIT)?;
+        Ok(db)
+    }
+
+    #[test]
+    fn schema_replaces_an_empty_version_2_unit_and_keeps_app_rows() -> Result<()> {
+        let db = empty_version_2_store()?;
+        let before = database_snapshot(&db)?;
+        let app = |snapshot: DatabaseSnapshot| {
+            snapshot
+                .tables
+                .into_iter()
+                .filter(|(name, _)| !name.starts_with("day2_credential_"))
+                .collect::<Vec<_>>()
+        };
+        open_credentials(&db)?;
+        assert_eq!(app(database_snapshot(&db)?), app(before));
+        let reference = Connection::open_in_memory()?;
+        reference.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
+        open_credentials(&reference)?;
+        assert_eq!(credential_objects(&db)?, credential_objects(&reference)?);
+        let installed = database_snapshot(&db)?;
+        open_credentials(&db)?;
+        assert_eq!(database_snapshot(&db)?, installed);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_refuses_occupied_historical_version_2_units_without_mutation() -> Result<()> {
+        for rows in [
+            "INSERT INTO day2_credential_browser VALUES('invocation','attempt','{}',1)",
+            "INSERT INTO day2_credential_confirmations VALUES('invocation','{}')",
+            "INSERT INTO day2_invocations VALUES('invocation'); INSERT INTO day2_credential_origins VALUES('invocation','{}')",
+        ] {
+            let db = empty_version_2_store()?;
+            db.execute_batch(rows)?;
+            let before = database_snapshot(&db)?;
+            let error = format!("{:#}", open_credentials(&db).unwrap_err());
+            assert!(error.contains("holds credential state"), "{rows}: {error}");
+            assert_eq!(database_snapshot(&db)?, before);
+        }
+        let db = empty_version_2_store()?;
+        corrupt_current_snapshot(
+            &db,
+            "INSERT INTO day2_credential_lineages VALUES('lineage','namespace','{}','family','contract','alice','alice','label','alice','session','{}','grant',2,1,'active','version',1)",
+        )?;
+        let before = database_snapshot(&db)?;
+        let error = format!("{:#}", open_credentials(&db).unwrap_err());
+        assert!(error.contains("holds credential state"), "{error}");
+        assert_eq!(database_snapshot(&db)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn historical_version_2_replacement_rolls_back_with_failed_fresh_installation() -> Result<()> {
+        let db = empty_version_2_store()?;
+        let before = database_snapshot(&db)?;
+        let result = crate::oauth::schema::admit(&db, |db| -> Result<()> {
+            replace_empty_historical_unit(db)?;
+            anyhow::bail!("fresh installation refused")
+        });
+        assert!(result.is_err());
+        assert_eq!(database_snapshot(&db)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_refuses_altered_historical_version_2_units_without_mutation() -> Result<()> {
+        for change in [
+            "CREATE TABLE day2_credential_unknown(value TEXT)",
+            "CREATE INDEX day2_credential_hidden ON day2_credential_material(identity_json)",
+            "DROP INDEX day2_credential_visible_creator",
+            "DROP TABLE day2_credential_origins",
+            "DROP TRIGGER day2_credential_versions_shape_INSERT_v2",
+            "DROP TRIGGER day2_credential_versions_shape_INSERT_v2; CREATE TRIGGER day2_credential_versions_shape_INSERT_v2 AFTER INSERT ON day2_credential_versions BEGIN SELECT 1; END",
+            "DROP TABLE day2_credential_reveals; CREATE TABLE day2_credential_reveals(attempt TEXT PRIMARY KEY, version TEXT NOT NULL, recipient TEXT NOT NULL, session TEXT NOT NULL, authorized_at INTEGER NOT NULL) STRICT",
+        ] {
+            let db = empty_version_2_store()?;
+            db.execute_batch(change)?;
+            let before = database_snapshot(&db)?;
+            assert!(
+                open_credentials(&db).is_err(),
+                "accepted changed historical schema: {change}"
+            );
+            assert_eq!(database_snapshot(&db)?, before);
         }
         Ok(())
     }
@@ -3308,7 +3437,7 @@ mod tests {
             let db = version_1_store(true)?;
             db.execute_batch(change)?;
             let before = database_snapshot(&db)?;
-            replace_empty_version_1_unit(&db)?;
+            replace_empty_historical_unit(&db)?;
             assert_eq!(database_snapshot(&db)?, before);
             let error = format!("{:#}", open_credentials(&db).unwrap_err());
             assert!(
