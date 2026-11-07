@@ -368,6 +368,10 @@ fn parse_image_origins(value: Option<String>) -> Result<BTreeSet<String>> {
             Failure::InvalidInput
         );
         previous = Some(origin.clone());
+        if origin == "https:" {
+            ensure!(unique.insert(origin), Failure::InvalidInput);
+            continue;
+        }
         web_templates::validate_remote_image_source(&origin).map_err(|_| Failure::InvalidInput)?;
         let parsed = url::Url::parse(&origin).map_err(|_| Failure::InvalidInput)?;
         ensure!(
@@ -380,7 +384,10 @@ fn parse_image_origins(value: Option<String>) -> Result<BTreeSet<String>> {
 }
 
 fn has_new_image_origins(document: &BTreeSet<String>, rendered: &[String]) -> bool {
-    rendered.iter().any(|origin| !document.contains(origin))
+    rendered.iter().any(|origin| {
+        !document.contains(origin)
+            && !(document.contains("https:") && origin.starts_with("https://"))
+    })
 }
 
 fn image_refresh_notice(needs_refresh: bool, page_url: &str) -> String {
@@ -674,7 +681,14 @@ mod tests {
             parse_image_origins(Some(r#"["https://cdn.example.test"]"#.into())).unwrap(),
             BTreeSet::from(["https://cdn.example.test".into()])
         );
+        assert_eq!(
+            parse_image_origins(Some(r#"["https:"]"#.into())).unwrap(),
+            BTreeSet::from(["https:".into()])
+        );
         for invalid in [
+            r#"["https:","https:"]"#,
+            r#"["http:"]"#,
+            r#"["*"]"#,
             r#"["http://cdn.example.test"]"#,
             r#"["https://cdn.example.test/path"]"#,
             r#"["https://user@cdn.example.test"]"#,
@@ -720,6 +734,16 @@ mod tests {
             &["https://one.example.test".into()]
         ));
         assert!(!has_new_image_origins(&document, &[]));
+        let https = BTreeSet::from(["https:".into()]);
+        assert!(!has_new_image_origins(
+            &https,
+            &["https:".into(), "https://two.example.test".into()]
+        ));
+        assert!(has_new_image_origins(
+            &https,
+            &["http://two.example.test".into()]
+        ));
+        assert!(has_new_image_origins(&document, &["https:".into()]));
         assert!(has_new_image_origins(
             &document,
             &["https://two.example.test".into()]

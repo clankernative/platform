@@ -4596,6 +4596,35 @@
       ]
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
+      "type_name": "UnfencedHostClock",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >",
+        "pub (super) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < HostTimeData >",
+        "pub (super) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < HostTimeData >"
+        },
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_webauthn.rs",
       "type_name": "TrustedKey",
       "kind": "private_material",

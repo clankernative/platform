@@ -1672,6 +1672,9 @@ fn validate_attribute(
         attr.len() <= 128 && value.len() <= 16_384,
         "template_attribute_budget"
     );
+    if attr == "data-ui-image-policy" {
+        ensure!(value == "https", "ui_image_policy_invalid");
+    }
     ensure!(
         !attr.starts_with("on")
             && ![

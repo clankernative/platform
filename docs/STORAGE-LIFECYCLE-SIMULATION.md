@@ -137,7 +137,7 @@ Model/replay divergence retains an original and reduced typed history, complete
 observations through the failure and compiled source identity under
 `artifacts/storage-lifecycle-simulation/`. Reduction is bounded and preserves the
 failure category. A failed hosted day2 shard uploads these bundles as the
-`day2-storage-lifecycle-failures` artifact. Bundles contain only fixed synthetic
+`day2-storage-lifecycle-failures-<shard>-<run>-<attempt>` artifact. Bundles contain only fixed synthetic
 fixture data, never live provider values, credentials, certificates or native
 process identities.
 

@@ -352,15 +352,25 @@ pub(crate) fn validate_remote_image_source(value: &str) -> Result<()> {
 }
 pub(crate) fn remote_image_origins(markup: &str) -> Result<Vec<String>> {
     let html = scraper::Html::parse_fragment(markup);
-    let selector = scraper::Selector::parse("img[src]").expect("static selector");
+    let policy = scraper::Selector::parse("[data-ui-image-policy]").expect("static selector");
     let mut origins = BTreeSet::new();
+    for element in html.select(&policy) {
+        ensure!(
+            element.value().attr("data-ui-image-policy") == Some("https"),
+            "ui_image_policy_invalid"
+        );
+        origins.insert("https:".into());
+    }
+    let selector = scraper::Selector::parse("img[src]").expect("static selector");
     for image in html.select(&selector) {
         let src = image.value().attr("src").expect("selector requires src");
         if src.starts_with("/assets/app/") || src.starts_with("/assets/instance/") {
             continue;
         }
         validate_remote_image_source(src)?;
-        origins.insert(url::Url::parse(src)?.origin().ascii_serialization());
+        if !origins.contains("https:") {
+            origins.insert(url::Url::parse(src)?.origin().ascii_serialization());
+        }
         ensure!(origins.len() <= 32, "ui_image_origin_budget");
     }
     Ok(origins.into_iter().collect())
@@ -810,5 +820,36 @@ mod tests {
         assert!(validate_selects("<select data-ui-choice-set=true data-ui-choice-value=3><option value=1>One</option></select>").is_err());
         assert!(validate_navigation("<nav data-ui-navigation=true data-ui-navigation-minimum-items=2 data-ui-navigation-current-last=true data-ui-navigation-ancestor-links=true><ol><li><a href='/'>Home</a></li><li><span aria-current=page>Current</span></li></ol></nav>").is_ok());
         assert!(validate_navigation("<nav data-ui-navigation=true data-ui-navigation-minimum-items=2 data-ui-navigation-current-last=true><ol><li><span aria-current=page>Current</span></li><li><a href='/'>Home</a></li></ol></nav>").is_err());
+    }
+}
+
+#[cfg(test)]
+mod cached_image_tests {
+    use super::*;
+    #[test]
+    fn cached_image_policy_is_explicit_https_and_keeps_url_validation() {
+        assert_eq!(remote_image_origins("<div data-ui-image-policy='https'><img src='https://a.example.test/icon.png'></div>").unwrap(), ["https:"]);
+        for policy in ["*", "http", "https:", "data:", "javascript:", ""] {
+            assert!(
+                remote_image_origins(&format!("<div data-ui-image-policy='{policy}'></div>"))
+                    .is_err()
+            );
+        }
+        for src in [
+            "http://example.test/a",
+            "https://user:secret@example.test/a",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                remote_image_origins(&format!(
+                    "<div data-ui-image-policy='https'><img src='{src}'></div>"
+                ))
+                .is_err()
+            );
+        }
+        assert_eq!(
+            remote_image_origins("<img src='https://a.example.test/icon.png'>").unwrap(),
+            ["https://a.example.test"]
+        );
     }
 }

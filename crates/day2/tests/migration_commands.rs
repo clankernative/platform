@@ -175,17 +175,15 @@ fn store_rows(store: &std::path::Path) -> Result<Vec<(String, Vec<String>)>> {
     Ok(rows)
 }
 
-/// Replaces the store's credential unit with the version-1 unit builds before
-/// the version-2 unit installed in every store, GoLinks' among them.
-const VERSION_1_UNIT: &str = concat!(
+/// Remove the test store's current credential unit before installing a frozen
+/// historical fixture, then exercise the native maintenance commands.
+const DROP_CREDENTIAL_UNIT: &str =
     "DROP TABLE day2_credential_reveals; DROP TABLE day2_credential_revocations;
     DROP TABLE day2_credential_receipts; DROP TABLE day2_credential_deliveries;
     DROP TABLE day2_credential_material; DROP TABLE day2_credential_versions;
     DROP TABLE day2_credential_lineages; DROP TABLE day2_credential_confirmations;
     DROP TABLE day2_credential_browser; DROP TABLE day2_credential_origins;
-    DROP TABLE day2_credential_schema_version;",
-    include_str!("../fixtures/credential-schema-v1.sql")
-);
+    DROP TABLE day2_credential_schema_version;";
 
 #[test]
 fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
@@ -202,13 +200,18 @@ fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
     // store written before the version-2 credential unit holds an empty
     // version-1 unit beside its app rows: the target replaces that unit and
     // admits the store, and the app rows are untouched.
-    let (copy, replaced) = rehearse(&world, Some(VERSION_1_UNIT))?;
+    let version_1_unit = format!(
+        "{DROP_CREDENTIAL_UNIT}{}",
+        include_str!("../fixtures/credential-schema-v1.sql")
+    );
+    let (copy, replaced) = rehearse(&world, Some(&version_1_unit))?;
     succeeded(&replaced)?;
     let store = copy.path().join(".state/reports.sqlite");
+    let app_models = &world.runtime.artifact().contract().schema.models;
     let app = |store: &std::path::Path| -> Result<Vec<(String, Vec<String>)>> {
         Ok(store_rows(store)?
             .into_iter()
-            .filter(|(table, _)| !table.starts_with("day2_"))
+            .filter(|(table, _)| app_models.contains_key(table))
             .collect())
     };
     let reports = app(world.runtime.db())?;
@@ -227,11 +230,69 @@ fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
     succeeded(&[("admit".to_owned(), again)])?;
     assert_eq!(store_rows(&store)?, before);
 
+    // The pre-verifier-revision version-2 unit was also installed in apps
+    // with no managed credentials. Exercise the actual maintenance CLI chain,
+    // keeping every app row and admitting the current layout afterwards.
+    let historical_v2 = format!(
+        "{DROP_CREDENTIAL_UNIT}{} DROP TABLE native_fresh_owners; DROP TABLE native_fresh_schema_version;{}",
+        include_str!("../fixtures/credential-schema-v2-empty.sql"),
+        include_str!("../fixtures/fresh-owner-schema-v1-empty.sql")
+    );
+    let (copy, replaced) = rehearse(&world, Some(&historical_v2))?;
+    succeeded(&replaced)?;
+    let store = copy.path().join(".state/reports.sqlite");
+    assert_eq!(app(&store)?, reports);
+    let fields = rusqlite::Connection::open(&store)?
+        .prepare("PRAGMA table_info(day2_credential_versions)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert!(fields.iter().any(|name| name == "verifier_revision"));
+    let fresh_owners: String = rusqlite::Connection::open(&store)?.query_row(
+        "SELECT sql FROM sqlite_master WHERE name='native_fresh_owners'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(fresh_owners.contains("'CredentialIssueIntent'"));
+
+    // A later occupied fresh-owner unit must also roll back replacement of
+    // the earlier empty credential unit in this same runtime admission.
+    let owner = day2_capabilities::Digest::new(b"historical owner DATA");
+    let context = serde_json::json!({
+        "attempt":"old-attempt", "human":"alice", "subject":"alice", "created_at":0,
+        "challenge":owner, "context":{"OAuth":{"expires_at":300}}
+    })
+    .to_string()
+    .replace('\'', "''");
+    let owner = owner.as_str();
+    let occupied_fresh = format!(
+        "{historical_v2} INSERT INTO native_fresh_owners(original,attempt,purpose,human,subject,context,owner,created_at,expires_at,stage)
+         VALUES('{owner}','old-attempt','OAuthApproval','alice','alice','{context}','{owner}',0,300,'allocated');"
+    );
+    let (copy, refused) = rehearse(&world, Some(&occupied_fresh))?;
+    succeeded(&refused[..3])?;
+    assert!(!refused[3].1.status.success());
+    assert!(String::from_utf8_lossy(&refused[3].1.stderr).contains("fresh-owner unit holds state"));
+    let store = copy.path().join(".state/reports.sqlite");
+    let columns = rusqlite::Connection::open(&store)?
+        .prepare("PRAGMA table_info(day2_credential_versions)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert!(!columns.iter().any(|name| name == "verifier_revision"));
+    assert_eq!(
+        rusqlite::Connection::open(&store)?.query_row(
+            "SELECT count(*) FROM native_fresh_owners",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        1
+    );
+    assert_eq!(app(&store)?, reports);
+
     // A version-1 unit holding credential state, and any other unit version:
     // the migration and the activation succeed, and the store admission
     // refuses the store, exactly where day2-serve would after a real activation.
     let occupied = format!(
-        "{VERSION_1_UNIT} INSERT INTO day2_credential_browser VALUES('invocation','attempt','{{}}',1);"
+        "{version_1_unit} INSERT INTO day2_credential_browser VALUES('invocation','attempt','{{}}',1);"
     );
     for (change, refusal) in [
         (occupied.as_str(), "holds credential state"),

@@ -31,6 +31,12 @@ cannot extend that access. Apps may expose their own history through a query
 using `Audit.history`, with the query's ordinary operation authority deciding
 its audience; see [SDK-CAPABILITIES.md](SDK-CAPABILITIES.md).
 
+The local [app owner CLI](APP-OWNERS.md) can inspect and change the active owner
+list with installation-operator authorization, expected stamps and retry receipts.
+Audit and the reserved secret-read/snapshot-download permission boundaries share
+the same transaction-bound owner guard. Secret values and owner-facing snapshot
+export endpoints are separate work.
+
 The former `auditors` instance key is retired: empty lists are accepted and
 omitted on serialization; nonempty lists are rejected with migration guidance.
 Existing activated documents and backup manifests containing the key still load,

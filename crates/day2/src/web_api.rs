@@ -15,12 +15,97 @@ use serde_json::{Value, json};
 pub(crate) const ACT_AS_HEADER: &str = "x-day2-act-as";
 
 pub(crate) fn session_allowed(runtime: &Runtime, catalog: &Catalog, actor: &str) -> bool {
-    catalog
-        .endpoints
-        .keys()
-        .any(|operation| runtime.authorize(operation, actor).is_ok())
+    runtime
+        .sql_read(|tx| {
+            Ok(catalog.endpoints.keys().any(|operation| {
+                crate::authority_state::authorize_in(tx, runtime, operation, actor).is_ok()
+            }))
+        })
+        .unwrap_or(false)
         || runtime.authorize_audit(actor).is_ok()
         || runtime.may_request_delegation(actor).unwrap_or(false)
+}
+
+/// A current, read-only binding for browser-held query presentation data. It
+/// is not an operation result or a command credential. The requested public
+/// query must still be authorized, including its complete-row requirements.
+pub(crate) fn query_cache_token(
+    runtime: &Runtime,
+    catalog: &Catalog,
+    actor: &str,
+    operation: &str,
+    now_ms: i64,
+) -> Result<String> {
+    ensure!(
+        catalog.endpoints.contains_key(operation),
+        crate::error::Failure::NotFound
+    );
+    ensure!(
+        runtime.artifact().operation(operation)?.kind == "query",
+        crate::error::Failure::InvalidInput
+    );
+    runtime.sql_read(|db| {
+        let active = crate::authority_state::authorize_in(db, runtime, operation, actor)?;
+        let revision = crate::live::revision(db)?;
+        // Resource leases can expire without any policy or model write. Bind
+        // their current availability, rather than the changing wall-clock value.
+        let resources = resource_cache_state(
+            active
+                .document
+                .resources
+                .operations
+                .get(operation)
+                .into_iter()
+                .flat_map(|bindings| bindings.values().map(|grant| grant.expires_at_ms)),
+            now_ms,
+        );
+        Ok(crate::digest(&serde_json::to_vec(&(
+            "browser-query-cache-v1",
+            runtime.scope(),
+            runtime.artifact().id(),
+            actor,
+            operation,
+            &active.stamp,
+            revision,
+            resources,
+        ))?))
+    })
+}
+
+fn resource_cache_state(deadlines: impl Iterator<Item = Option<i64>>, now_ms: i64) -> Vec<bool> {
+    deadlines
+        .map(|deadline| deadline.is_none_or(|at| now_ms < at))
+        .collect()
+}
+
+#[cfg(test)]
+mod cache_expiry_tests {
+    use super::*;
+    #[test]
+    fn timed_resource_grants_change_cache_bindings_at_exclusive_expiry_without_a_write() {
+        let binding = |at| {
+            crate::digest(
+                &serde_json::to_vec(&resource_cache_state(
+                    [None, Some(1000), Some(2000)].into_iter(),
+                    at,
+                ))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            binding(0),
+            binding(999),
+            "time alone must not bust a live cache"
+        );
+        assert_ne!(
+            binding(999),
+            binding(1000),
+            "an expired resource lease must invalidate restoration"
+        );
+        assert_eq!(binding(1000), binding(1999));
+        assert_ne!(binding(1999), binding(2000));
+        assert_eq!(resource_cache_state([None].into_iter(), i64::MAX), [true]);
+    }
 }
 
 pub(crate) fn is_json(path: &str) -> bool {
