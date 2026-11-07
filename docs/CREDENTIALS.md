@@ -247,6 +247,18 @@ checks, not current schema/key/epoch admission: backup verification remains
 historical inspection, and restoring private security state still needs genuine
 outside-backup fencing and its own qualified workflow.
 
+Runtime initialization can replace an exact historical empty credential unit
+with the current unit inside the same admission and caller transaction. The
+supported frozen layouts are version 1 and version 2 before verifier revisions.
+The native fresh-owner installer likewise recreates its exact empty version-1
+unit from before action-specific credential intents. It checks the complete
+frozen table, index and trigger set, the version marker, and absence of owner
+history before replacing anything. This runs within the same bounded admission
+and caller transaction, so refusal of either unit rolls both changes back.
+All credential tables must be empty; current app rows are preserved. Missing
+invariant guards, changed SQL, unknown objects or retained credential records
+refuse without mutation. The current installer supplies the replacement schema.
+
 Private SQLite tests retain consistent copies before and after rotation,
 revocation and delivery acknowledgement, including a copy while a rotation is
 uncommitted. The old copy can still accept a then-valid bearer under its old

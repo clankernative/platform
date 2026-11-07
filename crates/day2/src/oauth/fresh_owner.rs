@@ -356,8 +356,99 @@ fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>> {
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
     super::restore::install(db)?;
-    // Use the same cumulative bounded admission and exact-layout validation as
-    // all other identity units. Existing unknown/restored units are not repaired.
+    super::schema::admit(db, |db| {
+        replace_empty_historical_unit(db)?;
+        install_current(db)
+    })
+}
+
+// This unit was installed even in apps without native fresh-auth flows. It is
+// frozen independently of the current purpose names and invariant generators.
+const EMPTY_HISTORICAL_UNIT: &str = include_str!("../../fixtures/fresh-owner-schema-v1-empty.sql");
+
+fn replace_empty_historical_unit(db: &Connection) -> Result<()> {
+    use super::schema;
+    let Some(sql) = schema::schema_sql(db, "table", "native_fresh_owners")? else {
+        return Ok(());
+    };
+    // This only selects the historical candidate; every object and row is
+    // checked against the frozen unit before any DDL is allowed.
+    if !sql.contains("'CredentialIntent'") {
+        return Ok(());
+    }
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(EMPTY_HISTORICAL_UNIT)?;
+    let mut objects = Vec::new();
+    let mut statement =
+        db.prepare("SELECT type,name,tbl_name FROM sqlite_master ORDER BY type,name")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        schema::materialize(row)?;
+        let kind = row.get_ref(0)?.as_str()?;
+        let name = row.get_ref(1)?.as_str()?;
+        let table = row.get_ref(2)?.as_str()?;
+        let owned = |value: &str| {
+            value
+                .get(.."native_fresh_".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("native_fresh_"))
+        };
+        if !owned(name) && !owned(table) {
+            continue;
+        }
+        let known: bool = expected.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2 AND tbl_name=?3)",
+            [kind, name, table],
+            |row| row.get(0),
+        )?;
+        ensure!(known, "unsupported historical fresh-owner object {name}");
+        objects.push((kind.to_owned(), name.to_owned()));
+    }
+    drop(rows);
+    drop(statement);
+    let required: i64 =
+        expected.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))?;
+    ensure!(
+        objects.len() == usize::try_from(required)?,
+        "incomplete historical fresh-owner unit"
+    );
+    for (kind, name) in objects {
+        if kind == "trigger" {
+            ensure!(
+                schema::schema_sql(db, &kind, &name)?
+                    == schema::schema_sql(&expected, &kind, &name)?,
+                "unsupported historical fresh-owner trigger {name}"
+            );
+        }
+    }
+    for table in ["native_fresh_schema_version", "native_fresh_owners"] {
+        schema::exact_layout(db, &expected, table)?;
+    }
+    let mut statement = db.prepare("SELECT version FROM native_fresh_schema_version")?;
+    let mut rows = statement.query([])?;
+    let mut versions = Vec::new();
+    while let Some(row) = rows.next()? {
+        schema::materialize(row)?;
+        versions.push(row.get::<_, i64>(0)?);
+    }
+    ensure!(
+        versions == [1],
+        "unsupported historical fresh-owner version"
+    );
+    drop(rows);
+    drop(statement);
+    let occupied: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_fresh_owners)",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(!occupied, "historical fresh-owner unit holds state");
+    db.execute_batch("DROP TABLE native_fresh_owners; DROP TABLE native_fresh_schema_version")?;
+    Ok(())
+}
+
+fn install_current(db: &Connection) -> Result<()> {
+    // The caller's bounded admission owns both any empty historical replacement
+    // and this strict current installer; a later refusal rolls back both.
     super::schema::install_current(db, "native_fresh_schema_version", 1, SCHEMA,
         &[super::schema::Invariant { table: "native_fresh_owners", predicate:
             "length(original)=71 AND substr(original,1,7)='sha256:' AND substr(original,8) NOT GLOB '*[^0-9a-f]*'
@@ -1257,6 +1348,130 @@ mod tests {
             })?,
             "preserve"
         );
+        Ok(())
+    }
+
+    fn historical_unit() -> Result<Connection> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(EMPTY_HISTORICAL_UNIT)?;
+        db.execute_batch("CREATE TABLE app_rows(value TEXT); INSERT INTO app_rows VALUES('keep')")?;
+        Ok(db)
+    }
+
+    #[test]
+    fn empty_historical_unit_is_recreated_atomically_with_app_rows_preserved() -> Result<()> {
+        let db = historical_unit()?;
+        install(&db)?;
+        let current = Connection::open_in_memory()?;
+        install(&current)?;
+        assert_eq!(schema_rows(&db)?, schema_rows(&current)?);
+        assert_eq!(
+            db.query_row("SELECT value FROM app_rows", [], |row| row
+                .get::<_, String>(0))?,
+            "keep"
+        );
+        let before = schema_rows(&db)?;
+        install(&db)?;
+        assert_eq!(schema_rows(&db)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn occupied_historical_unit_is_refused_without_losing_owner_history() -> Result<()> {
+        let db = historical_unit()?;
+        let digest = Digest::new(b"historical fresh owner DATA");
+        let context = serde_json::json!({
+            "attempt":"old-attempt", "human":"alice", "subject":"alice", "created_at":0,
+            "challenge":digest, "context":{"OAuth":{"expires_at":300}}
+        })
+        .to_string();
+        db.execute(
+            "INSERT INTO native_fresh_owners(original,attempt,purpose,human,subject,context,owner,created_at,expires_at,stage)
+             VALUES(?1,'old-attempt','OAuthApproval','alice','alice',?2,?1,0,300,'allocated')",
+            params![digest.as_str(), context],
+        )?;
+        let before = schema_rows(&db)?;
+        let error = format!("{:#}", install(&db).unwrap_err());
+        assert!(error.contains("holds state"), "{error}");
+        assert_eq!(schema_rows(&db)?, before);
+        assert_eq!(
+            db.query_row("SELECT context FROM native_fresh_owners", [], |row| row
+                .get::<_, String>(
+                0
+            ))?,
+            context
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_or_incomplete_historical_units_are_refused_without_mutation() -> Result<()> {
+        for change in [
+            "CREATE TABLE native_fresh_unknown(value TEXT)",
+            "CREATE INDEX native_fresh_extra ON native_fresh_owners(owner)",
+            "DROP TABLE native_fresh_schema_version",
+            "DELETE FROM native_fresh_schema_version",
+            "UPDATE native_fresh_schema_version SET version=2",
+            "DROP TRIGGER native_fresh_owner_no_delete",
+            "DROP TRIGGER native_fresh_owners_shape_INSERT_v1",
+            "DROP TRIGGER native_fresh_owner_no_delete; CREATE TRIGGER native_fresh_owner_no_delete BEFORE DELETE ON native_fresh_owners BEGIN SELECT 1; END",
+            "CREATE TABLE NATIVE_FRESH_ALIAS(value TEXT)",
+        ] {
+            let db = historical_unit()?;
+            db.execute_batch(change)?;
+            let before: Vec<_> = db
+                .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            assert!(install(&db).is_err(), "{change}");
+            let after: Vec<_> = db
+                .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(after, before, "{change}");
+        }
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(&EMPTY_HISTORICAL_UNIT.replace("created_at >= 0", "created_at >= -1"))?;
+        let before = schema_rows(&db)?;
+        assert!(install(&db).is_err());
+        assert_eq!(schema_rows(&db)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn historical_replacement_rolls_back_with_the_callers_admission() -> Result<()> {
+        let db = historical_unit()?;
+        let before = schema_rows(&db)?;
+        let result = super::super::schema::admit(&db, |db| -> Result<()> {
+            install(db)?;
+            anyhow::bail!("later admission refused")
+        });
+        assert!(result.is_err());
+        assert_eq!(schema_rows(&db)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn historical_replacement_debits_and_preserves_the_shared_admission_budget() -> Result<()> {
+        let db = historical_unit()?;
+        let before = schema_rows(&db)?;
+        let result =
+            super::super::schema::admit_with_limits(&db, 1_000_000, 1, 8 * 1_048_576, install);
+        assert!(format!("{:#}", result.unwrap_err()).contains("budget"));
+        assert_eq!(schema_rows(&db)?, before);
+        install(&db)?;
         Ok(())
     }
 }
