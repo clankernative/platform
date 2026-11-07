@@ -326,7 +326,7 @@ async fn execution_grant_attempt_real_child_death_prevents_fresh_login_reuse_aft
         // Before known claim commit the native sender cannot have started. A
         // durable claim remains spent even if no provider reply was recorded.
         let spent = cut == 13;
-        assert_eq!(stored, i64::from(spent), "cut {cut}");
+        assert_eq!(stored, if spent { 1 } else { 0 }, "cut {cut}");
         let mut f = stable_fixture();
         let signed = super::super::signing::tests::statement(&mut f)?;
         let operation = Digest::new(b"new login and operation after child death");
