@@ -96,6 +96,13 @@ fn run_history(steps: &[Step]) -> Result<Vec<(bool, bool)>> {
 
 #[test]
 fn execution_attempt_generated_histories_match_independent_durable_refusal_and_replay() -> Result<()> {
+    for steps in [
+        [Step::Remove,Step::Mark,Step::Check,Step::Reopen,Step::Mark],
+        [Step::Replace,Step::Mark,Step::Check,Step::Reopen,Step::Mark],
+        [Step::Foreign,Step::RollBack,Step::Reopen,Step::Mark,Step::Check],
+    ] {
+        assert_eq!(run_history(&steps)?, run_history(&steps)?);
+    }
     let choices = [Step::Mark,Step::RollBack,Step::Check,Step::Reopen,Step::Foreign,Step::Remove,Step::Replace];
     for seed in [1_u64, 19, 709, 3089] {
         let mut state = seed;
