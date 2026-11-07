@@ -29,6 +29,7 @@ mod preparation_image;
 pub(crate) mod restore_approval;
 mod restore_fencing;
 mod restore_host_clock;
+mod restore_staging;
 mod runtime_profile;
 mod seed_core;
 mod self_check_profile;
