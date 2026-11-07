@@ -2,15 +2,20 @@
 
 ## CI simulation evidence
 
-Every full Linux `workspace-day2` campaign admits fresh observations from the
+The full Linux `workspace-day2` and `workspace-day2-runtime` campaigns jointly
+admit fresh observations from the
 required portable DST campaigns: OAuth and inbound OAuth, the three registration
 drivers, credential lifecycle, host-loop scheduling, the four native handshake
 models, storage lifecycle, native OAuth consumers, App/Shell connection-request
 models, and fixed/generated command crash schedules. The existing simulation
 shard independently admits the control-world corpus and generated schedules.
 
-Download `day2-dst-workspace-day2-<run>-<attempt>` and
-`day2-dst-simulation-<run>-<attempt>` from the CI run. Their `coverage.json` files
+Download `day2-dst-workspace-day2-<run>-<attempt>`,
+`day2-dst-workspace-day2-runtime-<run>-<attempt>` and
+`day2-dst-simulation-<run>-<attempt>` from the CI run. The day2 reports are explicitly
+partial observations. Final `verify` publishes their complete joined `dst/coverage.json`
+in the verification receipt artifact; only that joined report claims all day2
+campaigns passed. The simulation report remains independently complete. Reports
 list actual seeds, completed histories, and witnessed transition/result counts.
 Individual `.complete` files retain only closed campaign/transition enums and
 numeric counts. They contain no arguments, environments, provider values or
@@ -22,11 +27,26 @@ possible transition was exercised.
 
 The verifier creates a fresh directory for each test phase. A missing declared
 campaign, missing required seed, incomplete generated command campaign, or zero
-observed state/commit/provider/registration progress fails the phase before its
-verification receipt. Merely accepting/refusing calls cannot satisfy the
+observed state/commit/provider/registration progress fails final day2 composition
+before its full verification receipt (and fails an ordinary unsplit full phase). Merely accepting/refusing calls cannot satisfy the
 progress guard. A test failure can leave partial observations; absence of a
 passing `coverage.json` means incomplete coverage, never a successful campaign.
 No simulation results enter the compiled-action caches.
+
+The two day2 jobs remain serial internally. The runtime job owns exactly
+`oauth::management::app::tests::native_lifecycle::` from the library harness and
+the integration harness; the other job owns the library complement and all bin-unit harnesses.
+Before execution, each current hash-admitted binary lists its original configured
+case and ignored-case sets, and its exact partition is listed again. Successful
+execution must report every selected nonignored name and matching passed/ignored
+counts. Each source/run/preparation-bound result retains selected names and
+canonical digests of the original list and actually observed names, keeping the
+existing one-MiB receipt limit without repeating whole lists. Final
+composition lists the admitted current binaries again and requires the two parts
+to be disjoint and exhaustive, with identical declared ignored status. Zero-test,
+missing, duplicate, foreign or changed selections cannot issue full proof. Both
+parts' elapsed work is summed into the original 12,600-second workspace budget;
+no campaign, seed, transition requirement, test or concurrency within a harness changes.
 
 On failure, `day2-dst-replays-<shard>-<run>-<attempt>` retains existing redacted
 OAuth, credential, handshake, host-loop and offline control counterexamples,

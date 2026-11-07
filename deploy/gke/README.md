@@ -673,7 +673,10 @@ Restore disables authority, rotates sessions and clears historical overlap.
 
 After the first successful rollout enable `release_managed` so infrastructure
 reconciliation preserves the released image, instance, credentials and release
-identity. Keep enough memory/CPU/ephemeral capacity on the same node for both app
+identity. After each completed rollout, review and apply the `day2-app` plan so
+scheduled backups use the released image and instance too. The plan must retain
+the workload's released software selection and PVC.
+Keep enough memory/CPU/ephemeral capacity on the same node for both app
 replicas and the helper. Capacity failure leaves the incumbent in place. This
 profile addresses planned compatible deploys; it provides no node-failure HA.
 Before enabling it for a live app, run continuous read/write traffic through the

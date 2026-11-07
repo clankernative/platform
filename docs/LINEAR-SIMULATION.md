@@ -31,7 +31,7 @@ call must fail at that budget. No fixture raises or releases the budget to
 continue. All fourteen declared outcome/replay categories must be observed.
 
 CI publishes `day2-linear-coverage-<run>-<attempt>` and retains
-`day2-linear-replays-<run>-<attempt>` on failure for fourteen days. A missing
+`day2-linear-replays-<shard>-<run>-<attempt>` on failure for fourteen days. A missing
 success receipt fails the artifact step, so silently dropping the campaign
 cannot leave a green run. Failure bundles contain only a format, campaign-source
 digest and numeric seed, never provider data, handles, credentials or errors.
