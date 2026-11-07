@@ -408,11 +408,12 @@ impl ServingParticipant {
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
         operation: &Digest,
+        cohort: &mut crate::oauth::native_management::AppAuthorityStop<'_>,
     ) -> Result<()> {
         let ParticipantOwner::App(app) = &mut self.native else {
             anyhow::bail!("native_admin_read_app_required")
         };
-        app.admin_read(stage, operation)
+        app.admin_read(stage, operation, cohort)
     }
 
     pub(crate) fn prepare_current(&mut self) -> Result<()> {

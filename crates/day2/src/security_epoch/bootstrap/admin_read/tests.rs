@@ -388,9 +388,27 @@ fn real_loan_retains_originals_and_only_known_final_path_restores_continuations(
     assert!(before(&app, "begin", "sqlite_cohort"));
     assert!(before(&app, "sqlite_cohort", "begin_current"));
     let app_operation = method(source, "ActiveAppStorageContinuity", "admin_read");
-    assert_eq!(
-        app_operation.sig.inputs.len(),
-        3,
-        "fixed operation has no consumer callback"
+    fn closed_app_admin(method: &syn::ImplItemFn) -> bool {
+        use quote::ToTokens as _;
+        let expected: syn::Type =
+            syn::parse_quote!(&mut crate::oauth::native_management::AppAuthorityStop<'_>);
+        method.sig.inputs.len() == 4
+            && method.sig.generics.params.is_empty()
+            && matches!(method.sig.inputs.last(), Some(syn::FnArg::Typed(argument))
+                if argument.ty.to_token_stream().to_string() == expected.to_token_stream().to_string())
+    }
+    assert!(
+        closed_app_admin(&app_operation),
+        "fixed operation borrows the actual cohort, never a callback"
     );
+    for substituted in [
+        syn::parse_quote!(cohort: &mut dyn FnMut() -> anyhow::Result<()>),
+        syn::parse_quote!(cohort: bool),
+        syn::parse_quote!(cohort: &mut crate::oauth::native_management::AppAuthorityStop<'static>),
+    ] {
+        let mut mutant = app_operation.clone();
+        mutant.sig.inputs.pop();
+        mutant.sig.inputs.push(substituted);
+        assert!(!closed_app_admin(&mutant));
+    }
 }

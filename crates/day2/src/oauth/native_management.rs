@@ -27,6 +27,7 @@ use std::{
 mod request;
 mod response;
 mod response_tickets;
+pub(crate) use response_tickets::AppAuthorityStop;
 
 type Role = response::Role<EnrolledProcessRoleOwner>;
 
@@ -1483,9 +1484,50 @@ pub(crate) fn await_controller_admin_read(
         runtime.uses_native_storage(),
         "native_admin_read_storage_required"
     );
-    let scope = runtime_response_scope(runtime)?.context("native_admin_read_owner_required")?;
-    with_app_participant(&scope, |participant, stage| {
-        participant.admin_read(stage, operation)
+    // A response-owned invocation cannot relabel itself administrative or wait
+    // for its own still-live response ticket to drain. This fixed control action
+    // produces no response/body/consumer callback and owns its own App original.
+    ensure!(
+        ACTIVE_SINK.with(|slot| slot.try_borrow().map(|slot| slot.is_none()))?,
+        "native_admin_read_standalone_required"
+    );
+    let scope = sql_runtime_scope(runtime)?;
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let owners = owners
+            .get_mut(scope.app.as_str())
+            .context("native App executor missing")?;
+        ensure!(
+            owners.kind == NativeRole::AppHost && owners.selection.scope() == &scope,
+            "native_admin_read_app_selection_changed"
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut role = owners.role.try_borrow_mut()?;
+            // Capture BEFORE any storage/peer wait. It does not replace or
+            // reset the Controller's independently retained accepting original.
+            let mut stage = role.begin_current_stage()?;
+            stage.check_for(&scope, NativeRole::AppHost)?;
+            let AppStorage::Participant(storage) = &mut owners.storage else {
+                anyhow::bail!("native active App holder unavailable");
+            };
+            storage.prepare_current()?;
+            let mut cohort = owners.response_rights.borrow_stop(&scope)?;
+            let requested = storage.admin_read(&mut stage, operation, &mut cohort);
+            let checked = stage.check_for(&scope, NativeRole::AppHost);
+            requested?;
+            checked
+        }));
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                owners.storage.refuse();
+                Err(error)
+            }
+            Err(panic) => {
+                owners.storage.refuse();
+                std::panic::resume_unwind(panic)
+            }
+        }
     })
 }
 
