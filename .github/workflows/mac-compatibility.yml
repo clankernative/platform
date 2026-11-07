@@ -59,6 +59,12 @@ jobs:
     if: ${{ !cancelled() && needs.mac-secrets.result == 'success' && needs.mac-dependencies.result == 'success' }}
     runs-on: macos-15
     timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+    outputs: &mac_cache_outputs
+      cache_matrix: ${{ steps.cache_plan.outputs.cache_matrix }}
+      cache_count: ${{ steps.cache_plan.outcome == 'success' && steps.cache_plan.outputs.cache_count || '0' }}
     env: &mac_verification_environment
       # Keep compilation parallelism within the standard Mac runner's CPU budget.
       # Preserve compiler statistics through the long runtime campaigns.
@@ -101,9 +107,9 @@ jobs:
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: |
-            day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-
+            day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
             day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-mac --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
@@ -200,7 +206,9 @@ jobs:
             artifacts/ci-test-programs
             build-out/tests/*
 
-      - name: Publish completed Mac compiler actions
+      - name: Publish shared Mac compiler actions on main
+        id: compiler_cache
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
         timeout-minutes: 5
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -215,6 +223,14 @@ jobs:
         with:
           path: ~/.cache/bazel-repo/content_addressable
           key: ${{ steps.bazel_repositories.outputs.cache-primary-key }}
+      - name: Plan bounded Mac cache retention
+        id: cache_plan
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.compiler_cache.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        run: build-out/bin/xtask ci-cache-plan mac
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   admit-mac-acquisition-retry:
     # GitHub can cancel an unacquired hosted job after fifteen minutes. A fresh
@@ -263,7 +279,39 @@ jobs:
     if: ${{ !cancelled() && needs.admit-mac-acquisition-retry.result == 'success' && needs.admit-mac-acquisition-retry.outputs.admitted == 'true' }}
     runs-on: macos-15
     timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+    outputs: *mac_cache_outputs
     env: *mac_verification_environment
     # The identical recipe and receipt upload run once, after an allocation
     # failure that executed none of these steps. There is no second retry.
     steps: *mac_verification_steps
+
+  cleanup-mac-caches:
+    needs: [verify-mac-compatibility, retry-mac-compatibility]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && ((needs.verify-mac-compatibility.result == 'success' && needs.verify-mac-compatibility.outputs.cache_count != '' && needs.verify-mac-compatibility.outputs.cache_count != '0') || (needs.retry-mac-compatibility.result == 'success' && needs.retry-mac-compatibility.outputs.cache_count != '' && needs.retry-mac-compatibility.outputs.cache_count != '0')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    continue-on-error: true
+    permissions:
+      actions: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.verify-mac-compatibility.outputs.cache_matrix || needs.retry-mac-compatibility.outputs.cache_matrix || '{"include":[{"id":0}]}') }}
+    steps:
+      - name: Require the newly published shared compiler cache
+        # cache/save may warn and exit successfully without storing an entry.
+        # Check actual existence before every deletion, including after eviction.
+        run: >-
+          gh api --hostname github.com --method GET
+          'repos/clankernative/platform/actions/caches?ref=refs/heads/main&key=day2-bazel-mac-actions-v2-macOS-ARM64-${{ github.sha }}&per_page=100'
+          --jq 'if any(.actions_caches[]; .key == "day2-bazel-mac-actions-v2-macOS-ARM64-${{ github.sha }}" and .ref == "refs/heads/main") then true else error("shared compiler cache not published; cleanup refused") end'
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Delete one planned obsolete cache
+        continue-on-error: true
+        run: gh api --hostname github.com --method DELETE repos/clankernative/platform/actions/caches/${{ matrix.id }}
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -17,6 +17,7 @@ mod bazel;
 mod build_capture;
 mod build_native;
 mod carta_qualify;
+mod ci_cache;
 mod control_simulation;
 mod formatter_bootstrap;
 mod formatting;
@@ -938,6 +939,16 @@ fn main() -> Result<()> {
         "verify" => {
             ensure!(args.next().is_none(), "verify accepts no arguments");
             verification::execute(&root, "verify")?;
+        }
+        "ci-cache-plan" | "ci-cache-preview" => {
+            let platform = args
+                .next()
+                .context("usage: xtask ci-cache-plan linux|mac")?;
+            ensure!(
+                args.next().is_none(),
+                "cache planning accepts only a platform"
+            );
+            ci_cache::execute(&root, &platform, action == "ci-cache-preview")?;
         }
         "verify-queue-find" | "verify-queue-admit" => {
             ensure!(
