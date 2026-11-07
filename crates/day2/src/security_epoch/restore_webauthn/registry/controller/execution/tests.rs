@@ -42,37 +42,57 @@ fn recorded_attempt_boundary(source: &str) -> Result<bool> {
         }
         self.phase = ExecutionPhase::Claiming;
         let result = self.attempt_unit(reader, sql, AttemptUnit::Record);
-        if result.is_ok() { self.phase = ExecutionPhase::Claimed; }
+        if result.is_ok() {
+            self.phase = ExecutionPhase::Claimed;
+        }
         result
     });
     Ok(actual.to_token_stream().to_string() == expected.to_token_stream().to_string())
 }
 
 #[test]
-fn native_attempt_marks_sticky_in_progress_before_sql_and_requires_known_completion() -> Result<()> {
+fn native_attempt_marks_sticky_in_progress_before_sql_and_requires_known_completion() -> Result<()>
+{
     let source = include_str!("../execution.rs");
     assert!(recorded_attempt_boundary(source)?);
     for (from, to) in [
         ("self.phase != ExecutionPhase::Verified", "false"),
-        ("self.phase = ExecutionPhase::Claiming;", "let _unarmed = ();"),
-        ("self.attempt_unit(reader, sql, AttemptUnit::Record)", "Ok(())"),
+        (
+            "self.phase = ExecutionPhase::Claiming;",
+            "let _unarmed = ();",
+        ),
+        (
+            "self.attempt_unit(reader, sql, AttemptUnit::Record)",
+            "Ok(())",
+        ),
         ("if result.is_ok()", "if true"),
     ] {
         let changed = source.replacen(from, to, 1);
         assert_ne!(source, changed);
-        assert!(!recorded_attempt_boundary(&changed)?, "actual target {from}");
+        assert!(
+            !recorded_attempt_boundary(&changed)?,
+            "actual target {from}"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn native_attempt_sql_unit_evaluates_postcheck_after_commit_error_and_keeps_primary() -> Result<()> {
+fn native_attempt_sql_unit_evaluates_postcheck_after_commit_error_and_keeps_primary() -> Result<()>
+{
     let file = syn::parse_file(include_str!("../execution.rs"))?;
-    let functions: Vec<_> = file.items.iter().filter_map(|item| match item {
-        syn::Item::Fn(item) if item.sig.ident == "attempt_sql_unit" => Some(&item.block),
-        _ => None,
-    }).collect();
-    ensure!(functions.len() == 1, "one closed execution-attempt SQL unit");
+    let functions: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "attempt_sql_unit" => Some(&item.block),
+            _ => None,
+        })
+        .collect();
+    ensure!(
+        functions.len() == 1,
+        "one closed execution-attempt SQL unit"
+    );
     let block = functions[0];
     let expected: syn::Block = syn::parse_quote!({
         let committed = tx.commit();
@@ -80,15 +100,27 @@ fn native_attempt_sql_unit_evaluates_postcheck_after_commit_error_and_keeps_prim
         committed?;
         checked
     });
-    let tail = syn::Block { brace_token: Default::default(), stmts: block.stmts[block.stmts.len()-4..].to_vec() };
-    assert_eq!(tail.to_token_stream().to_string(), expected.to_token_stream().to_string());
+    let tail = syn::Block {
+        brace_token: Default::default(),
+        stmts: block.stmts[block.stmts.len() - 4..].to_vec(),
+    };
+    assert_eq!(
+        tail.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
+    );
     let mut conditional = tail.clone();
     conditional.stmts[1] = syn::parse_quote! { let checked = if committed.is_ok() { key.check_sqlite(db) } else { Ok(()) }; };
-    assert_ne!(conditional.to_token_stream().to_string(), expected.to_token_stream().to_string());
+    assert_ne!(
+        conditional.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
+    );
     let mut reversed = tail;
     reversed.stmts[2] = syn::parse_quote! { checked?; };
     reversed.stmts[3] = syn::Stmt::Expr(syn::parse_quote!(committed), None);
-    assert_ne!(reversed.to_token_stream().to_string(), expected.to_token_stream().to_string());
+    assert_ne!(
+        reversed.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
+    );
     Ok(())
 }
 

@@ -464,10 +464,17 @@ pub(in crate::security_epoch) struct ExecutionCompletion {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ExecutionPhase { Verified, Claiming, Claimed }
+enum ExecutionPhase {
+    Verified,
+    Claiming,
+    Claimed,
+}
 
 #[derive(Clone, Copy)]
-enum AttemptUnit { Record, Check }
+enum AttemptUnit {
+    Record,
+    Check,
+}
 
 fn attempt_sql_unit(
     db: &mut rusqlite::Connection,
@@ -517,7 +524,9 @@ impl ExecutionCompletion {
         }
         self.phase = ExecutionPhase::Claiming;
         let result = self.attempt_unit(reader, sql, AttemptUnit::Record);
-        if result.is_ok() { self.phase = ExecutionPhase::Claimed; }
+        if result.is_ok() {
+            self.phase = ExecutionPhase::Claimed;
+        }
         result
     }
 
@@ -529,7 +538,10 @@ impl ExecutionCompletion {
     ) -> Result<()> {
         let (db, files) = sql;
         let requested = (|| {
-            ensure!(std::ptr::eq(self.database, std::ptr::from_ref(db)), "restore_executor_completion_owner_changed");
+            ensure!(
+                std::ptr::eq(self.database, std::ptr::from_ref(db)),
+                "restore_executor_completion_owner_changed"
+            );
             ensure!(db.is_autocommit(), "restore_auth_transaction_open");
             self.ceremony.observe(reader)?;
             let challenge = self.ceremony.ceremony.challenge()?;
@@ -540,10 +552,19 @@ impl ExecutionCompletion {
             };
             let key = TrustedKey {
                 record: self.ceremony.ceremony.record.clone(),
-                source: KeySource::Registry(Origin { owner: RefCell::new(&mut borrow) }),
+                source: KeySource::Registry(Origin {
+                    owner: RefCell::new(&mut borrow),
+                }),
             };
-            attempt_sql_unit(db, &key, &challenge, &self.ceremony.signed,
-                &self.ceremony.operation, (self.counter, self.version, &self.snapshot), unit)
+            attempt_sql_unit(
+                db,
+                &key,
+                &challenge,
+                &self.ceremony.signed,
+                &self.ceremony.operation,
+                (self.counter, self.version, &self.snapshot),
+                unit,
+            )
         })();
         let held = crate::store::check_authentication_sqlite(files, db);
         let native = reader.check_registry_local();
@@ -600,7 +621,10 @@ impl ExecutionCompletion {
             reader.check_local()
         };
         let requested = (|| {
-            ensure!(self.phase == ExecutionPhase::Claimed, "restore_executor_attempt_not_claimed");
+            ensure!(
+                self.phase == ExecutionPhase::Claimed,
+                "restore_executor_attempt_not_claimed"
+            );
             ensure!(
                 std::ptr::eq(self.database, std::ptr::from_ref(db))
                     && signed == &self.ceremony.signed
@@ -626,8 +650,15 @@ impl ExecutionCompletion {
                 current.0 == self.version && current.1 == self.snapshot,
                 "restore_executor_completion_changed"
             );
-            attempt_sql_unit(db, &key, &challenge, &self.ceremony.signed,
-                &self.ceremony.operation, (self.counter, self.version, &self.snapshot), AttemptUnit::Check)?;
+            attempt_sql_unit(
+                db,
+                &key,
+                &challenge,
+                &self.ceremony.signed,
+                &self.ceremony.operation,
+                (self.counter, self.version, &self.snapshot),
+                AttemptUnit::Check,
+            )?;
             Ok(())
         })();
         let held = crate::store::check_authentication_sqlite(files, db);
@@ -656,7 +687,10 @@ impl ExecutionCompletion {
     ) -> Result<()> {
         let (db, files) = sql;
         let requested = (|| {
-            ensure!(self.phase != ExecutionPhase::Claiming, "restore_executor_attempt_unsettled");
+            ensure!(
+                self.phase != ExecutionPhase::Claiming,
+                "restore_executor_attempt_unsettled"
+            );
             ensure!(
                 std::ptr::eq(self.database, std::ptr::from_ref(db))
                     && signed == &self.ceremony.signed
