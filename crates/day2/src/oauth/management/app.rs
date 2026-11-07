@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::{Digest, oauth::AccountBindingPolicy};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use usage::Authority as _;
@@ -272,7 +272,9 @@ impl Manager {
         crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, &view.id)?;
         ensure!(
             self.authority_in(db, identity)? == view.authority
-                && Self::fence(db, &view.slot)? == view.fence,
+                && Self::fence(db, &view.slot)? == view.fence
+                && crate::oauth::restore::generation_floor(db, view.slot.as_str())?.unwrap_or(0)
+                    == view.generation_floor,
             "OAuth management authority or slot changed"
         );
         if view.action == Action::Connect {
@@ -327,7 +329,8 @@ impl Manager {
                 Self::unclaimed(tx, &selection.slot, None)?;
             }
             tx.execute(
-                "DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1",
+                "DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1
+                 AND NOT EXISTS(SELECT 1 FROM oauth_restore_closed c WHERE c.kind='management' AND c.id=oauth_management_intents.id)",
                 [captured_at],
             )?;
             let count: i64 =
@@ -354,6 +357,7 @@ impl Manager {
                 selection: selection.identity()?,
                 slot: selection.slot.clone(),
                 fence: Self::fence(tx, &selection.slot)?,
+                generation_floor: crate::oauth::restore::generation_floor(tx,selection.slot.as_str())?.unwrap_or(0),
                 binding_namespace: admission::binding_namespace(&selection.binding)?,
                 usage: selection.requirement.usage.clone(),
                 scopes: selection
@@ -540,12 +544,15 @@ impl Manager {
                     product_return: selection.binding.product_return.clone(),
                 },
             )?;
+            let (expected_generation, expected_epoch, proposed_generation) =
+                view.connect_generations()?;
             let intent = crate::oauth::connect::ConnectIntent {
                 attempt: view.id.clone(),
                 slot: view.slot.as_str().into(),
-                expected_generation: None,
-                expected_epoch: 1,
-                proposed_generation: 1,
+                expected_generation,
+                expected_epoch,
+                proposed_generation,
+                generation_floor: view.generation_floor,
                 owner: view.human.clone(),
                 profile: selection.permission.profile.id.as_str().into(),
                 registration: Digest::of(&selection.instance.registration.registration)?
@@ -648,10 +655,10 @@ impl Manager {
     )> {
         let (intent, callback): (_, String) = db.query_row(
             "SELECT a.slot,a.expected_generation,a.expected_epoch,a.proposed_generation,a.owner,a.profile,
-             a.registration,a.callback,a.consent,a.expires_at,b.binding FROM oauth_connect_attempts a
+             a.registration,a.callback,a.consent,a.expires_at,b.binding,a.generation_floor FROM oauth_connect_attempts a
              JOIN oauth_callback_bindings b ON b.attempt=a.attempt WHERE a.attempt=?1", [id], |row| {
                 Ok((crate::oauth::connect::ConnectIntent { attempt: id.into(), slot: row.get(0)?, expected_generation: row.get(1)?,
-                    expected_epoch: row.get(2)?, proposed_generation: row.get(3)?, owner: row.get(4)?, profile: row.get(5)?,
+                    expected_epoch: row.get(2)?, proposed_generation: row.get(3)?, generation_floor: row.get("generation_floor")?, owner: row.get(4)?, profile: row.get(5)?,
                     registration: row.get(6)?, callback: row.get(7)?, consent: row.get(8)?, expires_at: row.get(9)? }, row.get(10)?))
             })?;
         Ok((intent, crate::json::decode(callback.as_bytes())?))
@@ -1017,20 +1024,7 @@ impl Manager {
                 WHERE slot=?1 AND generation=?2 AND token_version=?3 AND security_epoch=?4 AND status='active'",
                 params![view.slot.as_str(), fence.generation, fence.token_version, fence.epoch])?;
                         ensure!(changed == 1, "OAuth disconnect fence lost");
-                        tx.execute(
-                    "UPDATE oauth_refresh_attempts SET state='publication_rejected' WHERE slot=?1
-                AND state IN ('ready','may_have_been_sent','uncertain')",
-                    [view.slot.as_str()],
-                )?;
-                        tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL WHERE slot=?1
-                AND state IN ('awaiting_provider_authorization','exchange_ready','exchange_may_have_been_sent','exchange_uncertain','awaiting_account_approval')", [view.slot.as_str()])?;
-                        tx.execute("DELETE FROM oauth_private_codes WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                        tx.execute("DELETE FROM oauth_private_verifiers WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                        tx.execute("DELETE FROM oauth_external_quarantine WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                        tx.execute(
-                            "DELETE FROM oauth_private_tokens WHERE slot=?1",
-                            [view.slot.as_str()],
-                        )?;
+                        reject_disconnected_material(tx,view.slot.as_str(),fence)?;
                         tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
                 params![view.id, proof.session.as_str()])?;
                         Ok(true)
@@ -1049,6 +1043,42 @@ impl Manager {
     }
 }
 
+fn reject_disconnected_material(tx: &Transaction<'_>, slot: &str, fence: &SlotFence) -> Result<()> {
+    crate::oauth::store::reject_current_refresh_in(
+        tx,
+        &crate::oauth::store::RefreshEligibility {
+            slot: slot.into(),
+            generation: fence.generation,
+            base_version: fence.token_version,
+            security_epoch: fence.epoch,
+            profile: fence.profile.clone(),
+            account: fence.account.clone(),
+            affinity: fence.affinity.clone(),
+        },
+    )?;
+    tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL
+        WHERE slot=?1 AND expected_epoch=?2 AND (expected_generation=?3 OR proposed_generation=?3)
+        AND state IN ('awaiting_provider_authorization','exchange_ready','exchange_may_have_been_sent','exchange_uncertain','awaiting_account_approval')
+        AND NOT EXISTS(SELECT 1 FROM oauth_restore_closed c WHERE c.kind='connect' AND c.id=oauth_connect_attempts.attempt)",
+        params![slot,fence.epoch,fence.generation])?;
+    for table in [
+        "oauth_private_codes",
+        "oauth_private_verifiers",
+        "oauth_external_quarantine",
+    ] {
+        tx.execute(&format!("DELETE FROM {table} WHERE attempt IN
+            (SELECT a.attempt FROM oauth_connect_attempts a WHERE a.slot=?1 AND a.expected_epoch=?2
+                AND (a.expected_generation=?3 OR a.proposed_generation=?3) AND a.state='cancelled'
+                AND NOT EXISTS(SELECT 1 FROM oauth_restore_closed c WHERE c.kind='connect' AND c.id=a.attempt))"),
+            params![slot,fence.epoch,fence.generation])?;
+    }
+    tx.execute(
+        "DELETE FROM oauth_private_tokens WHERE slot=?1 AND generation=?2 AND account=?3",
+        params![slot, fence.generation, fence.account],
+    )?;
+    Ok(())
+}
+
 /// A transaction borrow of the actual manager and immutable original context.
 /// It is constructed only after current shell signature/readiness checks.
 pub(in crate::oauth) struct StartGuard<'a> {
@@ -1062,16 +1092,17 @@ fn require_connect_intent(
     view: &View,
     intent: &crate::oauth::connect::ConnectIntent,
 ) -> Result<()> {
+    let (expected_generation, expected_epoch, proposed_generation) = view.connect_generations()?;
     ensure!(
         view.action == Action::Connect
-            && view.fence.is_none()
             && intent.attempt == view.id
             && intent.slot == view.slot.as_str()
             && intent.owner == view.human
             && intent.expires_at == view.expires_at
-            && intent.expected_generation.is_none()
-            && intent.expected_epoch == 1
-            && intent.proposed_generation == 1,
+            && intent.expected_generation == expected_generation
+            && intent.expected_epoch == expected_epoch
+            && intent.proposed_generation == proposed_generation
+            && intent.generation_floor == view.generation_floor,
         "OAuth consumer original intent or slot/version changed"
     );
     Ok(())
@@ -1853,6 +1884,355 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    #[test]
+    fn restored_connection_requires_new_confirmation_and_keeps_closed_material_after_disconnect()
+    -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let (old, old_session, old_query) = fixture.connect()?;
+            assert!(
+                matches!(fixture.manager.callback(&old.id,&old_query,&old_session,&fixture.identity,102)?,Reply::Completed{status} if status=="Connection active.")
+            );
+            let path = fixture.manager.runtime.db().to_path_buf();
+            let mut db = store::open(&path)?;
+            let (mut pending, _) = fixture.manager.context(&db, &old.id)?;
+            pending.attempt = "pre_restore_prepared_attempt".into();
+            pending.expected_generation = Some(1);
+            pending.proposed_generation = 2;
+            assert!(crate::oauth::connect::begin(&mut db, &pending, 103)?);
+            let old_ciphertext: Vec<u8> = db.query_row(
+                "SELECT ciphertext FROM oauth_private_tokens WHERE slot=?1 AND generation=1",
+                [old.slot.as_str()],
+                |row| row.get(0),
+            )?;
+            let fence = Manager::fence(&db, &old.slot)?.context("initial slot missing")?;
+            db.execute("INSERT INTO oauth_refresh_attempts VALUES('old_unknown',?1,1,1,1,?2,?3,?4,'uncertain',NULL,NULL)",params![old.slot.as_str(),fence.profile,fence.account,fence.affinity])?;
+            drop(db);
+            fixture.port.now.store(103, SeqCst);
+            let expiring =
+                fixture
+                    .manager
+                    .capture("calendar", Action::Disconnect, &fixture.identity, 103)?;
+            let mut db = store::open(&path)?;
+            let old_pending_json: String = db.query_row(
+                "SELECT view FROM oauth_management_intents WHERE id=?1",
+                [&expiring.id],
+                |row| row.get(0),
+            )?;
+            crate::oauth::restore::tests::apply_for_storage(&mut db, 94)?;
+            assert_eq!(
+                crate::oauth::restore::generation_floor(&db, old.slot.as_str())?,
+                Some(2)
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM oauth_management_dispatch_slots",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            for _ in 0..2 {
+                drop(db);
+                db = store::open(&path)?;
+                assert!(
+                    fixture
+                        .manager
+                        .callback(&old.id, &old_query, &old_session, &fixture.identity, 103)
+                        .is_err()
+                );
+                let tx = db.transaction()?;
+                assert!(crate::oauth::custody::delete_attempt_material(&tx, &old.id).is_err());
+                tx.rollback()?;
+                assert_eq!(db.query_row("SELECT ciphertext FROM oauth_private_tokens WHERE slot=?1 AND generation=1",[old.slot.as_str()],|row|row.get::<_,Vec<u8>>(0))?,old_ciphertext);
+            }
+            drop(db);
+            // This crosses the old pending's expiry: ordinary capacity cleanup
+            // must preserve its exact closed history, not delete it as stale.
+            fixture.port.now.store(500, SeqCst);
+            let (fresh, session, query) = fixture.connect()?;
+            assert_eq!(fresh.generation_floor, 2);
+            assert_eq!(fresh.connect_generations()?, (Some(1), 2, 3));
+            assert_eq!(
+                fresh
+                    .fence
+                    .as_ref()
+                    .context("restored fence missing")?
+                    .status,
+                "reauth_required"
+            );
+            assert_ne!(fresh.id, old.id);
+            assert_ne!(fresh.challenge, old.challenge);
+            assert!(
+                matches!(fixture.manager.callback(&fresh.id,&query,&session,&fixture.identity,502)?,Reply::Completed{status} if status=="Connection active.")
+            );
+            assert_eq!(fixture.port.posts.load(SeqCst), 2);
+            let db = store::open(&path)?;
+            let active = Manager::fence(&db, &old.slot)?.context("fresh slot missing")?;
+            assert_eq!(
+                (active.generation, active.epoch, active.status.as_str()),
+                (3, 2, "active")
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM oauth_private_tokens WHERE slot=?1",
+                    [old.slot.as_str()],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                2
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT view FROM oauth_management_intents WHERE id=?1",
+                    [&expiring.id],
+                    |row| row.get::<_, String>(0)
+                )?,
+                old_pending_json
+            );
+            // The required floor is not optional legacy wire data and it is
+            // committed by the same whole-view confirmation digest.
+            let mut wire = serde_json::to_value(&fresh)?;
+            wire.as_object_mut()
+                .context("view object")?
+                .remove("generation_floor");
+            assert!(crate::json::decode::<View>(&serde_json::to_vec(&wire)?).is_err());
+            drop(db);
+            fixture.port.now.store(503, SeqCst);
+            let disconnect =
+                fixture
+                    .manager
+                    .capture("calendar", Action::Disconnect, &fixture.identity, 503)?;
+            let proof = fixture.proof(&disconnect, Digest::new(b"fresh-disconnect-session"))?;
+            fixture
+                .manager
+                .disconnect(&disconnect, &proof, &fixture.identity, 505)?;
+            for _ in 0..2 {
+                let db = store::open(&path)?;
+                assert_eq!(
+                    db.query_row(
+                        "SELECT generation FROM oauth_private_tokens WHERE slot=?1",
+                        [old.slot.as_str()],
+                        |row| row.get::<_, i64>(0)
+                    )?,
+                    1
+                );
+                assert_eq!(db.query_row("SELECT ciphertext FROM oauth_private_tokens WHERE slot=?1 AND generation=1",[old.slot.as_str()],|row|row.get::<_,Vec<u8>>(0))?,old_ciphertext);
+                assert_eq!(
+                    db.query_row(
+                        "SELECT state FROM oauth_connect_attempts WHERE attempt=?1",
+                        [&pending.attempt],
+                        |row| row.get::<_, String>(0)
+                    )?,
+                    "awaiting_provider_authorization"
+                );
+                assert_eq!(
+                    db.query_row(
+                        "SELECT state FROM oauth_refresh_attempts WHERE attempt='old_unknown'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )?,
+                    "uncertain"
+                );
+                for id in [&old.id, &pending.attempt] {
+                    assert!(
+                        crate::oauth::restore::require_open(
+                            &db,
+                            crate::oauth::restore::Kind::Connect,
+                            id
+                        )
+                        .is_err()
+                    );
+                }
+                assert_eq!(
+                    db.query_row(
+                        "SELECT view FROM oauth_management_intents WHERE id=?1",
+                        [&expiring.id],
+                        |row| row.get::<_, String>(0)
+                    )?,
+                    old_pending_json
+                );
+            }
+            assert_eq!(fixture.port.revokes.load(SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn restored_unknown_exchange_can_only_start_a_new_generation_with_new_confirmation()
+    -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let (old, old_session, old_query) = fixture.connect()?;
+            fixture.port.lose_token_reply.store(true, SeqCst);
+            assert!(
+                matches!(fixture.manager.callback(&old.id,&old_query,&old_session,&fixture.identity,102)?,Reply::Completed{status} if status.contains("outcome unknown"))
+            );
+            let mut db = store::open(fixture.manager.runtime.db())?;
+            assert!(Manager::fence(&db, &old.slot)?.is_none());
+            let code: Vec<u8> = db.query_row(
+                "SELECT ciphertext FROM oauth_private_codes WHERE attempt=?1",
+                [&old.id],
+                |row| row.get(0),
+            )?;
+            let old_state: String = db.query_row(
+                "SELECT state FROM oauth_connect_attempts WHERE attempt=?1",
+                [&old.id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(old_state, "exchange_may_have_been_sent");
+            crate::oauth::restore::tests::apply_for_storage(&mut db, 96)?;
+            drop(db);
+            fixture.port.lose_token_reply.store(false, SeqCst);
+            fixture.port.now.store(103, SeqCst);
+            let (fresh, session, query) = fixture.connect()?;
+            assert!(fresh.fence.is_none());
+            assert_eq!(fresh.connect_generations()?, (None, 1, 2));
+            assert!(
+                matches!(fixture.manager.callback(&fresh.id,&query,&session,&fixture.identity,105)?,Reply::Completed{status} if status=="Connection active.")
+            );
+            for _ in 0..2 {
+                let db = store::open(fixture.manager.runtime.db())?;
+                assert_eq!(
+                    db.query_row(
+                        "SELECT state FROM oauth_connect_attempts WHERE attempt=?1",
+                        [&old.id],
+                        |row| row.get::<_, String>(0)
+                    )?,
+                    old_state
+                );
+                assert_eq!(
+                    db.query_row(
+                        "SELECT ciphertext FROM oauth_private_codes WHERE attempt=?1",
+                        [&old.id],
+                        |row| row.get::<_, Vec<u8>>(0)
+                    )?,
+                    code
+                );
+                assert_eq!(
+                    Manager::fence(&db, &old.slot)?
+                        .context("new slot missing")?
+                        .generation,
+                    2
+                );
+                assert!(
+                    fixture
+                        .manager
+                        .callback(&old.id, &old_query, &old_session, &fixture.identity, 105)
+                        .is_err()
+                );
+            }
+            assert_eq!(fixture.port.posts.load(SeqCst), 2);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn restore_will_not_release_a_dispatch_claim_without_its_matching_closed_connect() -> Result<()>
+    {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let view =
+                fixture
+                    .manager
+                    .capture("calendar", Action::Connect, &fixture.identity, 100)?;
+            let mut db = store::open(fixture.manager.runtime.db())?;
+            db.execute(
+                "UPDATE oauth_management_intents SET state='authorized',session=?2 WHERE id=?1",
+                params![view.id, Digest::new(b"unpaired-test-session").as_str()],
+            )?;
+            db.execute(
+                "INSERT INTO oauth_management_dispatch_slots VALUES(?1,?2)",
+                params![view.slot.as_str(), view.id],
+            )?;
+            // This is deliberately inconsistent imported DATA: no actual
+            // matching connect attempt exists. The cut must roll back, never
+            // turn that unsupported claim into a reusable connection slot.
+            assert!(crate::oauth::restore::tests::apply_for_storage(&mut db, 97).is_err());
+            for table in [
+                "oauth_restore_cuts",
+                "oauth_restore_closed",
+                "oauth_restore_slot_floors",
+            ] {
+                assert_eq!(
+                    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+            }
+            assert_eq!(
+                db.query_row(
+                    "SELECT attempt FROM oauth_management_dispatch_slots WHERE slot=?1",
+                    [view.slot.as_str()],
+                    |row| row.get::<_, String>(0)
+                )?,
+                view.id
+            );
+            assert_eq!(fixture.port.posts.load(SeqCst), 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn restored_pending_cannot_use_a_changed_slot_or_a_different_floor() -> Result<()> {
+        for changed in [
+            "token_version",
+            "security_epoch",
+            "account",
+            "floor_signature",
+        ] {
+            let fixture = Fixture::new(false)?;
+            effects::scope(fixture.port.clone(), || -> Result<()> {
+                let (old, session, query) = fixture.connect()?;
+                fixture
+                    .manager
+                    .callback(&old.id, &query, &session, &fixture.identity, 102)?;
+                let mut db = store::open(fixture.manager.runtime.db())?;
+                crate::oauth::restore::tests::apply_for_storage(&mut db, 95)?;
+                drop(db);
+                fixture.port.now.store(103, SeqCst);
+                let fresh =
+                    fixture
+                        .manager
+                        .capture("calendar", Action::Connect, &fixture.identity, 103)?;
+                let proof = fixture.proof(&fresh, Digest::new(b"new-confirmation"))?;
+                if changed == "floor_signature" {
+                    let mut forged = fresh.clone();
+                    forged.generation_floor += 1;
+                    assert!(
+                        fixture
+                            .manager
+                            .authority
+                            .verify_management(&forged, &proof, &fixture.identity, 105)
+                            .is_err()
+                    );
+                } else {
+                    let db = store::open(fixture.manager.runtime.db())?;
+                    match changed {
+                        "token_version" => {
+                            db.execute("UPDATE oauth_connection_slots SET token_version=token_version+1 WHERE slot=?1",[fresh.slot.as_str()])?;
+                        }
+                        "security_epoch" => {
+                            db.execute("UPDATE oauth_connection_slots SET security_epoch=security_epoch+1 WHERE slot=?1",[fresh.slot.as_str()])?;
+                        }
+                        "account" => {
+                            db.execute("UPDATE oauth_connection_slots SET account='other-account' WHERE slot=?1",[fresh.slot.as_str()])?;
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        fixture
+                            .manager
+                            .authorize_connect(&fresh.id, &proof, &fixture.identity, 105)
+                            .is_err()
+                    );
+                }
+                assert_eq!(fixture.port.posts.load(SeqCst), 1);
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
