@@ -14,6 +14,7 @@ use std::{
     rc::Rc,
 };
 mod controller;
+pub(in crate::security_epoch) use controller::ControllerCeremony;
 mod file;
 
 // Not a public extension point. The fixed production implementors retain an
@@ -83,6 +84,7 @@ const _: () = {
     closed!(super::TrustedKey<'static>);
     closed!(Origin<'static>);
     closed!(RegistryCeremony);
+    closed!(crate::security_epoch::restore_webauthn::ControllerCeremony);
 };
 
 struct Admins {

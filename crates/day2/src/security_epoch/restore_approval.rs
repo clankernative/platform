@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 pub(crate) const RESTORE_APPROVAL_LIFETIME_SECONDS: u64 = 3600;
 const MAX_REQUEST_BYTES: usize = 16_384;
 
+mod intent;
 pub(crate) mod signed;
+pub(crate) use intent::ApprovalIntent;
 
 /// Exact selected target DATA. The consumer must compare every field with its
 /// actual current selection, fenced epoch and held target, not just a digest.
@@ -26,6 +28,16 @@ pub(crate) struct TargetBinding {
     pub security_epoch: u64,
     pub artifact: Digest,
     pub schema: Digest,
+}
+
+impl TargetBinding {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.binding_generation > 0 && self.security_epoch > 0,
+            "restore_approval_target_shape"
+        );
+        Ok(())
+    }
 }
 
 /// Identity DATA only. An email or this decoded pair cannot authenticate an
@@ -153,10 +165,7 @@ impl ApprovalRequest {
     /// Shape checks only. No clock is sampled and no current permission follows.
     pub(crate) fn validate(&self) -> Result<()> {
         self.executor.validate()?;
-        ensure!(
-            self.target.binding_generation > 0 && self.target.security_epoch > 0,
-            "restore_approval_target_shape"
-        );
+        self.target.validate()?;
         ensure!(
             self.approved_at >= 0
                 && self.expires_at.checked_sub(self.approved_at)

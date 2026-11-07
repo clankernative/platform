@@ -69,7 +69,7 @@
     {
       "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
       "scope": "const",
-      "fingerprint": "sha256:1bd422f2a5e17fe475e618f391b17f51176ec15463dc014cd4c1bcd1e758aac3",
+      "fingerprint": "sha256:0c9b68ebb6eafc44c1610d2fd60011968daa08d673c327b4a3c4d759c530f28e",
       "registration": null
     },
     {
@@ -4636,7 +4636,7 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
-          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4693,7 +4693,7 @@
       "factories": [
         {
           "owner": "RegistryCeremony",
-          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4732,18 +4732,18 @@
       "methods": [
         "fn begin_attempt (& self) -> Result < () >",
         "pub (super) fn capture (runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >",
-        "pub (in crate :: security_epoch :: restore_webauthn) fn capture_controller (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >",
+        "fn capture_controller (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , request : Digest , executor : & str) -> Result < Self >",
         "fn challenge (& self) -> Result < Challenge >",
         "pub (super) fn encoded_challenge (& self) -> Result < String >",
         "fn observe (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ >) -> Result < () >",
-        "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ >) -> Result < () >",
+        "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str) -> Result < () >",
         "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >",
-        "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
       ],
       "factories": [
         {
           "owner": "RegistryCeremony",
-          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn capture_controller (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >"
+          "signature": "fn capture_controller (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , request : Digest , executor : & str) -> Result < Self >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4765,11 +4765,11 @@
         },
         {
           "owner": "RegistryCeremony",
-          "signature": "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ >) -> Result < () >"
+          "signature": "fn observe_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str) -> Result < () >"
         },
         {
           "owner": "RegistryCeremony",
-          "signature": "pub (in crate :: security_epoch :: restore_webauthn) fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+          "signature": "fn verify_current_controller (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , executor : & str , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
         },
         {
           "owner": "RegistryCeremony",
@@ -4797,6 +4797,35 @@
           }
         }
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_webauthn/registry/controller.rs",
+      "type_name": "ControllerCeremony",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , intent : ApprovalIntent) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn encoded_challenge (& self) -> Result < String >",
+        "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerCeremony",
+          "signature": "pub (in crate :: security_epoch) fn capture (reader : & mut ControllerAdminReader < '_ , '_ , '_ > , credential_id : & [u8] , intent : ApprovalIntent) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerCeremony",
+          "signature": "pub (in crate :: security_epoch) fn encoded_challenge (& self) -> Result < String >"
+        },
+        {
+          "owner": "ControllerCeremony",
+          "signature": "pub (in crate :: security_epoch) fn verify_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , expected : & ApprovalIntent , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     },
     {
       "source": "crates/day2/src/security_epoch/serving.rs",
