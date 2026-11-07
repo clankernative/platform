@@ -500,7 +500,10 @@ pub(in crate::security_epoch) fn commit_reply(bytes: &[u8]) -> Result<CommitReco
             "restore_provider_commit_time_order"
         );
     }
-    Ok(CommitRecord { committed, versions })
+    Ok(CommitRecord {
+        committed,
+        versions,
+    })
 }
 
 /// Transient provider transaction, not native approval or counter permission.

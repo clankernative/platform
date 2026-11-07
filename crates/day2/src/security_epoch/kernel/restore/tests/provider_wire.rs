@@ -516,16 +516,27 @@ impl wire::Port for ReservationPort {
                 self.calls.push("batchGet");
                 // The read must be strong, with exactly these names and no
                 // transaction, readTime, mask or other consistency selector.
-                ensure!(body == json!({"documents":self.names}), "controlled_strong_read");
+                ensure!(
+                    body == json!({"documents":self.names}),
+                    "controlled_strong_read"
+                );
                 ensure!(self.fault != 10, "controlled_read_unavailable");
                 if self.fault == 11 {
-                    return Ok(wire::EpochReply { status: 200, body: b"{}".to_vec() });
+                    return Ok(wire::EpochReply {
+                        status: 200,
+                        body: b"{}".to_vec(),
+                    });
                 }
                 let mut rows: Vec<Value> = crate::json::decode(&read_back(&self.db, &self.names)?)?;
                 match self.fault {
                     12 => rows[0]["readTime"] = json!(version(2)),
-                    13..=17 => rows[[0, 1, 4, 5, 6][self.fault - 13]]["found"]["updateTime"] = json!(version(4)),
-                    18..=19 => rows[[2, 3][self.fault - 18]]["found"]["updateTime"] = json!(version(4)),
+                    13..=17 => {
+                        rows[[0, 1, 4, 5, 6][self.fault - 13]]["found"]["updateTime"] =
+                            json!(version(4))
+                    }
+                    18..=19 => {
+                        rows[[2, 3][self.fault - 18]]["found"]["updateTime"] = json!(version(4))
+                    }
                     20 => rows[7]["found"]["updateTime"] = json!(version(4)),
                     21 => rows[0]["found"]["fields"] = self.initial_root.clone(),
                     _ => {}
@@ -564,7 +575,12 @@ fn reservation_budget() -> Result<wire::Budget> {
     )
 }
 
-fn reservation_port(db: Connection, reply: &[Value], names: Vec<String>, fault: usize) -> Result<ReservationPort> {
+fn reservation_port(
+    db: Connection,
+    reply: &[Value],
+    names: Vec<String>,
+    fault: usize,
+) -> Result<ReservationPort> {
     Ok(ReservationPort {
         db,
         reads: captured(reply)?,
@@ -580,7 +596,8 @@ fn reservation_port(db: Connection, reply: &[Value], names: Vec<String>, fault: 
 }
 
 #[test]
-fn consuming_reservation_send_replays_durable_cuts_without_reconstructing_permission() -> Result<()> {
+fn consuming_reservation_send_replays_durable_cuts_without_reconstructing_permission() -> Result<()>
+{
     for seed_value in 0..3 {
         let (selection, before) = initial();
         let (current, plan) = approval_use::plan(&selection, &before, seed_value)?;
@@ -595,11 +612,25 @@ fn consuming_reservation_send_replays_durable_cuts_without_reconstructing_permis
                 let db = Connection::open(&path)?;
                 seed(&db, &reply)?;
                 let mut port = reservation_port(db, &reply, names(&selection, &plan)?, fault)?;
-                let tx = || wire::RestoreNames::new(&selection, &plan, &expected)?.transaction(&serde_json::to_vec(&reply)?);
-                let result = tx()?.commit_and_readback(&mut port, reservation_budget()?, &selection, &plan, &current, 1000);
+                let tx = || {
+                    wire::RestoreNames::new(&selection, &plan, &expected)?
+                        .transaction(&serde_json::to_vec(&reply)?)
+                };
+                let result = tx()?.commit_and_readback(
+                    &mut port,
+                    reservation_budget()?,
+                    &selection,
+                    &plan,
+                    &current,
+                    1000,
+                );
                 // Independent control schedule: only the no-fault case is
                 // known. A committed use is deliberately NOT a positive result.
-                assert_eq!(result.is_ok(), fault == 27, "seed={seed_value} fault={fault}");
+                assert_eq!(
+                    result.is_ok(),
+                    fault == 27,
+                    "seed={seed_value} fault={fault}"
+                );
                 assert_eq!(port.refused, fault != 27);
                 let expected_calls = if fault <= 9 || (22..=24).contains(&fault) {
                     vec!["commit"]
@@ -614,18 +645,33 @@ fn consuming_reservation_send_replays_durable_cuts_without_reconstructing_permis
                     port.domain = Digest::new(b"controlled-reservation-clock");
                     // Repairing clock/transport and reparsing historical DATA
                     // cannot reuse the permanently refused same source.
-                    assert!(tx()?.commit_and_readback(&mut port, reservation_budget()?, &selection, &plan, &current, 1000).is_err());
+                    assert!(
+                        tx()?
+                            .commit_and_readback(
+                                &mut port,
+                                reservation_budget()?,
+                                &selection,
+                                &plan,
+                                &current,
+                                1000
+                            )
+                            .is_err()
+                    );
                     assert_eq!(port.calls, calls);
                 }
                 let calls = port.calls;
                 drop(port.db);
                 let reopened = Connection::open(&path)?;
-                let count: i64 = reopened.query_row("SELECT count(*) FROM records", [], |row| row.get(0))?;
+                let count: i64 =
+                    reopened.query_row("SELECT count(*) FROM records", [], |row| row.get(0))?;
                 let committed = fault >= 6;
                 assert_eq!(count, if committed { 8 } else { 5 }, "fault={fault}");
                 let raw = read_back(&reopened, &names(&selection, &plan)?)?;
                 let rows: Vec<Value> = crate::json::decode(&raw)?;
-                assert_eq!(rows[0]["found"]["fields"]["epoch"]["stringValue"], if committed { "2" } else { "1" });
+                assert_eq!(
+                    rows[0]["found"]["fields"]["epoch"]["stringValue"],
+                    if committed { "2" } else { "1" }
+                );
                 assert_eq!(rows[6].get("found").is_some(), committed);
                 outcomes.push((raw, calls));
             }
@@ -648,12 +694,27 @@ fn consuming_reservation_semantic_refusal_only_cleans_up_and_keeps_primary_error
         let mut port = reservation_port(db, &reply, names(&selection, &plan)?, fault)?;
         let tx = wire::RestoreNames::new(&selection, &plan, &publication(&selection, &plan)?)?
             .transaction(&serde_json::to_vec(&reply)?)?;
-        let result = tx.commit_and_readback(&mut port, reservation_budget()?, &selection, &plan, &current, 1000);
-        let error = match result { Ok(_) => anyhow::bail!("unexpected_semantic_admission"), Err(error) => error };
-        assert_eq!(error.to_string(), "restore_current_authority_or_exact_keys_changed");
+        let result = tx.commit_and_readback(
+            &mut port,
+            reservation_budget()?,
+            &selection,
+            &plan,
+            &current,
+            1000,
+        );
+        let error = match result {
+            Ok(_) => anyhow::bail!("unexpected_semantic_admission"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "restore_current_authority_or_exact_keys_changed"
+        );
         assert_eq!(port.calls, ["rollback"]);
         assert!(port.refused);
-        let count: i64 = port.db.query_row("SELECT count(*) FROM records", [], |row| row.get(0))?;
+        let count: i64 = port
+            .db
+            .query_row("SELECT count(*) FROM records", [], |row| row.get(0))?;
         assert_eq!(count, 5);
     }
     Ok(())
