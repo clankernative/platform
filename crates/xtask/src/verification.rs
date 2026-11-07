@@ -16,10 +16,41 @@ mod shards;
 
 const CACHE_FORMAT: u32 = 2;
 
+#[derive(Clone, Copy)]
+pub(super) enum LinuxContext {
+    Standard,
+    TestPreparation,
+}
+
+impl LinuxContext {
+    pub(super) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "test-preparation" => Ok(Self::TestPreparation),
+            _ => bail!("CI context requires standard or test-preparation purpose"),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::TestPreparation => "test-preparation",
+        }
+    }
+
+    fn memory_ceiling(self) -> u64 {
+        let gib = match self {
+            Self::Standard => 6,
+            Self::TestPreparation => 8,
+        };
+        gib * 1024_u64 * 1024 * 1024
+    }
+}
+
 /// Atomic setup for the hosted Linux compiler domain. The instance workflow
 /// supplies the private cgroup; neither an app nor a cache may select quotas,
 /// mount paths or a weaker compiler policy.
-pub(super) fn linux_context(root: &Path) -> Result<()> {
+pub(super) fn linux_context(root: &Path, purpose: LinuxContext) -> Result<()> {
     ensure!(
         std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
         "native Linux x86_64 CI context required"
@@ -30,7 +61,9 @@ pub(super) fn linux_context(root: &Path) -> Result<()> {
     );
     let cgroup = fs::read_to_string("/proc/self/cgroup")?;
     let memory = fs::read_to_string("/sys/fs/cgroup/memory.max")?;
-    validate_linux_context(&cgroup, &memory)?;
+    let swap = fs::read_to_string("/sys/fs/cgroup/memory.swap.max")?;
+    let job = std::env::var("GITHUB_JOB")?;
+    validate_linux_context(purpose, &job, &cgroup, &memory, &swap)?;
     let root = root.canonicalize()?;
     // The generated output directory also contains this checked-in ABI seed.
     // Preserve its exact checkout bytes and permissions across the tmpfs mount;
@@ -84,10 +117,12 @@ pub(super) fn linux_context(root: &Path) -> Result<()> {
     );
     let evidence = json!({"run":run,"attempt":attempt,"host":"linux","architecture":"x86_64",
         "workspace":root,"cgroup":cgroup,"memory_max":memory.trim(),
+        "purpose":purpose.name(),"job":job,"memory_ceiling_bytes":purpose.memory_ceiling(),
+        "memory_swap_max":swap.trim(),
         "checkout_abi_seed":{"path":"crates/worker/generated/roc_platform_abi.rs",
             "digest":day2::digest(&abi_seed),"bytes":abi_seed.len()},
         "mountinfo":fs::read_to_string("/proc/self/mountinfo")?,
-        "compiler_policy":"unchanged mandatory native cgroup/tmpfs/Landlock/seccomp admission"});
+        "compiler_policy":"fixed workflow-purpose outer cgroup; unchanged mandatory worker and compiler confinement"});
     fs::write(
         "/tmp/day2-ci-linux-context.json",
         serde_json::to_vec_pretty(&evidence)?,
@@ -96,7 +131,28 @@ pub(super) fn linux_context(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_linux_context(cgroup: &str, memory: &str) -> Result<()> {
+fn validate_linux_context(
+    purpose: LinuxContext,
+    job: &str,
+    cgroup: &str,
+    memory: &str,
+    swap: &str,
+) -> Result<()> {
+    let expected_job = match purpose {
+        LinuxContext::Standard => matches!(
+            job,
+            "verify-prepare-parts" | "verify-prepare" | "verify-shards" | "verify"
+        ),
+        LinuxContext::TestPreparation => job == "verify-prepare-parts",
+    };
+    ensure!(
+        expected_job,
+        "CI compiler purpose does not match its workflow job"
+    );
+    ensure!(
+        swap.trim() == "0",
+        "Linux CI compiler swap must remain disabled"
+    );
     ensure!(
         cgroup.trim() == "0::/",
         "private cgroup v2 namespace required"
@@ -106,8 +162,8 @@ fn validate_linux_context(cgroup: &str, memory: &str) -> Result<()> {
         .parse()
         .context("finite Linux CI memory quota required")?;
     ensure!(
-        (1..=6 * 1024_u64 * 1024 * 1024).contains(&memory),
-        "Linux compiler cgroup exceeds6GiB"
+        (1..=purpose.memory_ceiling()).contains(&memory),
+        "Linux compiler cgroup exceeds its fixed workflow-purpose allowance"
     );
     Ok(())
 }
@@ -443,9 +499,11 @@ impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
             "all-runtime" => 9000,
-            "workspace-runtime" | "workspace-day2" | "workspace-control" | "workspace-other" => {
-                12600
-            }
+            "workspace-runtime"
+            | "workspace-day2"
+            | "workspace-day2-runtime"
+            | "workspace-control"
+            | "workspace-other" => 12600,
             "control" => 3600,
             "isolated-build" | "installation-build" | "isolated-build-probe" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
@@ -468,6 +526,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
     let mut executed_binaries = BTreeSet::new();
+    let mut day2_evidence = None;
     let mut mac_campaigns = BTreeMap::new();
     let mut simulation = None;
     let mut simulation_started = None;
@@ -562,7 +621,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     )
                 })();
                 let observations = shard_storage(root, &campaign.suite, StoragePhase::After);
-                executed_binaries = preserve_campaign_error(tests, observations)?;
+                let execution = preserve_campaign_error(tests, observations)?;
+                executed_binaries = execution.binaries;
+                day2_evidence = execution.day2;
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
@@ -619,6 +680,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                         "crates/day2/tests/chart_live_navigation.test.mjs",
                         "crates/day2/tests/reactive_queries.test.mjs",
                         "crates/day2/tests/reactive_query_forms.test.mjs",
+                        "crates/day2/tests/restore_passkey_export.test.mjs",
                     ]),
                     Duration::from_secs(60),
                 )?;
@@ -721,6 +783,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     &passed,
                     &timings.steps_ms,
                     &executed_binaries,
+                    day2_evidence.take(),
                 )?;
                 return Ok(json!({}));
             }
@@ -2144,16 +2207,17 @@ mod tests {
         let context = ci_step(&shards, "Retain current native Linux shard context");
         assert!(context.contains("always() && steps.linux_context.outcome == 'success'"));
         assert!(
-            context.contains("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
+            context.contains("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9")
         );
         assert!(context.contains("name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}"));
         assert!(context.contains("path: /tmp/day2-ci-linux-context.json"));
+        assert!(context.contains("archive: true"));
         assert!(
             context.contains("if-no-files-found: error") && context.contains("retention-days: 14")
         );
         let replays = ci_step(&shards, "Retain redacted DST counterexamples for replay");
         assert!(replays.contains(
-            "failure() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation')"
+            "failure() && (contains(fromJSON('[\"workspace-day2\",\"workspace-day2-runtime\"]'), matrix.shard) || matrix.shard == 'simulation')"
         ));
         assert!(replays.contains("            artifacts/control-slot-replays/*/replay.json.gz\n"));
         assert!(!replays.contains("artifacts/control-slot-replays/**"));
@@ -2233,6 +2297,8 @@ mod tests {
             "crates/day2/tests/reactive_queries.test.mjs",
             "crates/day2/tests/reactive_query_forms.test.mjs",
             "assets/reactive-queries.js",
+            "crates/day2/tests/restore_passkey_export.test.mjs",
+            "assets/restore-passkey-export.js",
         ] {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap())?;
@@ -2350,7 +2416,7 @@ mod tests {
                     assert!(inputs.contains("repository: clankernative/platform"));
                     assert!(inputs.contains("github-token: ${{ github.token }}"));
                     assert!(inputs.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-                    assert!(inputs.contains("name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+                    assert!(inputs.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
                     assert!(inputs.contains("path: /tmp/day2-bazel-linux-bootstrap-actions"));
                     continue;
                 }
@@ -2390,11 +2456,16 @@ mod tests {
             )));
         }
         let shards = ci_job("verify-shards");
-        assert!(shards.contains("shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]"));
+        assert!(shards.contains("shard: [workspace-day2, workspace-day2-runtime, workspace-control, workspace-other, simulation, parallel-runtime]"));
         assert!(shards.contains("artifact-ids: ${{ steps.artifact_plan.outputs.binaries }}"));
         assert!(
             ci_step(&shards, "Download this workspace shard's test executables")
                 .contains("startsWith(matrix.shard, 'workspace-')")
+        );
+        assert!(
+            ci_step(&shards, "Restore this workspace shard's test executables").contains(
+                "day2-${{ matrix.shard == 'workspace-day2-runtime' && 'workspace-day2' || matrix.shard }}.tgz"
+            )
         );
         assert!(
             ci_step(&shards, "Download all required binary groups in parallel")
@@ -2450,6 +2521,59 @@ mod tests {
                 assert_eq!(first_inputs.trim(), retry_inputs.trim());
             }
         }
+    }
+
+    #[test]
+    fn tool_bootstrap_retries_only_downloads_and_checks_pins_before_installation() {
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        assert!(!ci.contains("opentofu/setup-opentofu@"));
+        assert!(!ci.contains("bazelisk-cache: true"));
+        for step in ci.split("      - ") {
+            if step.contains("name: Download the pinned Linux Bazel executable")
+                || step.contains("name: Download the pinned Mac Bazel executable")
+                || step.contains("name: Install the pinned OpenTofu CLI")
+            {
+                for required in [
+                    "timeout-minutes: 4",
+                    "--fail",
+                    "--retry 4",
+                    "--retry-delay 5",
+                    "--retry-max-time 120",
+                    "--connect-timeout 15",
+                    "--max-time 60",
+                    "--proto '=https'",
+                    "--proto-redir '=https'",
+                ] {
+                    assert!(step.contains(required), "missing {required}");
+                }
+                assert!(!step.contains("--insecure") && !step.contains("--retry-all-errors"));
+            }
+            if step.contains("name: Install the pinned OpenTofu CLI") {
+                assert!(step.contains("/download/v1.11.5/tofu_1.11.5_"));
+                let expected = if step.contains("darwin_arm64.zip") {
+                    "ce81702643dcdea497259b4de4639d9ee73746560683b9d2b778aae8f7d62827"
+                } else {
+                    assert!(step.contains("linux_amd64.zip"));
+                    "901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13"
+                };
+                assert!(step.contains(expected));
+                assert!(step.find("--check").unwrap() < step.find("unzip ").unwrap());
+                assert!(step.find("unzip ").unwrap() < step.find("GITHUB_PATH").unwrap());
+            }
+        }
+        let mac = ci_job("verify-mac-compatibility");
+        let checked = mac.find("name: Verify the pinned Mac Bazel bytes").unwrap();
+        let installed = mac
+            .find("name: Install the pinned Mac Bazel executable")
+            .unwrap();
+        let invoked = mac
+            .find("name: Compile and install the current verifier with Bazel")
+            .unwrap();
+        assert!(checked < installed && installed < invoked);
+        assert!(
+            ci_step(&mac, "Verify the pinned Mac Bazel bytes")
+                .contains("f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a")
+        );
     }
 
     #[test]
@@ -2660,7 +2784,7 @@ mod tests {
             let download = ci_step(&final_join, name);
             assert!(download.contains("repository: clankernative/platform"));
             assert!(download.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-            assert!(download.contains("name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+            assert!(download.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
             assert!(download.contains("timeout-minutes: 2"));
             assert!(download.contains("continue-on-error: true"));
         }
@@ -2680,6 +2804,9 @@ mod tests {
         let bootstrap = "Bootstrap the current source artifact admission guard";
         assert!(final_join.find(extract).unwrap() < final_join.find(bootstrap).unwrap());
         assert!(ci_step(&final_join, extract).contains("-C \"$HOME/.cache/bazel-disk\""));
+        assert!(ci_step(&final_join, extract).contains(
+            "/tmp/day2-bazel-linux-bootstrap-actions/day2-bazel-linux-bootstrap-actions.tgz"
+        ));
         assert!(!ci_step(&final_join, bootstrap).contains("        if:"));
         assert!(
             !ci_job("verify-queue-receipt")
@@ -2706,18 +2833,149 @@ mod tests {
     }
 
     #[test]
+    fn admission_bootstrap_cache_is_retained_before_test_work_and_survives_reruns() {
+        let producer = ci_job("verify-prepare-parts");
+        let compile = "Compile and install the current verifier with Bazel";
+        let archive = "Archive current verifier bootstrap compiler actions";
+        let upload = "Retain current verifier bootstrap compiler actions";
+        assert!(producer.find(compile).unwrap() < producer.find(archive).unwrap());
+        assert!(producer.find(archive).unwrap() < producer.find(upload).unwrap());
+        let native_at = producer.find("id: native_preparation").unwrap();
+        assert!(producer.find(upload).unwrap() < native_at);
+        let snapshot = ci_step(&producer, archive);
+        assert!(snapshot.contains("if: ${{ matrix.part == 'tests' }}"));
+        assert!(snapshot.contains("timeout-minutes: 3"));
+        assert!(snapshot.contains("tar -I 'gzip -1'"));
+        assert!(snapshot.contains("-C \"$HOME/.cache/bazel-disk\" ."));
+        assert!(!snapshot.contains("build-out/") && !snapshot.contains("artifacts/"));
+        let retained = ci_step(&producer, upload);
+        assert!(retained.contains("steps.bootstrap_actions_archive.outcome == 'success'"));
+        assert!(retained.contains(
+            "name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ github.run_id }}"
+        ));
+        assert!(!retained.contains("github.run_attempt"));
+        assert!(retained.contains("overwrite: false"));
+        assert!(retained.contains("if-no-files-found: error"));
+        assert!(retained.contains("path: /tmp/day2-bazel-linux-bootstrap-actions.tgz"));
+        assert!(producer.contains(
+            "name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}"
+        ));
+        let full = "Archive completed Linux test compiler actions";
+        assert!(native_at < producer.find(full).unwrap());
+        assert!(ci_step(&producer, full).contains("tar -I 'gzip -1'"));
+        let consumer = ci_job("verify");
+        for step in [
+            "Download retained compiler actions from the admitted preparation",
+            "Retry retained compiler action download once",
+        ] {
+            let download = ci_step(&consumer, step);
+            assert!(download.contains(
+                "name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"
+            ));
+            assert!(!download.contains("DAY2_CACHE_ORIGIN_ATTEMPT"));
+        }
+    }
+
+    #[test]
+    fn mac_allocation_retry_uses_api_eligibility_not_scheduler_result_or_guard_success() {
+        let guard = ci_job("admit-mac-acquisition-retry");
+        assert!(guard.contains("if: ${{ !cancelled() }}"));
+        assert!(!guard.contains("needs.verify-mac-compatibility.result"));
+        assert!(guard.contains("admitted: ${{ steps.admit.outputs.admitted }}"));
+        for fact in [
+            ".run_id == ${{ github.run_id }}",
+            ".run_attempt == ${{ github.run_attempt }}",
+            ".head_sha == ",
+            ".labels == [\"macos-15\"]",
+            ".status == \"completed\"",
+            ".conclusion == \"cancelled\"",
+            ".runner_id == 0",
+            ".runner_name == \"\"",
+            "(.steps | length) == 0",
+            "then \"admitted=true\"",
+            "then \"admitted=false\"",
+            ">> \"$GITHUB_OUTPUT\"",
+        ] {
+            assert!(guard.contains(fact), "{fact}");
+        }
+        let retry = ci_job("retry-mac-compatibility");
+        assert!(retry.contains("!cancelled()"));
+        assert!(retry.contains("needs.admit-mac-acquisition-retry.outputs.admitted == 'true'"));
+        assert!(!retry.contains("outputs.admitted == 'success'"));
+        assert!(retry.contains("steps: *mac_verification_steps"));
+    }
+
+    #[test]
     fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
-        validate_linux_context("0::/\n", "6442450944\n")?;
+        let standard = LinuxContext::Standard;
+        let preparation = LinuxContext::TestPreparation;
+        validate_linux_context(standard, "verify-shards", "0::/\n", "6442450944\n", "0")?;
+        validate_linux_context(standard, "verify", "0::/\n", "6442450944\n", "0")?;
+        validate_linux_context(
+            preparation,
+            "verify-prepare-parts",
+            "0::/\n",
+            "8589934592\n",
+            "0",
+        )?;
+        for (purpose, job, memory) in [
+            (standard, "verify-shards", "8589934592"),
+            (standard, "verify-prepare-parts", "6442450945"),
+            (preparation, "verify-prepare-parts", "8589934593"),
+            (preparation, "verify-shards", "6442450944"),
+            (standard, "unknown", "6442450944"),
+            (standard, "verification-diagnostics", "6442450944"),
+            (standard, "verify", "8589934592"),
+            (preparation, "verify", "6442450944"),
+        ] {
+            assert!(validate_linux_context(purpose, job, "0::/", memory, "0").is_err());
+        }
         for (group, memory) in [
             ("0::/host/job", "6442450944"),
             ("0::/", "max"),
             ("0::/", "0"),
-            ("0::/", "6442450945"),
             ("0::/", "-1"),
         ] {
-            assert!(validate_linux_context(group, memory).is_err());
+            for purpose in [standard, preparation] {
+                let result =
+                    validate_linux_context(purpose, "verify-prepare-parts", group, memory, "0");
+                assert!(result.is_err());
+            }
         }
+        for swap in ["max", "1", "-1", ""] {
+            let result = validate_linux_context(
+                preparation,
+                "verify-prepare-parts",
+                "0::/",
+                "8589934592",
+                swap,
+            );
+            assert!(result.is_err());
+        }
+        for value in ["", "8", "runtime", "test-preparation extra"] {
+            assert!(LinuxContext::parse(value).is_err());
+        }
+        LinuxContext::parse("standard")?;
+        LinuxContext::parse("test-preparation")?;
         Ok(())
+    }
+
+    #[test]
+    fn only_test_preparation_uses_existing_runner_memory_headroom() {
+        let preparation = ci_job("verify-prepare-parts");
+        assert!(preparation.contains("--memory=${{ matrix.part == 'tests' && '8g' || '6g' }}"));
+        assert!(
+            preparation.contains("--memory-swap=${{ matrix.part == 'tests' && '8g' || '6g' }}")
+        );
+        assert!(preparation.contains(
+            "verify-linux-context ${{ matrix.part == 'tests' && 'test-preparation' || 'standard' }}"
+        ));
+        for name in ["verify-prepare", "verify-shards", "verify"] {
+            let job = ci_job(name);
+            assert!(job.contains("--memory=6g --memory-swap=6g"));
+            assert!(job.contains("verify-linux-context standard"));
+            assert!(!job.contains("verify-linux-context test-preparation"));
+        }
     }
 
     #[test]
@@ -2755,6 +3013,7 @@ mod tests {
             ("all-runtime", 9000),
             ("workspace-runtime", 12600),
             ("workspace-day2", 12600),
+            ("workspace-day2-runtime", 12600),
             ("workspace-control", 12600),
             ("workspace-other", 12600),
             ("control", 3600),
@@ -2776,6 +3035,7 @@ mod tests {
             ("workspace-runtime", 0),
             ("workspace-runtime", 12601),
             ("workspace-day2", 12601),
+            ("workspace-day2-runtime", 12601),
             ("workspace-control", 12601),
             ("workspace-other", 12601),
             ("workspace-runtime", u64::MAX),

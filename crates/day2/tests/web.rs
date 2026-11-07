@@ -1786,6 +1786,74 @@ fn repeated_control_fields_cannot_pollute_csrf_or_ticket_verification() -> Resul
 }
 
 #[test]
+fn repeated_command_forms_recheck_grants_on_each_render_and_submission() -> Result<()> {
+    let world = World::new()?;
+    for index in 0..3 {
+        world.seed(&format!("repeated-form-{index}"))?;
+    }
+    let server = Server::start(world.runtime.clone(), "alice", 0)?;
+    let client = server.client()?;
+    let page = server.page(&client)?;
+    let edit = selected_form(&page, ".link-row form.command")?;
+    let nonces: BTreeSet<_> = Html::parse_document(&page)
+        .select(&selector(".link-row form.command input[name='_ticket']"))
+        .map(|input| input.value().attr("value").unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        nonces.len(),
+        3,
+        "each row keeps its own signed command ticket"
+    );
+
+    let original = Instance::load(world.runtime.instance_path())?;
+    let mut narrowed = original.clone();
+    narrowed
+        .apps
+        .get_mut("links")
+        .unwrap()
+        .authority
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("links.edit")
+        .unwrap()
+        .actors
+        .clear();
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&narrowed)?,
+    )?;
+    apply_desired_authority(&world.runtime)?;
+    let denied = server.page(&client)?;
+    assert_eq!(
+        Html::parse_document(&denied)
+            .select(&selector(".link-row form.command"))
+            .count(),
+        0
+    );
+    create_form(&denied).context("another command remains authorized in the same render")?;
+    assert_eq!(
+        server.post(&client, "/actions", &edit)?.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&original)?,
+    )?;
+    apply_desired_authority(&world.runtime)?;
+    let restored = server.page(&client)?;
+    assert_eq!(
+        Html::parse_document(&restored)
+            .select(&selector(".link-row form.command"))
+            .count(),
+        3
+    );
+    assert_eq!(world.count("links")?, 3);
+    Ok(())
+}
+
+#[test]
 fn real_http_mpa_datastar_queries_forms_and_redacted_audit() -> Result<()> {
     let world = World::new()?;
     let server = Server::start(world.runtime.clone(), "alice", 0)?;
@@ -1811,9 +1879,9 @@ fn real_http_mpa_datastar_queries_forms_and_redacted_audit() -> Result<()> {
     assert!(parsed.select(&selector("script")).all(|script| {
         script.value().attr("type") == Some("module")
             && script.value().attr("src").is_some_and(|src| {
-                src == "/assets/platform/datastar-1.0.1.js"
-                    || src == "/assets/platform/forms.js"
-                    || src == "/assets/platform/reactive-queries.js"
+                src.split('?').next().unwrap() == "/assets/platform/datastar-1.0.1.js"
+                    || src.split('?').next().unwrap() == "/assets/platform/forms.js"
+                    || src.split('?').next().unwrap() == "/assets/platform/reactive-queries.js"
                     || (src.starts_with("/assets/ui/") && src.ends_with("/app.js"))
             })
             && script.text().collect::<String>().trim().is_empty()
@@ -3098,6 +3166,10 @@ fn asset_cache_policies_and_conditional_get_and_head() -> Result<()> {
     let client = server.client()?;
     let page = server.page(&client)?;
     let policies = [
+        (
+            attribute(&page, "script[src*='/forms.js']", "src")?,
+            "public, max-age=31536000, immutable",
+        ),
         ("/assets/platform/web.css".into(), "no-cache"),
         ("/assets/platform/datastar-1.0.1.js".into(), "no-cache"),
         ("/assets/platform/icons/link.svg".into(), "no-cache"),
@@ -3111,15 +3183,15 @@ fn asset_cache_policies_and_conditional_get_and_head() -> Result<()> {
         ),
         (
             attribute(&page, "script[src$='/app.js']", "src")?,
-            "private, no-cache",
+            "private, max-age=31536000, immutable",
         ),
         (
             attribute(&page, "link[href$='/app.css']", "href")?,
-            "private, no-cache",
+            "private, max-age=31536000, immutable",
         ),
         (
             attribute(&page, "img.app-icon", "src")?,
-            "private, no-cache",
+            "private, max-age=31536000, immutable",
         ),
     ];
     for (path, policy) in policies {
@@ -3135,10 +3207,7 @@ fn asset_cache_policies_and_conditional_get_and_head() -> Result<()> {
         let etag = response.headers()["etag"].to_str()?.to_owned();
         let content_type = response.headers()["content-type"].clone();
         let vary = response.headers().get("vary").cloned();
-        assert_eq!(
-            vary.as_ref().map(|v| v.to_str().unwrap()),
-            policy.starts_with("private").then_some("Cookie")
-        );
+        assert_eq!(vary.as_ref().map(|v| v.to_str().unwrap()), None);
         let original = response.bytes()?;
         assert!(!original.is_empty());
         assert_eq!(etag, format!("\"{}\"", day2::digest(&original)));
@@ -3608,6 +3677,139 @@ fn pending_invocations_refuse_incomplete_host_audit_schema_without_repair() -> R
             |row| row.get::<_, String>(0)
         )?,
         "pending"
+    );
+    Ok(())
+}
+
+#[test]
+fn query_cache_proofs_bind_actor_scope_state_and_authority_without_running_queries() -> Result<()> {
+    let world = World::new()?;
+    let server = Server::start(world.runtime.clone(), "alice", 0)?;
+    let client = server.client()?;
+    let proof = |client: &Client, origin: &str| -> Result<String> {
+        let response = client
+            .get(format!("{origin}/api/session?operation=links.list"))
+            .send()?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let value: Value = serde_json::from_str(&response.text()?)?;
+        assert!(
+            value["server_time_ms"]
+                .as_i64()
+                .is_some_and(|time| time >= 0)
+        );
+        Ok(value["cache_token"]
+            .as_str()
+            .context("cache token")?
+            .to_owned())
+    };
+    let before = proof(&client, &server.origin)?;
+    let invocations = || {
+        world
+            .db()?
+            .query_row("SELECT count(*) FROM day2_invocations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(anyhow::Error::from)
+    };
+    let count = invocations()?;
+    assert_eq!(proof(&client, &server.origin)?, before);
+    assert_eq!(
+        invocations()?,
+        count,
+        "a permission probe must not invoke the query"
+    );
+    let page = client
+        .get(format!("{}/", server.origin))
+        .header("X-Day2-Query-Cache", "true")
+        .send()?;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert_eq!(page.headers()["x-day2-query-cache"], before);
+    assert_eq!(
+        proof(&client, &server.origin)?,
+        before,
+        "query journaling is not a business revision"
+    );
+    world.seed("cache-state-change")?;
+    let changed = proof(&client, &server.origin)?;
+    assert_ne!(changed, before);
+
+    let original = Instance::load(world.runtime.instance_path())?;
+    let mut denied = original.clone();
+    denied
+        .apps
+        .get_mut("links")
+        .unwrap()
+        .authority
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("links.list")
+        .unwrap()
+        .actors
+        .clear();
+    fs::write(world.runtime.instance_path(), serde_json::to_vec(&denied)?)?;
+    apply_desired_authority(&world.runtime)?;
+    assert_eq!(
+        client
+            .get(format!(
+                "{}/api/session?operation=links.list",
+                server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&original)?,
+    )?;
+    apply_desired_authority(&world.runtime)?;
+    assert_ne!(
+        proof(&client, &server.origin)?,
+        changed,
+        "A -> B -> A grants never revive a cache proof"
+    );
+    let viewer = Server::start(world.runtime.clone(), "viewer", 0)?;
+    assert_ne!(
+        proof(&viewer.client()?, &viewer.origin)?,
+        proof(&client, &server.origin)?
+    );
+    let other = Runtime::load(world.runtime.instance_path(), "other")?;
+    other.initialize()?;
+    let other = Server::start(other, "alice", 0)?;
+    assert_ne!(
+        proof(&other.client()?, &other.origin)?,
+        proof(&client, &server.origin)?
+    );
+    for (query, expected) in [
+        ("operation=links.create", StatusCode::BAD_REQUEST),
+        ("operation=missing", StatusCode::NOT_FOUND),
+        (
+            "operation=links.list&operation=links.list",
+            StatusCode::BAD_REQUEST,
+        ),
+        ("operation=links.list&extra=1", StatusCode::BAD_REQUEST),
+        ("operation=%FF", StatusCode::BAD_REQUEST),
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{}/api/session?{query}", server.origin))
+                .send()?
+                .status(),
+            expected,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        Client::new()
+            .get(format!(
+                "{}/api/session?operation=links.list",
+                server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::UNAUTHORIZED
     );
     Ok(())
 }

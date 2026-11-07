@@ -588,6 +588,7 @@ pub(in super::super) fn finish(
                     })
                     .collect::<Result<_>>()?,
                 binaries,
+                day2: None,
             };
             validate_receipt(&prepared, &result, shard)?;
             Ok(result)
@@ -797,6 +798,7 @@ pub(super) mod tests {
                 passed: effects(shard),
                 timings_ms: effects(shard).into_iter().map(|s| (s, 100)).collect(),
                 binaries: expected_binaries(&prepared, shard),
+                day2: None,
             })
             .collect();
         Ok(Proof {

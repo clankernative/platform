@@ -433,6 +433,24 @@ pub(super) fn refresh_context(
     }))
 }
 
+fn claim_identity(claims: &Claims) -> Result<Digest> {
+    Digest::of(&("day2-restore-closed-use-original-v1", &claims.invocation))
+}
+
+pub(super) fn restore_identity(encoded: &str, invocation: &str) -> Result<Digest> {
+    ensure!(encoded.len() <= 8192, "connection use byte budget");
+    let object: Value = crate::json::decode(encoded.as_bytes())
+        .map_err(|_| anyhow::anyhow!("restored_connection_use_encoding"))?;
+    ensure!(object.is_object(), "connection use object required");
+    let claims: Claims = serde_json::from_value(object)
+        .map_err(|_| anyhow::anyhow!("restored_connection_use_shape"))?;
+    ensure!(
+        claims.invocation == invocation,
+        "restored_connection_use_original_changed"
+    );
+    claim_identity(&claims)
+}
+
 fn load(
     db: &Connection,
     runtime: &Runtime,
@@ -441,6 +459,7 @@ fn load(
     reference: &str,
     now: i64,
 ) -> Result<Claims> {
+    super::restore::require_open(db, super::restore::Kind::Use, reference)?;
     ensure!(
         reference.starts_with("cu1_") && reference.len() <= 64,
         "invalid connection use reference"
@@ -452,6 +471,11 @@ fn load(
     )?;
     ensure!(encoded.len() <= 8192, "connection use byte budget");
     let claims: Claims = crate::json::decode(encoded.as_bytes())?;
+    super::restore::require_open(
+        db,
+        super::restore::Kind::UseOriginal,
+        claim_identity(&claims)?.as_str(),
+    )?;
     let active = crate::authority_state::require_invocation_in(
         db,
         runtime,
@@ -1042,13 +1066,14 @@ mod tests {
                 account_policy: AccountBindingPolicy::MappedHuman,
                 usage: "Read work events.".into(),
             };
-            let contract = serde_json::from_value(json!({
+            let mut contract: crate::artifact::Artifact = serde_json::from_value(json!({
                 "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test","schema_digest":"host-test",
                 "schema":{"models":{"entries":{"fields":{"note":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
                 "operations":[{"name":"read","kind":"query","input_type":"input","output_type":""}],
                 "connection_declarations":[ConnectionDeclaration { registration: Name::try_from("calendar".to_owned())?, requirement: requirement.clone() }],
                 "sources":{},"admission":"local-spike-only"
             }))?;
+            contract.schema_digest = crate::digest(&serde_json::to_vec(&contract.schema)?);
             fs::write(
                 &instance_path,
                 serde_json::to_vec(&json!({
@@ -1145,6 +1170,192 @@ mod tests {
                 result: if read { json!({"Listed":[]}) } else { json!({"Available":self.reference}) }.to_string(), error: String::new(),
             }
         }
+    }
+
+    #[test]
+    fn restore_cut_fences_actual_use_and_cached_completion_even_if_old_slot_or_reference_is_copied()
+    -> Result<()> {
+        super::super::effects::scope(Arc::new(Clock), || -> Result<()> {
+            let fixture = Fixture::new()?;
+            let path = fixture.runtime.db().to_path_buf();
+            let mut db = store::open(&path)?;
+            {
+                let tx = db.transaction()?;
+                load(
+                    &tx,
+                    &fixture.runtime,
+                    &fixture.request,
+                    "calendar",
+                    &fixture.reference,
+                    100,
+                )?;
+                for read in [false, true] {
+                    validate_cached(
+                        &tx,
+                        &fixture.runtime,
+                        &fixture.request,
+                        &fixture.observation(read),
+                    )?;
+                }
+                tx.commit()?;
+            }
+            let old: String = db.query_row(
+                "SELECT claims FROM oauth_use_handles WHERE reference=?1",
+                [&fixture.reference],
+                |r| r.get(0),
+            )?;
+            crate::oauth::restore::tests::apply_for_storage(&mut db, 83)?;
+            // A hostile local-row rewind cannot remove the independent cut.
+            db.execute(
+                "UPDATE oauth_connection_slots SET status='active',security_epoch=1",
+                [],
+            )?;
+            let copied = format!("cu1_{}", "y".repeat(43));
+            db.execute(
+                "INSERT INTO oauth_use_handles VALUES(?1,'invocation_1',?2)",
+                params![copied, old],
+            )?;
+            let mut aliases = vec![copied.clone()];
+            for (index, change_selection) in [false, true].into_iter().enumerate() {
+                let mut retimed = fixture.claims.clone();
+                retimed.issued_at = 99;
+                retimed.expires_at = 159;
+                if change_selection {
+                    retimed.selection = Digest::new(b"different mutable selection DATA");
+                }
+                let reference = format!("cu1_{}", if index == 0 { "r" } else { "s" }.repeat(43));
+                db.execute(
+                    "INSERT INTO oauth_use_handles VALUES(?1,'invocation_1',?2)",
+                    params![reference, serde_json::to_string_pretty(&retimed)?],
+                )?;
+                aliases.push(reference);
+            }
+            for _ in 0..2 {
+                drop(db);
+                db = store::open(&path)?;
+                let tx = db.transaction()?;
+                assert!(
+                    load(
+                        &tx,
+                        &fixture.runtime,
+                        &fixture.request,
+                        "calendar",
+                        &fixture.reference,
+                        100
+                    )
+                    .is_err()
+                );
+                assert!(
+                    load(
+                        &tx,
+                        &fixture.runtime,
+                        &fixture.request,
+                        "calendar",
+                        &copied,
+                        100
+                    )
+                    .is_err()
+                );
+                for read in [false, true] {
+                    assert!(
+                        validate_cached(
+                            &tx,
+                            &fixture.runtime,
+                            &fixture.request,
+                            &fixture.observation(read)
+                        )
+                        .is_err()
+                    );
+                    for reference in &aliases {
+                        assert!(
+                            load(
+                                &tx,
+                                &fixture.runtime,
+                                &fixture.request,
+                                "calendar",
+                                reference,
+                                100
+                            )
+                            .is_err()
+                        );
+                        let mut observation = fixture.observation(read);
+                        if read {
+                            let mut input: Value =
+                                crate::json::decode(observation.instruction.data.as_bytes())?;
+                            input["reference"] = json!(reference);
+                            observation.instruction.data = serde_json::to_string(&input)?;
+                        } else {
+                            observation.result = json!({"Available":reference}).to_string();
+                        }
+                        assert!(
+                            validate_cached(&tx, &fixture.runtime, &fixture.request, &observation)
+                                .is_err()
+                        );
+                    }
+                }
+                assert_eq!(
+                    tx.query_row(
+                        "SELECT claims FROM oauth_use_handles WHERE reference=?1",
+                        [&fixture.reference],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    old
+                );
+                tx.commit()?;
+            }
+            // A distinct authenticated invocation and freshly established
+            // generation are not the old receipt/handle under another name.
+            // This is ordinary SQL conformance, not a native restore supplier.
+            let identity = crate::iap::Verified {
+                email: "alice".into(),
+                subject: fixture.claims.subject.clone(),
+            };
+            fixture.runtime.accept_on_behalf_of_verified(
+                "read",
+                ActingAs {
+                    authenticated: "alice",
+                    actor: "alice",
+                    trigger: Trigger::Request,
+                },
+                "new_authenticated_invocation",
+                &json!({}),
+                100,
+                Some(&identity),
+            )?;
+            let request = Request {
+                operation: "read".into(),
+                input: "{}".into(),
+                context: store::invocation_context(&db, "new_authenticated_invocation")?,
+                observations: Vec::new(),
+            };
+            let mut current = fixture.claims.clone();
+            current.invocation = "new_authenticated_invocation".into();
+            current.generation = 2;
+            current.security_epoch = 2;
+            current.account = "newly_authenticated_account".into();
+            current.affinity = "new_authentication_affinity".into();
+            let reference = format!("cu1_{}", "z".repeat(43));
+            let tx = crate::write_queue::immediate(&mut db)?;
+            tx.execute("UPDATE oauth_connection_slots SET generation=2,security_epoch=2,status='active',account='newly_authenticated_account',affinity='new_authentication_affinity'",[])?;
+            tx.execute(
+                "INSERT INTO oauth_use_handles VALUES(?1,'new_authenticated_invocation',?2)",
+                params![reference, serde_json::to_string(&current)?],
+            )?;
+            load(&tx, &fixture.runtime, &request, "calendar", &reference, 100)?;
+            assert!(
+                load(
+                    &tx,
+                    &fixture.runtime,
+                    &fixture.request,
+                    "calendar",
+                    &fixture.reference,
+                    100
+                )
+                .is_err()
+            );
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     #[test]

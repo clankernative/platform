@@ -361,7 +361,7 @@ impl Artifact {
         page.validate_live()?;
         day2_contracts::names::identifier(&page.name)?;
         ensure!(
-            !["company", "asset"].contains(&page.name.as_str())
+            !["company", "asset", "view"].contains(&page.name.as_str())
                 && (self.format < 7 || !["routes", "platform"].contains(&page.name.as_str())),
             "reserved page context name"
         );
@@ -398,6 +398,7 @@ impl Artifact {
         );
         Ok(crate::output_schema::Type::Record(BTreeMap::from([
             (page.name.clone(), output.shape.template_shape()),
+            ("view".into(), output.shape.template_shape()),
             (
                 "company".into(),
                 crate::output_schema::Type::Record(BTreeMap::from([(
@@ -1414,6 +1415,10 @@ pub struct IdentityProvider {
     /// The only domain whose people are admitted, checked against both the
     /// assertion's `hd` claim and the address itself.
     pub hosted_domain: String,
+    /// Opt-in public CLI bootstrap registration. IAP's programmatic allowlist
+    /// and the app's current authority remain separate admission requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_desktop_client: Option<day2_capabilities::cli_login::DesktopClient>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3131,7 +3136,7 @@ mod output_contract_tests {
         page.template = "components/directory.html".into();
         assert!(artifact.contract.page_context_schema(&page).is_err());
         page.template = "pages/directory.html".into();
-        for name in ["company", "asset", "routes", "platform"] {
+        for name in ["company", "asset", "routes", "platform", "view"] {
             page.name = name.into();
             assert!(artifact.contract.page_context_schema(&page).is_err());
         }

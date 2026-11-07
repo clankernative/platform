@@ -255,11 +255,11 @@ fn validate_woff2(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn resolve_import(path: &str, specifier: &str, catalog: &Catalog) -> Result<()> {
+fn resolve_import(path: &str, specifier: &str, catalog: &Catalog) -> Result<Option<String>> {
     // One closed host module, served from embedded platform bytes. This does
     // not admit arbitrary absolute URLs or external dependency graphs.
     if specifier == "/assets/platform/navigation.js" {
-        return Ok(());
+        return Ok(None);
     }
     ensure!(
         (specifier.starts_with("./") || specifier.starts_with("../"))
@@ -276,11 +276,12 @@ fn resolve_import(path: &str, specifier: &str, catalog: &Catalog) -> Result<()> 
         media_type(relative)? == JS && catalog.contains_key(relative),
         "ui_import_unresolved: {specifier:?} from {path}; expected an admitted .js module"
     );
-    Ok(())
+    Ok(Some(relative.to_owned()))
 }
 
 struct Imports<'s> {
     imports: Vec<String>,
+    eager: Vec<String>,
     error: Option<&'static str>,
     source: &'s str,
 }
@@ -293,6 +294,7 @@ impl<'a> Visit<'a> for Imports<'_> {
             );
         }
         self.imports.push(node.source.value.to_string());
+        self.eager.push(node.source.value.to_string());
     }
 
     fn visit_export_from_declaration(&mut self, node: &ExportFromDeclaration<'a>) {
@@ -300,6 +302,7 @@ impl<'a> Visit<'a> for Imports<'_> {
             self.error = Some("ui_import_attributes_unsupported");
         }
         self.imports.push(node.source.value.to_string());
+        self.eager.push(node.source.value.to_string());
     }
 
     fn visit_export_all_declaration(&mut self, node: &ExportAllDeclaration<'a>) {
@@ -307,6 +310,7 @@ impl<'a> Visit<'a> for Imports<'_> {
             self.error = Some("ui_import_attributes_unsupported");
         }
         self.imports.push(node.source.value.to_string());
+        self.eager.push(node.source.value.to_string());
     }
 
     fn visit_import_expression(&mut self, node: &ImportExpression<'a>) {
@@ -332,7 +336,7 @@ impl<'a> Visit<'a> for Imports<'_> {
     }
 }
 
-fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()> {
+fn javascript_imports(source: &str) -> Result<(Vec<String>, Vec<String>)> {
     let allocator = Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::mjs()).parse();
     ensure!(
@@ -345,6 +349,7 @@ fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()
     );
     let mut imports = Imports {
         imports: vec![],
+        eager: vec![],
         error: None,
         source,
     };
@@ -352,10 +357,42 @@ fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()
     if let Some(error) = imports.error {
         bail!(error);
     }
-    for specifier in imports.imports {
+    Ok((imports.imports, imports.eager))
+}
+
+fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()> {
+    for specifier in javascript_imports(source)?.0 {
         resolve_import(path, &specifier, catalog)?;
     }
     Ok(())
+}
+
+/// Compute the admitted static module graph once at host startup. Preloading
+/// imports removes the entrypoint/import waterfall without eagerly fetching
+/// modules that the app intentionally loads with import().
+pub(crate) fn module_preloads(
+    directory: &Path,
+    catalog: &Catalog,
+    roots: &[String],
+) -> Result<Vec<String>> {
+    let mut pending = roots.to_vec();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let resource = catalog.get(&path).context("module_preload_not_admitted")?;
+        let source = String::from_utf8(read_blob(directory, resource)?)?;
+        for specifier in javascript_imports(&source)?.1 {
+            if let Some(import) = resolve_import(&path, &specifier, catalog)? {
+                pending.push(import);
+            }
+        }
+    }
+    Ok(seen
+        .into_iter()
+        .filter(|path| !roots.contains(path))
+        .collect())
 }
 
 pub fn validate_inline_style(source: &str) -> Result<()> {
@@ -514,4 +551,38 @@ fn css_tokens<'i>(
 
 fn validate_font_url(stylesheet: Option<(&str, &Catalog)>, value: &str) -> bool {
     stylesheet.is_some_and(|(path, catalog)| resolve_font(path, value, catalog).is_ok())
+}
+
+#[cfg(test)]
+mod preload_tests {
+    use super::*;
+    #[test]
+    fn static_preloads_follow_cycles_and_reexports_but_leave_lazy_modules_lazy() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("ui");
+        fs::create_dir(&source)?;
+        for (name, body) in [
+            (
+                "app.js",
+                "import './part.js'; export const later = () => import('./lazy.js');",
+            ),
+            ("part.js", "export * from './other.js';"),
+            ("other.js", "import './part.js'; export const value = 1;"),
+            ("lazy.js", "export const lazy = true;"),
+        ] {
+            fs::write(source.join(name), body)?;
+        }
+        let catalog = package(&source, temp.path())?;
+        assert_eq!(
+            module_preloads(temp.path(), &catalog, &["app.js".into()])?,
+            ["other.js", "part.js"]
+        );
+        let resource = &catalog["part.js"];
+        fs::write(
+            temp.path().join("web_resources").join(blob_name(resource)?),
+            "tampered",
+        )?;
+        assert!(module_preloads(temp.path(), &catalog, &["app.js".into()]).is_err());
+        Ok(())
+    }
 }

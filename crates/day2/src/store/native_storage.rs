@@ -109,6 +109,7 @@ impl Runtime {
                 scope: metadata.scope,
                 hosted_domain: desired.hosted_domain().map(str::to_owned),
                 instance_path: metadata.instance_path,
+                restore_registry_selector: Some(metadata.instance_selector),
                 app: metadata.app,
                 db: PathBuf::from(DATABASE),
                 artifact: Arc::new(metadata.artifact),
@@ -271,6 +272,14 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
     fn fail(&mut self) {
         self.failed = true;
         self.owner.refuse();
+    }
+
+    pub(crate) fn require_native_registry_read(&mut self, runtime: &Runtime) -> Result<()> {
+        self.unit(|sql| sql.owner.require_native_registry_read(runtime))
+    }
+
+    pub(crate) fn refuse_registry(&mut self) {
+        self.fail();
     }
 
     fn unit<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {

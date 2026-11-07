@@ -25,6 +25,7 @@ const RESULTS: &str = "artifacts/ci-results";
 const PARTS: [&str; 3] = ["inputs", "fixtures", "tests"];
 const SHARDS: &[&str] = &[
     "workspace-day2",
+    "workspace-day2-runtime",
     "workspace-control",
     "workspace-other",
     "simulation",
@@ -34,6 +35,7 @@ const SHARDS: &[&str] = &[
 ];
 
 pub(super) mod artifacts;
+pub(super) mod cases;
 pub(super) mod mac;
 pub(super) mod reuse;
 pub(super) mod transport;
@@ -373,6 +375,12 @@ struct Receipt {
     passed: BTreeSet<String>,
     timings_ms: BTreeMap<String, u64>,
     binaries: BTreeSet<PathBuf>,
+    day2: Option<cases::Evidence>,
+}
+
+pub(super) struct TestExecution {
+    pub(super) binaries: BTreeSet<PathBuf>,
+    pub(super) day2: Option<cases::Evidence>,
 }
 
 pub(super) fn valid(shard: &str) -> bool {
@@ -1111,7 +1119,7 @@ pub(super) fn fixtures(root: &Path, prepared: &Prepared) -> Result<BTreeMap<Stri
 
 fn selected(package: &str, shard: &str) -> bool {
     match shard {
-        "workspace-day2" => package == "day2",
+        "workspace-day2" | "workspace-day2-runtime" => package == "day2",
         "workspace-control" => package == "day2-control",
         "workspace-other" => package != "day2" && package != "day2-control",
         "parallel-runtime" | "isolated-build" | "installation-build" => true,
@@ -1123,7 +1131,10 @@ fn expected_binaries(prepared: &Prepared, shard: &str) -> BTreeSet<PathBuf> {
     prepared
         .binaries
         .iter()
-        .filter(|binary| selected(&binary.package, shard))
+        .filter(|binary| {
+            selected(&binary.package, shard)
+                && (!cases::part(shard) || cases::binary(binary, shard))
+        })
         .map(|binary| binary.executable.clone())
         .collect()
 }
@@ -1134,7 +1145,7 @@ pub(super) fn tests(
     shard: &str,
     fixtures: &BTreeMap<String, PathBuf>,
     budget: Duration,
-) -> Result<BTreeSet<PathBuf>> {
+) -> Result<TestExecution> {
     ensure!(valid(shard) && shard != "simulation", "test shard required");
     let dst = super::dst::Session::start(root, shard)?;
     let suite = if shard.starts_with("workspace-") {
@@ -1146,11 +1157,31 @@ pub(super) fn tests(
     let started = Instant::now();
     let private_build = super::prepare_private_build_inputs(root, suite)?;
     let mut executed = BTreeSet::new();
+    let mut inventories = BTreeMap::new();
     for binary in prepared
         .binaries
         .iter()
-        .filter(|binary| selected(&binary.package, shard))
+        .filter(|binary| expected_binaries(prepared, shard).contains(&binary.executable))
     {
+        if cases::part(shard) {
+            let mut inventory = cases::capture(root, binary, fixtures, shard, started, budget)?;
+            cases::run(
+                root,
+                binary,
+                fixtures,
+                &mut inventory,
+                budget
+                    .checked_sub(started.elapsed())
+                    .context("test campaign budget exhausted")?,
+                dst.as_ref().context("fresh day2 observations required")?,
+            )?;
+            inventories.insert(binary.executable.clone(), inventory);
+            ensure!(
+                executed.insert(binary.executable.clone()),
+                "duplicate test executable invocation"
+            );
+            continue;
+        }
         let mut command = Command::new(root.join(&binary.executable));
         command.args(&arguments);
         configure_tests(root, suite, fixtures, private_build.as_ref(), &mut command)?;
@@ -1176,10 +1207,15 @@ pub(super) fn tests(
         executed == expected_binaries(prepared, shard),
         "test executable campaign incomplete"
     );
-    if let Some(dst) = dst {
-        dst.finish()?;
-    }
-    Ok(executed)
+    let day2 = if let Some(dst) = dst {
+        Some(cases::Evidence::new(inventories, dst.partial()?))
+    } else {
+        None
+    };
+    Ok(TestExecution {
+        binaries: executed,
+        day2,
+    })
 }
 
 fn effects(shard: &str) -> BTreeSet<String> {
@@ -1198,6 +1234,7 @@ pub(super) fn receipt(
     passed: &BTreeSet<String>,
     timings: &BTreeMap<String, u64>,
     executed: &BTreeSet<PathBuf>,
+    day2: Option<cases::Evidence>,
 ) -> Result<()> {
     ensure!(
         valid(shard)
@@ -1212,7 +1249,9 @@ pub(super) fn receipt(
         passed: passed.clone(),
         timings_ms: timings.clone(),
         binaries: executed.clone(),
+        day2,
     };
+    validate_receipt(prepared, &receipt, shard)?;
     fs::create_dir_all(root.join(RESULTS))?;
     fs::write(
         root.join(RESULTS).join(format!("{shard}.json")),
@@ -1222,6 +1261,18 @@ pub(super) fn receipt(
 }
 
 fn validate_receipt(prepared: &Prepared, receipt: &Receipt, shard: &str) -> Result<()> {
+    if cases::part(shard) {
+        cases::validate(
+            receipt
+                .day2
+                .as_ref()
+                .context("actual day2 case evidence required")?,
+            prepared,
+            shard,
+        )?;
+    } else {
+        ensure!(receipt.day2.is_none(), "day2 evidence on another shard");
+    }
     ensure!(
         valid(shard)
             && receipt.shard == shard
@@ -1271,6 +1322,14 @@ fn admit_join(
             );
         }
     }
+    let part = |shard: &str| -> Result<&cases::Evidence> {
+        receipts
+            .iter()
+            .find(|receipt| receipt.shard == shard)
+            .and_then(|receipt| receipt.day2.as_ref())
+            .context("complete day2 partition evidence required")
+    };
+    cases::validate_join(prepared, part("workspace-day2")?, part(cases::RUNTIME)?)?;
     if let Some(proof) = mac {
         for receipt in mac::campaigns(proof) {
             for (step, elapsed) in &receipt.timings_ms {
@@ -1286,6 +1345,7 @@ fn admit_join(
         "test-binaries",
         "test-docs",
         "test-workspace-day2",
+        "test-workspace-day2-runtime",
         "test-workspace-control",
         "test-workspace-other",
     ] {
@@ -1347,7 +1407,7 @@ pub(super) fn join(
     let files = fs::read_dir(root.join(RESULTS))?.collect::<std::io::Result<Vec<_>>>()?;
     ensure!(
         files.len() == portable.len(),
-        "exact five portable receipts required"
+        "exact six portable receipts required"
     );
     let mut receipts = Vec::new();
     for shard in portable {
@@ -1356,6 +1416,19 @@ pub(super) fn join(
         )?)?);
     }
     let timings = admit_join(prepared, &receipts, Some(&mac))?;
+    let part = |shard: &str| -> Result<&cases::Evidence> {
+        receipts
+            .iter()
+            .find(|receipt| receipt.shard == shard)
+            .and_then(|receipt| receipt.day2.as_ref())
+            .context("complete day2 partition evidence required")
+    };
+    cases::join(
+        root,
+        prepared,
+        part("workspace-day2")?,
+        part(cases::RUNTIME)?,
+    )?;
     let passed: BTreeSet<_> = timings.keys().cloned().collect();
     artifacts::retain(root, &selected)?;
     fs::write(
@@ -2137,13 +2210,14 @@ mod tests {
             passed: BTreeSet::new(),
             timings_ms: BTreeMap::new(),
         };
-        let shard = "workspace-day2";
+        let shard = cases::RUNTIME;
         let valid = Receipt {
             prepared_digest: digest(&serde_json::to_vec(&prepared)?),
             shard: shard.into(),
             passed: effects(shard),
-            timings_ms: [("test-workspace-day2".into(), 100)].into(),
+            timings_ms: [("test-workspace-day2-runtime".into(), 100)].into(),
             binaries: expected_binaries(&prepared, shard),
+            day2: Some(cases::sample(&prepared, shard)),
         };
         validate_receipt(&prepared, &valid, shard)?;
         for field in [
@@ -2152,11 +2226,13 @@ mod tests {
             "passed",
             "timings_ms",
             "binaries",
+            "day2",
         ] {
             let mut value = serde_json::to_value(&valid)?;
             value[field] = match field {
                 "prepared_digest" | "shard" => json!("foreign"),
                 "timings_ms" => json!({}),
+                "day2" => json!(null),
                 _ => json!([]),
             };
             let invalid = serde_json::from_value(value)?;

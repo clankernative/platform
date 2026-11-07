@@ -2,7 +2,7 @@ load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", 
 
 package(default_visibility = ["//visibility:public"])
 
-COMPILE_INPUTS = []
+COMPILE_INPUTS = ["//build/bazel:roc-packages.json"]
 
 INTERNAL_DEPS = []
 

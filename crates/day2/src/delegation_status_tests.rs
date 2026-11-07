@@ -49,6 +49,7 @@ impl Callee {
             credentials: None,
             connections: None,
             rolling: false,
+            restore_registry_selector: None,
             instance_path: path,
             app: "callee".into(),
             db: state.join("callee.sqlite"),

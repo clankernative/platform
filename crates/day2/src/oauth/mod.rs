@@ -28,6 +28,7 @@ pub mod profiles;
 pub mod protocol;
 pub(crate) mod refresh;
 pub(crate) mod registration;
+pub(crate) mod restore;
 pub(crate) mod schema;
 pub(crate) mod security_shell;
 pub(crate) mod shell_oidc;

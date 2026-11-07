@@ -46,6 +46,293 @@ fn edit_mode() -> Value {
     json!({"kind":"edit","model":"links","id_field":"link_id","version_field":"expected_version"})
 }
 
+#[test]
+fn owner_changes_preserve_active_policy_and_are_cas_idempotent() -> Result<()> {
+    use day2::{
+        authority_state::{self, LocalOperator},
+        owners::{self, Change, Operation, Permission},
+    };
+    let world = World::new()?;
+    let mut instance = Instance::load(world.runtime.instance_path())?;
+    instance.control = Some(serde_json::from_value(json!({
+        "version":1,"state_directory":world.directory.path().join("control"),
+        "operators":["operator"],"sources":{},"apps":{}
+    }))?);
+    // Unreviewed desired changes must not hitch a ride on an owner operation.
+    instance
+        .apps
+        .get_mut("owned")
+        .unwrap()
+        .writers
+        .insert("pending-writer".into());
+    instance
+        .apps
+        .get_mut("owned")
+        .unwrap()
+        .authority
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("pending-owner".into());
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&instance)?,
+    )?;
+    let instance_bytes = fs::read(world.runtime.instance_path())?;
+    let operator = LocalOperator::assert_local("operator")?;
+    let denied = LocalOperator::assert_local("admin")?;
+    let before = authority_state::current(&rusqlite::Connection::open(world.runtime.db())?)?;
+    let change = Change {
+        owner: "bob".into(),
+        expected: before.stamp.clone(),
+        request_id: "owner-add-bob".into(),
+    };
+    assert!(owners::change(&world.runtime, &denied, Operation::Add, &change).is_err());
+    let receipt = owners::change(&world.runtime, &operator, Operation::Add, &change)?;
+    let after = authority_state::current(&rusqlite::Connection::open(world.runtime.db())?)?;
+    let mut expected_document = before.document.clone();
+    expected_document
+        .policy
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("bob".into());
+    assert_eq!(after.document, expected_document);
+    assert_eq!(after.artifact_id, before.artifact_id);
+    assert_eq!(after.stamp.revision, before.stamp.revision + 1);
+    assert_eq!(
+        owners::change(&world.runtime, &operator, Operation::Add, &change)?,
+        receipt
+    );
+    assert!(owners::change(&world.runtime, &operator, Operation::Remove, &change).is_err());
+    let stale = Change {
+        owner: "alice".into(),
+        request_id: "stale-add".into(),
+        ..change
+    };
+    assert!(owners::change(&world.runtime, &operator, Operation::Add, &stale).is_err());
+    let remove = Change {
+        owner: "bob".into(),
+        expected: after.stamp,
+        request_id: "owner-remove-bob".into(),
+    };
+    owners::change(&world.runtime, &operator, Operation::Remove, &remove)?;
+    // A delayed retry acknowledges its original change, without re-adding Bob.
+    assert_eq!(
+        owners::change(
+            &world.runtime,
+            &operator,
+            Operation::Add,
+            &Change {
+                owner: "bob".into(),
+                expected: before.stamp.clone(),
+                request_id: "owner-add-bob".into()
+            }
+        )?,
+        receipt
+    );
+    assert!(!owners::check(
+        &world.runtime,
+        &operator,
+        "bob",
+        Permission::SecretsRead
+    )?);
+    assert!(owners::check(
+        &world.runtime,
+        &operator,
+        "admin",
+        Permission::SqliteDownload
+    )?);
+    assert!(!owners::check(
+        &world.runtime,
+        &operator,
+        "pending-owner",
+        Permission::SecretsRead
+    )?);
+    assert!(!owners::check(
+        &world.runtime,
+        &operator,
+        "operator",
+        Permission::SecretsRead
+    )?);
+    let inspect = owners::inspect(&world.runtime, &operator)?;
+    assert!(!inspect.desired_matches_active);
+    let last = Change {
+        owner: "admin".into(),
+        expected: inspect.stamp.clone(),
+        request_id: "last-owner".into(),
+    };
+    assert!(owners::change(&world.runtime, &operator, Operation::Remove, &last).is_err());
+    for owner in [
+        "domain:example.com",
+        "group:owners@example.com",
+        "svc:worker",
+        "app:other",
+        "x@p.iam.gserviceaccount.com",
+    ] {
+        let invalid = Change {
+            owner: owner.into(),
+            expected: inspect.stamp.clone(),
+            request_id: "invalid-owner".into(),
+        };
+        assert!(owners::change(&world.runtime, &operator, Operation::Add, &invalid).is_err());
+    }
+    assert_eq!(fs::read(world.runtime.instance_path())?, instance_bytes);
+    Ok(())
+}
+
+#[test]
+fn owner_changes_reject_managed_clients_without_mutating_authority() -> Result<()> {
+    use day2::{
+        authority_state::{self, LocalOperator},
+        owners::{self, Change, Operation},
+    };
+    let world = World::new()?;
+    let mut instance = Instance::load(world.runtime.instance_path())?;
+    instance.control = Some(serde_json::from_value(json!({
+        "version":1,"state_directory":world.directory.path().join("control"),
+        "operators":["operator"],"sources":{},"apps":{}
+    }))?);
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&instance)?,
+    )?;
+    let operator = LocalOperator::assert_local("operator")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let before = authority_state::current(&db)?;
+    let counts = || -> Result<(i64, i64)> {
+        Ok((
+            db.query_row("SELECT count(*) FROM day2_authority_history", [], |row| {
+                row.get(0)
+            })?,
+            db.query_row("SELECT count(*) FROM day2_authority_requests", [], |row| {
+                row.get(0)
+            })?,
+        ))
+    };
+    let before_counts = counts()?;
+    for (index, owner) in [
+        format!("client/client_keys/{}", "a".repeat(64)),
+        "client/".into(),
+        "client/client_keys/not-a-stable-id".into(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = owners::change(
+            &world.runtime,
+            &operator,
+            Operation::Add,
+            &Change {
+                owner: owner.clone(),
+                expected: before.stamp.clone(),
+                request_id: format!("reject-client-{index}"),
+            },
+        )
+        .expect_err("managed clients cannot become individual owners");
+        assert!(error.to_string().contains("owner_must_be_an_individual"));
+        assert_eq!(authority_state::current(&db)?, before);
+        assert_eq!(counts()?, before_counts);
+        for permission in owners::PERMISSIONS {
+            assert!(!owners::check(
+                &world.runtime,
+                &operator,
+                &owner,
+                permission
+            )?);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn owner_permission_reads_use_live_authority_and_restores_do_not_grant_access() -> Result<()> {
+    use day2::{
+        authority_state::{self, LocalOperator},
+        owners::{self, Change, Operation},
+    };
+    let world = World::new()?;
+    let mut instance = Instance::load(world.runtime.instance_path())?;
+    instance.control = Some(serde_json::from_value(json!({
+        "version":1,"state_directory":world.directory.path().join("control"),
+        "operators":["operator"],"sources":{},"apps":{}
+    }))?);
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&instance)?,
+    )?;
+    let mut other = instance.apps["owned"].clone();
+    other.authority.as_mut().unwrap().admins = std::collections::BTreeSet::from(["alice".into()]);
+    instance.apps.insert("other".into(), other);
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&instance)?,
+    )?;
+    let other_runtime = Runtime::load(world.runtime.instance_path(), "other")?;
+    other_runtime.initialize()?;
+    let mut other_db = rusqlite::Connection::open(other_runtime.db())?;
+    {
+        let tx = other_db.transaction()?;
+        for permission in owners::PERMISSIONS {
+            assert!(owners::authorize_in(&tx, &world.runtime, "admin", permission).is_err());
+            assert!(owners::authorize_in(&tx, &other_runtime, "admin", permission).is_err());
+            owners::authorize_in(&tx, &other_runtime, "alice", permission)?;
+        }
+    }
+    let operator = LocalOperator::assert_local("operator")?;
+    let mut db = rusqlite::Connection::open(world.runtime.db())?;
+    // Permissions cannot be checked outside a transaction, even for an owner.
+    for permission in owners::PERMISSIONS {
+        assert!(owners::authorize_in(&db, &world.runtime, "admin", permission).is_err());
+    }
+    {
+        let tx = db.transaction()?;
+        for permission in owners::PERMISSIONS {
+            owners::authorize_in(&tx, &world.runtime, "admin", permission)?;
+            for actor in ["alice", "viewer", "operator", "admin@other.example"] {
+                assert!(owners::authorize_in(&tx, &world.runtime, actor, permission).is_err());
+            }
+        }
+    }
+    let stamp = owners::inspect(&world.runtime, &operator)?.stamp;
+    owners::change(
+        &world.runtime,
+        &operator,
+        Operation::Add,
+        &Change {
+            owner: "bob".into(),
+            expected: stamp,
+            request_id: "new-owner".into(),
+        },
+    )?;
+    owners::change(
+        &world.runtime,
+        &operator,
+        Operation::Remove,
+        &Change {
+            owner: "admin".into(),
+            expected: owners::inspect(&world.runtime, &operator)?.stamp,
+            request_id: "remove-admin".into(),
+        },
+    )?;
+    assert!(world.runtime.authorize_audit("admin").is_err());
+    world.runtime.authorize_audit("bob")?;
+    {
+        let tx = db.transaction()?;
+        authority_state::invalidate_restored(&tx, world.runtime.artifact().directory())?;
+        tx.commit()?;
+    }
+    for permission in owners::PERMISSIONS {
+        assert!(!owners::check(
+            &world.runtime,
+            &operator,
+            "bob",
+            permission
+        )?);
+    }
+    Ok(())
+}
+
 struct World {
     directory: tempfile::TempDir,
     runtime: Runtime,
