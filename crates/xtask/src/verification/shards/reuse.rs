@@ -4,8 +4,8 @@ use super::{
     BuildCache, BuildIdentity, Identity, Prepared, Receipt, Targets, admit_join, build_identity,
     compiler_targets, identity,
 };
-use crate::run_with_budget;
-use anyhow::{Context, Result, ensure};
+use crate::{CommandStatusError, command_status_with_budget};
+use anyhow::{Context, Result, bail, ensure};
 use day2::digest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,7 +15,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const REPOSITORY: &str = "clankernative/platform";
@@ -69,18 +69,63 @@ fn number(value: &Value, key: &str) -> Result<u64> {
 
 pub(super) fn api(root: &Path, endpoint: &str) -> Result<Value> {
     // Fixed repository endpoints only; no response-supplied URL or credential output.
-    let file = tempfile::NamedTempFile::new()?;
-    run_with_budget(
-        root,
-        Command::new("gh")
-            .args(["api", "--hostname", "github.com", "--method", "GET"])
+    let started = Instant::now();
+    retry_api_with(|| {
+        // Each closed attempt has a fresh response file, never an earlier body.
+        let file = tempfile::NamedTempFile::new()?;
+        let mut command = Command::new("gh");
+        command
+            .args([
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "GET",
+                "--header",
+                "Cache-Control: no-cache",
+            ])
             .arg(format!("repos/{REPOSITORY}/{endpoint}"))
             .env_remove("GH_DEBUG")
             .stdout(Stdio::from(file.reopen()?))
-            .stderr(Stdio::null()),
-        Duration::from_secs(120),
-    )?;
-    read_json(&file.path().canonicalize()?)
+            .stderr(Stdio::null());
+        let budget = remaining_api_budget(started.elapsed())?;
+        let outcome = command_status_with_budget(root, &mut command, budget);
+        let status = outcome.map_err(|error| match error {
+            CommandStatusError::Spawn(_) => anyhow::anyhow!("GitHub metadata child spawn failed"),
+            CommandStatusError::Wait(_) => anyhow::anyhow!("GitHub metadata child wait failed"),
+            CommandStatusError::Timeout => anyhow::anyhow!("GitHub metadata child timed out"),
+        })?;
+        completed_api_response(status.code(), || read_json(&file.path().canonicalize()?))
+    })
+    .with_context(|| format!("GitHub metadata endpoint={endpoint}"))
+}
+
+fn remaining_api_budget(elapsed: Duration) -> Result<Duration> {
+    Duration::from_secs(120)
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+        .context("GitHub metadata read exhausted its original 120-second budget")
+}
+
+fn retry_api_with(mut request: impl FnMut() -> Result<Option<Value>>) -> Result<Value> {
+    for _ in 0..3 {
+        if let Some(value) = request()? {
+            return Ok(value);
+        }
+    }
+    bail!("GitHub metadata GET failed after three closed numeric exit-1 requests")
+}
+
+fn completed_api_response(
+    code: Option<i32>,
+    read: impl FnOnce() -> Result<Value>,
+) -> Result<Option<Value>> {
+    match code {
+        Some(0) => read().map(Some),
+        Some(1) => Ok(None),
+        Some(code) => bail!("GitHub metadata child failed: numeric_exit={code}"),
+        None => bail!("GitHub metadata child ended without a numeric exit status"),
+    }
 }
 
 pub(super) fn read_json(path: &Path) -> Result<Value> {
@@ -540,6 +585,98 @@ mod tests {
     use super::super::tests::{sample_identity, sample_part};
     use super::super::{Binary, SHARDS, effects, expected_binaries, program_output};
     use super::*;
+
+    #[test]
+    fn metadata_get_retries_only_closed_exit_one_and_caps_attempts() -> Result<()> {
+        let mut calls = 0;
+        let value = retry_api_with(|| {
+            calls += 1;
+            let code = if calls < 3 { 1 } else { 0 };
+            completed_api_response(Some(code), || Ok(json!({"id":7})))
+        })?;
+        assert_eq!(calls, 3);
+        assert_eq!(value, json!({"id":7}));
+
+        calls = 0;
+        assert!(
+            retry_api_with(|| {
+                calls += 1;
+                Ok(None)
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 3);
+
+        calls = 0;
+        let value = retry_api_with(|| {
+            calls += 1;
+            completed_api_response(Some(0), || Ok(json!({"conclusion":"failure"})))
+        })?;
+        assert_eq!(calls, 1);
+        assert_eq!(value, json!({"conclusion":"failure"}));
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_get_does_not_retry_request_errors_or_invalid_success_json() {
+        for code in [Some(2), Some(4), None] {
+            let mut calls = 0;
+            assert!(
+                retry_api_with(|| {
+                    calls += 1;
+                    completed_api_response(code, || panic!("failed child body must not be read"))
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1);
+        }
+        for error in ["spawn", "wait", "timeout"] {
+            let mut calls = 0;
+            assert!(
+                retry_api_with(|| {
+                    calls += 1;
+                    Err(anyhow::anyhow!(error))
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1);
+        }
+        for error in ["malformed JSON", "oversized JSON"] {
+            let mut calls = 0;
+            assert!(
+                retry_api_with(|| {
+                    calls += 1;
+                    completed_api_response(Some(0), || Err(anyhow::anyhow!(error)))
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn metadata_get_retries_share_the_original_budget() {
+        assert_eq!(
+            remaining_api_budget(Duration::ZERO).unwrap(),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            remaining_api_budget(Duration::from_secs(119)).unwrap(),
+            Duration::from_secs(1)
+        );
+        let mut elapsed = [119, 120].into_iter();
+        let mut requests = 0;
+        assert!(
+            retry_api_with(|| {
+                remaining_api_budget(Duration::from_secs(elapsed.next().unwrap()))?;
+                requests += 1;
+                Ok(None)
+            })
+            .is_err()
+        );
+        assert_eq!(requests, 1);
+        assert!(remaining_api_budget(Duration::from_secs(121)).is_err());
+    }
 
     fn metadata(current: &Identity) -> Candidate {
         let jobs: Vec<_> = REQUIRED
