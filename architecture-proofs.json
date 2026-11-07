@@ -142,7 +142,7 @@
     {
       "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
       "scope": "const",
-      "fingerprint": "sha256:f2499f9eb70a64af334461b4f9646c6eca2f78fbf54dd2c6370f27e78d04dc8f",
+      "fingerprint": "sha256:39349f8b70dcf60a97b62786973b9d3ea8b0c42c8c9fda977b382c4c47d54514",
       "registration": null
     },
     {
@@ -6099,6 +6099,118 @@
             "module": "writer"
           }
         },
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+            "module": "dispatch"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+      "type_name": "NativeParent",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn application (& mut self , _source : & rusqlite :: Transaction < '_ >) -> Result < super :: application :: Selection < '_ > >",
+        "fn current (& mut self) -> Result < () >",
+        "fn execute_staging (& mut self) -> Result < Projection >",
+        "fn local_sql (& mut self) -> Result < () >",
+        "fn refuse (& mut self)",
+        "fn state (& mut self) -> & mut State"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "NativeParent < '_ , '_ , '_ , '_ , '_ >",
+          "signature": "fn application (& mut self , _source : & rusqlite :: Transaction < '_ >) -> Result < super :: application :: Selection < '_ > >"
+        },
+        {
+          "owner": "NativeParent < '_ , '_ , '_ , '_ , '_ >",
+          "signature": "fn current (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "NativeParent < '_ , '_ , '_ , '_ , '_ >",
+          "signature": "fn execute_staging (& mut self) -> Result < Projection >"
+        },
+        {
+          "owner": "NativeParent < '_ , '_ , '_ , '_ , '_ >",
+          "signature": "fn local_sql (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "NativeParent < '_ , '_ , '_ , '_ , '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "NativeParent < '_ , '_ , '_ , '_ , '_ >",
+          "signature": "fn state (& mut self) -> & mut State"
+        },
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "fn native (parent : & 'owner mut NativeParent < 'borrow , 'metadata , 'storage , 'role , 'selection >) -> Self"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+            "module": "dispatch"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+      "type_name": "StagingContext",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn application (& mut self , source : & rusqlite :: Transaction < '_ >) -> Result < super :: application :: Selection < '_ > >",
+        "pub (super) fn current (& mut self) -> Result < () >",
+        "pub (super) fn local_sql (& mut self) -> Result < () >",
+        "fn native (parent : & 'owner mut NativeParent < 'borrow , 'metadata , 'storage , 'role , 'selection >) -> Self",
+        "pub (super) fn portable (owner : & 'owner mut impl Checks) -> Self",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn state (& mut self) -> & mut State"
+      ],
+      "factories": [
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "fn native (parent : & 'owner mut NativeParent < 'borrow , 'metadata , 'storage , 'role , 'selection >) -> Self"
+        },
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "pub (super) fn portable (owner : & 'owner mut impl Checks) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "pub (super) fn application (& mut self , source : & rusqlite :: Transaction < '_ >) -> Result < super :: application :: Selection < '_ > >"
+        },
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "pub (super) fn current (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "pub (super) fn local_sql (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "StagingContext < 'owner , 'borrow , 'metadata , 'storage , 'role , 'selection >",
+          "signature": "pub (super) fn state (& mut self) -> & mut State"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
         {
           "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
           "registration": {

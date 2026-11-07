@@ -196,6 +196,94 @@ const _: () = {
         crate::security_epoch::restore_staging::Flight,
         serde::Deserialize<'static>
     );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        Clone
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        Copy
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        Default
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        Sync
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        std::ops::Deref
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        AsRef<std::fs::File>
+    );
+    assert_not_impl!(
+        super::NativeParent<'static, 'static, 'static, 'static, 'static>,
+        std::borrow::Borrow<std::fs::File>
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        Clone
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        Copy
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        Default
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        Sync
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        std::ops::Deref
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        AsRef<std::fs::File>
+    );
+    assert_not_impl!(
+        super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
+        std::borrow::Borrow<std::fs::File>
+    );
 };
 
 #[cfg(test)]

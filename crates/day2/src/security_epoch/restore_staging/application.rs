@@ -19,6 +19,22 @@ pub(super) struct Selection<'a> {
     cut: &'a restore_cut::Cut,
 }
 
+impl Selection<'_> {
+    /// Lend only the same already-retained immutable selection; this is not a
+    /// constructor from a record and supplies no native authority.
+    pub(super) fn reborrow(&self) -> Selection<'_> {
+        Selection {
+            namespace: self.namespace,
+            source_epoch: self.source_epoch,
+            artifact: self.artifact,
+            fence: self.fence,
+            authority_schema: self.authority_schema,
+            oauth_schema: self.oauth_schema,
+            cut: self.cut,
+        }
+    }
+}
+
 pub(super) type Summary = crate::oauth::restore::ApplicationResetSummary;
 
 pub(super) fn reset_in(
