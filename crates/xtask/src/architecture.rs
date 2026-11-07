@@ -373,7 +373,7 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         // native/Runtime factory exists. No borrowed SQL callback is admitted.
         (
             "crates/day2/src/security_epoch/restore_staging.rs",
-            "sha256:f73ae712603edd27110f77f43b29c13a2f77512b14324b7cf792781e0fb5eee3",
+            "sha256:60138be15a9aeb63795f04b6aea1058ca26edf498b12577d4f02f3bc456e2f99",
         ),
         // Serde wire serialization, unrelated to SQLite Connection::serialize.
         (

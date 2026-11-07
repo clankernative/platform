@@ -50,8 +50,22 @@ freezes budget debt and marks imported OAuth connections for fresh
 reauthorization. Existing uncertain refresh and external-effect history stays.
 The ordinary restore refusal is unchanged.
 
-The production accepting boundary remains closed. Every implementation of the
-private checks trait is test-only; no default implementation, public command,
+The production accepting boundary remains closed. The native Parent retains one
+actual fenced write loan alongside the same staging state and immutable
+selection. A closed concrete context dispatches either to that actual Parent or
+to the existing unqualified portable source. Both use one reset, SQL and file
+body. No manual authority trait, native callback table, role/descriptor/HTTP/
+connection getter, new stage or new original is introduced. Full checks delegate
+to the actual loan outside SQL; local checks use only its SQL-safe check.
+
+Explicit failure refuses the same loan. Loss must retain the actual supplier's
+nongeneric lost-loan guard; a Parent-local flag or generic destructor cannot
+replace that contract. The accepting constructor remains absent until exact
+approved target binding, creator/P3 admission and fixed native writer
+transitions are supplied. The later generation handoff must preserve sealed old
+history and the same Controller original; it cannot reinstall an empty ledger,
+unseal the issuer or cold-enroll a replacement as proof. Only tests
+can currently construct staging owners; no default implementation, public command,
 Runtime opener, native factory, target adoption or publication path is installed.
 The test application validator is synthetic. A staging projection supplies
 counts and image identity only. It now describes the concrete whole reset that

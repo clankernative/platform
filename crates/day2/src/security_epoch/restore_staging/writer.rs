@@ -17,8 +17,139 @@ use zeroize::Zeroizing;
 mod dispatch;
 pub(in crate::security_epoch) use dispatch::{Disposition, Flight};
 
+/// Retains the actual exclusive fenced loan through the same staging state.
+/// There is deliberately no constructor: exact approval/target binding and the
+/// fixed native writer transitions must be supplied before creation can start.
+/// A DATA plan, staged image or freshly captured role cannot construct this.
+struct NativeParent<'borrow, 'metadata, 'storage, 'role, 'selection> {
+    loan: crate::security_epoch::bootstrap::RestoreWriteLoan<'borrow, 'metadata, 'storage, 'role>,
+    state: State,
+    selection: super::application::Selection<'selection>,
+}
+
+impl NativeParent<'_, '_, '_, '_, '_> {
+    fn execute_staging(&mut self) -> Result<Projection> {
+        super::execute_context(&mut StagingContext::native(self))
+    }
+
+    fn state(&mut self) -> &mut State {
+        &mut self.state
+    }
+
+    fn current(&mut self) -> Result<()> {
+        let checked = self.loan.check_current().map(|_| ());
+        if checked.is_err() {
+            self.refuse();
+        }
+        checked
+    }
+
+    fn local_sql(&mut self) -> Result<()> {
+        // Only the SQL-safe retained check. The existing builder owns the
+        // transaction; no coherent provider read runs while it is open.
+        let checked = self.loan.check_local();
+        if checked.is_err() {
+            self.refuse();
+        }
+        checked
+    }
+
+    fn application(
+        &mut self,
+        _source: &rusqlite::Transaction<'_>,
+    ) -> Result<super::application::Selection<'_>> {
+        ensure!(
+            self.state.attempted && !self.state.refused && self.state.sql.is_none(),
+            "native_restore_parent_sql_loan_required"
+        );
+        // Prepared immutable input only. reset_in still checks the exact
+        // staging namespace/epoch/artifact/model before canonical reset.
+        Ok(self.selection.reborrow())
+    }
+
+    fn refuse(&mut self) {
+        self.state.refused = true;
+        self.loan.refuse();
+    }
+}
+
+// The actual loan retains its own nongeneric lost-loan refusal owner. Dropping
+// this direct field permanently refuses that SAME continuation; the parent
+// must not duplicate it with an inadmissible generic destructor or substitute
+// a local flag for the actual owner. Failed current/SQL checks still explicitly
+// refuse above. No accepting constructor exists before that supplier is joined.
+
+/// A fixed borrow of one actual Parent, or the existing unqualified portable
+/// source. No callback table, runtime owner getter or native trait bridge is
+/// accepted. This struct does not construct its NativeParent.
+pub(super) struct StagingContext<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection> {
+    source: StagingSource<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>,
+}
+
+enum StagingSource<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection> {
+    Native(&'owner mut NativeParent<'borrow, 'metadata, 'storage, 'role, 'selection>),
+    Portable(&'owner mut dyn Checks),
+}
+
+impl<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>
+    StagingContext<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>
+{
+    pub(super) fn portable(owner: &'owner mut impl Checks) -> Self {
+        Self {
+            source: StagingSource::Portable(owner),
+        }
+    }
+
+    fn native(
+        parent: &'owner mut NativeParent<'borrow, 'metadata, 'storage, 'role, 'selection>,
+    ) -> Self {
+        Self {
+            source: StagingSource::Native(parent),
+        }
+    }
+
+    pub(super) fn state(&mut self) -> &mut State {
+        match &mut self.source {
+            StagingSource::Native(parent) => parent.state(),
+            StagingSource::Portable(owner) => owner.state(),
+        }
+    }
+
+    pub(super) fn current(&mut self) -> Result<()> {
+        match &mut self.source {
+            StagingSource::Native(parent) => parent.current(),
+            StagingSource::Portable(owner) => owner.current(),
+        }
+    }
+
+    pub(super) fn local_sql(&mut self) -> Result<()> {
+        match &mut self.source {
+            StagingSource::Native(parent) => parent.local_sql(),
+            StagingSource::Portable(owner) => owner.local_sql(),
+        }
+    }
+
+    pub(super) fn application(
+        &mut self,
+        source: &rusqlite::Transaction<'_>,
+    ) -> Result<super::application::Selection<'_>> {
+        match &mut self.source {
+            StagingSource::Native(parent) => parent.application(source),
+            StagingSource::Portable(owner) => owner.application(source),
+        }
+    }
+
+    pub(super) fn refuse(&mut self) {
+        match &mut self.source {
+            StagingSource::Native(parent) => parent.refuse(),
+            StagingSource::Portable(owner) => owner.refuse(),
+        }
+    }
+}
+
 mod sealed {
     pub trait Source {}
+    pub trait WriterOwner {}
 }
 
 #[derive(Clone)]
@@ -166,50 +297,110 @@ impl Target {
     }
 }
 
-struct Guard<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>> {
+/// The existing portable owner drives the common transition/readback body.
+/// There is no native implementation: an opaque NativeParent must retain its
+/// actual loan through the concrete context, without a manual trait bridge,
+/// another Session or another approval consumption. The portable adapter cannot
+/// construct native admission. No default, DATA factory or public implementation
+/// is provided.
+trait WriterOwner: sealed::WriterOwner {
+    type Admission;
+
+    fn state(&mut self) -> &mut State;
+    fn current(&mut self) -> Result<()>;
+    fn refuse(&mut self);
+    fn require_original(&mut self, target: &Target) -> Result<()>;
+    fn admit_writer(&mut self, target: &Target) -> Result<Self::Admission>;
+    fn check_writer(&mut self, target: &Target, admission: &Self::Admission) -> Result<()>;
+    fn refuse_writer(&mut self);
+}
+
+struct PortableWriter<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>> {
     owner: &'a mut A,
     session: &'a mut Session<'original, 'source, F>,
     source: &'a mut W,
+}
+
+impl<A: Checks, F: fence::Source, W: Source<F>> sealed::WriterOwner
+    for PortableWriter<'_, '_, '_, A, F, W>
+{
+}
+
+impl<A: Checks, F: fence::Source, W: Source<F>> WriterOwner
+    for PortableWriter<'_, '_, '_, A, F, W>
+{
+    type Admission = Admission;
+
+    fn state(&mut self) -> &mut State {
+        self.owner.state()
+    }
+    fn current(&mut self) -> Result<()> {
+        self.owner.current()
+    }
+    fn refuse(&mut self) {
+        self.owner.refuse();
+    }
+    fn require_original(&mut self, target: &Target) -> Result<()> {
+        self.session.require_join(&target.binding, &target.original)
+    }
+    fn admit_writer(&mut self, target: &Target) -> Result<Admission> {
+        let creator = self
+            .owner
+            .state()
+            .creator
+            .as_ref()
+            .context("restore_creator_missing")?;
+        self.source.admit(self.session, target, creator)
+    }
+    fn check_writer(&mut self, target: &Target, admission: &Admission) -> Result<()> {
+        ensure!(
+            admission.target.same(target),
+            "restore_writer_admission_changed"
+        );
+        let creator = self
+            .owner
+            .state()
+            .creator
+            .as_ref()
+            .context("restore_creator_missing")?;
+        self.source.check(self.session, admission, creator)
+    }
+    fn refuse_writer(&mut self) {
+        self.session.refuse();
+        self.source.refuse();
+    }
+}
+
+struct Guard<'a, O: WriterOwner> {
+    owner: &'a mut O,
     done: bool,
 }
-impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Guard<'_, '_, '_, A, F, W> {
+impl<O: WriterOwner> Drop for Guard<'_, O> {
     fn drop(&mut self) {
         if !self.done {
             self.owner.state().refused = true;
             self.owner.refuse();
-            self.session.refuse();
-            self.source.refuse();
+            self.owner.refuse_writer();
         }
     }
 }
-impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, '_, A, F, W> {
+impl<O: WriterOwner> Guard<'_, O> {
     fn retained(&mut self, target: &Target) -> Result<()> {
-        self.session
-            .require_join(&target.binding, &target.original)?;
+        self.owner.require_original(target)?;
         let checked = self.owner.current().and_then(|()| {
             self.owner.state().join()?;
             target.join(self.owner.state())
         });
         // Metadata/owner work above can take time. The actual original must
         // remain current AFTER it, immediately before the next concrete IO.
-        let post = self.session.require_join(&target.binding, &target.original);
+        let post = self.owner.require_original(target);
         checked?;
         post
     }
-    fn current(&mut self, target: &Target, admission: Option<&Admission>) -> Result<()> {
+    fn current(&mut self, target: &Target, admission: Option<&O::Admission>) -> Result<()> {
         self.retained(target)?;
         if let Some(admission) = admission {
-            ensure!(
-                admission.target.same(target),
-                "restore_writer_admission_changed"
-            );
-            let creator = self
-                .owner
-                .state()
-                .creator
-                .as_ref()
-                .context("restore_creator_missing")?;
-            let checked = self.source.check(self.session, admission, creator);
+            let checked = self.owner.check_writer(target, admission);
             let post = self.retained(target);
             checked?;
             post?;
@@ -219,7 +410,7 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, '_, A, F, W> {
     fn io<T>(
         &mut self,
         target: &Target,
-        admission: Option<&Admission>,
+        admission: Option<&O::Admission>,
         operation: impl FnOnce(&mut File) -> Result<T>,
     ) -> Result<T> {
         self.current(target, admission)?;
@@ -236,7 +427,7 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, '_, A, F, W> {
         post?;
         Ok(value)
     }
-    fn readback(&mut self, target: &Target, admission: Option<&Admission>) -> Result<()> {
+    fn readback(&mut self, target: &Target, admission: Option<&O::Admission>) -> Result<()> {
         self.io(target, admission, |file| {
             file.seek(SeekFrom::Start(0))?;
             Ok(())
@@ -265,6 +456,51 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, '_, A, F, W> {
     }
 }
 
+fn admit_owned<O: WriterOwner>(
+    owner: &mut O,
+    binding: Binding,
+    settled_root: Digest,
+) -> Result<(Target, O::Admission)> {
+    let mut guard = Guard { owner, done: false };
+    ensure!(
+        !guard.owner.state().writer_attempted,
+        "restore_writer_attempt_spent"
+    );
+    // Known-May BEFORE target extraction and any possible admission send.
+    // Every extraction/refusal/unwind below remains under this same guard.
+    guard.owner.state().writer_attempted = true;
+    let target = Target {
+        binding,
+        original: guard
+            .owner
+            .state()
+            .birth_original
+            .clone()
+            .context("restore_creator_original_missing")?,
+        settled_root,
+        image: guard
+            .owner
+            .state()
+            .frozen_image
+            .clone()
+            .context("restore_reset_image_missing")?,
+        creator: guard
+            .owner
+            .state()
+            .creator_identity
+            .context("restore_creator_identity_missing")?,
+    };
+    guard.readback(&target, None)?;
+    let admitted = guard.owner.admit_writer(&target);
+    let post = guard.retained(&target);
+    let admission = admitted?;
+    post?;
+    // Consumption checks actual bytes, even with unchanged inode and length.
+    guard.readback(&target, Some(&admission))?;
+    guard.done = true;
+    Ok((target, admission))
+}
+
 /// A borrow of the actual staging, drain and admission sources, never a new
 /// native writer. No FD/Connection getter, publication or serving conversion.
 struct Candidate<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>> {
@@ -284,56 +520,15 @@ impl<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>>
         binding: Binding,
         settled_root: Digest,
     ) -> Result<Self> {
-        let mut guard = Guard {
-            owner: &mut *owner,
-            session: &mut *session,
-            source: &mut *source,
-            done: false,
-        };
-        ensure!(
-            !guard.owner.state().writer_attempted,
-            "restore_writer_attempt_spent"
-        );
-        // Known-May BEFORE any possible P3/writer admission send. Unknown
-        // completion cannot retry or adopt the same path under another original.
-        guard.owner.state().writer_attempted = true;
-        let target = Target {
+        let (target, admission) = admit_owned(
+            &mut PortableWriter {
+                owner: &mut *owner,
+                session: &mut *session,
+                source: &mut *source,
+            },
             binding,
-            original: guard
-                .owner
-                .state()
-                .birth_original
-                .clone()
-                .context("restore_creator_original_missing")?,
             settled_root,
-            image: guard
-                .owner
-                .state()
-                .frozen_image
-                .clone()
-                .context("restore_reset_image_missing")?,
-            creator: guard
-                .owner
-                .state()
-                .creator_identity
-                .context("restore_creator_identity_missing")?,
-        };
-        guard.readback(&target, None)?;
-        let creator = guard
-            .owner
-            .state()
-            .creator
-            .as_ref()
-            .context("restore_creator_missing")?;
-        let admitted = guard.source.admit(guard.session, &target, creator);
-        let post = guard.retained(&target);
-        let admission = admitted?;
-        post?;
-        // Consumption rechecks actual creator bytes even when dev/inode and
-        // length have not changed. A frozen digest is not a current file proof.
-        guard.readback(&target, Some(&admission))?;
-        guard.done = true;
-        drop(guard);
+        )?;
         Ok(Self {
             owner,
             session,
@@ -343,10 +538,13 @@ impl<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>>
         })
     }
     fn check(&mut self) -> Result<()> {
-        let mut guard = Guard {
+        let mut owner = PortableWriter {
             owner: &mut *self.owner,
             session: &mut *self.session,
             source: &mut *self.source,
+        };
+        let mut guard = Guard {
+            owner: &mut owner,
             done: false,
         };
         guard.readback(&self.target, Some(&self.admission))?;

@@ -1,5 +1,5 @@
-//! Mechanical unpublished staging leaf. No production Checks implementation,
-//! native factory, public command, adoption or publication path exists here.
+//! Mechanical unpublished staging leaf. No accepting constructor, native
+//! factory, public command, adoption or publication path exists here.
 //! The future genuine owner must PRECEDE creation and keep this same State and
 //! actual creator FD through reset, SQL close, sync and final target admission.
 use anyhow::{Context, Result, ensure};
@@ -14,6 +14,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
 };
+use writer::StagingContext;
 use zeroize::Zeroizing;
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -141,8 +142,10 @@ const _: () = {
 mod sealed {
     pub(super) trait Sealed {}
 }
-/// Closed current-owner boundary. It cannot be supplied by a DTO, default,
-/// arbitrary callback or a previous staged State. PR1 has cfg(test) impls ONLY.
+/// Closed portable check source with no production implementation. Actual
+/// native staging uses the concrete StagingContext branch instead of a manual
+/// trait implementation on an opaque material owner. No accepting Parent
+/// constructor exists; fixtures alone construct staging owners today.
 trait Checks: sealed::Sealed {
     fn state(&mut self) -> &mut State;
     fn current(&mut self) -> Result<()>;
@@ -260,11 +263,11 @@ impl State {
 
 /// Keep the actual owner/state refused on every early return and unwind. No
 /// Err removes owned files, reconstructs a handle, or reports completion.
-struct Attempt<'a, A: Checks> {
-    owner: &'a mut A,
+struct Attempt<'a, 'owner, 'borrow, 'metadata, 'storage, 'role, 'selection> {
+    owner: &'a mut StagingContext<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>,
     done: bool,
 }
-impl<A: Checks> Drop for Attempt<'_, A> {
+impl Drop for Attempt<'_, '_, '_, '_, '_, '_, '_> {
     fn drop(&mut self) {
         if !self.done {
             self.owner.state().refused = true;
@@ -273,8 +276,8 @@ impl<A: Checks> Drop for Attempt<'_, A> {
     }
 }
 
-fn boundary<A: Checks, T>(
-    owner: &mut A,
+fn boundary<T>(
+    owner: &mut StagingContext<'_, '_, '_, '_, '_, '_>,
     operation: impl FnOnce(&mut State) -> Result<T>,
 ) -> Result<T> {
     owner.current()?;
@@ -293,7 +296,10 @@ fn sum(context: Hash) -> Result<Digest> {
     Digest::try_from(format!("sha256:{}", crate::hex(context.finish().as_ref())))
 }
 
-fn hash_file<A: Checks>(owner: &mut A, source: bool) -> Result<(Digest, u64)> {
+fn hash_file(
+    owner: &mut StagingContext<'_, '_, '_, '_, '_, '_>,
+    source: bool,
+) -> Result<(Digest, u64)> {
     boundary(owner, |s| {
         let file = if source {
             s.source.as_mut()
@@ -338,7 +344,7 @@ fn hash_file<A: Checks>(owner: &mut A, source: bool) -> Result<(Digest, u64)> {
     Ok((sum(context)?, bytes))
 }
 
-fn close_sql<A: Checks>(owner: &mut A) -> Result<()> {
+fn close_sql_context(owner: &mut StagingContext<'_, '_, '_, '_, '_, '_>) -> Result<()> {
     boundary(owner, |s| {
         let Some(db) = s.sql.take() else {
             return Ok(());
@@ -355,12 +361,16 @@ fn close_sql<A: Checks>(owner: &mut A) -> Result<()> {
 
 // Returning the connection to its actual owning State is unconditional, even
 // when a test fault or a future owner panics. No close/adoption is inferred.
-struct SqlLoan<'a, A: Checks> {
-    owner: &'a mut A,
+struct SqlLoan<'a, 'owner, 'borrow, 'metadata, 'storage, 'role, 'selection> {
+    owner: &'a mut StagingContext<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>,
     db: Option<Connection>,
 }
-impl<'a, A: Checks> SqlLoan<'a, A> {
-    fn new(owner: &'a mut A) -> Result<Self> {
+impl<'a, 'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>
+    SqlLoan<'a, 'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>
+{
+    fn new(
+        owner: &'a mut StagingContext<'owner, 'borrow, 'metadata, 'storage, 'role, 'selection>,
+    ) -> Result<Self> {
         let s = owner.state();
         let slot = &mut s.sql;
         let db = slot.take().context("restore_sql_missing")?;
@@ -370,7 +380,7 @@ impl<'a, A: Checks> SqlLoan<'a, A> {
         })
     }
 }
-impl<A: Checks> Drop for SqlLoan<'_, A> {
+impl Drop for SqlLoan<'_, '_, '_, '_, '_, '_, '_> {
     fn drop(&mut self) {
         let s = self.owner.state();
         let slot = &mut s.sql;
@@ -441,8 +451,8 @@ fn require_single_image(source: &std::path::Path) -> Result<()> {
 
 /// Fixed fresh-memory DATA builder. It accepts no raw connection or callback;
 /// the entire function is reviewed/pinned for its sole serialize operation.
-fn prepare_image<A: Checks>(
-    owner: &mut A,
+fn prepare_image(
+    owner: &mut StagingContext<'_, '_, '_, '_, '_, '_>,
     image: &mut Zeroizing<Vec<u8>>,
 ) -> Result<application::Summary> {
     // This is always a fresh scratch connection. No filename, physical owner,
@@ -519,11 +529,19 @@ fn prepare_image<A: Checks>(
     let post = owner.local_sql();
     let reset = reset?;
     post?;
-    close_sql(owner)?;
+    close_sql_context(owner)?;
     Ok(reset)
 }
 
 fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
+    execute_context(&mut StagingContext::portable(owner))
+}
+
+fn close_sql<A: Checks>(owner: &mut A) -> Result<()> {
+    close_sql_context(&mut StagingContext::portable(owner))
+}
+
+fn execute_context(owner: &mut StagingContext<'_, '_, '_, '_, '_, '_>) -> Result<Projection> {
     let mut attempt = Attempt { owner, done: false };
     let owner = &mut *attempt.owner;
     ensure!(!owner.state().attempted, "restore_staging_attempt_spent");
