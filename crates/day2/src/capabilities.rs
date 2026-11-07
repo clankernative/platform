@@ -235,6 +235,13 @@ pub(crate) fn authorized(
         .copied()
         .find(|action| action.capability() == instruction.model.as_str())
         .context("unknown_capability")?;
+    // This existing Runtime classification can only refuse; it supplies no
+    // current native permission. Delivered object-store and GitHub log bearer
+    // URLs have no qualified native revocation fence. Refuse before resource,
+    // credential-file, signing or provider work on both observations and effects.
+    if runtime.uses_native_storage() {
+        require_native_bearer_fence(resource_action)?;
+    }
     let mut resource =
         crate::resources::authorize(connection, runtime, request, instruction, resource_action)?;
     let mut quote = crate::resources::ProviderQuote {
@@ -750,6 +757,16 @@ pub(crate) fn authorized(
     })
 }
 
+fn require_native_bearer_fence(action: day2_capabilities::resources::Action) -> Result<()> {
+    ensure!(
+        !action.returns_external_bearer(),
+        crate::error::Failure::CapabilityForbidden
+    );
+    // This refusal grants no native authority or complete-stop proof. Pending
+    // provider work and every other escaped right need their own real owner.
+    Ok(())
+}
+
 pub(crate) struct ProviderResult {
     pub result: Result<String>,
     pub usage: crate::resources::ProviderUsage,
@@ -1238,6 +1255,249 @@ pub(crate) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_bearer_filter_refuses_upload_download_and_log_urls_without_granting_authority() {
+        use day2_capabilities::resources::Action;
+        for action in Action::ALL.iter().copied() {
+            let refused = matches!(
+                action,
+                Action::ObjectStoreGrantUpload
+                    | Action::ObjectStoreGrantDownload
+                    | Action::GitHubJobLog
+            );
+            let result = require_native_bearer_fence(action);
+            assert_eq!(result.is_err(), refused);
+            if let Err(error) = result {
+                assert!(matches!(
+                    error.downcast_ref::<crate::error::Failure>(),
+                    Some(crate::error::Failure::CapabilityForbidden)
+                ));
+            }
+        }
+        assert!(WRITES.contains(&Action::ObjectStoreGrantUpload.capability()));
+        assert!(READS.contains(&Action::ObjectStoreGrantDownload.capability()));
+        assert!(READS.contains(&Action::GitHubJobLog.capability()));
+        // These internal URLs are not delivered as escaping bearer rights.
+        assert!(require_native_bearer_fence(Action::ObjectStoreHead).is_ok());
+        assert!(require_native_bearer_fence(Action::ObjectStoreDelete).is_ok());
+    }
+
+    #[test]
+    fn native_bearer_filter_preserves_typed_refusal_before_a_credential_lookup() -> Result<()> {
+        use day2_capabilities::resources::Action;
+        let directory = tempfile::tempdir()?;
+        let missing = directory.path().join("absent-instance.json");
+        let live = day2_capabilities::integrations::LiveConnection::ObjectStore {
+            credential_ref: day2_capabilities::resources::VersionRef {
+                id: "fixture-signing".into(),
+                revision: 1,
+            },
+            endpoint: "https://objects.example.test".into(),
+            region: "us-east-1".into(),
+            bucket: "fixture-bucket".into(),
+            access_key_id: "PUBLICFIXTUREID".into(),
+        };
+        live.validate()?;
+        let mounts = crate::integration_host::MountedCredentials::new(&missing)?;
+        assert!(mounts.signing_secret(&live).is_err());
+        for action in [
+            Action::ObjectStoreGrantUpload,
+            Action::ObjectStoreGrantDownload,
+            Action::GitHubJobLog,
+        ] {
+            // The same real production filter and credential constructor are
+            // bound to the actual authorized() order by the source control.
+            // This fixture supplies no successful native Runtime or permission.
+            let attempted = (|| -> Result<()> {
+                require_native_bearer_fence(action)?;
+                let credentials = crate::integration_host::MountedCredentials::new(&missing)?;
+                let _secret = credentials.signing_secret(&live)?;
+                Ok(())
+            })();
+            assert!(matches!(
+                attempted
+                    .unwrap_err()
+                    .downcast_ref::<crate::error::Failure>(),
+                Some(crate::error::Failure::CapabilityForbidden)
+            ));
+        }
+        assert!(!directory.path().join(".state").exists());
+        Ok(())
+    }
+
+    fn native_bearer_guard_precedes_resource_and_signing(source: &str) -> bool {
+        use syn::visit::{self, Visit};
+        fn path(expression: &syn::Expr, expected: &str) -> bool {
+            let syn::Expr::Path(value) = expression else {
+                return false;
+            };
+            value.qself.is_none()
+                && value
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::")
+                    == expected
+        }
+        fn guard(statement: &syn::Stmt) -> bool {
+            let syn::Stmt::Expr(syn::Expr::If(branch), None) = statement else {
+                return false;
+            };
+            let syn::Expr::MethodCall(condition) = branch.cond.as_ref() else {
+                return false;
+            };
+            if branch.else_branch.is_some()
+                || condition.method != "uses_native_storage"
+                || !condition.args.is_empty()
+                || !path(&condition.receiver, "runtime")
+                || branch.then_branch.stmts.len() != 1
+            {
+                return false;
+            }
+            let syn::Stmt::Expr(syn::Expr::Try(requested), Some(_)) = &branch.then_branch.stmts[0]
+            else {
+                return false;
+            };
+            let syn::Expr::Call(call) = requested.expr.as_ref() else {
+                return false;
+            };
+            path(&call.func, "require_native_bearer_fence")
+                && call.args.len() == 1
+                && path(&call.args[0], "resource_action")
+        }
+        #[derive(Default)]
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(value) = call.func.as_ref() {
+                    self.0.push(
+                        value
+                            .path
+                            .segments
+                            .iter()
+                            .map(|part| part.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::"),
+                    );
+                }
+                visit::visit_expr_call(self, call);
+            }
+        }
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let Some(function) = file.items.iter().find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "authorized" => Some(function),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let mut guarded = None;
+        let mut resolved = None;
+        let mut resource = None;
+        for (index, statement) in function.block.stmts.iter().enumerate() {
+            if guard(statement) && guarded.replace(index).is_some() {
+                return false;
+            }
+            if let syn::Stmt::Local(local) = statement {
+                let syn::Pat::Ident(name) = &local.pat else {
+                    continue;
+                };
+                let Some(initializer) = &local.init else {
+                    continue;
+                };
+                let syn::Expr::Try(checked) = initializer.expr.as_ref() else {
+                    continue;
+                };
+                if name.ident == "resource_action" {
+                    let mut origin = checked.expr.as_ref();
+                    while let syn::Expr::MethodCall(method) = origin {
+                        origin = method.receiver.as_ref();
+                    }
+                    if path(origin, "ResourceAction::ALL") {
+                        resolved = Some(index);
+                    }
+                }
+                if name.ident == "resource"
+                    && name.mutability.is_some()
+                    && let syn::Expr::Call(call) = checked.expr.as_ref()
+                    && path(&call.func, "crate::resources::authorize")
+                    && call.args.len() == 5
+                    && call
+                        .args
+                        .iter()
+                        .zip([
+                            "connection",
+                            "runtime",
+                            "request",
+                            "instruction",
+                            "resource_action",
+                        ])
+                        .all(|(argument, expected)| path(argument, expected))
+                {
+                    resource = Some(index);
+                }
+            }
+        }
+        let (Some(resolved), Some(guarded), Some(resource)) = (resolved, guarded, resource) else {
+            return false;
+        };
+        let mut calls = Calls::default();
+        calls.visit_block(&function.block);
+        let position = |name: &str| calls.0.iter().position(|call| call == name);
+        let (Some(authorize), Some(prepare), Some(mounts), Some(sign)) = (
+            position("crate::resources::authorize"),
+            position("crate::integrations::prepare"),
+            position("crate::integration_host::MountedCredentials::new"),
+            position("crate::integrations::presign"),
+        ) else {
+            return false;
+        };
+        resolved + 1 == guarded
+            && guarded + 1 == resource
+            && authorize < prepare
+            && authorize < mounts
+            && mounts < sign
+            && calls
+                .0
+                .iter()
+                .filter(|call| call.as_str() == "require_native_bearer_fence")
+                .count()
+                == 1
+    }
+
+    #[test]
+    fn actual_native_bearer_boundary_rejects_removal_false_classification_or_ignored_refusal() {
+        let source = include_str!("capabilities.rs");
+        assert!(native_bearer_guard_precedes_resource_and_signing(source));
+        for (old, new) in [
+            (
+                "let resource_action = ResourceAction::ALL",
+                "let resource_action = [ResourceAction::ObjectStoreHead]",
+            ),
+            (
+                "connection, runtime, request, instruction, resource_action)?",
+                "connection, runtime, request, instruction, ResourceAction::ObjectStoreHead)?",
+            ),
+            ("if runtime.uses_native_storage() {", "if false {"),
+            ("require_native_bearer_fence(resource_action)?;", ""),
+            (
+                "require_native_bearer_fence(resource_action)?;",
+                "let _ignored = require_native_bearer_fence(resource_action);",
+            ),
+            (
+                "require_native_bearer_fence(resource_action)?;",
+                "require_native_bearer_fence(day2_capabilities::resources::Action::ObjectStoreHead)?;",
+            ),
+        ] {
+            let mutant = source.replacen(old, new, 1);
+            assert_ne!(source, mutant);
+            assert!(!native_bearer_guard_precedes_resource_and_signing(&mutant));
+        }
+    }
 
     #[test]
     fn freetool_usage_charges_wire_error_after_code_normalization() -> Result<()> {

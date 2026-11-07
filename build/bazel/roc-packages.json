@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "packages": [
+    {
+      "name": "basic-cli",
+      "version": "0.26.0-rc2",
+      "archive": "Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst",
+      "bytes": 23067712,
+      "sha256": "5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b",
+      "tree_sha256": "5031e75bb41e27c5eefe7c99378700980b84d64840623d107f63cf92a87f2580",
+      "files": 204,
+      "expanded_bytes": 81410950
+    },
+    {
+      "name": "http",
+      "version": "1.0.0",
+      "archive": "6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst",
+      "bytes": 1830,
+      "sha256": "e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4",
+      "tree_sha256": "6289acb644fba9914980e8ab2ab651ea60f9a8210b0dd736d58f246ebcc395a7",
+      "files": 5,
+      "expanded_bytes": 5991
+    }
+  ]
+}

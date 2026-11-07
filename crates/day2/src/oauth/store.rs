@@ -56,6 +56,7 @@ pub fn install_schema(db: &Connection) -> Result<()> {
 }
 
 fn install_schema_in(db: &Connection) -> Result<()> {
+    super::restore::install(db)?;
     let ddl = "PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS oauth_schema_version (
             version INTEGER PRIMARY KEY
@@ -139,6 +140,7 @@ fn claim_refresh_in(
     attempt: &str,
     expected: &RefreshEligibility,
 ) -> Result<bool> {
+    super::restore::require_open(tx, super::restore::Kind::Refresh, attempt)?;
     let current: Option<(i64, i64, i64, String, String, String, String)> = tx
         .query_row(
             "SELECT generation, token_version, security_epoch, profile, account, affinity, status
@@ -231,6 +233,7 @@ fn checked_dispatch_in(
     attempt: &str,
     authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
 ) -> Result<Option<RefreshEligibility>> {
+    super::restore::require_open(tx, super::restore::Kind::Refresh, attempt)?;
     if !authorize(tx)? {
         return Ok(None);
     }
@@ -275,7 +278,7 @@ pub fn mark_uncertain(db: &Connection, attempt: &str) -> Result<bool> {
 /// only if this attempt still owns the active base version. A stale rejection
 /// cannot disable a successor connection.
 #[cfg(test)]
-fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<bool> {
+pub(super) fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<bool> {
     validate_id(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = definitive_rejection_in(&tx, attempt)?;
@@ -295,6 +298,7 @@ pub(super) fn reject_current_refresh(
 }
 
 fn definitive_rejection_in(tx: &Transaction<'_>, attempt: &str) -> Result<bool> {
+    super::restore::require_open(tx, super::restore::Kind::Refresh, attempt)?;
     let row: Option<RefreshEligibility> = tx
         .query_row(
             "SELECT slot, generation, base_version, security_epoch, profile, account, affinity
@@ -411,6 +415,7 @@ fn commit_replacement_in(
     receipt: &str,
     custody_write: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<Option<ReplacementReceipt>> {
+    super::restore::require_open(tx, super::restore::Kind::Refresh, attempt)?;
     let row: Option<(RefreshEligibility, String)> = tx
         .query_row(
             "SELECT slot, generation, base_version, security_epoch, profile, account, affinity, state

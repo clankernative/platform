@@ -184,6 +184,8 @@ fn verify_cli_receipt(
 }
 
 fn add_cli(root: &Path, files: &mut Files) -> Result<()> {
+    crate::roc_packages::admit(root)?;
+    files.add(root, Path::new("cli/.cache/roc-packages"), 0)?;
     let receipt: serde_json::Value =
         day2::json::decode_evidence(&fs::read(root.join("cli/distribution.json"))?)?;
     let ui_dependency = day2::build_dependencies::installed(root)?;

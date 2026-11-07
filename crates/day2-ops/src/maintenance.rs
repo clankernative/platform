@@ -139,13 +139,14 @@ impl Operation {
 
 /// The scratch volume for `copies` of stores measuring `stores` bytes, with a
 /// quarter more for their growth, beside `artifacts` bytes of artifacts copied
-/// in (counted twice: a backup holds the running one again). Whole MiB, at
+/// in (the pod, backup, and, for targeted operations, rehearsal each hold a
+/// copy). Whole MiB, at
 /// least `SCRATCH_FLOOR`.
 fn scratch_bytes(copies: u64, stores: u64, artifacts: u64) -> u64 {
     let stores = copies.saturating_mul(stores);
     let bytes = stores
         .saturating_add(stores / 4)
-        .saturating_add(artifacts.saturating_mul(2))
+        .saturating_add(artifacts.saturating_mul(if copies > 1 { 3 } else { 2 }))
         .saturating_add(SCRATCH_SLACK)
         .max(SCRATCH_FLOOR);
     bytes.div_ceil(MIB).saturating_mul(MIB)
@@ -2085,6 +2086,18 @@ impl Session {
         let state = format!("{ADMISSION}/.state");
         // No -p: a leftover copy is refused, never reused.
         self.exec(&["mkdir", ADMISSION, &state], Duration::from_secs(60))?;
+        // A rolling runtime resolves its selected artifact beside its instance,
+        // including while opening the source copy before rollout preparation.
+        // Keep the rehearsal self-contained under the same reviewed bytes.
+        self.exec(
+            &[
+                "cp",
+                "-a",
+                &format!("{ROOT}/artifacts"),
+                &format!("{ADMISSION}/artifacts"),
+            ],
+            Duration::from_secs(300),
+        )?;
         self.exec(
             &[
                 "cp",

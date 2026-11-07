@@ -24,6 +24,7 @@ pub(super) enum Role {
     Control,
     Other,
     Day2Result,
+    Day2RuntimeResult,
     ControlResult,
     OtherResult,
     SimulationResult,
@@ -43,6 +44,7 @@ impl Role {
             Self::Control => "day2-verify-workspace-control",
             Self::Other => "day2-verify-workspace-other",
             Self::Day2Result => "day2-result-workspace-day2",
+            Self::Day2RuntimeResult => "day2-result-workspace-day2-runtime",
             Self::ControlResult => "day2-result-workspace-control",
             Self::OtherResult => "day2-result-workspace-other",
             Self::SimulationResult => "day2-result-simulation",
@@ -59,6 +61,7 @@ impl Role {
             Self::Tests => "verify-prepare-parts (tests)",
             Self::Common | Self::Day2 | Self::Control | Self::Other => "verify-prepare",
             Self::Day2Result => "verify-shards (workspace-day2)",
+            Self::Day2RuntimeResult => "verify-shards (workspace-day2-runtime)",
             Self::ControlResult => "verify-shards (workspace-control)",
             Self::OtherResult => "verify-shards (workspace-other)",
             Self::SimulationResult => "verify-shards (simulation)",
@@ -105,7 +108,7 @@ fn roles(phase: &str) -> Result<Vec<Role>> {
     Ok(match phase {
         "preparation" => vec![Inputs, Fixtures, Tests],
         "reuse" => vec![Reused],
-        "workspace-day2" => vec![Common, Day2],
+        "workspace-day2" | "workspace-day2-runtime" => vec![Common, Day2],
         "workspace-control" => vec![Common, Control],
         "workspace-other" => vec![Common, Other],
         "simulation" => vec![Common],
@@ -119,6 +122,7 @@ fn roles(phase: &str) -> Result<Vec<Role>> {
             Control,
             Other,
             Day2Result,
+            Day2RuntimeResult,
             ControlResult,
             OtherResult,
             SimulationResult,
@@ -227,6 +231,68 @@ fn run_identity(run: &Value, expected: &Identity) -> Result<()> {
     Ok(())
 }
 
+// The paginated jobs index can lag behind the individual job record. Keep the
+// complete index for identity/uniqueness, but authenticate the producer's current
+// outcome through its exact numeric job endpoint, never a SHA or another run.
+fn refresh_producers_with(
+    jobs: &mut [Value],
+    names: &BTreeSet<&str>,
+    mut read: impl FnMut(u64) -> Result<Value>,
+) -> Result<()> {
+    for job in jobs {
+        if !job["name"]
+            .as_str()
+            .is_some_and(|name| names.contains(name))
+        {
+            continue;
+        }
+        let fresh = read(number(job, "id")?)?;
+        number(&fresh, "id")?;
+        for field in [
+            "id",
+            "name",
+            "run_id",
+            "run_attempt",
+            "head_sha",
+            "html_url",
+            "labels",
+        ] {
+            ensure!(
+                fresh[field] == job[field],
+                "producer detail disagrees with its indexed identity: field={field}"
+            );
+        }
+        if job["status"] == "completed"
+            && !job["conclusion"].is_null()
+            && job["conclusion"] != "success"
+        {
+            ensure!(
+                fresh["status"] == "completed" && fresh["conclusion"] == job["conclusion"],
+                "conflicting terminal producer outcome; refusing stale success"
+            );
+        }
+        let unacquired = |value: &Value| {
+            value["runner_id"] == 0
+                && value["runner_name"] == ""
+                && value["steps"].as_array().is_some_and(Vec::is_empty)
+        };
+        ensure!(
+            unacquired(job) || !unacquired(&fresh),
+            "producer detail cannot erase runner assignment or execution evidence"
+        );
+        *job = fresh;
+    }
+    Ok(())
+}
+
+fn producer_jobs(root: &Path, inventory: Inventory, names: &BTreeSet<&str>) -> Result<Vec<Value>> {
+    let mut jobs = pages(root, inventory)?;
+    refresh_producers_with(&mut jobs, names, |id| {
+        reuse::api(root, &format!("actions/jobs/{id}"))
+    })?;
+    Ok(jobs)
+}
+
 fn successful_job<'a>(
     jobs: &'a [Value],
     role: Role,
@@ -274,21 +340,25 @@ fn successful_job<'a>(
             "native Mac retry runner required"
         );
     }
-    ensure!(
-        job["run_id"] == run["id"]
-            && job["run_attempt"] == attempt
-            && job["head_sha"] == run["head_sha"]
-            && job["status"] == "completed"
-            && job["conclusion"] == "success"
-            && job["html_url"]
-                == format!(
-                    "https://github.com/{REPOSITORY}/actions/runs/{}/job/{}",
-                    number(run, "id")?,
-                    number(job, "id")?
-                ),
-        "latest and origin artifact producers must both have succeeded: {}",
-        role.job()
+    let expected_url = format!(
+        "https://github.com/{REPOSITORY}/actions/runs/{}/job/{}",
+        number(run, "id")?,
+        number(job, "id")?
     );
+    for (field, valid) in [
+        ("run_id", job["run_id"] == run["id"]),
+        ("run_attempt", job["run_attempt"] == attempt),
+        ("head_sha", job["head_sha"] == run["head_sha"]),
+        ("status", job["status"] == "completed"),
+        ("conclusion", job["conclusion"] == "success"),
+        ("html_url", job["html_url"] == expected_url),
+    ] {
+        ensure!(
+            valid,
+            "latest and origin artifact producers must both have succeeded: {} field={field}",
+            role.job()
+        );
+    }
     Ok(job)
 }
 
@@ -390,16 +460,25 @@ fn resolve(root: &Path, expected: &Identity, phase: &str) -> Result<Selection> {
     );
     let artifacts = pages(root, Inventory::Artifacts { run: run_id })?;
     let attempt = number(&run, "run_attempt")?;
-    let latest = pages(
+    let required = roles(phase)?;
+    let mut names = required
+        .iter()
+        .map(|role| role.job())
+        .collect::<BTreeSet<_>>();
+    if required.contains(&Role::Mac) {
+        names.insert("retry-mac-compatibility");
+    }
+    let latest = producer_jobs(
         root,
         Inventory::Jobs {
             run: run_id,
             attempt,
         },
+        &names,
     )?;
     let mut jobs = BTreeMap::from([(attempt, latest.clone())]);
     let mut origins = BTreeMap::new();
-    for role in roles(phase)? {
+    for role in required {
         let prefix = format!("{}-{run_id}-", role.prefix());
         let origin_attempt = artifacts
             .iter()
@@ -417,12 +496,13 @@ fn resolve(root: &Path, expected: &Identity, phase: &str) -> Result<Selection> {
             "artifact attempt is outside the current run history"
         );
         if let std::collections::btree_map::Entry::Vacant(entry) = jobs.entry(origin_attempt) {
-            entry.insert(pages(
+            entry.insert(producer_jobs(
                 root,
                 Inventory::Jobs {
                     run: run_id,
                     attempt: origin_attempt,
                 },
+                &names,
             )?);
         }
         let origin_jobs = &jobs[&origin_attempt];
@@ -483,6 +563,7 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
             "results",
             vec![
                 Role::Day2Result,
+                Role::Day2RuntimeResult,
                 Role::ControlResult,
                 Role::OtherResult,
                 Role::SimulationResult,
@@ -739,6 +820,157 @@ mod tests {
         let check = json!({"id":job["id"],"name":job["name"],"head_sha":run["head_sha"],
             "status":"completed","conclusion":"success","app":{"id":15368},"check_suite":{"id":99},"details_url":job["html_url"]});
         (run, job, artifact, check)
+    }
+
+    #[test]
+    fn producer_details_refresh_stale_index_status_without_changing_identity() -> Result<()> {
+        let (run, job, artifact, check) = facts(1);
+        let (_, latest, _, _) = facts(2);
+        let names = BTreeSet::from([Role::Common.job()]);
+        for (status, conclusion) in [
+            ("in_progress", Value::Null),
+            ("queued", Value::Null),
+            ("waiting", Value::Null),
+        ] {
+            let mut stale = job.clone();
+            stale["status"] = json!(status);
+            stale["conclusion"] = conclusion;
+            let mut indexed = vec![stale];
+            let mut reads = Vec::new();
+            refresh_producers_with(&mut indexed, &names, |id| {
+                reads.push(id);
+                Ok(job.clone())
+            })?;
+            assert_eq!(reads, vec![101]);
+            assert_eq!(indexed, vec![job.clone()]);
+            assert_eq!(
+                select(
+                    Role::Common,
+                    std::slice::from_ref(&artifact),
+                    &run,
+                    std::slice::from_ref(&latest),
+                    &indexed,
+                    &check,
+                )?
+                .attempt,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn producer_details_refuse_substitution_and_same_sha_foreign_run() -> Result<()> {
+        let (run, job, artifact, check) = facts(1);
+        let (_, latest, _, _) = facts(2);
+        let names = BTreeSet::from([Role::Common.job()]);
+        for (field, value) in [
+            ("id", json!(999)),
+            ("run_id", json!(124)),
+            ("run_attempt", json!(2)),
+            ("head_sha", json!("b".repeat(40))),
+            ("name", json!(Role::Tests.job())),
+            ("html_url", json!("foreign")),
+        ] {
+            let mut fresh = job.clone();
+            fresh[field] = value;
+            assert!(
+                refresh_producers_with(&mut [job.clone()], &names, |_| Ok(fresh.clone())).is_err(),
+                "{field}"
+            );
+        }
+        let mut foreign = job.clone();
+        foreign["run_id"] = json!(124);
+        foreign["html_url"] = json!(format!(
+            "https://github.com/{REPOSITORY}/actions/runs/124/job/101"
+        ));
+        let mut indexed = vec![foreign.clone()];
+        refresh_producers_with(&mut indexed, &names, |_| Ok(foreign.clone()))?;
+        assert!(
+            select(
+                Role::Common,
+                std::slice::from_ref(&artifact),
+                &run,
+                std::slice::from_ref(&latest),
+                &indexed,
+                &check,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn current_failed_producer_cannot_be_hidden_by_stale_success_or_old_artifact() -> Result<()> {
+        let (run, old, artifact, check) = facts(1);
+        let (_, latest, _, _) = facts(2);
+        let mut failed = latest.clone();
+        failed["conclusion"] = json!("failure");
+        let mut indexed = vec![latest];
+        refresh_producers_with(&mut indexed, &BTreeSet::from([Role::Common.job()]), |_| {
+            Ok(failed.clone())
+        })?;
+        let mut conflicting = vec![failed.clone()];
+        assert!(
+            refresh_producers_with(
+                &mut conflicting,
+                &BTreeSet::from([Role::Common.job()]),
+                |_| Ok(indexed[0].clone()),
+            )
+            .is_ok()
+        );
+        let (_, stale_success, _, _) = facts(2);
+        assert!(
+            refresh_producers_with(
+                &mut [failed.clone()],
+                &BTreeSet::from([Role::Common.job()]),
+                |_| Ok(stale_success.clone()),
+            )
+            .is_err()
+        );
+        let error = select(
+            Role::Common,
+            std::slice::from_ref(&artifact),
+            &run,
+            &indexed,
+            std::slice::from_ref(&old),
+            &check,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("field=conclusion"));
+        failed["conclusion"] = json!("private-field-canary");
+        let error = successful_job(&[failed], Role::Common, &run, 2).unwrap_err();
+        assert!(error.to_string().contains("field=conclusion"));
+        assert!(!error.to_string().contains("private-field-canary"));
+        Ok(())
+    }
+
+    #[test]
+    fn producer_refresh_cannot_invent_an_unacquired_mac_job() -> Result<()> {
+        let (_, jobs, _, _) = mac_facts(1);
+        let unacquired = jobs[0].clone();
+        let names = BTreeSet::from([Role::Mac.job()]);
+        for (field, value) in [
+            ("runner_id", json!(42)),
+            ("runner_name", json!("assigned Mac")),
+            ("steps", json!([{"number":1,"conclusion":"failure"}])),
+            ("steps", Value::Null),
+            ("labels", json!(["ubuntu-24.04"])),
+        ] {
+            let mut indexed = unacquired.clone();
+            indexed[field] = value;
+            assert!(
+                refresh_producers_with(&mut [indexed], &names, |_| Ok(unacquired.clone())).is_err(),
+                "{field}"
+            );
+        }
+        let mut acquired = unacquired.clone();
+        acquired["runner_id"] = json!(42);
+        acquired["steps"] = json!([{"number":1,"conclusion":"failure"}]);
+        let mut indexed = vec![unacquired];
+        refresh_producers_with(&mut indexed, &names, |_| Ok(acquired.clone()))?;
+        assert_eq!(indexed, vec![acquired]);
+        Ok(())
     }
 
     fn mac_facts(attempt: u64) -> (Value, Vec<Value>, Value, Value) {

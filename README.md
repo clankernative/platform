@@ -44,6 +44,9 @@ ignored `.cache/tofu.json`; machine-specific paths are never source inputs.
 
 ## Develop and verify
 
+Company-owned native CLI login uses the opt-in [human login bootstrap](docs/CLI-LOGIN.md)
+and the existing IAP human identity channel.
+
 ```console
 bazel run //crates/xtask:xtask -- verify-fast
 bazel run //crates/xtask:xtask -- verify
