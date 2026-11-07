@@ -59,9 +59,25 @@ impl ControllerAdminSqlite {
         Ok(())
     }
 
+    pub(crate) fn read_fenced(
+        &mut self,
+        loan: &mut crate::security_epoch::FencedReadUnit<'_, '_, '_>,
+        metadata: &InitialStoreMetadata,
+    ) -> Result<ControllerAdminData> {
+        self.read_unit(ReadLoan::Fenced(loan), metadata)
+    }
+
     pub(crate) fn read(
         &mut self,
         loan: &mut ControllerAdminReadLoan<'_, '_>,
+        metadata: &InitialStoreMetadata,
+    ) -> Result<ControllerAdminData> {
+        self.read_unit(ReadLoan::Active(loan), metadata)
+    }
+
+    fn read_unit(
+        &mut self,
+        mut loan: ReadLoan<'_, '_, '_, '_>,
         metadata: &InitialStoreMetadata,
     ) -> Result<ControllerAdminData> {
         loan.check_metadata(metadata)?;
@@ -135,6 +151,52 @@ impl ControllerAdminSqlite {
             .take()
             .context("controller_admin_reader_closed")?;
         loan.close_reader(connection)
+    }
+}
+
+// The same fixed projection/SQL/handle unit serves two distinct actual loans.
+// No flag broadens Active admission and no generic callback or owner escapes.
+enum ReadLoan<'borrow, 'fenced, 'storage, 'role> {
+    Active(&'borrow mut ControllerAdminReadLoan<'storage, 'role>),
+    Fenced(&'borrow mut crate::security_epoch::FencedReadUnit<'fenced, 'storage, 'role>),
+}
+
+impl ReadLoan<'_, '_, '_, '_> {
+    fn check_metadata(&mut self, metadata: &InitialStoreMetadata) -> Result<()> {
+        match self {
+            Self::Active(loan) => loan.check_metadata(metadata),
+            Self::Fenced(loan) => loan.check_metadata(metadata),
+        }
+    }
+    fn begin_retained_sql(&mut self, db: &Connection) -> Result<()> {
+        match self {
+            Self::Active(loan) => loan.begin_retained_sql(db),
+            Self::Fenced(loan) => loan.begin_retained_sql(db),
+        }
+    }
+    fn check_database(&mut self, db: &Connection) -> Result<()> {
+        match self {
+            Self::Active(loan) => loan.check_database(db),
+            Self::Fenced(loan) => loan.check_database(db),
+        }
+    }
+    fn end_retained_sql(&mut self, db: &Connection, completed: &Result<()>) -> Result<()> {
+        match self {
+            Self::Active(loan) => loan.end_retained_sql(db, completed),
+            Self::Fenced(loan) => loan.end_retained_sql(db, completed),
+        }
+    }
+    fn end_sql(&mut self, completed: &Result<()>) -> Result<()> {
+        match self {
+            Self::Active(loan) => loan.end_sql(completed),
+            Self::Fenced(loan) => loan.end_sql(completed),
+        }
+    }
+    fn refuse(&mut self) {
+        match self {
+            Self::Active(loan) => loan.refuse(),
+            Self::Fenced(loan) => loan.refuse(),
+        }
     }
 }
 
