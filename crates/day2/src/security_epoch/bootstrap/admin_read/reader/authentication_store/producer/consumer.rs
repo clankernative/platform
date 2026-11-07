@@ -464,8 +464,12 @@ mod tests {
                     shape.push("end-group".to_owned());
                 }
                 proc_macro2::TokenTree::Ident(ident) => shape.push(format!("ident:{ident}")),
-                proc_macro2::TokenTree::Literal(literal) => shape.push(format!("literal:{literal}")),
-                proc_macro2::TokenTree::Punct(punct) => shape.push(format!("punct:{}", punct.as_char())),
+                proc_macro2::TokenTree::Literal(literal) => {
+                    shape.push(format!("literal:{literal}"))
+                }
+                proc_macro2::TokenTree::Punct(punct) => {
+                    shape.push(format!("punct:{}", punct.as_char()))
+                }
             }
         }
         shape
@@ -548,9 +552,11 @@ mod tests {
         assert!(!guarded_owner_route(delegate, &substituted));
         let actual = actual_owner_method(&leaf, "ExecutionSourceLoan", "check")?;
         assert!(guarded_owner_check(actual));
-        let joint: proc_macro2::TokenStream = "!*self.refused".parse()
+        let joint: proc_macro2::TokenStream = "!*self.refused"
+            .parse()
             .map_err(|_| anyhow::anyhow!("consumer_joint_punctuation_fixture"))?;
-        let separate: proc_macro2::TokenStream = "! * self . refused".parse()
+        let separate: proc_macro2::TokenStream = "! * self . refused"
+            .parse()
             .map_err(|_| anyhow::anyhow!("consumer_separate_punctuation_fixture"))?;
         assert_eq!(token_shape(joint), token_shape(separate));
         let mut changed = actual.clone();
