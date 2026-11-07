@@ -76,6 +76,105 @@ pub(crate) struct EnrolledRoleStage<'a> {
     deadline: Duration,
 }
 
+/// The actual closed issuer exchange and kernel message handles. This only
+/// excludes new enrollments/cold-peer grants from THIS same issuer; it cannot
+/// attest that business/remote rights drained or construct a new writer.
+pub(crate) struct FrozenRoleIssuer {
+    same: SameEnrolledOwner,
+    original: NativeAcquisition,
+    statement: super::protocol::FrozenIssuance,
+    signature: String,
+    certificate: IssuerCertificate,
+    refused: bool,
+    #[cfg(target_os = "linux")]
+    nonce_peer: IssuerReceipt,
+    #[cfg(target_os = "linux")]
+    grant_peer: IssuerReceipt,
+    #[cfg(target_os = "linux")]
+    _channel: Channel,
+}
+
+impl FrozenRoleIssuer {
+    pub(in crate::security_epoch) fn check(
+        &mut self,
+        storage: &mut EnrolledStorageStage<'_, '_>,
+    ) -> Result<()> {
+        let stage = &mut *storage.stage;
+        let requested: Result<()> = (|| {
+            ensure!(!self.refused, "native_restore_issuer_refused");
+            self.same
+                .meet_current_read_view(stage, &mut self.original)?;
+            stage.require_purpose(StagePurpose::CurrentRole)?;
+            ensure!(
+                self.certificate == stage.owner.certificate
+                    && self.statement.issuer == self.certificate.digest()?
+                    && self.statement.policy == stage.owner.policy.digest()?
+                    && self.statement.cohort == self.statement.selection.history_digest()?,
+                "native_restore_issuer_changed"
+            );
+            super::protocol::verify(
+                &self.certificate.data.public_key,
+                "restore-issuer-frozen",
+                &self.statement,
+                &self.signature,
+            )?;
+            #[cfg(target_os = "linux")]
+            {
+                self.nonce_peer.check_live(&mut self.original)?;
+                self.grant_peer.check_live(&mut self.original)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native_restore_issuer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            self.original.remaining().map(|_| ())
+        })();
+        let checked = stage.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn stop_message(
+        &mut self,
+        storage: &mut EnrolledStorageStage<'_, '_>,
+        exchange: &super::storage_peer_wire::CurrentExchange,
+    ) -> Result<super::storage_peer_wire::Body> {
+        self.check(storage)?;
+        ensure!(
+            self.statement.selection.admin_binding == *exchange.request.binding()
+                && self.statement.selection.app.digest()? == exchange.app_stage
+                && self.statement.selection.controller.digest()? == exchange.controller_stage,
+            "native_restore_issuer_peer_changed"
+        );
+        Ok(super::storage_peer_wire::Body::CurrentStop {
+            exchange: exchange.digest()?,
+            frozen: Box::new(self.statement.clone()),
+            signature: self.signature.clone(),
+        })
+    }
+
+    pub(in crate::security_epoch) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&(
+            "day2-native-frozen-issuer-v1",
+            &self.statement,
+            &self.signature,
+        ))
+    }
+
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.refused = true;
+        self.original.refuse();
+    }
+}
+
+impl Drop for FrozenRoleIssuer {
+    fn drop(&mut self) {
+        self.refuse();
+    }
+}
+
 /// Exclusive, short borrow of an actual enrolled stage for storage work.
 /// Every operation retains that stage's exact purpose, clock and refusal.
 /// There is no raw-stage getter, dereference, adoption or independent owner.
@@ -181,6 +280,7 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <EnrolledCurrentRequest as Ambiguous<_>>::check;
+            let _ = <FrozenRoleIssuer as Ambiguous<_>>::check;
             let _ = <UnselectedShellRequest as Ambiguous<_>>::check;
         }};
     }
@@ -1206,4 +1306,126 @@ fn exchange(
     })();
     work.finish(result.is_ok());
     result
+}
+
+impl FrozenRoleIssuer {
+    pub(in crate::security_epoch::native_enrollment) fn capture_restore(
+        storage: &mut EnrolledStorageStage<'_, '_>,
+        app: &super::storage_peer_wire::StageStatement,
+        admin_binding: &Digest,
+        operation: &Digest,
+        fenced_root: &Digest,
+    ) -> Result<FrozenRoleIssuer> {
+        let stage = &mut *storage.stage;
+        let requested: Result<FrozenRoleIssuer> = (|| {
+            stage.require_purpose(StagePurpose::CurrentRole)?;
+            ensure!(
+                stage.owner.role == NativeRole::EpochController,
+                "native_restore_issuer_controller_required"
+            );
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (app, admin_binding, operation, fenced_root);
+                anyhow::bail!("native_restore_issuer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let controller = stage.storage()?.storage_statement()?;
+                let selection = protocol::FreezeSelection {
+                    app: app.clone(),
+                    controller,
+                    admin_binding: admin_binding.clone(),
+                    operation: operation.clone(),
+                    fenced_root: fenced_root.clone(),
+                };
+                let mut original = stage.narrow_io_acquisition(5)?;
+                let request = protocol::nonce("restore-issuer-freeze-request")?;
+                stage.check()?;
+                let mut channel = Channel::connect(&mut original)?;
+                channel.send(
+                    &Packet::FreezeHello {
+                        selection: Box::new(selection.clone()),
+                        request: request.clone(),
+                    },
+                    &mut original,
+                )?;
+                stage.check()?;
+                let (packet, mut nonce_peer) = channel.receive_issuer(&mut original)?;
+                let Packet::FreezeNonce {
+                    request: echoed,
+                    challenge,
+                } = packet
+                else {
+                    anyhow::bail!("native_restore_freeze_order");
+                };
+                ensure!(echoed == request, "native_restore_freeze_nonce_changed");
+                nonce_peer.bind(&stage.owner.certificate, &stage.owner.policy, &mut original)?;
+                stage.check()?;
+                let signature = stage
+                    .owner
+                    .key
+                    .sign("restore-issuer-freeze", &(&selection, &request, &challenge))?;
+                channel.send(
+                    &Packet::FreezeBind {
+                        selection: Box::new(selection.clone()),
+                        request: request.clone(),
+                        challenge: challenge.clone(),
+                        signature,
+                    },
+                    &mut original,
+                )?;
+                stage.check()?;
+                let (packet, mut grant_peer) = channel.receive_issuer(&mut original)?;
+                let Packet::FreezeGrant {
+                    statement,
+                    signature,
+                } = packet
+                else {
+                    anyhow::bail!("native_restore_freeze_order");
+                };
+                let expected = protocol::FrozenIssuance {
+                    selection: selection.clone(),
+                    policy: stage.owner.policy.digest()?,
+                    issuer: stage.owner.certificate.digest()?,
+                    cohort: selection.history_digest()?,
+                    request,
+                    challenge,
+                };
+                ensure!(
+                    *statement == expected,
+                    "native_restore_freeze_statement_changed"
+                );
+                protocol::verify(
+                    &stage.owner.certificate.data.public_key,
+                    "restore-issuer-frozen",
+                    &*statement,
+                    &signature,
+                )?;
+                grant_peer.bind(&stage.owner.certificate, &stage.owner.policy, &mut original)?;
+                stage.check()?;
+                let same = stage.capture_same_owner()?;
+                let frozen = FrozenRoleIssuer {
+                    same,
+                    original,
+                    statement: *statement,
+                    signature,
+                    certificate: stage.owner.certificate.clone(),
+                    refused: false,
+                    nonce_peer,
+                    grant_peer,
+                    _channel: channel,
+                };
+                Ok(frozen)
+            }
+        })();
+        let checked = stage.check();
+        if requested.is_err() || checked.is_err() {
+            stage.owner.refused = true;
+            stage.acquisition.as_mut().refuse();
+        }
+        let mut frozen = requested?;
+        checked?;
+        frozen.check(storage)?;
+        Ok(frozen)
+    }
 }

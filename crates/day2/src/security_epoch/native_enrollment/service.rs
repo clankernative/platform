@@ -20,6 +20,7 @@ struct Enrollment {
 pub(super) fn run() -> Result<()> {
     let mut issuer = IssuerOwner::born()?;
     let mut enrolled = BTreeMap::new();
+    let mut issuance_closed = false;
     let mut recorder = Recorder::new(std::io::stderr());
     loop {
         let (mut channel, mut acquisition) = issuer.listener.next()?;
@@ -47,6 +48,7 @@ pub(super) fn run() -> Result<()> {
             serve(
                 &mut issuer,
                 &mut enrolled,
+                &mut issuance_closed,
                 &mut channel,
                 &mut acquisition,
                 &costs,
@@ -87,6 +89,7 @@ pub(super) fn run() -> Result<()> {
 fn serve(
     issuer: &mut IssuerOwner,
     enrolled: &mut BTreeMap<(u32, u64, super::NativeRole), Enrollment>,
+    issuance_closed: &mut bool,
     channel: &mut Channel,
     acquisition: &mut NativeAcquisition,
     costs: &Costs,
@@ -117,6 +120,18 @@ fn serve(
             &costs.hashes(Subject::Requester),
         )
     })?;
+    if let Packet::FreezeHello { selection, request } = packet {
+        return freeze(
+            issuer,
+            enrolled,
+            issuance_closed,
+            (channel, acquisition),
+            (costs, &mut current, &mut peer),
+            *selection,
+            request,
+        );
+    }
+    ensure!(!*issuance_closed, "native_enrollment_issuance_closed");
     let Packet::StageHello {
         policy,
         role,
@@ -251,4 +266,135 @@ fn serve(
         acquisition,
     )?;
     Ok(())
+}
+
+// No replacement enrollment table, expiry pruning or issuer restart adoption.
+// Only the actual serial grant loop can close itself. This proves only new
+// role/cold-peer exclusion, not termination of any business/remote right.
+fn freeze(
+    issuer: &mut IssuerOwner,
+    enrolled: &BTreeMap<(u32, u64, super::NativeRole), Enrollment>,
+    issuance_closed: &mut bool,
+    transport: (&mut Channel, &mut NativeAcquisition),
+    observations: (&Costs, &mut SelfSnapshot, &mut MessageProcess),
+    selection: protocol::FreezeSelection,
+    request: day2_capabilities::Digest,
+) -> Result<()> {
+    use super::NativeRole;
+    let (channel, acquisition) = transport;
+    let (costs, current, peer) = observations;
+    ensure!(!*issuance_closed, "native_enrollment_issuance_closed");
+    let controller = &selection.controller;
+    let app = &selection.app;
+    let now = acquisition.sample()?.elapsed;
+    for (statement, role) in [
+        (app, NativeRole::AppHost),
+        (controller, NativeRole::EpochController),
+    ] {
+        ensure!(
+            statement.certificate == issuer.certificate
+                && statement.stage.data.issuer == issuer.certificate.digest()?
+                && statement.stage.data.policy == issuer.policy.digest()?
+                && statement.stage.data.role == role,
+            "native_restore_issuer_selection_changed"
+        );
+        statement.validate_issued_request_data(&issuer.policy, &issuer.certificate, role, now)?;
+        let key = (
+            statement.stage.data.process.process,
+            statement.stage.data.process.start_ticks,
+            role,
+        );
+        let actual = enrolled
+            .get(&key)
+            .ok_or_else(|| anyhow::anyhow!("native_restore_actor_not_enrolled"))?;
+        ensure!(
+            actual.process == statement.stage.data.process
+                && actual.runtime == statement.stage.data.runtime
+                && actual.public_key == statement.stage.data.public_key,
+            "native_restore_actor_changed"
+        );
+    }
+    ensure!(
+        peer.data() == &controller.stage.data.process
+            && app.stage.data.process != controller.stage.data.process,
+        "native_restore_controller_sender_changed"
+    );
+    let challenge = protocol::nonce("restore-issuer-freeze")?;
+    channel.send(
+        &Packet::FreezeNonce {
+            request: request.clone(),
+            challenge: challenge.clone(),
+        },
+        acquisition,
+    )?;
+    let (packet, mut bound) = channel.receive(
+        issuer.policy.code(NativeRole::EpochController),
+        acquisition,
+        &costs.hashes(Subject::Requester),
+    )?;
+    let Packet::FreezeBind {
+        selection: selected,
+        request: echoed,
+        challenge: answered,
+        signature,
+    } = packet
+    else {
+        anyhow::bail!("native_restore_freeze_order");
+    };
+    ensure!(
+        *selected == selection && echoed == request && answered == challenge,
+        "native_restore_freeze_binding_changed"
+    );
+    protocol::verify(
+        &controller.stage.data.public_key,
+        "restore-issuer-freeze",
+        &(&selection, &request, &challenge),
+        &signature,
+    )?;
+    MessageProcess::check_same_actor(
+        &mut [peer, &mut bound],
+        acquisition,
+        &costs.hashes(Subject::Requester),
+    )?;
+    issuer
+        .parent
+        .check_identity(acquisition, &costs.hashes(Subject::ParentBefore))?;
+    // Arm before inspecting/publishing. Unsupported historical actors and a
+    // failed/lost reply leave this issuer closed forever, never retryable.
+    *issuance_closed = true;
+    ensure!(enrolled.len() == 2, "native_restore_unclosed_role_cohort");
+    let statement = protocol::FrozenIssuance {
+        policy: issuer.policy.digest()?,
+        issuer: issuer.certificate.digest()?,
+        cohort: selection.history_digest()?,
+        selection,
+        request,
+        challenge,
+    };
+    let signature = issuer.key.sign("restore-issuer-frozen", &statement)?;
+    // Recheck this Current request after nonce/bind IO on the same clock.
+    // The historical cold grant is identity, never a renewed request deadline.
+    // This is DATA validation, not App liveness or complete business Stop.
+    let now = acquisition.sample()?.elapsed;
+    for (statement, role) in [
+        (&statement.selection.app, NativeRole::AppHost),
+        (&statement.selection.controller, NativeRole::EpochController),
+    ] {
+        statement.validate_issued_request_data(&issuer.policy, &issuer.certificate, role, now)?;
+    }
+    // Same publication guards as enrollment, on the actual entry snapshot and
+    // original request acquisition; freezing is not an issuer-check exemption.
+    issuer.certificate.verify(&issuer.policy)?;
+    issuer
+        .parent
+        .check_identity(acquisition, &costs.hashes(Subject::ParentBefore))?;
+    current.check(acquisition)?;
+    acquisition.remaining()?;
+    channel.send(
+        &Packet::FreezeGrant {
+            statement: Box::new(statement),
+            signature,
+        },
+        acquisition,
+    )
 }

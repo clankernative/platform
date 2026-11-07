@@ -85,7 +85,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "scope": "const",
-      "fingerprint": "sha256:9f3349ef6380e5e139c84793d88b509596ddac8ce7e3f991ea4dce15d7846fed",
+      "fingerprint": "sha256:2f70a38e9a7e92d34bacb3ce859ac9cfd800bc91fd59eb4ade714d033a7587bd",
       "registration": null
     },
     {
@@ -4432,6 +4432,18 @@
         {
           "owner": "EnrolledStorageStage < '_ , '_ >",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_admitted_storage_statement (& mut self , statement : & StageStatement , admitted : & StageStatement , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , operation : & Digest , fenced_root : & Digest) -> Result < FrozenRoleIssuer >"
+        },
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn stop_message (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , exchange : & super :: storage_peer_wire :: CurrentExchange) -> Result < super :: storage_peer_wire :: Body >"
+        },
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -4451,6 +4463,61 @@
           }
         }
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "FrozenRoleIssuer",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "storage"
+          }
+        }
+      ],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , operation : & Digest , fenced_root : & Digest) -> Result < FrozenRoleIssuer >",
+        "pub (in crate :: security_epoch) fn check (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn digest_data (& self) -> Result < Digest >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn stop_message (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , exchange : & super :: storage_peer_wire :: CurrentExchange) -> Result < super :: storage_peer_wire :: Body >"
+      ],
+      "factories": [
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , operation : & Digest , fenced_root : & Digest) -> Result < FrozenRoleIssuer >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn stop_message (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , exchange : & super :: storage_peer_wire :: CurrentExchange) -> Result < super :: storage_peer_wire :: Body >"
+        },
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch) fn digest_data (& self) -> Result < Digest >"
+        },
+        {
+          "owner": "FrozenRoleIssuer",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:24d0fd45ec183baafa5508f3743db352ab562160f0379e8fe6e04d43a96d2e89"
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
