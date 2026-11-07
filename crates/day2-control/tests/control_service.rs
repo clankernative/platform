@@ -41,6 +41,7 @@ fn configuration(directory: &std::path::Path) -> InstallationControl {
         security_epochs: BTreeMap::new(),
         security_bootstraps: BTreeMap::new(),
         restore_passkeys: None,
+        restore_approval_signing: None,
     }
 }
 fn scope() -> ControlScope {

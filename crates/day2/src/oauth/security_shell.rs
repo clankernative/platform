@@ -38,6 +38,7 @@ use tokio::sync::Semaphore;
 use tokio::{net::TcpListener, sync::OwnedSemaphorePermit};
 
 const COOKIE: &str = "__Host-day2_security_shell";
+mod passkey_export;
 const PREFIX: &str = "/oauth/approvals/";
 const SESSION_SECONDS: i64 = 300;
 const MAX_SESSIONS: usize = 1024;
@@ -758,6 +759,11 @@ impl SecurityShell {
                     error
                 }
             })?;
+        }
+        if let Some(response) =
+            passkey_export::dispatch(method, path, query, body, &identity, &self.origin)?
+        {
+            return Ok(response);
         }
         if let Some(management) = &self.management {
             if let Some(response) = management.provider_callback(
@@ -1726,6 +1732,7 @@ fn protected(mut response: Response) -> Response {
             .headers_mut()
             .insert(name, value.parse().expect("static security header"));
     }
+    passkey_export::protect_document(&mut response);
     response
 }
 
@@ -1907,6 +1914,125 @@ mod tests {
             approvals,
             Arc::new(BrowserIdentity { fresh: false }),
         )
+    }
+
+    #[tokio::test]
+    async fn passkey_export_is_get_only_and_keeps_shell_guards_and_existing_csp() -> Result<()> {
+        let shell = isolated_shell()?;
+        let headers = HeaderMap::from_iter([(header::HOST, "security.example.com".parse()?)]);
+        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+            let response = protected(shell.dispatch(&Method::GET, path, None, &headers, &[], 5)?);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+            if path == passkey_export::PAGE {
+                let csp = response.headers()[header::CONTENT_SECURITY_POLICY].to_str()?;
+                assert!(
+                    csp.contains(
+                        "script-src https://security.example.com/restore/passkeys/export.js;"
+                    ) && csp.contains("connect-src 'none'")
+                        && csp.contains("form-action 'none'")
+                        && !csp.contains("unsafe")
+                );
+                assert!(
+                    response.headers()["permissions-policy"].to_str()?.contains(
+                        "publickey-credentials-create=(self), publickey-credentials-get=()"
+                    )
+                );
+                let html = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+                assert!(
+                    html.contains("does not enroll a key")
+                        && html.contains("data-subject=\"accounts.google.com:google-alice\"")
+                );
+                assert!(!html.contains("<form") && !html.contains("fetch("));
+            } else {
+                assert_eq!(
+                    response.headers()[header::CONTENT_SECURITY_POLICY],
+                    "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+                );
+                assert!(
+                    to_bytes(response.into_body(), 16384)
+                        .await?
+                        .starts_with(b"// Browser presentation")
+                );
+            }
+            assert!(
+                shell
+                    .dispatch(&Method::POST, path, None, &headers, &[], 5)
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(&Method::GET, path, Some("key=untrusted"), &headers, &[], 5)
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(&Method::GET, path, None, &headers, b"untrusted", 5)
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(&Method::GET, path, None, &HeaderMap::new(), &[], 5)
+                    .is_err()
+            );
+        }
+        assert!(shell.sessions.lock().unwrap().is_empty());
+        assert_eq!(
+            protected(StatusCode::OK.into_response()).headers()[header::CONTENT_SECURITY_POLICY],
+            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passkey_export_never_bypasses_identity_or_native_shell_guard() -> Result<()> {
+        struct DenyIdentity;
+        impl FreshAuthenticator for DenyIdentity {
+            fn identify(&self, _: &HeaderMap, _: i64) -> Result<iap::Verified> {
+                anyhow::bail!("fixture_identity_refused")
+            }
+            fn begin(
+                &self,
+                _: &iap::Verified,
+                _: FreshIntent,
+                _: &HeaderMap,
+                _: i64,
+            ) -> Result<ReauthStart> {
+                panic!("export never reauthenticates")
+            }
+        }
+        struct DenyGuard;
+        impl ShellGuard for DenyGuard {
+            fn check(&self, _: i64) -> Result<()> {
+                anyhow::bail!("fixture_native_guard_refused")
+            }
+        }
+        let headers = HeaderMap::from_iter([(header::HOST, "security.example.com".parse()?)]);
+        let mut shell = isolated_shell()?;
+        Arc::get_mut(&mut shell).unwrap().guard = Some(Arc::new(DenyGuard));
+        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+            assert_eq!(
+                shell
+                    .dispatch(&Method::GET, path, None, &headers, &[], 5)
+                    .unwrap_err()
+                    .to_string(),
+                "fixture_native_guard_refused"
+            );
+        }
+        let shell_mut = Arc::get_mut(&mut shell).unwrap();
+        shell_mut.guard = None;
+        shell_mut.authenticator = Arc::new(DenyIdentity);
+        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+            assert_eq!(
+                shell
+                    .dispatch(&Method::GET, path, None, &headers, &[], 5)
+                    .unwrap_err()
+                    .to_string(),
+                "fixture_identity_refused"
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -2191,6 +2317,7 @@ mod tests {
         instance.identity = Some(crate::artifact::IdentityProvider {
             scheme: crate::artifact::IdentityScheme::GoogleIap,
             hosted_domain: "example.com".into(),
+            cli_desktop_client: None,
         });
         instance.security_shell = Some(crate::artifact::Edge {
             origin: "https://security.example.com".into(),

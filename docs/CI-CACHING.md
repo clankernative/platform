@@ -33,11 +33,18 @@ A missing archive, including on a
 failed-jobs-only rerun with an earlier producer attempt, merely loses this optional
 acceleration. It cannot supply a receipt or skip the current verification gate.
 
-The final verification join also restores that retained compiler-action archive
-before compiling its current admission guard. It uses its own preparation run and
-attempt, or the exact queue origin already admitted by the reuse guard. This
-keeps a cache entry evicted during a long runtime campaign from forcing a cold
-verifier rebuild inside the join's unchanged twenty-minute budget. Artifact
+The final verification join restores a separate bootstrap compiler-action snapshot
+captured immediately after tests preparation compiles the current verifier, before
+test compilation grows the cache. Both Linux archives use fast gzip compression;
+the bootstrap no longer depends on the larger post-test archive completing within
+its three-minute deadline. It uses the exact checkout SHA and its own preparation
+run, or the exact queue origin already admitted by the reuse guard. The first
+complete bootstrap snapshot is immutable across attempts of that same run and
+checkout, so a failed-jobs-only rerun does not request a nonexistent new-attempt
+cache artifact. This exception applies only to compiler-cache data, never to
+verification receipts or prepared executables. This keeps cache eviction during
+a long campaign from forcing a cold verifier rebuild inside the join's unchanged
+twenty-minute budget. Artifact
 transport has the same two-minute deadline and one retry; failures leave the
 ordinary compilation path in place. The archive contains only content-addressed
 compiler data, never a verifier to install directly or a reusable test outcome.
@@ -97,8 +104,13 @@ with the expected ignored status; zero matches cannot qualify compatibility.
 The lane compiles the ordinary default graph and executes its focused campaign
 rather than substituting a Linux result. Neither real native campaign is cached.
 
-Linux jobs keep the pinned OCI image, private 6 GiB cgroup without swap, four CPU
-allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Trusted
+Linux jobs keep the pinned OCI image, private cgroup without swap, four CPU
+allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Test
+preparation alone gets 8 GiB on the existing standard 16 GB Linux runner; the
+other preparation parts and runtime shards retain 6 GiB. Setup accepts only
+the explicit workflow purposes `standard` and `test-preparation`, checks their
+fixed finite ceilings, and records the selected purpose and actual allowance.
+This uses existing runner RAM, with no larger-runner allocation. Trusted
 setup preserves and rechecks the checked-in ABI seed. Inner compiler/worker
 confinement and ELF/glibc/loader admission remain mandatory. This is separate
 from the production Mac private builder; no Linux production builder is added.
@@ -137,9 +149,22 @@ count and its entries disagree or the count changes between pages, the selector
 discards that entire snapshot and restarts from page one, at most three times.
 It never truncates extra entries or combines pages from different snapshots.
 Malformed identities, duplicates and budget overruns refuse immediately;
-persistent inconsistency also refuses. Diagnostics identify only the closed
-inventory endpoint and numeric run/attempt, without process arguments or
-environment values.
+persistent inconsistency also refuses. The complete jobs index binds producer
+identity and uniqueness. Each selected producer's exact numeric job endpoint
+refreshes its current outcome without changing the indexed run, attempt, SHA,
+job ID, name, URL or runner labels. Refresh also refuses to erase observed
+runner assignment or execution evidence. A known terminal failure cannot be
+overwritten by a conflicting success; a fresh failed producer still refuses
+older artifacts.
+
+Read-only metadata GETs request revalidation. Only a genuinely closed child with
+numeric exit code 1 can retry, at most three requests sharing the original
+120-second monotonic budget. Each attempt uses a fresh response file. Spawn,
+wait, timeout, other or nonnumeric exit, and malformed or oversized successful
+JSON errors refuse without retry. A successful response reporting a failed
+producer is not a transport failure and still refuses admission. Diagnostics
+identify only the fixed refused field or closed endpoint and numeric exit, never
+process arguments, environments, API values or private output.
 
 `ci-artifact-selection.json` in the final verification receipt records the current
 consumer and each original producer attempt, job, check, artifact ID and digest.
@@ -154,7 +179,12 @@ GitHub can cancel a `macos-15` allocation before any runner starts, independentl
 of the job's six-hour execution timeout. Platform CI requests one new allocation
 only after a read-only API guard authenticates the unique original job in the
 same run, attempt and head, cancelled with runner ID zero, an empty runner name,
-and no steps. Partial job inventories, missing or duplicated jobs, wrong heads
+and no steps. The cheap guard reads the actual API state after the original job
+instead of requiring the scheduler's `needs.result` to report `cancelled`.
+A completed ordinary success or executed failure emits `admitted=false` and
+cannot allocate a retry; only the exact unacquired shape emits `admitted=true`.
+The normal workflow-cancellation conditions still apply to both guard and retry.
+Partial job inventories, missing or duplicated jobs, wrong heads
 and executed failures refuse the retry. Cancelling the entire workflow also
 prevents it. The retry uses the identical steps, runner, verification recipe,
 cache policy, and source/run/attempt-bound Mac receipt as the original job.
@@ -264,3 +294,15 @@ References: [Bazel caching](https://bazel.build/remote/caching),
 [GitHub cache scopes and limits](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),
 [workflow runs](https://docs.github.com/en/rest/actions/workflow-runs),
 [artifact API](https://docs.github.com/en/rest/actions/artifacts).
+
+### Day2 runtime partitions
+
+The day2 binary group serves both `workspace-day2` and `workspace-day2-runtime`;
+it is still admitted by exact compiler/preparation identity before either job
+executes it. The runtime part runs the integration harness and OAuth lifecycle library
+histories; the other part runs the remaining library and bin-unit cases. The
+jobs run disjoint actual case inventories, not cached test results. Composition requires both authenticated result artifacts, current
+executable inventory equality and complete joined DST observations. A main queue
+reuse receipt without the additional part and its completed case evidence refuses.
+The binary group is shared transport data; it does not let either part stand in
+for the other's fresh runtime outcomes.

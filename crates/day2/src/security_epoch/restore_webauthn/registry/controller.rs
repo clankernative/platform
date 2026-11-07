@@ -60,7 +60,7 @@ impl ControllerCeremony {
         expected: &ApprovalIntent,
         stored_counter: u32,
         assertion: &Assertion,
-    ) -> Result<AssertionFacts> {
+    ) -> Result<Option<AssertionFacts>> {
         let result = (|| {
             self.intent.require_exact(expected)?;
             self.ceremony.verify_current_controller(
@@ -239,7 +239,7 @@ impl RegistryCeremony {
         executor: &str,
         stored_counter: u32,
         assertion: &Assertion,
-    ) -> Result<AssertionFacts> {
+    ) -> Result<Option<AssertionFacts>> {
         let result = (|| {
             self.begin_attempt()?;
             self.observe_controller(reader, executor)?;
@@ -258,15 +258,38 @@ impl RegistryCeremony {
                 super::super::verify(&key, &challenge, &self.request, stored_counter, assertion)
             };
             let checked = self.observe_controller(reader, executor);
-            let facts = requested?;
-            checked?;
-            Ok(facts)
+            settle_verification(requested, checked)
         })();
         if result.is_err() {
             self.refused.set(true);
             reader.refuse();
+        } else if matches!(&result, Ok(None)) {
+            // A known denial spends this attempt without poisoning a reader
+            // whose actual postchecks succeeded. No retry on the ceremony.
+            self.refused.set(true);
         }
         result
+    }
+}
+
+/// Only this fixed native caller converts an actual typed assertion rejection
+/// into DATA, after the actual current-source postcheck has already run and
+/// succeeded. Unknown errors retain their identity, and a failed postcheck
+/// never becomes a known denial. The caller refuses the reader on every Err.
+fn settle_verification(
+    requested: Result<AssertionFacts>,
+    checked: Result<()>,
+) -> Result<Option<AssertionFacts>> {
+    match requested {
+        Ok(facts) => {
+            checked?;
+            Ok(Some(facts))
+        }
+        Err(error) if error.is::<super::super::AssertionDenied>() => {
+            checked?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 

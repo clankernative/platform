@@ -197,6 +197,19 @@ not test execution or a count of generated machine-code actions. The migration
 PR remains unqualified for a speedup until matched full Linux/Mac runs retain
 those measurements and unchanged verification coverage.
 
+The Roc CLI and operational runner use the complete source-pinned package set
+in `build/bazel/roc-packages.json`. `xtask bootstrap` fetches those archives with
+bounded HTTPS retries, verifies exact archive sizes and SHA-256 values, and
+unbundles them with the pinned compiler into `cli/.cache/roc-packages`. Bootstrap
+sets the declared public-input modes during construction. Receivers verify hashes
+covering every file, directory and permission, and reject aliases and extra
+entries. Only these admitted inputs travel with the CLI to its test shard;
+compiler scratch and test outcomes do not. Every receiver rechecks archive and
+tree pins. Compiler calls use explicit URL-to-local replacements for the root
+platform and its transitive HTTP package, so absent or changed inputs refuse
+before compilation instead of falling back to live downloads or a default cache.
+Existing CLI check/test/build and inference-negative cases still execute fresh.
+
 References: [Bazel run and test behavior](https://bazel.build/docs/user-manual),
 [Bazel caching](https://bazel.build/remote/caching),
 [setup-bazel](https://github.com/bazel-contrib/setup-bazel).

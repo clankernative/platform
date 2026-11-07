@@ -2,6 +2,11 @@
 startup --host_jvm_args=-Xmx768m
 common --lockfile_mode=error
 common --enable_platform_specific_config
+# Retry source downloads, never compiler actions or tests. The connector handles
+# retryable HTTP responses; the repository layer handles truncated/socket reads.
+common --http_connector_attempts=12
+common --http_connector_retry_max_timeout=10s
+common --experimental_repository_downloader_retries=5
 build --jobs=2
 build --define=DAY2_PLATFORM_JOBS=2
 build --define=DAY2_PLATFORM_FEATURE_SCOPE=verification

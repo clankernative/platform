@@ -16,17 +16,45 @@ pub(crate) struct Appearance {
     name: String,
     binding: Option<String>,
     brand: Option<LoadedBrand>,
+    module_preloads: Vec<String>,
 }
 impl Appearance {
     pub fn load(runtime: &Runtime) -> Result<Self> {
         let instance = Instance::load(runtime.instance_path())?;
-        Ok(Self {
+        let mut appearance = Self {
             scope: assets::hash_part(&digest(runtime.scope().as_bytes()))?.into(),
             artifact: assets::hash_part(runtime.artifact().id())?.into(),
             name: instance.installation,
             binding: instance.branding,
             brand: LoadedBrand::for_instance(runtime.instance_path())?,
+            module_preloads: Vec::new(),
+        };
+        let prefix = appearance.resource_prefix();
+        let roots = [
+            appearance.script_url(runtime)?,
+            appearance.component_script_url(runtime)?,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|url| {
+            url.strip_prefix(&prefix)
+                .map(str::to_owned)
+                .context("module_preload_scope")
         })
+        .collect::<Result<Vec<_>>>()?;
+        appearance.module_preloads = crate::web_resources::module_preloads(
+            runtime.artifact().directory(),
+            &runtime.artifact().contract().web_resources,
+            &roots,
+        )?
+        .into_iter()
+        .map(|path| appearance.resource_url(runtime, &path))
+        .collect::<Result<_>>()?;
+        Ok(appearance)
+    }
+
+    pub fn module_preload_urls(&self) -> &[String] {
+        &self.module_preloads
     }
     pub fn check_binding(&self, runtime: &Runtime) -> Result<()> {
         ensure!(
@@ -155,13 +183,15 @@ impl Appearance {
         &self,
         runtime: &Runtime,
         path: &str,
+        query: Option<&str>,
         session: Option<&Session>,
         headers: &HeaderMap,
     ) -> Result<Response> {
         self.check_binding(runtime)?;
         if path.starts_with("/assets/platform/") {
-            return platform(path, headers);
+            return platform(path, query, headers);
         }
+        ensure!(query.is_none(), crate::error::Failure::InvalidInput);
         if path.starts_with("/assets/app/") || path.starts_with("/assets/ui/") {
             let pieces: Vec<_> = path.split('/').collect();
             if pieces.len() >= 6 && pieces[3] == self.scope && pieces[4] != self.artifact {
@@ -240,12 +270,17 @@ impl Appearance {
         if path.starts_with("/assets/app/") || path.starts_with("/assets/ui/") {
             let session = session.context(crate::error::Failure::SignInRequired)?;
             ensure!(
-                runtime
-                    .artifact()
-                    .contract()
-                    .pages
-                    .iter()
-                    .any(|page| runtime.authorize(&page.operation, &session.actor).is_ok()),
+                runtime.sql_read(|tx| {
+                    Ok(runtime.artifact().contract().pages.iter().any(|page| {
+                        crate::authority_state::authorize_in(
+                            tx,
+                            runtime,
+                            &page.operation,
+                            &session.actor,
+                        )
+                        .is_ok()
+                    }))
+                })?,
                 crate::error::Failure::Forbidden
             );
             for (key, asset) in &runtime.artifact().contract().assets {
@@ -253,7 +288,7 @@ impl Appearance {
                     return blob(
                         runtime.artifact().directory(),
                         asset,
-                        CachePolicy::PrivateRevalidate,
+                        CachePolicy::PrivateImmutable,
                         headers,
                     );
                 }
@@ -263,7 +298,7 @@ impl Appearance {
                     return bytes(
                         &resource.media_type,
                         crate::web_resources::read_blob(runtime.artifact().directory(), resource)?,
-                        CachePolicy::PrivateRevalidate,
+                        CachePolicy::PrivateImmutable,
                         headers,
                     );
                 }
@@ -310,6 +345,7 @@ pub(crate) enum CachePolicy {
     PublicImmutable,
     PublicRevalidate,
     PrivateRevalidate,
+    PrivateImmutable,
 }
 
 pub(crate) fn bytes(
@@ -343,6 +379,7 @@ pub(crate) fn bytes(
             CachePolicy::PublicImmutable => "public, max-age=31536000, immutable",
             CachePolicy::PublicRevalidate => "no-cache",
             CachePolicy::PrivateRevalidate => "private, no-cache",
+            CachePolicy::PrivateImmutable => "private, max-age=31536000, immutable",
         }
         .parse()?,
     );
@@ -398,8 +435,8 @@ fn if_none_match(headers: &HeaderMap, etag: &[u8]) -> bool {
 
 // Only platform chrome is embedded. No app asset names or company brands live
 // in this catalog; those are resolved exclusively from admitted bundles above.
-fn platform(path: &str, headers: &HeaderMap) -> Result<Response> {
-    let (kind, data): (&str, &[u8]) = match path {
+fn platform_data(path: &str) -> Option<(&'static str, &'static [u8])> {
+    let result: (&str, &[u8]) = match path {
         "/assets/platform/web.css" => ("text/css", include_bytes!("../../../assets/web.css")),
         "/assets/platform/api-docs.css" => {
             ("text/css", include_bytes!("../../../assets/api-docs.css"))
@@ -448,8 +485,61 @@ fn platform(path: &str, headers: &HeaderMap) -> Result<Response> {
             "image/svg+xml",
             include_bytes!("../../../assets/icons/shield-check.svg"),
         ),
-        _ => return Ok(StatusCode::NOT_FOUND.into_response()),
+        _ => return None,
     };
-    // These paths are not content-addressed, even when a filename has a version.
-    bytes(kind, data, CachePolicy::PublicRevalidate, headers)
+    Some(result)
+}
+
+pub(crate) fn platform_url(path: &str) -> Result<String> {
+    let (_, data) = platform_data(path).context("unknown_platform_asset")?;
+    Ok(format!("{path}?v={}", digest(data)))
+}
+
+fn platform(path: &str, query: Option<&str>, headers: &HeaderMap) -> Result<Response> {
+    let Some((kind, data)) = platform_data(path) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let policy = if let Some(query) = query {
+        let fields =
+            crate::routing::query_fields(query).map_err(|_| crate::error::Failure::InvalidInput)?;
+        ensure!(
+            fields.len() == 1 && fields.get("v") == Some(&digest(data)),
+            crate::error::Failure::InvalidInput
+        );
+        CachePolicy::PublicImmutable
+    } else {
+        CachePolicy::PublicRevalidate
+    };
+    bytes(kind, data, policy, headers)
+}
+
+#[cfg(test)]
+mod platform_version_tests {
+    use super::*;
+    #[test]
+    fn immutable_platform_urls_require_the_exact_embedded_digest() -> Result<()> {
+        let url = platform_url("/assets/platform/forms.js")?;
+        let (path, query) = url.split_once('?').context("versioned URL")?;
+        let response = platform(path, Some(query), &HeaderMap::new())?;
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        for bad in [
+            "v=wrong".to_owned(),
+            format!("{query}&v=wrong"),
+            format!("{query}&extra=1"),
+            "v=%FF".into(),
+        ] {
+            assert!(
+                platform(path, Some(&bad), &HeaderMap::new()).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            platform(path, None, &HeaderMap::new())?.headers()[header::CACHE_CONTROL],
+            "no-cache"
+        );
+        Ok(())
+    }
 }

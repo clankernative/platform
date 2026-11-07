@@ -25,7 +25,7 @@ call must fail at the unchanged one-slot concurrency budget. All eight declared
 outcome/replay categories must be observed.
 
 CI retains `day2-alerts-coverage-<run>-<attempt>` and, on failure,
-`day2-alerts-replays-<run>-<attempt>` for fourteen days. Missing success output
+`day2-alerts-replays-<shard>-<run>-<attempt>` for fourteen days. Missing success output
 fails its artifact step. Failure bundles contain only the format, compiled
 campaign-source digest and numeric seed, never alert bodies, handles,
 credentials, raw snapshots or error text.
