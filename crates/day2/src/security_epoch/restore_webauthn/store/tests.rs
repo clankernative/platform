@@ -47,6 +47,100 @@ fn prepare(db: &mut Connection, f: &Fixture) -> Digest {
     id
 }
 
+#[test]
+fn executor_completion_rechecks_the_new_counter_and_exact_verified_row_after_reopen() -> Result<()>
+{
+    let mut f = fixture();
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().canonicalize()?.join("execution.sqlite");
+    let mut db = Connection::open(&path)?;
+    let approval = prepare(&mut db, &f);
+    complete(
+        &mut db,
+        &f.key,
+        &approval,
+        &f.challenge.request,
+        1100,
+        &f.assertion(1, 0x0d),
+    )?;
+    // The SAME administrator/key now authenticates execution. Its successful
+    // approval already advanced the version/counter; that old value must not
+    // be required by the new executor completion.
+    f.challenge.request = Digest::of(&(
+        "day2-restore-executor-assertion-v1",
+        Digest::new(b"complete signed approval"),
+        Digest::new(b"one actual operation"),
+    ))?;
+    f.challenge.nonce = [79; 32];
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let id = issue(&tx, &f.key, &f.challenge, 1100, 1400)?;
+    assert!(verified_snapshot(&tx, &f.key, &f.challenge, 2).is_err());
+    tx.commit()?;
+    complete(
+        &mut db,
+        &f.key,
+        &id,
+        &f.challenge.request,
+        1200,
+        &f.assertion(2, 0x0d),
+    )?;
+    let tx = db.transaction()?;
+    let expected = verified_snapshot(&tx, &f.key, &f.challenge, 2)?;
+    assert_eq!(expected.0, 3);
+    tx.commit()?;
+    drop(db);
+    let mut db = Connection::open(&path)?;
+    let tx = db.transaction()?;
+    assert_eq!(verified_snapshot(&tx, &f.key, &f.challenge, 2)?, expected);
+    assert!(verified_snapshot(&tx, &f.key, &f.challenge, 1).is_err());
+    tx.commit()?;
+    // Independent expectation: every listed persistent transition invalidates
+    // the saved completion. Each actual transaction is rolled back only to
+    // reset this fixture, never to promise production rollback after delivery.
+    let foreign = Digest::new(b"foreign binding").as_str().to_owned();
+    for mutation in [
+        "UPDATE restore_passkey_keys SET enabled=0".to_owned(),
+        "UPDATE restore_passkey_keys SET version=version+1".to_owned(),
+        "UPDATE restore_passkey_keys SET counter=counter+1".to_owned(),
+        format!("UPDATE restore_passkey_keys SET binding='{foreign}'"),
+        "UPDATE restore_passkey_challenges SET state='claimed' WHERE state='verified'".to_owned(),
+        format!("UPDATE restore_passkey_challenges SET request='{foreign}'"),
+        format!("UPDATE restore_passkey_challenges SET binding='{foreign}'"),
+        "UPDATE restore_passkey_challenges SET nonce=zeroblob(32)".to_owned(),
+        "UPDATE restore_passkey_challenges SET key_version=key_version+1".to_owned(),
+        "UPDATE restore_passkey_challenges SET counter=counter+1".to_owned(),
+        "UPDATE restore_passkey_challenges SET created_at=created_at+1,expires_at=expires_at+1"
+            .to_owned(),
+        "DELETE FROM restore_passkey_challenges".to_owned(),
+    ] {
+        let tx = db.transaction()?;
+        tx.execute_batch(&mutation)?;
+        let actual = verified_snapshot(&tx, &f.key, &f.challenge, 2);
+        assert!(actual.is_err() || actual.as_ref().is_ok_and(|value| value != &expected));
+        tx.rollback()?;
+    }
+    // A denied assertion leaves a claimed tombstone, never a completed row.
+    f.challenge.nonce = [83; 32];
+    let tx = db.transaction()?;
+    let denied = issue(&tx, &f.key, &f.challenge, 1200, 1500)?;
+    tx.commit()?;
+    assert!(
+        complete(
+            &mut db,
+            &f.key,
+            &denied,
+            &f.challenge.request,
+            1300,
+            &f.assertion(3, 0x09)
+        )
+        .is_err()
+    );
+    let tx = db.transaction()?;
+    assert!(verified_snapshot(&tx, &f.key, &f.challenge, 3).is_err());
+    tx.commit()?;
+    Ok(())
+}
+
 fn observed(db: &Connection) -> (String, i64, u32) {
     for table in [
         "main.restore_passkey_keys",

@@ -464,7 +464,7 @@ fn expiry_revocation_key_loss_and_rewind_cannot_create_even_a_refusal_plan() -> 
                 3 => at = 999,
                 4 => current.observed_at = 999,
                 5 => current.grant.revision = Digest::new(b"changed"),
-                6 => current.grant.expires_at = 1200,
+                6 => current.grant.approval.expires_at = 1200,
                 7 => current.grant.clock_domain = Digest::new(b"other-domain"),
                 _ => current.grant.fence.receipt = Digest::new(b"another-fence"),
             }
@@ -929,6 +929,7 @@ fn source() -> Result<Digest> {
         include_str!("../../../../managed_credentials/store.rs"),
         include_str!("../../advance.rs"),
         include_str!("../../../kernel.rs"),
+        include_str!("../../../restore_approval.rs"),
         include_str!("../../../../json.rs"),
         include_str!("../../../../../../../Cargo.lock"),
         include_str!("../../../../../../day2-capabilities/src/lib.rs"),
@@ -1076,16 +1077,21 @@ fn replay(bytes: &[u8]) -> Result<bool> {
     }
     Ok(equal)
 }
+fn private_replay_directory(base: &std::path::Path, prefix: &str) -> Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(tempfile::Builder::new()
+        .prefix(prefix)
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(base)?)
+}
+
 fn retain(bytes: &[u8]) -> Result<std::path::PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../artifacts/control-slot-replays");
     std::fs::create_dir_all(&base)?;
-    let path = tempfile::Builder::new()
-        .prefix("restore-settlement-")
-        .tempdir_in(base)?
-        .keep();
+    let path = private_replay_directory(&base, "restore-settlement-")?.keep();
     let file = path.join("replay.json.gz");
     let mut out = std::fs::OpenOptions::new()
         .write(true)
@@ -1146,6 +1152,7 @@ fn generated_terminal_histories_compare_independent_complete_state_twice() -> Re
 
 #[test]
 fn uncertain_completion_false_oracle_and_restored_active_history_replay_closed() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     for events in [
         vec![
             Event::Prepare(true),
@@ -1164,6 +1171,11 @@ fn uncertain_completion_false_oracle_and_restored_active_history_replay_closed()
         assert_eq!(runs.iter().any(|r| r.failure.is_some()), wrong);
         let bytes = archive(77, &events, wrong, &runs)?;
         let path = retain(&bytes)?;
+        assert_eq!(path.metadata()?.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            path.parent().unwrap().metadata()?.permissions().mode() & 0o777,
+            0o700
+        );
         assert!(replay(&std::fs::read(path)?)?);
         assert!(decode(&bytes[..bytes.len() - 1]).is_err());
         let mut extra = bytes.clone();

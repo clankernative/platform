@@ -308,13 +308,13 @@ fn activation(
         "exact OAuth activation material missing"
     );
     let (intent, callback): (super::connect::ConnectIntent, String) = db.query_row(
-        "SELECT a.attempt,a.expected_generation,a.expected_epoch,a.owner,a.profile,a.registration,a.callback,a.consent,a.expires_at,b.binding
+        "SELECT a.attempt,a.expected_generation,a.expected_epoch,a.owner,a.profile,a.registration,a.callback,a.consent,a.expires_at,b.binding,a.generation_floor
          FROM oauth_connect_attempts a JOIN oauth_callback_bindings b ON b.attempt=a.attempt
          WHERE a.slot=?1 AND a.proposed_generation=?2 AND a.state='activated' AND a.account=?3",
         params![claims.slot, claims.generation, claims.account],
         |row| Ok((super::connect::ConnectIntent {
             attempt: row.get(0)?, slot: claims.slot.clone(), expected_generation: row.get(1)?, expected_epoch: row.get(2)?,
-            proposed_generation: claims.generation, owner: row.get(3)?, profile: row.get(4)?, registration: row.get(5)?,
+            proposed_generation: claims.generation, generation_floor: row.get("generation_floor")?, owner: row.get(3)?, profile: row.get(4)?, registration: row.get(5)?,
             callback: row.get(6)?, consent: row.get(7)?, expires_at: row.get(8)?,
         }, row.get(9)?)),
     )?;
@@ -1832,6 +1832,7 @@ mod tests {
             expected_generation: None,
             expected_epoch: 1,
             proposed_generation: 1,
+            generation_floor: 0,
             owner: "alice@example.com".into(),
             profile: permission.profile.id.as_str().into(),
             registration: Digest::of(&binding.registration)?.as_str().into(),

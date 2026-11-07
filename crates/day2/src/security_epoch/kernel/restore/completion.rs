@@ -229,6 +229,29 @@ pub(in crate::security_epoch) struct Plan {
 }
 
 impl Plan {
+    /// Validate a completed terminal observation and current authority for the
+    /// distinct writer transition. The returned report remains historical DATA,
+    /// not proof of reset, a consumed approval or permission to admit a writer.
+    pub(in crate::security_epoch) fn completed_report(
+        &self,
+        selected: &EpochStore,
+        request: &Request,
+        current: &Current,
+        at: i64,
+        observed: &State,
+        terminal: &Versioned<Receipt>,
+    ) -> Result<&TargetReport> {
+        self.revalidate(selected, request, current, at, observed, None)?;
+        ensure!(
+            terminal.value == self.receipt,
+            "restore_writer_terminal_changed"
+        );
+        let Disposition::Completed { report } = &self.receipt.disposition else {
+            anyhow::bail!("restore_writer_reset_not_completed");
+        };
+        Ok(report)
+    }
+
     pub(in crate::security_epoch) fn revalidate(
         &self,
         selected: &EpochStore,

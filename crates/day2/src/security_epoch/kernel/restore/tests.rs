@@ -4,9 +4,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
+mod approval_use;
 mod history;
 #[cfg(unix)]
 mod process;
+mod provider_wire;
 
 pub(super) fn version(n: u64) -> super::super::UpdateTime {
     format!("2026-11-04T00:00:00.{n:06}Z").try_into().unwrap()
@@ -66,6 +68,7 @@ pub(super) fn intent(selected: &EpochStore, seed: u64) -> Intent {
                 .database_incarnation
                 .clone(),
             security_epoch: 1,
+            full_archive_digest: Digest::of(&("complete-archive", seed)).unwrap(),
             image: Digest::of(&("backup-image", seed)).unwrap(),
             schema: Digest::new(b"exact-private-schema"),
             artifact: Digest::new(b"admitted-artifact"),
@@ -88,15 +91,40 @@ pub(super) fn current(selected: &EpochStore, intent: &Intent, before: &Snapshot)
     let Phase::ActiveFirstHolder { completion } = &root.phase else {
         panic!("fixture root");
     };
+    let target = crate::security_epoch::restore_approval::TargetBinding {
+        scope: selected.scope.clone(),
+        binding_generation: 1,
+        authority: selected.authority_key().unwrap(),
+        selection: Digest::of(selected).unwrap(),
+        incarnation: intent.target_incarnation.clone(),
+        security_epoch: 2,
+        artifact: intent.archive.artifact.clone(),
+        schema: intent.archive.schema.clone(),
+    };
+    let custody = intent.archive.required_keys[0].binding.clone();
+    let executor = crate::security_epoch::restore_approval::AdminIdentity {
+        email: "operator@example.test".into(),
+        subject: "stable-operator-subject".into(),
+    };
     Current {
+        target: target.clone(),
+        custody: custody.clone(),
+        executor: executor.clone(),
         grant: Grant {
             intent: intent.commitment(selected).unwrap(),
             issuer: Digest::new(b"independent-maintenance-issuer"),
             revision: Digest::new(b"original-approval-revision"),
             policy: Digest::new(b"restore-only-policy"),
             clock_domain: Digest::new(b"maintenance-clock-domain"),
-            issued_at: 1000,
-            expires_at: 1100,
+            approval: crate::security_epoch::restore_approval::ApprovalRequest {
+                grant_id: Digest::of(&("approval-id", &intent.operation)).unwrap(),
+                full_archive_digest: intent.archive.full_archive_digest.clone(),
+                target,
+                executor,
+                custody,
+                approved_at: 1000,
+                expires_at: 4600,
+            },
             fence: Fence {
                 root: Digest::of(root).unwrap(),
                 holder: Digest::of(&completion.holder).unwrap(),
@@ -586,11 +614,11 @@ fn fresh_authority_exact_keys_fence_and_clock_are_required_without_renewing_the_
             7 => at = 999,
             8 => at = 1005,
             9 => {
-                changed.observed_at = 1099;
-                changed.ready_until = 1101;
-                at = 1099;
+                changed.observed_at = 4599;
+                changed.ready_until = 4601;
+                at = 4599;
             }
-            10 => changed.grant.expires_at = 1200,
+            10 => changed.grant.approval.expires_at = 1200,
             11 => changed.grant.issuer = Digest::new(b"foreign-maintenance-issuer"),
             12 => changed.grant.policy = Digest::new(b"foreign-maintenance-policy"),
             13 => changed.grant.intent = Digest::new(b"another-restore-intent"),
@@ -605,11 +633,11 @@ fn fresh_authority_exact_keys_fence_and_clock_are_required_without_renewing_the_
         );
     }
     let mut fresh = current.clone();
-    fresh.observed_at = 1099;
-    fresh.ready_until = 1100;
-    plan.revalidate(&selected, &fresh, 1099, &before, None)?;
+    fresh.observed_at = 4599;
+    fresh.ready_until = 4600;
+    plan.revalidate(&selected, &fresh, 4599, &before, None)?;
     assert!(
-        plan.revalidate(&selected, &fresh, 1100, &before, None)
+        plan.revalidate(&selected, &fresh, 4600, &before, None)
             .is_err()
     );
     let mut original = current.clone();
