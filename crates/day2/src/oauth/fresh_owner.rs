@@ -355,8 +355,8 @@ fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>> {
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
-    super::restore::install(db)?;
     super::schema::admit(db, |db| {
+        super::restore::install(db)?;
         replace_empty_historical_unit(db)?;
         install_current(db)
     })
