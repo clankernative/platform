@@ -384,6 +384,7 @@ impl ControllerExecutionCeremony {
             counter,
             version,
             snapshot,
+            phase: ExecutionPhase::Verified,
         }))
     }
 
@@ -459,9 +460,108 @@ pub(in crate::security_epoch) struct ExecutionCompletion {
     counter: u32,
     version: i64,
     snapshot: Digest,
+    phase: ExecutionPhase,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutionPhase { Verified, Claiming, Claimed }
+
+#[derive(Clone, Copy)]
+enum AttemptUnit { Record, Check }
+
+fn attempt_sql_unit(
+    db: &mut rusqlite::Connection,
+    key: &TrustedKey<'_>,
+    challenge: &super::super::super::Challenge,
+    signed: &SignedApprovalRecord,
+    operation: &Digest,
+    completed: (u32, i64, &Digest),
+    unit: AttemptUnit,
+) -> Result<()> {
+    key.check_sqlite(db)?;
+    let behavior = match unit {
+        AttemptUnit::Record => rusqlite::TransactionBehavior::Immediate,
+        AttemptUnit::Check => rusqlite::TransactionBehavior::Deferred,
+    };
+    let tx = db.transaction_with_behavior(behavior)?;
+    match unit {
+        AttemptUnit::Record => super::super::super::store::mark_may_execute(
+            &tx, key, challenge, signed, operation, completed,
+        )?,
+        AttemptUnit::Check => super::super::super::store::check_may_execute(
+            &tx, key, challenge, signed, operation, completed,
+        )?,
+    }
+    key.check_sqlite(&tx)?;
+    let committed = tx.commit();
+    let checked = key.check_sqlite(db);
+    committed?;
+    checked
 }
 
 impl ExecutionCompletion {
+    /// The actual completed executor, boxed connection and file/native loan
+    /// remain retained. Claiming is sticky on error or unwind; a row never
+    /// reconstructs this completion. The consuming stop still checks its own
+    /// original before and after this fixed, closed SQL unit.
+    pub(in crate::security_epoch) fn record_attempt(
+        &mut self,
+        reader: &mut ControllerAdminReader<'_, '_, '_>,
+        sql: (&mut rusqlite::Connection, &mut AuthenticationStoreFiles),
+    ) -> Result<()> {
+        if self.phase != ExecutionPhase::Verified {
+            self.ceremony.ceremony.refused.set(true);
+            sql.1.refuse();
+            reader.refuse();
+            anyhow::bail!("restore_executor_attempt_already_started");
+        }
+        self.phase = ExecutionPhase::Claiming;
+        let result = self.attempt_unit(reader, sql, AttemptUnit::Record);
+        if result.is_ok() { self.phase = ExecutionPhase::Claimed; }
+        result
+    }
+
+    fn attempt_unit(
+        &self,
+        reader: &mut ControllerAdminReader<'_, '_, '_>,
+        sql: (&mut rusqlite::Connection, &mut AuthenticationStoreFiles),
+        unit: AttemptUnit,
+    ) -> Result<()> {
+        let (db, files) = sql;
+        let requested = (|| {
+            ensure!(std::ptr::eq(self.database, std::ptr::from_ref(db)), "restore_executor_completion_owner_changed");
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.ceremony.observe(reader)?;
+            let challenge = self.ceremony.ceremony.challenge()?;
+            let mut borrow = AuthenticationBorrow {
+                reader: AuthenticationReader::Active(&mut *reader),
+                held: &self.ceremony.ceremony.held,
+                files: &mut *files,
+            };
+            let key = TrustedKey {
+                record: self.ceremony.ceremony.record.clone(),
+                source: KeySource::Registry(Origin { owner: RefCell::new(&mut borrow) }),
+            };
+            attempt_sql_unit(db, &key, &challenge, &self.ceremony.signed,
+                &self.ceremony.operation, (self.counter, self.version, &self.snapshot), unit)
+        })();
+        let held = crate::store::check_authentication_sqlite(files, db);
+        let native = reader.check_registry_local();
+        let checked = (|| {
+            held?;
+            native?;
+            ensure!(db.is_autocommit(), "restore_auth_transaction_open");
+            self.ceremony.observe(reader)
+        })();
+        if requested.is_err() || checked.is_err() {
+            self.ceremony.ceremony.refused.set(true);
+            files.refuse();
+            reader.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn check_fenced(
         &self,
         reader: &mut crate::security_epoch::bootstrap::FencedRegistryLoan<'_, '_, '_, '_>,
@@ -500,6 +600,7 @@ impl ExecutionCompletion {
             reader.check_local()
         };
         let requested = (|| {
+            ensure!(self.phase == ExecutionPhase::Claimed, "restore_executor_attempt_not_claimed");
             ensure!(
                 std::ptr::eq(self.database, std::ptr::from_ref(db))
                     && signed == &self.ceremony.signed
@@ -525,6 +626,8 @@ impl ExecutionCompletion {
                 current.0 == self.version && current.1 == self.snapshot,
                 "restore_executor_completion_changed"
             );
+            attempt_sql_unit(db, &key, &challenge, &self.ceremony.signed,
+                &self.ceremony.operation, (self.counter, self.version, &self.snapshot), AttemptUnit::Check)?;
             Ok(())
         })();
         let held = crate::store::check_authentication_sqlite(files, db);
@@ -553,6 +656,7 @@ impl ExecutionCompletion {
     ) -> Result<()> {
         let (db, files) = sql;
         let requested = (|| {
+            ensure!(self.phase != ExecutionPhase::Claiming, "restore_executor_attempt_unsettled");
             ensure!(
                 std::ptr::eq(self.database, std::ptr::from_ref(db))
                     && signed == &self.ceremony.signed
@@ -566,6 +670,9 @@ impl ExecutionCompletion {
                 current.0 == self.version && current.1 == self.snapshot,
                 "restore_executor_completion_changed"
             );
+            if self.phase == ExecutionPhase::Claimed {
+                self.attempt_unit(reader, (db, files), AttemptUnit::Check)?;
+            }
             Ok(())
         })();
         if requested.is_err() {
