@@ -26,6 +26,7 @@ use std::{
 
 mod request;
 mod response;
+mod response_tickets;
 
 type Role = response::Role<EnrolledProcessRoleOwner>;
 
@@ -72,6 +73,7 @@ struct Owners {
     selection: NativeSelection,
     originals: BTreeMap<String, StoredOriginal<EnrolledClock>>,
     storage: AppStorage,
+    response_rights: response_tickets::ResponseRights,
 }
 
 struct StoredOriginal<C: Clock> {
@@ -217,6 +219,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                         selection: selection.clone(),
                         originals: BTreeMap::new(),
                         storage,
+                        response_rights: response_tickets::ResponseRights::new(),
                     }
                 )
                 .is_none(),
@@ -409,8 +412,10 @@ pub(crate) fn with_app_request<T>(
                 sink.bindings.try_borrow()?.is_empty() && sink.runtime.try_borrow()?.is_none(),
                 "autonomous request cannot retain HTTP response ownership"
             );
+            let terminal = sink.response_tickets.prepare(&sink.identity)?;
             sink.request.finish()?;
             sink.state.set(SinkState::Complete);
+            terminal.complete();
             Ok(value)
         }
         Ok(Err(error)) => {
@@ -2231,6 +2236,7 @@ pub(super) struct Sink {
     prepared: Rc<std::cell::Cell<bool>>,
     finite_app_io: Rc<std::cell::Cell<bool>>,
     request: request::Request,
+    response_tickets: Rc<response_tickets::ResponseTickets>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2284,14 +2290,17 @@ impl Sink {
             prepared: Rc::new(std::cell::Cell::new(false)),
             finite_app_io: Rc::new(std::cell::Cell::new(false)),
             request: request::Request::new(),
+            response_tickets: Rc::new(response_tickets::ResponseTickets::new()),
         }
     }
 
     pub(super) fn capture_app_request(&self, scope: &AuthorityScope) -> Result<()> {
+        self.response_tickets.capture_app(scope, &self.identity)?;
         self.request.capture_app(scope)
     }
 
     pub(super) fn capture_shell_request(&self) -> Result<()> {
+        self.response_tickets.capture_shell(&self.identity)?;
         self.request.capture_shell()
     }
 
@@ -2476,6 +2485,7 @@ impl Sink {
         for ((role, _), binding) in self.bindings.try_borrow()?.iter() {
             complete_response(&binding.intent, *role, &self.identity)?;
         }
+        let terminal = self.response_tickets.prepare(&self.identity)?;
         #[cfg(test)]
         if !fixtures::active() || self.request.has_started()? {
             self.request.finish()?;
@@ -2483,6 +2493,7 @@ impl Sink {
         #[cfg(not(test))]
         self.request.finish()?;
         self.state.set(SinkState::Complete);
+        terminal.complete();
         Ok(())
     }
 
@@ -2549,6 +2560,7 @@ impl Sink {
             return;
         }
         self.state.set(SinkState::Refused);
+        self.response_tickets.refuse();
         self.request.refuse();
         response::refuse_leased(self);
         let Ok(bindings) = self.bindings.try_borrow() else {

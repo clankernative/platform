@@ -292,6 +292,7 @@
     "crates/day2/src/oauth/native_management.rs",
     "crates/day2/src/oauth/native_management/request.rs",
     "crates/day2/src/oauth/native_management/response.rs",
+    "crates/day2/src/oauth/native_management/response_tickets.rs",
     "crates/day2/src/oauth/native_original.rs",
     "crates/day2/src/oauth/outbound.rs",
     "crates/day2/src/oauth/profiles.rs",
