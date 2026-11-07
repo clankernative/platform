@@ -2,9 +2,11 @@
 
 This private verifier checks a narrow ES256 WebAuthn assertion profile using the
 already admitted ring signature implementation. It does not register keys,
-install a registry, issue approval, select a clock or grant restore permission.
-Its trusted-key input has private fields, no codec or production factory, and a
-source enum with no production variant. The enrollment policy is still pending.
+issue approval, select a clock or grant restore permission. The trusted-key input
+has private fields and no codec. Its sole production source borrows an actual
+native runtime SQL owner and retained instance-configuration handles; it cannot
+be constructed from a registry record or an ordinary SQL runtime. See
+[the reviewed-registry source](CREDENTIAL-RESTORE-PASSKEY-SOURCE.md).
 
 The selected key binds the exact admin subject commitment, registry and version,
 credential identifier, user handle, P-256 public key, RP ID, HTTPS origin and
@@ -29,7 +31,7 @@ the received counter must strictly increase. Counterless passkeys still require
 durable one-use challenge consumption: repeated stateless verification is not a
 replay barrier. Signature/counter results are DATA, never an approval owner.
 
-The next store slice must atomically condition completion on the exact live
+The durable-store integration must atomically condition completion on the exact live
 enrollment and current admin-policy version, consume the challenge and update
 the stored counter. It must reject key removal or replacement, policy changes,
 stale writes and replay, including two valid assertions racing one challenge.

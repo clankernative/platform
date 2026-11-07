@@ -6,7 +6,7 @@ use ring::{
 
 struct Fixture {
     signer: EcdsaKeyPair,
-    key: TrustedKey,
+    key: TrustedKey<'static>,
     challenge: Challenge,
 }
 
@@ -391,7 +391,7 @@ fn require_closed_source(source: &str) -> Result<()> {
             .fields
             .iter()
             .any(|f| f.ident.as_ref().is_some_and(|id| id == "source")
-                && matches!(&f.ty, syn::Type::Path(path) if path.path.is_ident("KeySource"))),
+                && matches!(&f.ty, syn::Type::Path(path) if path.path.segments.len()==1 && path.path.segments[0].ident=="KeySource")),
         "trusted input lost closed source"
     );
     let origin = file
@@ -402,27 +402,77 @@ fn require_closed_source(source: &str) -> Result<()> {
             _ => None,
         })
         .unwrap();
+    let production = origin
+        .variants
+        .iter()
+        .filter(|v| !v.attrs.iter().any(|a| a.path().is_ident("cfg")))
+        .collect::<Vec<_>>();
+    ensure!(
+        production.len() == 1 && production[0].ident == "Registry",
+        "trusted input gained scalar source"
+    );
+    let syn::Fields::Unnamed(fields) = &production[0].fields else {
+        anyhow::bail!("registry origin not retained")
+    };
+    ensure!(
+        fields.unnamed.len() == 1
+            && matches!(&fields.unnamed[0].ty,syn::Type::Path(p) if p.path.segments.len()==2 && p.path.segments[0].ident=="registry" && p.path.segments[1].ident=="Origin"),
+        "registry origin not retained"
+    );
     ensure!(
         origin
             .variants
             .iter()
+            .filter(|v| v.ident != "Registry")
             .all(|v| v.attrs.iter().any(|a| a.path().is_ident("cfg")
                 && a.meta
                     .require_list()
-                    .is_ok_and(|list| list.tokens.to_string() == "test"))),
-        "production trusted-key source added"
+                    .is_ok_and(|l| l.tokens.to_string() == "test"))),
+        "production fixture source added"
     );
+    use syn::visit::Visit;
+    struct Calls(usize);
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "check_local"
+                && matches!(&*node.receiver,syn::Expr::Path(p) if p.path.is_ident("source"))
+            {
+                self.0 += 1;
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut calls = Calls(0);
+    for item in &file.items {
+        if let syn::Item::Impl(item) = item
+            && matches!(&*item.self_ty,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="TrustedKey"))
+        {
+            for method in &item.items {
+                if let syn::ImplItem::Fn(method) = method
+                    && method.sig.ident == "validate"
+                {
+                    calls.visit_block(&method.block);
+                }
+            }
+        }
+    }
+    ensure!(calls.0 == 1, "trusted source check removed");
     Ok(())
 }
 
 #[test]
-fn production_cannot_construct_or_deserialize_the_trusted_key_input() {
+fn production_trusted_key_requires_the_scoped_registry_origin() {
     let source = include_str!("../restore_webauthn.rs");
     require_closed_source(source).unwrap();
     for (from, to) in [
-        ("source: KeySource,", "source: (),"),
+        ("source: KeySource<'owner>,", "source: (),"),
         ("record: KeyRecord,", "pub record: KeyRecord,"),
-        ("enum KeySource {", "enum KeySource { Production,"),
+        (
+            "enum KeySource<'owner> {",
+            "enum KeySource<'owner> { Production,",
+        ),
+        ("Registry(registry::Origin<'owner>)", "Registry(())"),
+        ("source.check_local()?", "Ok(())"),
         (
             "pub(super) struct TrustedKey",
             "#[derive(Clone)] pub(super) struct TrustedKey",

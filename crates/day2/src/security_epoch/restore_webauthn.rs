@@ -1,6 +1,7 @@
 //! Closed ES256 assertion profile for restore approval. Successful verification
 //! returns DATA, not approval, current authority, delivery or a native owner.
-//! The enrolled-key source deliberately has no production variant or factory.
+//! The only production key origin borrows a real native registry-read owner.
+//! Signing, durable grant consumption and post-fence approval remain separate.
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::Digest;
@@ -20,18 +21,19 @@ const SUPPORTED_FLAGS: u8 = USER_PRESENT | USER_VERIFIED | BACKUP_ELIGIBLE | BAC
 
 /// Exact admitted registry selection, not a browser-supplied key. A future
 /// registry owner must retain current admin membership and this exact version.
-/// Private fields and an uninhabited production source prevent scalar minting.
-pub(super) struct TrustedKey {
+/// Private fields and a scoped native registry source prevent scalar minting.
+pub(super) struct TrustedKey<'owner> {
     record: KeyRecord,
-    source: KeySource,
+    source: KeySource<'owner>,
 }
 
-enum KeySource {
+enum KeySource<'owner> {
+    Registry(registry::Origin<'owner>),
     #[cfg(test)]
     Fixture,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct KeyRecord {
     admin: Digest,
     registry: Digest,
@@ -44,11 +46,15 @@ struct KeyRecord {
     backup_eligible: bool,
 }
 
-impl TrustedKey {
+impl TrustedKey<'_> {
     fn validate(&self) -> Result<()> {
         // The source is not a bool, public trait, deserializable proof or
         // production default. Reading record DATA never supplies that source.
-        let _source = &self.source;
+        match &self.source {
+            KeySource::Registry(source) => source.check_local()?,
+            #[cfg(test)]
+            KeySource::Fixture => (),
+        }
         let row = &self.record;
         ensure!(
             row.revision > 0
@@ -77,7 +83,14 @@ impl TrustedKey {
 
     fn binding(&self) -> Result<Digest> {
         self.validate()?;
-        let row = &self.record;
+        self.record.binding_data()
+    }
+}
+
+impl KeyRecord {
+    // Commitment DATA only. Only the scoped source validates current authority.
+    fn binding_data(&self) -> Result<Digest> {
+        let row = self;
         Digest::of(&(
             "day2-restore-passkey-enrollment-v1",
             &row.admin,
@@ -93,8 +106,8 @@ impl TrustedKey {
     }
 }
 
-/// Server-owned request DATA. The nonce must come from real entropy in the
-/// eventual producer. No challenge generator or production installer exists.
+/// Server-owned request DATA. Registry capture obtains actual entropy under
+/// its current native owner. This is not a durable grant or approval.
 /// The exact request digest includes archive, target, epoch and executor.
 #[derive(Clone)]
 pub(super) struct Challenge {
@@ -145,13 +158,12 @@ pub(super) struct AssertionFacts {
 }
 
 pub(super) fn verify(
-    key: &TrustedKey,
+    key: &TrustedKey<'_>,
     challenge: &Challenge,
     expected_request: &Digest,
     stored_counter: u32,
     assertion: &Assertion,
 ) -> Result<AssertionFacts> {
-    key.validate()?;
     ensure!(
         challenge.request == *expected_request && challenge.enrollment == key.binding()?,
         "restore_passkey_challenge_binding_changed"
@@ -211,5 +223,6 @@ pub(super) fn verify(
     Ok(AssertionFacts { counter, backed_up })
 }
 
+mod registry;
 #[cfg(test)]
 mod tests;
