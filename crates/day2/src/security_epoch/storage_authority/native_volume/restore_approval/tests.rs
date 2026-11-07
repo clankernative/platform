@@ -509,13 +509,19 @@ fn actual_default_client_requires_https_and_refusal_reaches_the_parent_original(
 
 fn is_closed(source: &str) -> Result<bool> {
     let file = syn::parse_file(source)?;
-    let mut saw_kms = false;
-    let mut methods = Vec::new();
+    let mut saw = std::collections::BTreeSet::new();
+    let mut methods: std::collections::BTreeMap<&str, Vec<String>> =
+        std::collections::BTreeMap::new();
     for item in file.items {
         match item {
-            syn::Item::Struct(item) if item.ident == "Kms" => {
-                saw_kms = true;
-                if !matches!(item.vis, syn::Visibility::Inherited)
+            syn::Item::Struct(item) if item.ident == "Kms" || item.ident == "KeyHttp" => {
+                let owner = if item.ident == "Kms" {
+                    "Kms"
+                } else {
+                    "KeyHttp"
+                };
+                if !saw.insert(owner)
+                    || !matches!(item.vis, syn::Visibility::Inherited)
                     || item
                         .fields
                         .iter()
@@ -524,13 +530,25 @@ fn is_closed(source: &str) -> Result<bool> {
                     return Ok(false);
                 }
             }
-            syn::Item::Impl(item) if matches!(item.self_ty.as_ref(),syn::Type::Path(path) if path.path.is_ident("Kms")) => {
+            syn::Item::Impl(item) if matches!(item.self_ty.as_ref(),syn::Type::Path(path) if path.path.is_ident("Kms") || path.path.is_ident("KeyHttp")) =>
+            {
+                let syn::Type::Path(path) = item.self_ty.as_ref() else {
+                    unreachable!()
+                };
+                let owner = if path.path.is_ident("Kms") {
+                    "Kms"
+                } else {
+                    "KeyHttp"
+                };
                 for entry in item.items {
                     if let syn::ImplItem::Fn(method) = entry {
                         if !matches!(method.vis, syn::Visibility::Inherited) {
                             return Ok(false);
                         }
-                        methods.push(method.sig.ident.to_string());
+                        methods
+                            .entry(owner)
+                            .or_default()
+                            .push(method.sig.ident.to_string());
                     }
                 }
             }
@@ -540,22 +558,97 @@ fn is_closed(source: &str) -> Result<bool> {
             _ => (),
         }
     }
-    methods.sort();
-    Ok(saw_kms && methods == ["new", "request", "sign"])
+    for names in methods.values_mut() {
+        names.sort();
+    }
+    Ok(saw == std::collections::BTreeSet::from(["KeyHttp", "Kms"])
+        && methods
+            == std::collections::BTreeMap::from([
+                (
+                    "KeyHttp",
+                    ["new", "read", "read_all"].map(String::from).to_vec(),
+                ),
+                ("Kms", ["new", "request", "sign"].map(String::from).to_vec()),
+            ]))
+}
+
+enum TransportMutation {
+    Struct(&'static str),
+    Method(&'static str, &'static str),
+    ClientField(&'static str),
+    ExtraMethod(&'static str),
+    Helper,
+}
+
+fn mutate_transport(source: &str, target: TransportMutation) -> Result<String> {
+    use quote::ToTokens as _;
+    let mut file = syn::parse_file(source)?;
+    let mut changed = 0;
+    for item in &mut file.items {
+        match (&target, item) {
+            (TransportMutation::Struct(owner), syn::Item::Struct(item)) if item.ident == *owner => {
+                item.vis = syn::parse_quote!(pub(super));
+                changed += 1;
+            }
+            (TransportMutation::ClientField(owner), syn::Item::Struct(item))
+                if item.ident == *owner =>
+            {
+                for field in &mut item.fields {
+                    if field.ident.as_ref().is_some_and(|name| name == "client") {
+                        field.vis = syn::parse_quote!(pub(super));
+                        changed += 1;
+                    }
+                }
+            }
+            (TransportMutation::Method(owner, name), syn::Item::Impl(item)) if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident(*owner)) => {
+                for member in &mut item.items {
+                    if let syn::ImplItem::Fn(method) = member
+                        && method.sig.ident == *name
+                    {
+                        method.vis = syn::parse_quote!(pub(super));
+                        changed += 1;
+                    }
+                }
+            }
+            (TransportMutation::ExtraMethod(owner), syn::Item::Impl(item)) if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident(*owner)) =>
+            {
+                item.items.push(syn::parse_quote!(
+                    fn raw_frame(&self) -> &Client {
+                        &self.client
+                    }
+                ));
+                changed += 1;
+            }
+            (TransportMutation::Helper, syn::Item::Fn(item)) if item.sig.ident == "client" => {
+                item.vis = syn::parse_quote!(pub(super));
+                changed += 1;
+            }
+            _ => {}
+        }
+    }
+    ensure!(changed == 1, "one actual transport privacy mutation");
+    Ok(file.to_token_stream().to_string())
 }
 
 #[test]
 fn production_signer_keeps_transport_private_without_a_general_frame_api() -> Result<()> {
     let source = include_str!("../restore_approval.rs");
     assert!(is_closed(source)?);
-    for (from, to) in [
-        ("struct Kms {", "pub(super) struct Kms {"),
-        ("fn new()", "pub(super) fn new()"),
-        ("fn sign(", "pub(super) fn sign("),
-        ("fn client(", "pub(super) fn client("),
+    for target in [
+        TransportMutation::Struct("Kms"),
+        TransportMutation::Method("Kms", "new"),
+        TransportMutation::Method("Kms", "sign"),
+        TransportMutation::Helper,
+        TransportMutation::Struct("KeyHttp"),
+        TransportMutation::Method("KeyHttp", "new"),
+        TransportMutation::Method("KeyHttp", "read"),
+        TransportMutation::Method("KeyHttp", "read_all"),
+        TransportMutation::ClientField("Kms"),
+        TransportMutation::ClientField("KeyHttp"),
+        TransportMutation::ExtraMethod("Kms"),
+        TransportMutation::ExtraMethod("KeyHttp"),
     ] {
-        assert_eq!(source.matches(from).count(), 1);
-        assert!(!is_closed(&source.replacen(from, to, 1))?);
+        assert!(!is_closed(&mutate_transport(source, target)?)?);
     }
     Ok(())
 }

@@ -24,8 +24,8 @@ use std::{cell::RefCell, rc::Rc};
 mod admin_read;
 pub(crate) use admin_read::FencedReadUnit;
 pub(in crate::security_epoch) use admin_read::{
-    CompletedCeremony, FencedRegistryLoan, FencedRestoreContinuation, RestoreAuthenticationAction,
-    RestoreWriteLoan,
+    CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation,
+    RestoreAuthenticationAction, RestoreWriteLoan,
 };
 mod app_serving;
 pub(crate) use admin_read::{

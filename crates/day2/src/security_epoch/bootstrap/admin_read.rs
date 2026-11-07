@@ -17,8 +17,8 @@ use std::{marker::PhantomData, rc::Rc};
 mod reader;
 pub(crate) use reader::FencedReadUnit;
 pub(in crate::security_epoch) use reader::{
-    CompletedCeremony, FencedRegistryLoan, FencedRestoreContinuation, RestoreAuthenticationAction,
-    RestoreWriteLoan,
+    CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation,
+    RestoreAuthenticationAction, RestoreWriteLoan,
 };
 pub(crate) use reader::{ControllerAdminReader, ControllerRegistryData};
 

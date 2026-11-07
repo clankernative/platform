@@ -25,6 +25,7 @@ use std::{fs::File, io::Read};
 mod authentication_store;
 pub(crate) use authentication_store::AuthenticationStoreFiles;
 mod restore_approval;
+pub(in crate::security_epoch) use restore_approval::HistoricalKeyAvailability;
 pub(crate) use restore_approval::NativeApprovalSource;
 
 const ROOT: &str = "/state";

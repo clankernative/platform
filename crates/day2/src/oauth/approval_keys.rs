@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use url::{Host, Url};
+use zeroize::Zeroizing;
 
 const MAX_RESPONSE_BYTES: usize = 4096;
 const METADATA_URL: &str =
@@ -167,7 +168,7 @@ pub(crate) struct GcpSecretVersion {
 }
 
 impl GcpSecretVersion {
-    pub(super) fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.project_number > 0
                 && self.version > 0
@@ -182,7 +183,7 @@ impl GcpSecretVersion {
         Ok(())
     }
 
-    pub(super) fn resource_name(&self) -> String {
+    pub(crate) fn resource_name(&self) -> String {
         format!(
             "projects/{}/secrets/{}/versions/{}",
             self.project_number, self.secret, self.version
@@ -285,12 +286,34 @@ fn read_secret(
         body.len() <= MAX_RESPONSE_BYTES,
         "OAuth secret response too large"
     );
-    let response: AccessResponse =
-        crate::json::decode(&body).map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
-    ensure!(response.name == name, "OAuth secret version changed");
-    let decoded = STANDARD
-        .decode(response.payload.data)
-        .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?;
+    decode_secret_access_response(version, &body)
+}
+
+/// Bounded response DATA only. Neither these bytes nor an exact resource name
+/// authenticates a native caller, proves current key availability, or supplies
+/// a transport/original. Each caller must guard its own actual I/O.
+pub(crate) fn decode_secret_access_response(
+    version: &GcpSecretVersion,
+    body: &[u8],
+) -> Result<Vec<u8>> {
+    version.validate()?;
+    ensure!(
+        body.len() <= MAX_RESPONSE_BYTES,
+        "OAuth secret response too large"
+    );
+    let mut response: AccessResponse =
+        crate::json::decode(body).map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
+    // Own the parsed secret copy before any fallible response check.
+    let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
+    ensure!(
+        response.name == version.resource_name(),
+        "OAuth secret version changed"
+    );
+    let mut decoded = Zeroizing::new(
+        STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?,
+    );
     ensure!(
         !decoded.is_empty() && decoded.len() <= 2048,
         "invalid OAuth secret length"
@@ -304,7 +327,7 @@ fn read_secret(
         crc32c::crc32c(&decoded) == checksum,
         "OAuth secret checksum mismatch"
     );
-    Ok(decoded)
+    Ok(std::mem::take(&mut *decoded))
 }
 
 impl GcpApprovalKeys {
@@ -708,5 +731,108 @@ mod tests {
             assert!(keys.load(&reference, purpose).is_err());
             worker.join().unwrap();
         }
+    }
+
+    #[test]
+    fn pure_secret_decoder_keeps_exact_version_and_its_own_transport_independent_bound()
+    -> Result<()> {
+        use quote::ToTokens as _;
+        fn guarded(file: &syn::File) -> Result<bool> {
+            let functions: Vec<_> = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Fn(function)
+                        if function.sig.ident == "decode_secret_access_response" =>
+                    {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let [function] = functions.as_slice() else {
+                return Ok(false);
+            };
+            let decoded: syn::Stmt = syn::parse_quote! {
+                let mut response: AccessResponse = crate::json::decode(body)
+                    .map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
+            };
+            let owned: syn::Stmt = syn::parse_quote! {
+                let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
+            };
+            let named: syn::Stmt = syn::parse_quote! {
+                ensure!(response.name == version.resource_name(), "OAuth secret version changed");
+            };
+            let indices = |expected: &syn::Stmt| {
+                function
+                    .block
+                    .stmts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, stmt)| {
+                        stmt.to_token_stream().to_string() == expected.to_token_stream().to_string()
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>()
+            };
+            let (decoded, owned, named) = (indices(&decoded), indices(&owned), indices(&named));
+            Ok(
+                matches!((decoded.as_slice(), owned.as_slice(), named.as_slice()), ([decoded], [owned], [named]) if *owned == decoded + 1 && owned < named),
+            )
+        }
+        let file = syn::parse_file(include_str!("approval_keys.rs"))?;
+        assert!(
+            guarded(&file)?,
+            "parsed payload is owned before every response check"
+        );
+        for remove in [false, true] {
+            let mut changed = file.clone();
+            let mut targets = 0;
+            for item in &mut changed.items {
+                let syn::Item::Fn(function) = item else {
+                    continue;
+                };
+                if function.sig.ident != "decode_secret_access_response" {
+                    continue;
+                }
+                targets += 1;
+                let owned: syn::Stmt = syn::parse_quote! {
+                    let data = Zeroizing::new(std::mem::take(&mut response.payload.data));
+                };
+                let indices: Vec<_> = function
+                    .block
+                    .stmts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, stmt)| {
+                        stmt.to_token_stream().to_string() == owned.to_token_stream().to_string()
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                assert_eq!(indices.len(), 1, "actual parsed payload owner");
+                let index = indices[0];
+                let owner = function.block.stmts.remove(index);
+                if !remove {
+                    function.block.stmts.insert(index + 1, owner);
+                }
+            }
+            assert_eq!(targets, 1, "actual response decoder");
+            assert!(!guarded(&changed)?, "removed/late secret owner must refuse");
+        }
+        let (_, version) = fixture();
+        let body = serde_json::to_vec(&response(
+            &version.resource_name(),
+            crc32c::crc32c(&[9; 32]),
+        ))?;
+        assert_eq!(decode_secret_access_response(&version, &body)?, [9; 32]);
+        let mut other = version.clone();
+        other.version += 1;
+        assert!(decode_secret_access_response(&other, &body).is_err());
+        // JSON permits trailing whitespace. This otherwise-valid response must
+        // not borrow a future caller's transport bound as decoder permission.
+        let mut oversized = body;
+        oversized.resize(MAX_RESPONSE_BYTES + 1, b' ');
+        assert!(decode_secret_access_response(&version, &oversized).is_err());
+        Ok(())
     }
 }

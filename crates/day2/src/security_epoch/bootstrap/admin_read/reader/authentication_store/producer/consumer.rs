@@ -19,7 +19,7 @@ use std::time::Duration;
 mod stop;
 pub(crate) use stop::FencedReadUnit;
 pub(in crate::security_epoch) use stop::{
-    FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
+    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
 };
 
 const EXECUTION_CHALLENGE_SECONDS: i64 = 300;
@@ -47,6 +47,7 @@ pub(in crate::security_epoch) struct AuthenticatedRestoreExecution<'metadata, 's
     record: SignedApprovalRecord,
     operation: Digest,
     time_operation: Digest,
+    historical_keys: Option<crate::security_epoch::storage_authority::HistoricalKeyAvailability>,
     refused: bool,
 }
 
@@ -239,6 +240,7 @@ impl PendingRestoreExecution {
             record: self.record,
             operation: self.operation,
             time_operation,
+            historical_keys: None,
             refused: false,
         };
         owner.check()?;
@@ -250,40 +252,7 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
     /// Fresh current registry, exact signer and executor, qualified original
     /// time/floor and physical checks; no renewal, reauthentication or replay.
     pub(in crate::security_epoch) fn check(&mut self) -> Result<RestoreObservation> {
-        let requested = (|| {
-            ensure!(!self.refused, "restore_executor_refused");
-            self.action.check_execution_original(
-                &mut self.original,
-                &self.record,
-                &self.operation,
-            )?;
-            self.completion.check_current(
-                &mut self.action.reader,
-                (
-                    self.action
-                        .sqlite
-                        .as_mut()
-                        .context("restore_auth_sqlite_closed")?,
-                    &mut self.action.files,
-                ),
-                &self.record,
-                &self.operation,
-            )?;
-            self.source.require_qualified(&self.time_operation)?;
-            let time = self.source.current_time(&mut self.action)?;
-            approval_window(&self.record, &time)?;
-            Ok(())
-        })();
-        // A primary verification/time failure does not bypass this SAME held
-        // original's mandatory postcheck. Preserve the first failure.
-        let checked =
-            self.action
-                .check_execution_original(&mut self.original, &self.record, &self.operation);
-        if requested.is_err() || checked.is_err() {
-            self.refuse();
-        }
-        requested?;
-        checked
+        self.check_source()
     }
 
     pub(in crate::security_epoch) fn refuse(&mut self) {
@@ -450,17 +419,60 @@ mod tests {
         Ok(())
     }
 
-    fn actual_owner_check(file: &syn::File) -> Result<&syn::Block> {
+    fn actual_owner_method<'a>(
+        file: &'a syn::File,
+        owner: &str,
+        name: &str,
+    ) -> Result<&'a syn::Block> {
         let methods: Vec<_> = file.items.iter().filter_map(|item| match item {
             syn::Item::Impl(item) if item.trait_.is_none()
-                && matches!(&*item.self_ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|p|p.ident=="AuthenticatedRestoreExecution")) => Some(item),
+                && matches!(&*item.self_ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|p|p.ident==owner)) => Some(item),
             _ => None,
         }).flat_map(|item|item.items.iter()).filter_map(|item|match item {
-            syn::ImplItem::Fn(item) if item.sig.ident=="check" => Some(&item.block),
+            syn::ImplItem::Fn(item) if item.sig.ident==name => Some(&item.block),
             _ => None,
         }).collect();
         ensure!(methods.len() == 1, "actual_executor_check_count");
         Ok(methods[0])
+    }
+
+    fn guarded_owner_route(delegate: &syn::Block, borrow: &syn::Block) -> bool {
+        let expected_delegate: syn::Block = syn::parse_quote!({ self.check_source() });
+        let expected_borrow: syn::Block = syn::parse_quote!({
+            ExecutionSourceLoan {
+                action: &mut self.action,
+                original: &mut self.original,
+                completion: &mut self.completion,
+                record: &self.record,
+                operation: &self.operation,
+                time_operation: &self.time_operation,
+                refused: &mut self.refused,
+            }
+            .check(&mut self.source)
+        });
+        delegate.to_token_stream().to_string() == expected_delegate.to_token_stream().to_string()
+            && borrow.to_token_stream().to_string() == expected_borrow.to_token_stream().to_string()
+    }
+
+    fn token_shape(tokens: proc_macro2::TokenStream) -> Vec<String> {
+        let mut shape = Vec::new();
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Group(group) => {
+                    shape.push(format!("group:{:?}", group.delimiter()));
+                    shape.extend(token_shape(group.stream()));
+                    shape.push("end-group".to_owned());
+                }
+                proc_macro2::TokenTree::Ident(ident) => shape.push(format!("ident:{ident}")),
+                proc_macro2::TokenTree::Literal(literal) => {
+                    shape.push(format!("literal:{literal}"))
+                }
+                proc_macro2::TokenTree::Punct(punct) => {
+                    shape.push(format!("punct:{}", punct.as_char()))
+                }
+            }
+        }
+        shape
     }
 
     fn guarded_owner_check(block: &syn::Block) -> bool {
@@ -469,9 +481,9 @@ mod tests {
         // oracle alone cannot establish these later consumer boundaries.
         let expected: syn::Block = syn::parse_quote! {{
             let requested = (|| {
-                ensure!(!self.refused, "restore_executor_refused");
+                ensure!(!*self.refused, "restore_executor_refused");
                 self.action.check_execution_original(
-                    &mut self.original, &self.record, &self.operation,
+                    self.original, self.record, self.operation
                 )?;
                 self.completion.check_current(
                     &mut self.action.reader,
@@ -479,20 +491,28 @@ mod tests {
                         self.action.sqlite.as_mut().context("restore_auth_sqlite_closed")?,
                         &mut self.action.files,
                     ),
-                    &self.record,
-                    &self.operation,
+                    self.record,
+                    self.operation,
                 )?;
-                self.source.require_qualified(&self.time_operation)?;
-                let time = self.source.current_time(&mut self.action)?;
-                approval_window(&self.record, &time)?;
+                source.require_qualified(self.time_operation)?;
+                let time = source.current_time(self.action)?;
+                approval_window(self.record, &time)?;
                 Ok(())
             })();
-            let checked = self.action.check_execution_original(&mut self.original, &self.record, &self.operation);
-            if requested.is_err() || checked.is_err() { self.refuse(); }
+            let checked = self.action.check_execution_original(self.original, self.record, self.operation);
+            if requested.is_err() || checked.is_err() {
+                *self.refused = true;
+                self.original.refuse();
+                self.action.refuse();
+            }
             requested?;
             checked
         }};
-        block.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        // syn preserves lexical punctuation spacing inside ensure! input,
+        // whereas quote constructs separate `!` and `*` tokens. Preserve every
+        // delimiter, identifier, literal and punctuation character, ignoring
+        // only that joint/alone spacing in the already-parsed Rust block.
+        token_shape(block.to_token_stream()) == token_shape(expected.to_token_stream())
     }
 
     fn requested_body(block: &mut syn::Block) -> &mut syn::Block {
@@ -517,8 +537,32 @@ mod tests {
     #[test]
     fn actual_consumer_rechecks_completion_utc_and_original_even_on_primary_error() -> Result<()> {
         let file = syn::parse_file(include_str!("consumer.rs"))?;
-        let actual = actual_owner_check(&file)?;
+        let leaf = syn::parse_file(include_str!("consumer/stop.rs"))?;
+        let delegate = actual_owner_method(&file, "AuthenticatedRestoreExecution", "check")?;
+        let borrow = actual_owner_method(&leaf, "AuthenticatedRestoreExecution", "check_source")?;
+        assert!(guarded_owner_route(delegate, borrow));
+        let bypass: syn::Block = syn::parse_quote!({ self.unchecked_source() });
+        assert!(!guarded_owner_route(&bypass, borrow));
+        assert!(!guarded_owner_route(delegate, &bypass));
+        let borrowed = borrow.to_token_stream().to_string();
+        let substitution = "action : & mut self . action";
+        assert_eq!(borrowed.matches(substitution).count(), 1);
+        let substituted: syn::Block =
+            syn::parse_str(&borrowed.replacen(substitution, "action : & mut other . action", 1))?;
+        assert!(!guarded_owner_route(delegate, &substituted));
+        let actual = actual_owner_method(&leaf, "ExecutionSourceLoan", "check")?;
         assert!(guarded_owner_check(actual));
+        let joint: proc_macro2::TokenStream = "!*self.refused"
+            .parse()
+            .map_err(|_| anyhow::anyhow!("consumer_joint_punctuation_fixture"))?;
+        let separate: proc_macro2::TokenStream = "! * self . refused"
+            .parse()
+            .map_err(|_| anyhow::anyhow!("consumer_separate_punctuation_fixture"))?;
+        assert_eq!(token_shape(joint), token_shape(separate));
+        let mut changed = actual.clone();
+        requested_body(&mut changed).stmts[0] =
+            syn::parse_quote! { ensure!(false, "restore_executor_refused"); };
+        assert!(!guarded_owner_check(&changed));
         for cut in [2, 3, 4, 5] {
             let mut changed = actual.clone();
             requested_body(&mut changed).stmts.remove(cut);
@@ -536,7 +580,7 @@ mod tests {
         let mut changed = actual.clone();
         changed.stmts[1] = syn::parse_quote! {
             let checked=if requested.is_ok() {
-                self.action.check_execution_original(&mut self.original,&self.record,&self.operation)
+                self.action.check_execution_original(self.original,self.record,self.operation)
             } else { Err(anyhow::anyhow!("fixture_post_bypassed")) };
         };
         assert!(!guarded_owner_check(&changed));

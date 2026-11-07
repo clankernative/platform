@@ -233,6 +233,22 @@ impl CredentialMaterial {
         Self::mint_body(source, selected, http, acquisition, body)
     }
 
+    /// Fixed restore-key scope, distinct from counter and signing credentials.
+    /// Secret Manager access requires cloud-platform; the owning native caller
+    /// must retain genuine executor verification and its original around only
+    /// the selected exact-version read. This material is not restore authority.
+    /// https://docs.cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access
+    pub(super) fn mint_restore_key_reader(
+        source: &Self,
+        selected: &EpochIam,
+        http: &NativeHttp,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let body =
+            br#"{"scope":["https://www.googleapis.com/auth/cloud-platform"],"lifetime":"300s"}"#;
+        Self::mint_body(source, selected, http, acquisition, body)
+    }
+
     fn mint_body(
         source: &Self,
         selected: &EpochIam,
@@ -454,6 +470,129 @@ impl Drop for MintReply {
 mod tests {
     use super::*;
     use day2_capabilities::Digest;
+
+    fn fixed_mint_scopes(source: &str) -> Result<bool> {
+        let expected = std::collections::BTreeMap::from([
+            ("mint_target", "https://www.googleapis.com/auth/datastore"),
+            (
+                "mint_restore_signer",
+                "https://www.googleapis.com/auth/cloudkms",
+            ),
+            (
+                "mint_restore_key_reader",
+                "https://www.googleapis.com/auth/cloud-platform",
+            ),
+        ]);
+        let mut found = std::collections::BTreeMap::new();
+        for item in syn::parse_file(source)?.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            if item.trait_.is_some()
+                || !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == "CredentialMaterial"))
+            {
+                continue;
+            }
+            for member in item.items {
+                let syn::ImplItem::Fn(method) = member else {
+                    continue;
+                };
+                let name = method.sig.ident.to_string();
+                let Some(scope) = expected.get(name.as_str()) else {
+                    continue;
+                };
+                if method.sig.inputs.len() != 4
+                    || !method.sig.generics.params.is_empty()
+                    || method.block.stmts.len() != 2
+                {
+                    return Ok(false);
+                }
+                let Some(syn::Stmt::Expr(syn::Expr::Call(call), None)) = method.block.stmts.last()
+                else {
+                    return Ok(false);
+                };
+                let syn::Expr::Path(path) = &*call.func else {
+                    return Ok(false);
+                };
+                if path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>()
+                    != ["Self", "mint_body"]
+                {
+                    return Ok(false);
+                }
+                let forwarded: Vec<_> = call
+                    .args
+                    .iter()
+                    .map(|argument| match argument {
+                        syn::Expr::Path(path) => path.path.get_ident().map(ToString::to_string),
+                        _ => None,
+                    })
+                    .collect();
+                if forwarded
+                    != ["source", "selected", "http", "acquisition", "body"]
+                        .map(|name| Some(name.to_owned()))
+                {
+                    return Ok(false);
+                }
+                let body = method.block.stmts.iter().find_map(|statement| {
+                    let syn::Stmt::Local(local) = statement else {
+                        return None;
+                    };
+                    let syn::Pat::Ident(binding) = &local.pat else {
+                        return None;
+                    };
+                    if binding.ident != "body" {
+                        return None;
+                    }
+                    let syn::Expr::Lit(value) = &*local.init.as_ref()?.expr else {
+                        return None;
+                    };
+                    let syn::Lit::ByteStr(bytes) = &value.lit else {
+                        return None;
+                    };
+                    Some(bytes.value())
+                });
+                let Some(body) = body else { return Ok(false) };
+                let value: serde_json::Value = serde_json::from_slice(&body)?;
+                if value != serde_json::json!({"scope":[scope],"lifetime":"300s"}) {
+                    return Ok(false);
+                }
+                if found.insert(name, true).is_some() {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(found.len() == expected.len())
+    }
+
+    #[test]
+    fn restore_key_minter_has_one_fixed_scope_without_changing_counter_or_signer() -> Result<()> {
+        let source = include_str!("credential_material.rs");
+        assert!(fixed_mint_scopes(source)?);
+        for (old, new) in [
+            (
+                "https://www.googleapis.com/auth/datastore",
+                "https://www.googleapis.com/auth/cloud-platform",
+            ),
+            (
+                "https://www.googleapis.com/auth/cloudkms",
+                "https://www.googleapis.com/auth/cloud-platform",
+            ),
+            (
+                "[\"https://www.googleapis.com/auth/cloud-platform\"]",
+                "[\"https://www.googleapis.com/auth/cloud-platform\",\"extra\"]",
+            ),
+        ] {
+            let mutant = source.replacen(old, new, 1);
+            assert_ne!(source, mutant, "actual fixed native minter target");
+            assert!(!fixed_mint_scopes(&mutant)?);
+        }
+        Ok(())
+    }
 
     fn selected_counter_account() -> EpochIam {
         EpochIam::GkeWorkloadIdentityV1 {
