@@ -510,11 +510,16 @@ fn actual_default_client_requires_https_and_refusal_reaches_the_parent_original(
 fn is_closed(source: &str) -> Result<bool> {
     let file = syn::parse_file(source)?;
     let mut saw = std::collections::BTreeSet::new();
-    let mut methods: std::collections::BTreeMap<&str, Vec<String>> = std::collections::BTreeMap::new();
+    let mut methods: std::collections::BTreeMap<&str, Vec<String>> =
+        std::collections::BTreeMap::new();
     for item in file.items {
         match item {
             syn::Item::Struct(item) if item.ident == "Kms" || item.ident == "KeyHttp" => {
-                let owner = if item.ident == "Kms" { "Kms" } else { "KeyHttp" };
+                let owner = if item.ident == "Kms" {
+                    "Kms"
+                } else {
+                    "KeyHttp"
+                };
                 if !saw.insert(owner)
                     || !matches!(item.vis, syn::Visibility::Inherited)
                     || item
@@ -525,15 +530,25 @@ fn is_closed(source: &str) -> Result<bool> {
                     return Ok(false);
                 }
             }
-            syn::Item::Impl(item) if matches!(item.self_ty.as_ref(),syn::Type::Path(path) if path.path.is_ident("Kms") || path.path.is_ident("KeyHttp")) => {
-                let syn::Type::Path(path) = item.self_ty.as_ref() else { unreachable!() };
-                let owner = if path.path.is_ident("Kms") { "Kms" } else { "KeyHttp" };
+            syn::Item::Impl(item) if matches!(item.self_ty.as_ref(),syn::Type::Path(path) if path.path.is_ident("Kms") || path.path.is_ident("KeyHttp")) =>
+            {
+                let syn::Type::Path(path) = item.self_ty.as_ref() else {
+                    unreachable!()
+                };
+                let owner = if path.path.is_ident("Kms") {
+                    "Kms"
+                } else {
+                    "KeyHttp"
+                };
                 for entry in item.items {
                     if let syn::ImplItem::Fn(method) = entry {
                         if !matches!(method.vis, syn::Visibility::Inherited) {
                             return Ok(false);
                         }
-                        methods.entry(owner).or_default().push(method.sig.ident.to_string());
+                        methods
+                            .entry(owner)
+                            .or_default()
+                            .push(method.sig.ident.to_string());
                     }
                 }
             }
@@ -547,10 +562,14 @@ fn is_closed(source: &str) -> Result<bool> {
         names.sort();
     }
     Ok(saw == std::collections::BTreeSet::from(["KeyHttp", "Kms"])
-        && methods == std::collections::BTreeMap::from([
-            ("KeyHttp", ["new", "read", "read_all"].map(String::from).to_vec()),
-            ("Kms", ["new", "request", "sign"].map(String::from).to_vec()),
-        ]))
+        && methods
+            == std::collections::BTreeMap::from([
+                (
+                    "KeyHttp",
+                    ["new", "read", "read_all"].map(String::from).to_vec(),
+                ),
+                ("Kms", ["new", "request", "sign"].map(String::from).to_vec()),
+            ]))
 }
 
 enum TransportMutation {
@@ -571,7 +590,9 @@ fn mutate_transport(source: &str, target: TransportMutation) -> Result<String> {
                 item.vis = syn::parse_quote!(pub(super));
                 changed += 1;
             }
-            (TransportMutation::ClientField(owner), syn::Item::Struct(item)) if item.ident == *owner => {
+            (TransportMutation::ClientField(owner), syn::Item::Struct(item))
+                if item.ident == *owner =>
+            {
                 for field in &mut item.fields {
                     if field.ident.as_ref().is_some_and(|name| name == "client") {
                         field.vis = syn::parse_quote!(pub(super));
@@ -579,8 +600,7 @@ fn mutate_transport(source: &str, target: TransportMutation) -> Result<String> {
                     }
                 }
             }
-            (TransportMutation::Method(owner, name), syn::Item::Impl(item))
-                if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident(*owner)) => {
+            (TransportMutation::Method(owner, name), syn::Item::Impl(item)) if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident(*owner)) => {
                 for member in &mut item.items {
                     if let syn::ImplItem::Fn(method) = member
                         && method.sig.ident == *name
@@ -590,9 +610,13 @@ fn mutate_transport(source: &str, target: TransportMutation) -> Result<String> {
                     }
                 }
             }
-            (TransportMutation::ExtraMethod(owner), syn::Item::Impl(item))
-                if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident(*owner)) => {
-                item.items.push(syn::parse_quote!(fn raw_frame(&self) -> &Client { &self.client }));
+            (TransportMutation::ExtraMethod(owner), syn::Item::Impl(item)) if matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident(*owner)) =>
+            {
+                item.items.push(syn::parse_quote!(
+                    fn raw_frame(&self) -> &Client {
+                        &self.client
+                    }
+                ));
                 changed += 1;
             }
             (TransportMutation::Helper, syn::Item::Fn(item)) if item.sig.ident == "client" => {

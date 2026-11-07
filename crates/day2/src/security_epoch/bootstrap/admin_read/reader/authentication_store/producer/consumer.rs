@@ -419,7 +419,11 @@ mod tests {
         Ok(())
     }
 
-    fn actual_owner_method<'a>(file: &'a syn::File, owner: &str, name: &str) -> Result<&'a syn::Block> {
+    fn actual_owner_method<'a>(
+        file: &'a syn::File,
+        owner: &str,
+        name: &str,
+    ) -> Result<&'a syn::Block> {
         let methods: Vec<_> = file.items.iter().filter_map(|item| match item {
             syn::Item::Impl(item) if item.trait_.is_none()
                 && matches!(&*item.self_ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|p|p.ident==owner)) => Some(item),
@@ -443,7 +447,8 @@ mod tests {
                 operation: &self.operation,
                 time_operation: &self.time_operation,
                 refused: &mut self.refused,
-            }.check(&mut self.source)
+            }
+            .check(&mut self.source)
         });
         delegate.to_token_stream().to_string() == expected_delegate.to_token_stream().to_string()
             && borrow.to_token_stream().to_string() == expected_borrow.to_token_stream().to_string()
@@ -517,7 +522,8 @@ mod tests {
         let borrowed = borrow.to_token_stream().to_string();
         let substitution = "action : & mut self . action";
         assert_eq!(borrowed.matches(substitution).count(), 1);
-        let substituted: syn::Block = syn::parse_str(&borrowed.replacen(substitution, "action : & mut other . action", 1))?;
+        let substituted: syn::Block =
+            syn::parse_str(&borrowed.replacen(substitution, "action : & mut other . action", 1))?;
         assert!(!guarded_owner_route(delegate, &substituted));
         let actual = actual_owner_method(&leaf, "ExecutionSourceLoan", "check")?;
         assert!(guarded_owner_check(actual));
