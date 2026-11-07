@@ -112,6 +112,29 @@ placement nor durable storage, current key trust, qualified time, single-use
 approval publication or restore authority. Native store admission and explicit
 store birth remain separate work.
 
+### Grant-keyed reservation-attempt marker
+
+The canonical authentication schema also contains a create-only execution-attempt
+row keyed by the approval's grant ID. It binds the complete signed record,
+operation, executor challenge, current key binding/version/counter and verified
+completion snapshot. Fresh authentication or a different operation cannot insert
+another attempt for that same grant. Checking the row only compares historical
+DATA; it cannot recover a native completion, stop, original or send permission.
+
+These transaction primitives do not yet supply the accepting native stop. That
+caller must commit the marker and finish all same-file, registry, authority and
+original postchecks before any reservation send, closing SQL first. After a
+committed or possibly committed marker it must neither delete the row nor adopt
+it into another owner. A later failure can leave the grant unavailable without
+proving any provider write or response completed. The external five-write CAS
+remains the actual atomic grant consumption and root transition.
+
+The controls use real SQLite, synthetic verified assertions, independent seeded
+histories, reopen, competing connections and actual child-death cuts before the
+claim, before its commit and after its commit. They do not establish a native
+execution owner, live-provider behavior or power-loss durability. Missing or old
+schema shapes refuse; no migration or repair path is supplied.
+
 ### Existing native authentication-ledger admission
 
 The current-reader admission consumes the actual accepting admin reader and keeps
