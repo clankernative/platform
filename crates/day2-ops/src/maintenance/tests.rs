@@ -195,13 +195,26 @@ impl FakeCluster {
             store != OLD_CREDENTIAL_STORE,
             "Error: unsupported credential schema version"
         );
-        let desired: Value = serde_json::from_slice(&fs::read(&instance)?)?;
-        let artifact = desired["apps"][app]["artifact"]
-            .as_str()
-            .unwrap()
-            .trim_start_matches("artifacts/")
-            .to_owned();
+        let artifact = self.selected_artifact(&instance, app)?;
         Ok(json!({"admitted": true, "scope": "exampleco/production/example_app", "artifact": format!("sha256:{artifact}")}).to_string())
+    }
+
+    fn selected_artifact(&self, instance: &Path, app: &str) -> Result<String> {
+        let desired: Value = serde_json::from_slice(&fs::read(instance)?)?;
+        let relative = desired["apps"][app]["artifact"].as_str().unwrap();
+        let manifest: Value = serde_json::from_slice(&fs::read(
+            instance
+                .parent()
+                .unwrap()
+                .join(relative)
+                .join("artifact.json"),
+        )?)?;
+        let artifact = relative.trim_start_matches("artifacts/").to_owned();
+        ensure!(
+            day2::digest(&serde_json::to_vec(&manifest)?) == format!("sha256:{artifact}"),
+            "selected artifact identity mismatch"
+        );
+        Ok(artifact)
     }
 
     fn host(&self, request: &str) -> Result<String> {
@@ -302,7 +315,8 @@ impl Cluster for FakeCluster {
                 }
                 String::new()
             }
-            ["exec", _, "--", "cp", from, to] => {
+            ["exec", _, "--", "cp", "-a", from, to]
+            | ["exec", _, "--", "cp", from, to] => {
                 Self::copy(&self.pod_path(from), &self.pod_path(to))?;
                 String::new()
             }
@@ -317,6 +331,12 @@ impl Cluster for FakeCluster {
                 String::new()
             }
             ["exec", _, "--", DAY2, "rollout-inspect", CURRENT, _] => self.release.borrow().to_string(),
+            ["exec", _, "--", DAY2, "rollout-prepare", instance, app, target, ..] => {
+                self.selected_artifact(&self.pod_path(instance), app)?;
+                self.selected_artifact(&self.pod_path(target), app)?;
+                json!({"phase":"prepared"}).to_string()
+            }
+            ["exec", _, "--", DAY2, "rollout-bind" | "rollout-transition", ..] => "{}".into(),
             ["exec", _, "--", DAY2, "rollout-probe", CURRENT, _, _, _, _] => {
                 self.release.borrow_mut()["probe"] = json!({"status":"verified"});
                 json!({"requested":true}).to_string()
@@ -887,10 +907,10 @@ fn scratch_holds_the_operations_copies_of_the_store() {
     let store = 5 * gib / 2;
     let artifacts = 64 * MIB;
     // activate: the backup (then the rehearsal's copy) and the migration's
-    // WAL and temporary files, a quarter more, the artifacts twice, slack.
+    // WAL and temporary files, a quarter more, the artifacts three times, slack.
     let activate = scratch_bytes(Operation::Activate.store_copies(), store, artifacts);
-    assert_eq!(activate, (5_120 + 1_280 + 128 + 256) * MIB);
-    assert!(activate >= 2 * store + 2 * artifacts);
+    assert_eq!(activate, (5_120 + 1_280 + 192 + 256) * MIB);
+    assert!(activate >= 2 * store + 3 * artifacts);
     assert_eq!(
         scratch_bytes(Operation::Backup.store_copies(), store, artifacts),
         (2_560 + 640 + 128 + 256) * MIB
@@ -1481,6 +1501,31 @@ fn rollout_helpers_stay_on_incumbent_node_and_failure_never_scales_it() -> Resul
         assert!(rendered.contains("day2.dev/rollout-request: sha256:"));
         assert!(rendered.contains("app.kubernetes.io/name: day2-maintenance"));
     }
+    Ok(())
+}
+
+#[test]
+fn rolling_rehearsal_opens_both_artifacts_beside_its_disposable_instance() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    assert_eq!(
+        session.admission()?["artifact"],
+        format!("sha256:{}", harness.target.artifact_id)
+    );
+    assert!(
+        !harness
+            .directory
+            .path()
+            .join("pod/srv/day2/admission")
+            .exists(),
+        "the admitted copy is discarded"
+    );
+    drop(session);
+    assert!(!harness.scaled_up());
     Ok(())
 }
 
