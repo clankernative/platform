@@ -15,6 +15,9 @@ use std::{
     path::Path,
 };
 
+mod reader;
+pub(crate) use reader::ControllerAdminSqlite;
+
 pub(crate) struct ControllerAdminData {
     pub(crate) members: BTreeSet<String>,
     pub(crate) authority: crate::authority_state::AuthorityStamp,

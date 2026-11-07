@@ -14,6 +14,8 @@ use crate::security_epoch::{
 use anyhow::{Context, Result, ensure};
 use std::{marker::PhantomData, rc::Rc};
 
+mod reader;
+
 pub(crate) struct ControllerAdminReadLoan<'storage, 'role> {
     physical: Option<CurrentControllerStoragePhase<'storage, 'role>>,
     reads: CounterRequest<'storage>,
@@ -27,6 +29,7 @@ pub(crate) struct ControllerAdminReadLoan<'storage, 'role> {
     continuation: &'storage mut bool,
     trace: &'storage ServingTiming,
     disposition: ReadDisposition,
+    reader: Option<*const rusqlite::Connection>,
 }
 
 /// Current policy membership only, NOT authentication of email/subject. The
@@ -137,6 +140,7 @@ impl ActiveControllerStorageContinuity {
             continuation: &mut self.valid,
             trace,
             disposition: ReadDisposition::new(),
+            reader: None,
         };
         loan.check_local()?;
         Ok(loan)
@@ -144,6 +148,20 @@ impl ActiveControllerStorageContinuity {
 }
 
 impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
+    /// Bind accepting work before any SQLite activation. The operation is DATA,
+    /// compared with the authenticated request held by this actual loan.
+    pub(crate) fn check_action(
+        &mut self,
+        metadata: &crate::store::InitialStoreMetadata,
+        operation: &Digest,
+    ) -> Result<()> {
+        if self.operation != *operation {
+            self.refuse();
+            anyhow::bail!("controller_admin_operation_changed");
+        }
+        self.check_metadata(metadata)
+    }
+
     /// SQL-safe handle/original checks. No provider RPC or new stage is acquired.
     pub(crate) fn check_local(&mut self) -> Result<()> {
         let result = (|| {
@@ -177,6 +195,106 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
             return Err(error);
         }
         self.check_local()
+    }
+
+    /// A retained accepting reader closes each transaction, but keeps its
+    /// actual MAIN/WAL/SHM connection until the whole action has settled. Only
+    /// this fixed adapter uses this boundary; no SQL or callback escapes it.
+    pub(crate) fn end_retained_sql(
+        &mut self,
+        db: &rusqlite::Connection,
+        completed: &Result<()>,
+    ) -> Result<()> {
+        let closed = (|| {
+            ensure!(
+                self.reader == Some(std::ptr::from_ref(db)),
+                "controller_admin_reader_substituted"
+            );
+            ensure!(
+                db.is_autocommit(),
+                "controller_admin_transaction_not_closed"
+            );
+            self.check_database(db)?;
+            ensure!(completed.is_ok(), "controller_admin_sql_completion_unknown");
+            Ok(())
+        })();
+        let ended = self.disposition.end_retained_sql(closed.is_ok());
+        if closed.is_err() || ended.is_err() {
+            self.refuse();
+        }
+        closed?;
+        ended?;
+        self.check_local()
+    }
+
+    pub(crate) fn begin_retained_sql(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        let result = (|| {
+            self.check_local()?;
+            self.disposition.require_reader_closed_unit()?;
+            ensure!(
+                self.reader == Some(std::ptr::from_ref(db)) && db.is_autocommit(),
+                "controller_admin_reader_substituted_or_unit_open"
+            );
+            self.disposition.begin_retained_sql()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// Bind the actual stable boxed connection, before any configuration or
+    /// transaction. Pointer equality is only a substitution check; it supplies
+    /// no authority and is never returned or dereferenced.
+    pub(crate) fn retain_reader(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        let result = (|| {
+            self.check_local()?;
+            ensure!(
+                self.reader.is_none(),
+                "controller_admin_reader_already_open"
+            );
+            self.disposition.retain_reader()?;
+            self.reader = Some(std::ptr::from_ref(db));
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// Consume and close the SAME actual connection. A Result/boolean supplied
+    /// by a caller cannot mark a retained reader closed or release its peer.
+    pub(crate) fn close_reader(&mut self, db: Box<rusqlite::Connection>) -> Result<()> {
+        let requested = (|| {
+            self.disposition.require_reader_closed_unit()?;
+            ensure!(
+                self.reader == Some(std::ptr::from_ref(db.as_ref())),
+                "controller_admin_reader_substituted"
+            );
+            ensure!(
+                db.is_autocommit(),
+                "controller_admin_transaction_not_closed"
+            );
+            self.check_database(&db)
+        })();
+        let closed = match (*db).close() {
+            Ok(()) => Ok(()),
+            Err((db, _)) => {
+                drop(db);
+                Err(anyhow::anyhow!("controller_admin_sql_close_refused"))
+            }
+        };
+        let checked = self.check_local();
+        if requested.is_err() || closed.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        closed?;
+        checked?;
+        self.disposition.close_reader()?;
+        self.reader = None;
+        Ok(())
     }
 
     fn refresh(&mut self) -> Result<()> {
@@ -273,6 +391,12 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
     /// Only after the admin-dependent action and its postchecks. Consuming
     /// this owner makes every borrowed membership unusable at compile time.
     pub(crate) fn finish_checked(mut self) -> Result<()> {
+        // Never start final peer/counter settlement while any Controller
+        // reader or transaction remains held, even if all SQL units committed.
+        if let Err(error) = self.disposition.require_released() {
+            self.refuse();
+            return Err(error);
+        }
         self.refresh()?;
         let physical = self
             .physical
@@ -398,6 +522,8 @@ const _: () = {
 enum ReadPhase {
     Reading,
     Sql,
+    Reader,
+    ReaderSql,
     Refused,
     Finished,
 }
@@ -412,14 +538,17 @@ impl ReadDisposition {
     }
     fn check(&self) -> Result<()> {
         ensure!(
-            matches!(self.phase, ReadPhase::Reading | ReadPhase::Sql),
+            matches!(
+                self.phase,
+                ReadPhase::Reading | ReadPhase::Sql | ReadPhase::Reader | ReadPhase::ReaderSql
+            ),
             "controller_admin_loan_refused"
         );
         Ok(())
     }
     fn require_closed(&self) -> Result<()> {
         ensure!(
-            self.phase == ReadPhase::Reading,
+            matches!(self.phase, ReadPhase::Reading | ReadPhase::Reader),
             "controller_admin_sql_not_closed"
         );
         Ok(())
@@ -427,7 +556,7 @@ impl ReadDisposition {
     fn begin_sql(&mut self) -> Result<()> {
         if self.phase != ReadPhase::Reading {
             self.refuse();
-            anyhow::bail!("controller_admin_sql_already_open");
+            anyhow::bail!("controller_admin_sql_already_open_or_reader_held");
         }
         self.phase = ReadPhase::Sql;
         Ok(())
@@ -441,7 +570,7 @@ impl ReadDisposition {
         Ok(())
     }
     fn finish(&mut self) -> Result<()> {
-        if let Err(error) = self.require_closed() {
+        if let Err(error) = self.require_released() {
             self.refuse();
             return Err(error);
         }
@@ -450,6 +579,52 @@ impl ReadDisposition {
     }
     fn refuse(&mut self) {
         self.phase = ReadPhase::Refused;
+    }
+
+    fn require_released(&self) -> Result<()> {
+        ensure!(
+            self.phase == ReadPhase::Reading,
+            "controller_admin_reader_not_closed"
+        );
+        Ok(())
+    }
+
+    fn retain_reader(&mut self) -> Result<()> {
+        self.require_released()?;
+        self.phase = ReadPhase::Reader;
+        Ok(())
+    }
+
+    fn require_reader_closed_unit(&self) -> Result<()> {
+        ensure!(
+            self.phase == ReadPhase::Reader,
+            "controller_admin_reader_unit_not_closed"
+        );
+        Ok(())
+    }
+
+    fn end_retained_sql(&mut self, known: bool) -> Result<()> {
+        if self.phase != ReadPhase::ReaderSql || !known {
+            self.refuse();
+            anyhow::bail!("controller_admin_reader_sql_completion_unknown");
+        }
+        self.phase = ReadPhase::Reader;
+        Ok(())
+    }
+
+    fn begin_retained_sql(&mut self) -> Result<()> {
+        if self.phase != ReadPhase::Reader {
+            self.refuse();
+            anyhow::bail!("controller_admin_reader_sql_already_open_or_missing");
+        }
+        self.phase = ReadPhase::ReaderSql;
+        Ok(())
+    }
+
+    fn close_reader(&mut self) -> Result<()> {
+        self.require_reader_closed_unit()?;
+        self.phase = ReadPhase::Reading;
+        Ok(())
     }
 }
 

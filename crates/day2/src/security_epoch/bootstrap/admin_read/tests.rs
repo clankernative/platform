@@ -87,6 +87,135 @@ fn open_sql_never_allows_provider_or_release_and_unknown_close_is_permanent() {
     assert!(state.check().is_err());
 }
 
+// An independently tracked connection lifetime is deliberately different from
+// the transaction lifetime. Neither autocommit nor a successful unit may release
+// the peer while the actual reader remains open.
+#[test]
+fn retained_reader_units_match_independent_connection_and_transaction_histories() {
+    for seed in 1_u64..=512 {
+        let mut random = seed;
+        let mut actual = ReadDisposition::new();
+        let (mut live, mut connection, mut transaction) = (true, false, false);
+        let mut history = Vec::new();
+        for _ in 0..64 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let action = random % 8;
+            history.push(action);
+            let expected = match action {
+                0 => {
+                    let yes = live && !connection && !transaction;
+                    if yes {
+                        connection = true;
+                    }
+                    yes
+                }
+                1 => {
+                    let yes = live && !transaction;
+                    if yes {
+                        transaction = true;
+                    } else {
+                        live = false;
+                    }
+                    yes
+                }
+                2 => {
+                    let yes = live && connection && transaction;
+                    if yes {
+                        transaction = false;
+                    } else {
+                        live = false;
+                    }
+                    yes
+                }
+                3 => {
+                    let yes = live && connection && !transaction;
+                    if yes {
+                        connection = false;
+                    }
+                    yes
+                }
+                4 => {
+                    let yes = live && !connection && transaction;
+                    if yes {
+                        transaction = false;
+                    } else {
+                        live = false;
+                    }
+                    yes
+                }
+                5 => live && !transaction,
+                6 => {
+                    let yes = live && !connection && !transaction;
+                    live = false;
+                    yes
+                }
+                _ => {
+                    live = false;
+                    true
+                }
+            };
+            let observed = match action {
+                0 => actual.retain_reader().is_ok(),
+                1 => {
+                    if connection {
+                        actual.begin_retained_sql().is_ok()
+                    } else {
+                        actual.begin_sql().is_ok()
+                    }
+                }
+                2 => actual.end_retained_sql(true).is_ok(),
+                3 => actual.close_reader().is_ok(),
+                4 => actual.end_sql(true).is_ok(),
+                5 => actual.require_closed().is_ok(),
+                6 => actual.finish().is_ok(),
+                _ => {
+                    actual.refuse();
+                    true
+                }
+            };
+            assert_eq!(observed, expected, "seed={seed} events={history:?}");
+        }
+    }
+}
+
+#[test]
+fn successful_reader_unit_is_not_connection_close_or_peer_release() {
+    let mut state = ReadDisposition::new();
+    state.retain_reader().unwrap();
+    state.begin_retained_sql().unwrap();
+    assert!(state.require_closed().is_err());
+    state.end_retained_sql(true).unwrap();
+    state.require_closed().unwrap();
+    assert!(state.require_released().is_err());
+    state.close_reader().unwrap();
+    state.finish().unwrap();
+
+    let mut state = ReadDisposition::new();
+    state.retain_reader().unwrap();
+    state.begin_retained_sql().unwrap();
+    assert!(state.end_sql(true).is_err());
+    assert!(state.end_retained_sql(true).is_err());
+    assert!(state.close_reader().is_err());
+    assert!(state.finish().is_err());
+
+    let mut state = ReadDisposition::new();
+    state.retain_reader().unwrap();
+    state.begin_retained_sql().unwrap();
+    assert!(state.end_retained_sql(false).is_err());
+    assert!(state.end_retained_sql(true).is_err());
+    assert!(state.close_reader().is_err());
+    assert!(state.finish().is_err());
+
+    // The one-shot projection cannot open a second connection inside the
+    // retained session. It refuses BEFORE the fixed adapter's SQLite open.
+    let mut state = ReadDisposition::new();
+    state.retain_reader().unwrap();
+    assert!(state.begin_sql().is_err());
+    assert!(state.begin_retained_sql().is_err());
+}
+
 fn method(source: &str, owner: &str, name: &str) -> syn::ImplItemFn {
     syn::parse_file(source)
         .unwrap()
