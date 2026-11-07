@@ -74,6 +74,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/store/native_storage/keeper.rs",
+      "scope": "const",
+      "fingerprint": "sha256:6c73232d170004bae701a9e459664a9b538dfc71250e305585a047889450fbfd",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
       "fingerprint": "sha256:75c882a8ff349f2b5236f19a1947469948d914f3243dd5d5c1e122fdafe69c8a",
@@ -1906,7 +1912,10 @@
         "pub (super) fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
         "fn finish_result < T > (mut self , stage : & mut EnrolledRoleStage < '_ > , result : std :: thread :: Result < Result < T > >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
         "pub (in crate :: security_epoch) fn reobserve (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (super) async fn run_async < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        "pub (super) async fn run_async < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
+        "pub (in crate :: security_epoch) fn begin_runtime_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_runtime_opened_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (in crate :: security_epoch) fn retain_runtime_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
       ],
       "factories": [
         {
@@ -1962,6 +1971,18 @@
         {
           "owner": "CurrentAppServingPhase < 'storage >",
           "signature": "pub (super) async fn run_async < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn begin_runtime_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn check_runtime_opened_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn retain_runtime_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -4778,7 +4799,11 @@
         "pub (in crate :: security_epoch) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn begin_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_opened_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn retain_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
       ],
       "factories": [
         {
@@ -4802,6 +4827,22 @@
         {
           "owner": "CurrentAppStoragePhase < '_ >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn begin_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check_opened_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn retain_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -5412,7 +5453,11 @@
         "pub (in crate :: security_epoch) fn check_bootstrap_physical (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn check_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn check_physical (& mut self , stage : & mut EnrolledRoleStage < '_ > , purpose : ContinuityPurpose) -> Result < () >",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (crate) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn begin_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_opened_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn retain_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , mut keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
       ],
       "factories": [
         {
@@ -5440,6 +5485,22 @@
         {
           "owner": "AppFileContinuity",
           "signature": "pub (in crate :: security_epoch) fn check_bootstrap_physical (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (in crate :: security_epoch) fn check_opened_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (in crate :: security_epoch) fn require_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (in crate :: security_epoch) fn retain_sqlite (& mut self , stage : & mut EnrolledRoleStage < '_ > , mut keeper : crate :: store :: NativeSqliteKeeper) -> Result < () >"
         }
       ],
       "proof_uses": []
@@ -5743,6 +5804,55 @@
     },
     {
       "source": "crates/day2/src/store/native_storage.rs",
+      "type_name": "NativeSqliteKeeper",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/store/native_storage/keeper.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "keeper"
+          }
+        },
+        {
+          "source": "crates/day2/src/store/native_storage/opened_files.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "opened_files"
+          }
+        }
+      ],
+      "methods": [
+        "pub (super) fn capture_created_files (& mut self) -> Result < () >",
+        "pub (crate) fn check (& mut self , directory : & File , original : & File) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn require_initial_main (db : & Connection , original : & File) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Runtime",
+          "signature": "pub (crate) fn load_native_storage (metadata : InitialStoreMetadata , current : & mut dyn CurrentServingPhase , stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeSqliteKeeper",
+          "signature": "pub (crate) fn check (& mut self , directory : & File , original : & File) -> Result < () >"
+        },
+        {
+          "owner": "NativeSqliteKeeper",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "NativeSqliteKeeper",
+          "signature": "pub (super) fn capture_created_files (& mut self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/store/native_storage.rs",
       "type_name": "RuntimeSql",
       "kind": "private_material",
       "consuming_methods": [],
@@ -5802,7 +5912,22 @@
         }
       ],
       "proof_uses": [],
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/store/native_storage/keeper.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "keeper"
+          }
+        },
+        {
+          "source": "crates/day2/src/store/native_storage/opened_files.rs",
+          "registration": {
+            "source": "crates/day2/src/store/native_storage.rs",
+            "module": "opened_files"
+          }
+        }
+      ]
     }
   ],
   "buffer_destructors": [
