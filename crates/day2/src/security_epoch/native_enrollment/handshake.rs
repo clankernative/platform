@@ -23,6 +23,7 @@ pub(super) enum Actor {
 pub(super) enum Protocol {
     Enrollment,
     InitialStorage,
+    RestoredStorage,
     CurrentStorage,
     InitialServing,
     CurrentServing,
@@ -147,6 +148,17 @@ impl Protocol {
                 (Controller, Complete),
                 (App, Accepted),
             ],
+            Self::RestoredStorage => &[
+                (Controller, BeginReady),
+                (App, Hello),
+                (Controller, Offer),
+                (App, Confirm),
+                (Controller, Complete),
+                (App, Accepted),
+                (Controller, Known),
+                (App, Consumed),
+                (Controller, Released),
+            ],
             Self::CurrentStorage => &[
                 (Controller, BeginReady),
                 (App, Hello),
@@ -185,6 +197,7 @@ impl Protocol {
                     | (Self::CurrentStorage, StagePurpose::StorageBootstrap)
                     | (
                         Self::Enrollment
+                            | Self::RestoredStorage
                             | Self::CurrentStorage
                             | Self::InitialServing
                             | Self::CurrentServing,
@@ -202,7 +215,10 @@ impl Transcript {
         let selected = matches!(
             (protocol, actor),
             (Protocol::Enrollment, Actor::Client | Actor::Issuer)
-                | (Protocol::InitialStorage, Actor::App | Actor::Controller)
+                | (
+                    Protocol::InitialStorage | Protocol::RestoredStorage,
+                    Actor::App | Actor::Controller
+                )
                 | (Protocol::InitialServing, Actor::Shell | Actor::Controller)
         );
         Self {
@@ -233,7 +249,9 @@ impl Transcript {
                 "native_handshake_sequence"
             );
             let protocol = match self.protocol {
-                Protocol::InitialStorage | Protocol::CurrentStorage => Protocol::CurrentStorage,
+                Protocol::InitialStorage | Protocol::RestoredStorage | Protocol::CurrentStorage => {
+                    Protocol::CurrentStorage
+                }
                 Protocol::InitialServing | Protocol::CurrentServing => Protocol::CurrentServing,
                 Protocol::Enrollment => anyhow::bail!("native_handshake_no_reenrollment"),
             };

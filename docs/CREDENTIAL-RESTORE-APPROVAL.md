@@ -6,6 +6,11 @@ verification. The signed approval must bind the exact archive, target, epoch
 and executor. The executor is an authenticated current instance admin running
 the operator command; the approver and executor may be the same person.
 
+The approved first-passkey trust root is the reviewed instance-config registry:
+credential ID, COSE/ES256 public key and its binding to a current `policy.admins`
+identity. Keys change through reviewed configuration, never IAP or web
+self-enrollment. Removing a registry key makes it unusable for new approvals.
+
 Each grant is single use and valid for exactly one hour from approval. It cannot
 be renewed by a fresh observation, consumption, recovery or a repaired clock.
 Expiry or consumption requires a new approval. This hour does not extend the
@@ -37,13 +42,6 @@ In particular, a decoded executor pair cannot replace the actual verified owner.
 
 ## Remaining producer and consumer work
 
-The WebAuthn verifier, trusted enrolled-passkey registry, first-enrollment policy,
-server challenge ceremony and exact-purpose signing producer are not implemented
-by this request contract. Google signed authentication timing and ordinary IAP
-identity do not prove that a passkey was used. `LocalOperator::assert_local`
-explicitly supplies no production authentication. A client-selected key, CLI
-flag, boolean or saved record cannot fill these boundaries.
-
 The [native producer composition](CREDENTIAL-RESTORE-APPROVAL-PRODUCER.md) retains
 its actual short-action owner through verification, signing and publication.
 No native owner survives the human wait or is reconstructed from a signed
@@ -54,3 +52,23 @@ postchecks may create a consumed grant.
 Consumption must be keyed by the grant identifier outside the restored app's
 rollback domain, joined to the restore reservation/epoch transition. An uncertain
 send or historical receipt cannot reconstruct permission or justify a retry.
+
+## Closed native consumer input
+
+`restore_approval::native` now declares the lifetime-bound consumer input. Its
+origin is empty in production and tests: no wire record, fixture, decoded request,
+receipt, boolean or local clock can construct it. This deliberately enables no
+native approval or secure-restore execution.
+
+The input is moved into its single `consume(expected, operation)` entry. A future
+genuine producer must compare the complete request and operation, arm its actual
+owner before the existing durable single-use CAS, and return the owned consumed
+input only after known commitment and same-original postchecks. The existing
+atomic-use codec is to be called once inside that entry; a loaded receipt cannot
+be converted into permission afterwards. Unknown completion permanently refuses.
+
+The consumed owner retains the source lifetime and supplies mutable checks.
+Observation bounds are DATA in the qualified restore original's fixed clock
+domain, in nanoseconds. The producer must separately enforce the signed grant's
+unchanged one-hour absolute expiry with its genuine qualified clock and floor.
+There is no caller-supplied sample, renewed original or public constructor.

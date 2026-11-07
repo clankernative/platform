@@ -1,8 +1,18 @@
-//! Closed restore lease-drain foundation. No production approval/complete-stop
+//! Closed restore lease-drain foundation. No genuine approval/complete-stop
 //! supplier exists. Controlled tests exercise the same state machine, not native
 //! owners. Serializable epoch/fence records and elapsed local time cannot enter.
+use super::{
+    kernel::restore::Intent,
+    restore_approval::{
+        ApprovalRequest,
+        native::{ConsumedRestoreApproval, NativeRestoreApproval},
+    },
+};
 use anyhow::{Context, Result, ensure};
-use day2_capabilities::{Digest, security_epoch::AuthorityScope};
+use day2_capabilities::{
+    Digest,
+    security_epoch::{AuthorityScope, EpochStore},
+};
 use std::{cell::Cell, marker::PhantomData, rc::Rc};
 
 const MAX_OUTSTANDING: usize = 1024;
@@ -22,9 +32,10 @@ pub(super) struct Binding {
     pub target_incarnation: Digest,
 }
 
-// Deliberately UNINHABITED in production. Adding a genuine supplier must retain
-// its actual authenticated approval/original owner here, not add a DTO variant.
-enum ApprovalOrigin {
+// Native carries the ACTUAL typed consumed owner, never request/receipt DATA.
+// Its origin remains empty in production AND tests until the genuine producer.
+enum ApprovalOrigin<'source> {
+    Native(ConsumedRestoreApproval<'source>),
     #[cfg(test)]
     UnqualifiedModel,
 }
@@ -38,9 +49,10 @@ enum Disposition {
 }
 
 /// No configuration/scalar/record/default constructor, clone, serialization,
-/// transfer or clock renewal. The eventual policy defines its fixed interval.
-pub(super) struct Approval {
-    origin: ApprovalOrigin,
+/// transfer or renewal. Native input retains its actual short original and the
+/// separately checked, signed one-hour approval, without converting UTC scalars.
+pub(super) struct Approval<'source> {
+    origin: ApprovalOrigin<'source>,
     binding: Binding,
     domain: Digest,
     issued_at: u64,
@@ -111,18 +123,96 @@ mod sealed {
 /// Only a future retained native source may implement this in production.
 /// No default, blanket or production implementation is supplied in this slice.
 pub(super) trait Source: sealed::Source {
-    fn current(&mut self, approval: &Approval) -> Result<Clock>;
+    fn current(&mut self, approval: &Approval<'_>) -> Result<Clock>;
     /// Atomically exclude new issuance AND renewal, including in-flight sends,
     /// then freeze the complete bounded inventory in one qualified clock domain.
-    fn stop(&mut self, approval: &Approval) -> Result<Stopped>;
+    fn stop(&mut self, approval: &Approval<'_>) -> Result<Stopped>;
     /// Check that the SAME retained source/exclusion remains current; this must
     /// not issue a new cut, resample old deadlines or acquire replacement rights.
-    fn check_stopped(&mut self, approval: &Approval, cut: &Stopped) -> Result<()>;
+    fn check_stopped(&mut self, approval: &Approval<'_>, cut: &Stopped) -> Result<()>;
     /// Terminal local disposition even after expiry, without new IO/permission.
     fn refuse(&mut self);
 }
 
-impl Approval {
+impl<'source> Approval<'source> {
+    /// Sole production-shaped entry: consumes Credential's actual typed input.
+    /// That type remains uninhabited; this does not implement its producer/CAS.
+    /// One-hour signed validity stays inside the native owner. The drain uses
+    /// its UNCHANGED short original/domain in nanoseconds, not UTC scalars.
+    pub(super) fn consume_native(
+        input: NativeRestoreApproval<'source>,
+        expected: &ApprovalRequest,
+        selected: &EpochStore,
+        intent: &Intent,
+        binding: Binding,
+    ) -> Result<Self> {
+        require_native_binding(selected, intent, &binding, expected)?;
+        let mut native = input.consume(expected, &binding.operation)?;
+        let observed = native.check()?;
+        let (domain, origin, deadline) = observed.interval_data();
+        let (lower, upper) = observed.observation_data();
+        let clock = Clock {
+            binding: binding.clone(),
+            domain: domain.clone(),
+            lower,
+            upper,
+        };
+        let mut approval = Self {
+            origin: ApprovalOrigin::Native(native),
+            binding,
+            domain: domain.clone(),
+            issued_at: origin,
+            expires_at: deadline,
+            last: None,
+            state: Cell::new(Disposition::Fresh),
+            identity: Rc::new(()),
+            local: PhantomData,
+        };
+        approval.observe(clock)?;
+        Ok(approval)
+    }
+
+    fn observe_native(&mut self) -> Result<()> {
+        let observation = match &mut self.origin {
+            ApprovalOrigin::Native(native) => native.check()?,
+            #[cfg(test)]
+            ApprovalOrigin::UnqualifiedModel => anyhow::bail!("restore_native_origin_required"),
+        };
+        let (domain, origin, deadline) = observation.interval_data();
+        ensure!(
+            domain == &self.domain && origin == self.issued_at && deadline == self.expires_at,
+            "restore_native_original_changed"
+        );
+        let (lower, upper) = observation.observation_data();
+        self.observe(Clock {
+            binding: self.binding.clone(),
+            domain: domain.clone(),
+            lower,
+            upper,
+        })
+    }
+
+    fn refresh(&mut self, source: &mut impl Source) -> Result<()> {
+        match &self.origin {
+            ApprovalOrigin::Native(_) => {
+                self.observe_native()?;
+                let result = source.current(self).and_then(|clock| self.observe(clock));
+                // Mandatory same producer postcheck even on a source failure.
+                let post = self.observe_native();
+                result?;
+                post?;
+                // All prior source-clock checks stay mandatory. They can add
+                // refusal but cannot replace the final ACTUAL producer check.
+                Ok(())
+            }
+            #[cfg(test)]
+            ApprovalOrigin::UnqualifiedModel => {
+                let clock = source.current(self)?;
+                self.observe(clock)
+            }
+        }
+    }
+
     fn observe(&mut self, clock: Clock) -> Result<()> {
         ensure!(
             self.state.get() != Disposition::Refused,
@@ -147,12 +237,49 @@ impl Approval {
         self.last = Some((clock.lower, clock.upper));
         Ok(())
     }
-    fn refuse(&self) {
+    fn refuse(&mut self) {
         self.state.set(Disposition::Refused);
+        match &mut self.origin {
+            ApprovalOrigin::Native(native) => native.refuse(),
+            #[cfg(test)]
+            ApprovalOrigin::UnqualifiedModel => {}
+        }
     }
 }
+
+// Selection DATA checks only. This never constructs approval from an archive,
+// caller identity, local timestamp, request hash or stored consumption receipt.
+fn require_native_binding(
+    selected: &EpochStore,
+    intent: &Intent,
+    binding: &Binding,
+    expected: &ApprovalRequest,
+) -> Result<()> {
+    selected.validate()?;
+    expected.validate()?;
+    ensure!(
+        expected.target.scope == selected.scope
+            && expected.target.authority == selected.authority_key()?
+            && expected.target.selection == Digest::of(selected)?
+            && expected.full_archive_digest == intent.archive.full_archive_digest
+            && expected.target.incarnation == intent.target_incarnation
+            && expected.target.artifact == intent.archive.artifact
+            && expected.target.schema == intent.archive.schema
+            && binding.scope == expected.target.scope
+            && binding.selection == expected.target.selection
+            && binding.intent == intent.commitment(selected)?
+            && binding.operation == intent.operation
+            && binding.binding_generation == expected.target.binding_generation
+            && binding.source_epoch == intent.archive.security_epoch
+            && binding.target_epoch == expected.target.security_epoch
+            && binding.source_epoch.checked_add(1) == Some(binding.target_epoch)
+            && binding.target_incarnation == expected.target.incarnation,
+        "restore_native_target_or_archive_changed"
+    );
+    Ok(())
+}
 impl Stopped {
-    fn ceiling(&self, approval: &Approval) -> Result<u64> {
+    fn ceiling(&self, approval: &Approval<'_>) -> Result<u64> {
         ensure!(
             self.binding == approval.binding && self.domain == approval.domain,
             "restore_stop_binding_or_clock_changed"
@@ -186,12 +313,12 @@ impl Stopped {
     }
 }
 
-struct Attempt<'a, S: Source> {
-    approval: &'a mut Approval,
+struct Attempt<'a, 'source, S: Source> {
+    approval: &'a mut Approval<'source>,
     source: &'a mut S,
     disarmed: bool,
 }
-impl<S: Source> Drop for Attempt<'_, S> {
+impl<S: Source> Drop for Attempt<'_, '_, S> {
     fn drop(&mut self) {
         if !self.disarmed {
             self.approval.refuse();
@@ -209,14 +336,14 @@ pub(super) enum WaitStatus {
 
 /// Retains BOTH original approval and same stop source across every poll. A
 /// cached status cannot create this owner or bypass its fresh check.
-pub(super) struct Session<'a, S: Source> {
-    approval: &'a mut Approval,
+pub(super) struct Session<'a, 'source, S: Source> {
+    approval: &'a mut Approval<'source>,
     source: &'a mut S,
     cut: Stopped,
     ceiling: u64,
 }
-impl<'a, S: Source> Session<'a, S> {
-    pub(super) fn begin(approval: &'a mut Approval, source: &'a mut S) -> Result<Self> {
+impl<'a, 'source, S: Source> Session<'a, 'source, S> {
+    pub(super) fn begin(approval: &'a mut Approval<'source>, source: &'a mut S) -> Result<Self> {
         let mut guard = Attempt {
             approval: &mut *approval,
             source: &mut *source,
@@ -232,24 +359,17 @@ impl<'a, S: Source> Session<'a, S> {
                 && guard.approval.binding.target_epoch > guard.approval.binding.source_epoch,
             "restore_fence_epoch_binding_invalid"
         );
-        let clock = guard.source.current(guard.approval)?;
-        guard.approval.observe(clock)?;
+        guard.approval.refresh(guard.source)?;
         // Known-May boundary BEFORE the possible stop effect. An unknown reply
         // permanently refuses this attempt; no retry or reapplied stop occurs.
         guard.approval.state.set(Disposition::Stopping);
         let result = guard.source.stop(guard.approval);
-        let post = guard
-            .source
-            .current(guard.approval)
-            .and_then(|c| guard.approval.observe(c));
+        let post = guard.approval.refresh(guard.source);
         let cut = result?;
         post?;
         let ceiling = cut.ceiling(guard.approval)?;
         let checked = guard.source.check_stopped(guard.approval, &cut);
-        let post = guard
-            .source
-            .current(guard.approval)
-            .and_then(|c| guard.approval.observe(c));
+        let post = guard.approval.refresh(guard.source);
         checked?;
         post?;
         guard.approval.state.set(Disposition::Waiting);
@@ -280,13 +400,9 @@ impl<'a, S: Source> Session<'a, S> {
                 ),
                 "restore_fence_session_refused"
             );
-            let clock = guard.source.current(guard.approval)?;
-            guard.approval.observe(clock)?;
+            guard.approval.refresh(guard.source)?;
             let checked = guard.source.check_stopped(guard.approval, cut);
-            let post = guard
-                .source
-                .current(guard.approval)
-                .and_then(|c| guard.approval.observe(c));
+            let post = guard.approval.refresh(guard.source);
             checked?;
             post?;
             ensure!(
@@ -353,7 +469,7 @@ impl<'a, S: Source> Session<'a, S> {
         self.source.refuse();
     }
 }
-impl<S: Source> Drop for Session<'_, S> {
+impl<S: Source> Drop for Session<'_, '_, S> {
     fn drop(&mut self) {
         self.refuse();
     }

@@ -16,6 +16,9 @@ use std::{
     marker::PhantomData,
 };
 
+mod execution;
+pub(in crate::security_epoch) use execution::{ControllerExecutionCeremony, ExecutionCompletion};
+
 struct AuthenticationBorrow<'borrow, 'metadata, 'storage, 'role> {
     reader: &'borrow mut ControllerAdminReader<'metadata, 'storage, 'role>,
     held: &'borrow file::Held,
