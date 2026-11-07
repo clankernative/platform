@@ -2523,7 +2523,10 @@ mod tests {
                     "name: Download retained compiler actions from the admitted preparation\n",
                 ) || step.starts_with("name: Retry retained compiler action download once\n")
                 {
-                    assert_eq!(name, "verify");
+                    assert!(["verify", "verify-shards"].contains(&name));
+                    if name == "verify-shards" {
+                        assert!(job.contains("DAY2_CACHE_ORIGIN_RUN: ${{ github.run_id }}"));
+                    }
                     assert!(inputs.contains("repository: clankernative/platform"));
                     assert!(inputs.contains("github-token: ${{ github.token }}"));
                     assert!(inputs.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
@@ -2851,19 +2854,22 @@ mod tests {
         assert!(actions.contains("path: ~/.cache/bazel-disk"));
         assert!(actions.contains("lookup-only: ${{ inputs.compilation_cache == 'empty' }}"));
         assert!(
-            actions.contains("-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}")
+            actions.contains("-${{ github.sha }}")
+                && !actions.contains("github.run_id")
+                && !actions.contains("github.run_attempt")
         );
         let native_at = job
             .find("      - run: build-out/bin/xtask verify-mac\n")
             .unwrap();
         let publish_at = job
-            .find("      - name: Publish completed Mac compiler actions\n")
+            .find("      - name: Publish shared Mac compiler actions on main\n")
             .unwrap();
         assert!(native_at < publish_at);
-        let publish = ci_step(&job, "Publish completed Mac compiler actions");
+        let publish = ci_step(&job, "Publish shared Mac compiler actions on main");
         assert!(publish.contains("path: ~/.cache/bazel-disk"));
         assert!(publish.contains("key: ${{ steps.bazel_actions.outputs.cache-primary-key }}"));
         assert!(!publish.contains("always()") && !publish.contains("artifacts/"));
+        assert!(publish.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         let main = ci_job("verify-queue-receipt");
         assert!(main.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         let bootstrap = ci_step(&main, "Publish completed Linux bootstrap actions");
@@ -2880,18 +2886,25 @@ mod tests {
                     .contains("Persist newly compiled actions under the captured source key")
             );
         }
-        for consumer in ["verify-prepare", "verify-shards"] {
+        assert!(
+            !ci_job("verify-prepare-parts")
+                .contains("Persist newly compiled actions under the captured source key")
+        );
+        for (consumer, download) in [
+            (
+                "verify-prepare",
+                "Download retained compiler actions for preparation admission",
+            ),
+            (
+                "verify-shards",
+                "Download retained compiler actions from the admitted preparation",
+            ),
+        ] {
             let job = ci_job(consumer);
-            let prepared = ci_step(
-                &job,
-                "Restore compiled actions from this run preparation only",
-            );
-            assert!(prepared.contains("path: ~/.cache/bazel-disk"));
-            assert!(prepared.contains(
-                "key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
-            ));
-            assert!(!prepared.contains("restore-keys:") && !prepared.contains("lookup-only:"));
-            assert!(!prepared.contains("        if:"));
+            assert!(!job.contains("Restore compiled actions from this run preparation only"));
+            let prepared = ci_step(&job, download);
+            assert!(prepared.contains("digest-mismatch: error"));
+            assert!(prepared.contains("run-id:"));
         }
         let final_join = ci_job("verify");
         assert!(final_join.contains("timeout-minutes: 20"));

@@ -165,3 +165,26 @@ for the required fixtures and evidence scope.
 The manifest commitment is not the approval contract's `full_archive_digest`.
 That contract requires the actual complete captured archive bytes/inventory;
 inspection does not produce or authenticate that future capture.
+
+## CI cache survival
+
+Compiler caches are shared acceleration data, never verification receipts. Only
+main publishes the Linux bootstrap, Linux test compiler, and Mac compiler caches;
+keys are immutable per source SHA rather than per run or retry. Same-run compiler
+handoffs use retained artifacts, so Actions cache eviction cannot discard the
+producer's work before the admission guard is rebuilt from current source.
+
+The private `Ci.cache_choose` recipe retains two shared source generations per
+compiler family, preserves a newer actual main during overlapping publications,
+and prefers canonical keys over duplicate retry archives. Closed PR caches and
+deleted queue refs are eligible for cleanup; live refs and active/waiting queue
+runs and still-running PR workflows are preserved. Unknown refs, foreign cache keys and incomplete or failed
+metadata reads never authorize deletion. Plans contain at most 16 numeric IDs per
+platform and report deferred work. Main-only cleanup jobs apply them after cache
+publication succeeds, checking the new shared cache exists before each deletion,
+with one deletion job at a time and isolated Actions write
+permission. Cache maintenance failures never waive any verification obligation.
+
+Preview the read-only plan with
+`bazel run //crates/xtask:xtask -- ci-cache-preview linux` (or `mac`). The preview
+prints IDs and changes neither cache contents nor billing/storage limits.

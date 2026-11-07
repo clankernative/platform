@@ -58,6 +58,7 @@ run! = |args| match args {
 		Ok(Json.to_str({ run: should_run }))
 	}
 	["ci-recipe"] => Ci.run!(call!)
+	["ci-cache-plan", target] => Ci.cache_plan!(target, call!)
 	["simulate-control", seed, count] => Simulation.campaign!(
 		U64.from_str(seed).map_err(|_| "invalid simulation seed")?,
 		U32.from_str(count).map_err(|_| "invalid simulation count")?,
