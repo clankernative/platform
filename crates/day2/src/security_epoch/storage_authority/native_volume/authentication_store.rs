@@ -530,7 +530,8 @@ mod descriptor_tests {
     -> Result<()> {
         use rusqlite::{Connection, OpenFlags};
         let directory = tempfile::tempdir()?;
-        let path = directory.path().canonicalize()?.join("auth.sqlite");
+        let root = directory.path().canonicalize()?;
+        let path = root.join("auth.sqlite");
         let original = Connection::open(&path)?;
         original.pragma_update(None, "journal_mode", "WAL")?;
         original.execute_batch("CREATE TABLE fixture(value INTEGER)")?;
@@ -547,16 +548,16 @@ mod descriptor_tests {
         assert_ne!(expected.main.0, same_file.main.0);
         assert!(expected.require_continuation(&same_file).is_err());
         drop(other);
-        let aba_path = directory.path().join("aba.sqlite");
+        let aba_path = root.join("aba.sqlite");
         let aba_original = Connection::open(&aba_path)?;
         aba_original.execute_batch("CREATE TABLE fixture(value INTEGER)")?;
         let expected_aba = sqlite_observation(&aba_original)?;
-        let foreign_path = directory.path().join("foreign.sqlite");
+        let foreign_path = root.join("foreign.sqlite");
         let foreign = Connection::open(&foreign_path)?;
         foreign.execute_batch("CREATE TABLE fixture(value INTEGER)")?;
         // Keep both genuine fixture connections alive while the fixed name is
         // exchanged. Opening an alias is not evidence for the original owner.
-        let saved = directory.path().join("saved.sqlite");
+        let saved = root.join("saved.sqlite");
         std::fs::rename(&aba_path, &saved)?;
         std::fs::rename(&foreign_path, &aba_path)?;
         let replaced = Connection::open_with_flags(&aba_path, flags)?;

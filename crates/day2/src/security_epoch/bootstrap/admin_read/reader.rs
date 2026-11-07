@@ -10,6 +10,9 @@ use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 
 mod authentication_store;
+pub(in crate::security_epoch) use authentication_store::{
+    CompletedCeremony, RestoreAuthenticationAction,
+};
 
 /// Fields drop in declaration order: SQLite closes before the actual native
 /// loan unwinds. No transaction, Connection, descriptor or native owner getter.

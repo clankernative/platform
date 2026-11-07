@@ -4,7 +4,7 @@
 use super::preparation::PendingPhysicalFilePhase;
 use super::{
     AppFileContinuity, AuthenticationStoreFiles, CurrentPhysicalFilePhase,
-    CurrentPreparedFilePhase, PreparedFileContinuity,
+    CurrentPreparedFilePhase, NativeApprovalSource, PreparedFileContinuity,
 };
 use crate::security_epoch::{
     authenticated_reads::{
@@ -1002,6 +1002,32 @@ impl CurrentAppStoragePhase<'_> {
 }
 
 impl<'role> CurrentControllerStoragePhase<'_, 'role> {
+    pub(in crate::security_epoch) fn capture_approval_source(
+        &mut self,
+        scope: &day2_capabilities::security_epoch::AuthorityScope,
+    ) -> Result<NativeApprovalSource> {
+        let requested = (|| {
+            self.check()?;
+            ensure!(
+                self.app_request()?.purpose() == StoragePeerPurpose::AdminRead,
+                "restore_approval_admin_read_required"
+            );
+            let clock =
+                crate::security_epoch::restore_host_clock::UnfencedControllerClock::capture(
+                    self, scope,
+                )?;
+            self.file.capture_approval_source(clock)
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let mut source = requested?;
+        checked?;
+        source.check_phase(self)?;
+        Ok(source)
+    }
+
     pub(in crate::security_epoch) fn check(&mut self) -> Result<()> {
         use crate::security_epoch::self_check_profile::{self, PhysicalStep};
         let _profile = self_check_profile::enter(self_check_profile::Category::PhysicalLocal);

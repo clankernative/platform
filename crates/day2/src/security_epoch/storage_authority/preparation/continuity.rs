@@ -7,6 +7,7 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use super::{observe_anchored_file, observe_current_anchored_file};
+use crate::security_epoch::restore_host_clock::UnfencedControllerClock;
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
     authenticated_reads::{ControllerEpochReads, ProviderEpochReads},
@@ -14,8 +15,8 @@ use crate::security_epoch::{
     controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     storage_authority::{
-        AuthenticationStoreFiles, DirectoryIdentity, ReviewedStorageSelection,
-        native_volume::NativeVolumeContinuity,
+        AuthenticationStoreFiles, DirectoryIdentity, NativeApprovalSource,
+        ReviewedStorageSelection, native_volume::NativeVolumeContinuity,
     },
 };
 use anyhow::{Result, ensure};
@@ -562,6 +563,21 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 }
 
 impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
+    pub(in crate::security_epoch::storage_authority) fn capture_approval_source(
+        &mut self,
+        clock: UnfencedControllerClock,
+    ) -> Result<NativeApprovalSource> {
+        self.check()?;
+        let requested = self.inner.phase.capture_approval_source(clock);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let source = requested?;
+        checked?;
+        Ok(source)
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             self.inner.disposition.check()?;

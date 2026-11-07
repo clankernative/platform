@@ -99,6 +99,61 @@ impl Fixture {
 }
 
 #[test]
+fn assertion_transport_is_bounded_canonical_data_and_still_requires_real_verification() -> Result<()>
+{
+    let f = fixture();
+    let assertion = f.assertion(3, 0x0d);
+    let wire = serde_json::json!({
+        "format":"day2_restore_passkey_assertion_v1",
+        "credential_id":URL_SAFE_NO_PAD.encode(&assertion.credential_id),
+        "client_data_json":URL_SAFE_NO_PAD.encode(&assertion.client_data_json),
+        "authenticator_data":URL_SAFE_NO_PAD.encode(&assertion.authenticator_data),
+        "signature":URL_SAFE_NO_PAD.encode(&assertion.signature),
+        "user_handle":assertion.user_handle.as_ref().map(|v|URL_SAFE_NO_PAD.encode(v)),
+    });
+    let decoded = Assertion::decode(&serde_json::to_vec(&wire)?)?;
+    assert_eq!(f.verify(&decoded, 2)?.counter, 3);
+    for (field, max) in [
+        ("credential_id", 1023),
+        ("client_data_json", 4096),
+        ("authenticator_data", 37),
+        ("signature", 72),
+        ("user_handle", 64),
+    ] {
+        for bad in [
+            String::new(),
+            URL_SAFE_NO_PAD.encode(vec![1; max + 1]),
+            format!("{}=", wire[field].as_str().unwrap()),
+        ] {
+            let mut changed = wire.clone();
+            changed[field] = bad.into();
+            assert!(
+                Assertion::decode(&serde_json::to_vec(&changed)?).is_err(),
+                "{field}"
+            );
+        }
+    }
+    let mut unknown = wire.clone();
+    unknown["approved"] = true.into();
+    assert!(Assertion::decode(&serde_json::to_vec(&unknown)?).is_err());
+    let text = serde_json::to_string(&wire)?;
+    let duplicate = text.replacen('{', "{\"format\":\"day2_restore_passkey_assertion_v1\",", 1);
+    assert!(Assertion::decode(duplicate.as_bytes()).is_err());
+    assert!(Assertion::decode(&vec![b' '; 16_385]).is_err());
+    let mut invalid_uv = wire;
+    invalid_uv["authenticator_data"] = URL_SAFE_NO_PAD
+        .encode(f.assertion(3, 0x09).authenticator_data)
+        .into();
+    // Parsing is deliberately not authentication, including for correctly shaped
+    // but unverified bytes. The unchanged real verifier must still reject them.
+    assert!(
+        f.verify(&Assertion::decode(&serde_json::to_vec(&invalid_uv)?)?, 2)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn real_es256_assertions_require_presence_and_user_verification() {
     let f = fixture();
     for flags in [0x0d, 0x1d] {
