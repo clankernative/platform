@@ -7,6 +7,240 @@ use day2_capabilities::Digest;
 use rusqlite::{Connection, TransactionBehavior, params};
 use std::{collections::BTreeSet, path::Path};
 
+#[test]
+fn current_use_admits_its_connect_dependency_once_through_the_actual_owner() -> Result<()> {
+    use syn::visit::{self, Visit};
+    fn call(expression: &syn::Expr, target: &str) -> bool {
+        let syn::Expr::Try(tried) = expression else {
+            return false;
+        };
+        let syn::Expr::Call(call) = &*tried.expr else {
+            return false;
+        };
+        let syn::Expr::Path(path) = &*call.func else {
+            return false;
+        };
+        path.path
+            .segments
+            .iter()
+            .map(|p| p.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::")
+            == target
+            && call.args.len() == 1
+            && matches!(call.args.first(),Some(syn::Expr::Path(p)) if p.path.is_ident("db"))
+    }
+    fn present(expression: &syn::Expr, name: &str) -> bool {
+        let syn::Expr::Call(call) = expression else {
+            return false;
+        };
+        matches!(&*call.func,syn::Expr::Path(p) if p.path.is_ident("present"))
+            && call.args.len() == 1
+            && matches!(call.args.first(),Some(syn::Expr::Lit(l)) if matches!(&l.lit,syn::Lit::Str(s) if s.value()==name))
+    }
+    #[derive(Default)]
+    struct Calls {
+        guards: Vec<u8>,
+        connect: usize,
+        usage: usize,
+        valid: bool,
+    }
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+            let guard = if present(&node.cond, "oauth_connect_schema_version") {
+                1
+            } else if matches!(&*node.cond,syn::Expr::Unary(u) if matches!(u.op,syn::UnOp::Not(_)) && present(&u.expr,"oauth_use_schema_version"))
+            {
+                2
+            } else if present(&node.cond, "oauth_use_schema_version") {
+                3
+            } else {
+                0
+            };
+            self.visit_expr(&node.cond);
+            self.guards.push(guard);
+            self.visit_block(&node.then_branch);
+            self.guards.pop();
+            if let Some((_, otherwise)) = &node.else_branch {
+                self.visit_expr(otherwise);
+            }
+        }
+        fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+            let expression = syn::Expr::Try(node.clone());
+            if call(&expression, "super::connect::install_schema") {
+                self.connect += 1;
+                self.valid &= self.guards.last() == Some(&2) && self.guards.contains(&1);
+            }
+            if call(&expression, "super::usage::install") {
+                self.usage += 1;
+                self.valid &= self.guards.last() == Some(&3);
+            }
+            visit::visit_expr_try(self, node);
+        }
+    }
+    fn valid(source: &str, usage: &str) -> Result<bool> {
+        let syntax = syn::parse_file(source)?;
+        let captures: Vec<_> = syntax
+            .items
+            .iter()
+            .filter_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                matches!(&*item.self_ty,syn::Type::Path(p) if p.path.is_ident("Snapshot"))
+                    .then_some(item)
+            })
+            .flat_map(|item| item.items.iter())
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(f) if f.sig.ident == "capture" => Some(&f.block),
+                _ => None,
+            })
+            .collect();
+        ensure!(captures.len() == 1, "test_snapshot_capture_target");
+        let mut calls = Calls {
+            valid: true,
+            ..Default::default()
+        };
+        calls.visit_block(captures[0]);
+        let syntax = syn::parse_file(usage)?;
+        let installs: Vec<_> = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(f) if f.sig.ident == "install" => Some(&f.block),
+                _ => None,
+            })
+            .collect();
+        ensure!(installs.len() == 1, "test_use_install_target");
+        let first = matches!(installs[0].stmts.first(),Some(syn::Stmt::Expr(e,_)) if call(e,"super::connect::install_schema"));
+        let mut dependency = Calls {
+            valid: true,
+            ..Default::default()
+        };
+        dependency.visit_block(installs[0]);
+        Ok(calls.valid
+            && calls.connect == 1
+            && calls.usage == 1
+            && first
+            && dependency.connect == 1)
+    }
+    let source = include_str!("restore.rs");
+    let usage = include_str!("usage.rs");
+    assert!(valid(source, usage)?);
+    let direct = "super::connect::install_schema(db)?;";
+    let use_call = "super::usage::install(db)?;";
+    let condition = "if !present(\"oauth_use_schema_version\")";
+    assert_eq!(source.matches(direct).count(), 1);
+    assert_eq!(source.matches(use_call).count(), 1);
+    assert_eq!(source.matches(condition).count(), 1);
+    assert!(!valid(&source.replace(condition, "if true"), usage)?);
+    assert!(!valid(&source.replace(direct, "();"), usage)?);
+    assert!(!valid(
+        &source.replace(direct, &format!("{direct}{direct}")),
+        usage
+    )?);
+    assert!(!valid(&source.replace(use_call, "();"), usage)?);
+    assert_eq!(usage.matches(direct).count(), 1);
+    assert!(!valid(source, &usage.replace(direct, "();"))?);
+    assert!(!valid(
+        source,
+        &usage.replace(direct, &format!("let _ = ();{direct}"))
+    )?);
+    Ok(())
+}
+
+#[test]
+fn current_connect_and_use_corruption_keep_first_refusal_and_the_absent_use_route() -> Result<()> {
+    fn rows(db: &Connection, sql: &str) -> Result<Vec<Vec<rusqlite::types::Value>>> {
+        Ok(db
+            .prepare(sql)?
+            .query_map([], |r| {
+                (0..r.as_ref().column_count())
+                    .map(|i| r.get(i))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    fn corrupt(db: &Connection, sql: &str) -> Result<()> {
+        let guards = db
+            .prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        db.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
+        for (name, _) in &guards {
+            db.execute_batch(&format!("DROP TRIGGER {name}"))?;
+        }
+        db.execute_batch(sql)?;
+        for (_, ddl) in guards {
+            db.execute_batch(&ddl)?;
+        }
+        db.execute_batch("PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON")?;
+        Ok(())
+    }
+    for (with_use, bad_connect, bad_use) in [
+        (false, false, false),
+        (false, true, false),
+        (true, true, true),
+        (true, false, true),
+    ] {
+        let mut db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", true)?;
+        db.execute_batch(crate::store::PLATFORM_DDL)?;
+        db.execute(
+            "INSERT INTO day2_meta VALUES('scope','company/canary/calendar')",
+            [],
+        )?;
+        db.execute(
+            "INSERT INTO day2_meta VALUES('schema',?1)",
+            [Digest::new(b"schema").as_str()],
+        )?;
+        if with_use {
+            crate::oauth::usage::install(&db)?;
+        } else {
+            connect::install_schema(&db)?;
+        }
+        db.execute("INSERT INTO oauth_connection_slots VALUES('slot',1,1,1,'profile','account','affinity','active')",[])?;
+        if bad_use {
+            db.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status) VALUES('old','query','alice@example.com','{}',?1,1,'pending')",[Digest::new(b"artifact").as_str()])?;
+            db.execute(
+                "INSERT INTO oauth_use_handles VALUES(?1,'old','{}')",
+                ["x".repeat(43)],
+            )?;
+        }
+        if bad_connect {
+            corrupt(&db, "UPDATE oauth_connection_slots SET generation=0")?;
+        }
+        if bad_use {
+            corrupt(&db, "UPDATE oauth_use_handles SET claims='null'")?;
+        }
+        let before = rows(&db, "SELECT * FROM oauth_connection_slots ORDER BY slot")?;
+        let profile = Profile::prepare()?;
+        let tx = db.transaction()?;
+        let result = Snapshot::capture(&tx, &profile);
+        if bad_connect || bad_use {
+            let error = result
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("test_expected_corruption_refusal"))?;
+            let table = if bad_connect {
+                "oauth_connection_slots"
+            } else {
+                "oauth_use_handles"
+            };
+            assert!(
+                error.chain().any(|e| e.to_string().contains(table)),
+                "wrong canonical dependency refusal"
+            );
+        } else {
+            result?;
+        }
+        tx.rollback()?;
+        assert!(before == rows(&db, "SELECT * FROM oauth_connection_slots ORDER BY slot")?);
+        let present:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='oauth_use_handles')",[],|row|row.get(0))?;
+        assert_eq!(present, with_use);
+    }
+    Ok(())
+}
+
 pub(in crate::oauth) fn database(path: &Path) -> Result<Connection> {
     let db = Connection::open(path)?;
     db.pragma_update(None, "foreign_keys", true)?;
@@ -268,6 +502,40 @@ fn allocation_floor_requires_the_whole_current_unit_without_repair() -> Result<(
         );
         assert_eq!(db.query_row("SELECT group_concat(name||':'||coalesce(sql,''),'|') FROM (SELECT name,sql FROM sqlite_master ORDER BY name)",[],|r|r.get::<_,String>(0))?,before);
     }
+    Ok(())
+}
+
+#[test]
+fn applied_cut_rejects_another_real_connection_even_with_that_connections_owned_scope() -> Result<()>
+{
+    let a_dir = tempfile::tempdir()?;
+    let b_dir = tempfile::tempdir()?;
+    let mut a = database(&a_dir.path().join("a.sqlite"))?;
+    let mut b = database(&b_dir.path().join("b.sqlite"))?;
+    let profile = Profile::prepare()?;
+    let a_tx = a.transaction()?;
+    let b_tx = b.transaction()?;
+    let before = Snapshot::capture(&a_tx, &profile)?;
+    let cut = crate::security_epoch::restore_cut::fixture(before.digest().clone(), 1234)?;
+    // Private helper access is confined to this child test. The production
+    // whole-reset entry returns counts and cannot export this transaction loan.
+    let applied =
+        crate::oauth::schema::admit(&a_tx, |_| super::apply_in(&a_tx, before, &cut, &profile))?;
+    assert!(
+        applied.require_connection(&a_tx).is_err(),
+        "no live admission scope remains"
+    );
+    crate::oauth::schema::admit(&b_tx, |db| {
+        crate::oauth::schema::require_admission(db)?;
+        assert!(
+            applied.require_connection(&b_tx).is_err(),
+            "foreign metadata is not this loan"
+        );
+        Ok(())
+    })?;
+    crate::oauth::schema::admit(&a_tx, |_| applied.require_connection(&a_tx))?;
+    a_tx.rollback()?;
+    b_tx.rollback()?;
     Ok(())
 }
 

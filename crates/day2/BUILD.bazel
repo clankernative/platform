@@ -202,7 +202,14 @@ platform_rust_test(
     crate_name = "day2",
     crate_root = "src/lib.rs",
     srcs = glob(["src/**/*.rs"]),
-    compile_data = COMPILE_INPUTS,
+    compile_data = COMPILE_INPUTS + [
+        "//:.bazelrc",
+        "//:MODULE.bazel",
+        "//crates/day2-capabilities:BUILD.bazel",
+        "//crates/day2-capabilities:Cargo.toml",
+        "//crates/day2-capabilities:src/credentials.rs",
+        "//crates/day2:BUILD.bazel",
+    ],
     internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
 )
 
@@ -398,6 +405,7 @@ platform_rust_test(
 )
 
 exports_files([
+    "BUILD.bazel",
     "Cargo.toml",
     "fixtures/credential-schema-v1.sql",
     "fixtures/credential-schema-v2-empty.sql",
