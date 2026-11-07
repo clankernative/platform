@@ -27,6 +27,7 @@ mod native_identity;
 mod native_namespace;
 mod preparation_image;
 pub(crate) mod restore_approval;
+pub(crate) mod restore_authority;
 mod restore_fencing;
 mod restore_host_clock;
 mod restore_staging;
