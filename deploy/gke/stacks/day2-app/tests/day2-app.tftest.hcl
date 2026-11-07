@@ -430,6 +430,13 @@ run "infrastructure_preserves_software_after_release_handoff" {
     condition     = output.release_deployment.credentials == null
     error_message = "An app without provider credentials releases no registration metadata."
   }
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" &&
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.config_map[0].name if volume.name == "instance"]) == "day2-release-two"
+    )
+    error_message = "Scheduled backups must load the released artifact and instance instead of the bootstrap selection."
+  }
 }
 
 # A directly deployed app (release_managed = false) between `day2 platform
@@ -1604,6 +1611,127 @@ run "renders_freetool_app_resource_scope" {
   }
 }
 
+run "cli_bootstrap_registration_comes_from_the_edge_contract" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\",\"client_secret\":\"synthetic-desktop-registration-value\"}"
+      }
+    }
+  }
+  assert {
+    condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).identity == {
+      scheme             = "google_iap"
+      hosted_domain      = "example.com"
+      cli_desktop_client = { client_id = "123-desktop.apps.googleusercontent.com", client_secret = "synthetic-desktop-registration-value" }
+    }
+    error_message = "The runtime must publish the edge-selected registration with the existing instance identity, without a second client selection."
+  }
+}
+
+run "cli_bootstrap_refuses_a_malformed_contract_registration" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"https://evil.example/client\",\"client_secret\":\"synthetic-desktop-registration-value\"}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_partial_registration" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\"}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_unparseable_registration" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "invalid JSON"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_numeric_registration_values" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\",\"client_secret\":1234567890123456}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "cli_bootstrap_refuses_unselected_registration_fields" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = {
+      data = {
+        APP_DOMAIN                   = "example.test.example.com"
+        IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+        PVC_NAME                     = "data"
+        SERVICE_NAME                 = "app"
+        REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+        REQUIRED_SERVICE_LABEL_VALUE = "app"
+        CLI_DESKTOP_CLIENT           = "{\"client_id\":\"123-desktop.apps.googleusercontent.com\",\"client_secret\":\"synthetic-desktop-registration-value\",\"refresh_token\":\"synthetic-user-token\"}"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
 run "rolling_sqlite_keeps_incumbent_and_requires_same_node" {
   command = plan
   variables { rolling_deploys = true }
@@ -1641,6 +1769,46 @@ run "rolling_refuses_implicit_statefulset_replacement" {
     values = { objects = [{ metadata = { name = "day2-example-app" } }] }
   }
   expect_failures = [terraform_data.rolling_admission]
+}
+
+run "rolling_handoff_keeps_backups_with_the_released_workload" {
+  command = plan
+  variables {
+    rolling_deploys = true
+    release_managed = true
+  }
+  override_data {
+    target = data.kubernetes_resources.exclusive_workload
+    values = { objects = [] }
+  }
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = { "day2.dev/rollout" = "release-two" } }
+      spec = { replicas = 1, template = {
+        metadata = {
+          labels = { "day2.dev/rollout" = "release-two" }
+          annotations = {
+            "day2.dev/installation"    = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+            "day2.dev/artifact"        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "day2.dev/instance-sha256" = "released-instance"
+          }
+        }
+        spec = {
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
+        }
+      } }
+    }] }
+  }
+  assert {
+    condition = (
+      kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].container[0].image &&
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.config_map[0].name if volume.name == "instance"]) == "day2-release-two"
+    )
+    error_message = "A rolling release must keep its image and provide that image and instance to scheduled backups."
+  }
 }
 
 run "rolling_refuses_unadmitted_direct_image_change" {

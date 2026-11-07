@@ -35,7 +35,9 @@ use syn::{
 
 const POLICY: &str = "architecture-proofs.json";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PROOFS: usize = 128;
+// The reviewed registry aggregates owners; candidate requests stay separately bounded.
+const MAX_POLICY_PROOFS: usize = 256;
+const MAX_CANDIDATE_PROOFS: usize = 128;
 const MAX_TRAIT_SOURCES: usize = 32;
 const MAX_BUFFER_DESTRUCTORS: usize = 128;
 const MAX_OWNING_CHILDREN: usize = 8;
@@ -282,7 +284,7 @@ fn source_path(root: &Path, source: &str) -> Result<std::path::PathBuf> {
 fn validate_policy(policy: &Policy) -> Result<()> {
     ensure!(policy.version == 1, "unsupported proof policy version");
     ensure!(
-        !policy.proofs.is_empty() && policy.proofs.len() <= MAX_PROOFS,
+        !policy.proofs.is_empty() && policy.proofs.len() <= MAX_POLICY_PROOFS,
         "proof policy entry budget"
     );
     let mut identities = BTreeSet::new();
@@ -1208,7 +1210,7 @@ fn validate_candidate(descriptor: &CandidateDescriptor) -> Result<()> {
         "trait check catalog budget"
     );
     ensure!(
-        descriptor.destructors.len() <= MAX_PROOFS,
+        descriptor.destructors.len() <= MAX_CANDIDATE_PROOFS,
         "proof candidate destructor budget"
     );
     ensure!(
@@ -1216,7 +1218,7 @@ fn validate_candidate(descriptor: &CandidateDescriptor) -> Result<()> {
         "buffer destructor catalog budget"
     );
     ensure!(
-        descriptor.proof_uses.len() <= MAX_PROOFS,
+        descriptor.proof_uses.len() <= MAX_CANDIDATE_PROOFS,
         "proof candidate use selector budget"
     );
     let mut trait_sources = BTreeSet::new();
@@ -1272,7 +1274,7 @@ fn validate_candidate(descriptor: &CandidateDescriptor) -> Result<()> {
         );
     }
     ensure!(
-        descriptor.owning_apis.len() <= MAX_PROOFS,
+        descriptor.owning_apis.len() <= MAX_CANDIDATE_PROOFS,
         "owning API selector budget"
     );
     let mut owning_apis = BTreeSet::new();
@@ -2634,6 +2636,115 @@ mod tests {
 
     fn check_source(source: &str) -> Result<()> {
         inspect(&proof(Kind::Consuming), &syn::parse_file(source)?.items)
+    }
+
+    fn proof_catalog(count: usize) -> serde_json::Value {
+        let proofs = (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "source": format!("crates/example/src/proof_{index:03}.rs"),
+                    "type_name": "Permit", "kind": "consuming",
+                    "consuming_methods": ["send"], "methods": ["pub fn send(self)"],
+                    "factories": []
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"version": 1, "proofs": proofs})
+    }
+
+    #[test]
+    fn reviewed_proof_catalog_has_a_finite_256_entry_budget() -> Result<()> {
+        for count in [130, 256] {
+            validate_policy(&serde_json::from_value(proof_catalog(count))?)?;
+        }
+        for count in [0, 257] {
+            let error = validate_policy(&serde_json::from_value(proof_catalog(count))?)
+                .err()
+                .context("out-of-budget proof catalog admitted")?;
+            ensure!(error.to_string() == "proof policy entry budget");
+        }
+        let mut duplicate = proof_catalog(256);
+        duplicate["proofs"][255] = duplicate["proofs"][0].clone();
+        ensure!(
+            validate_policy(&serde_json::from_value(duplicate)?)
+                .err()
+                .context("duplicate record beyond the former limit admitted")?
+                .to_string()
+                == "duplicate proof policy entry"
+        );
+        let mut reordered = proof_catalog(256);
+        reordered["proofs"].as_array_mut().unwrap().swap(254, 255);
+        ensure!(
+            validate_policy(&serde_json::from_value(reordered)?)
+                .err()
+                .context("unsorted record beyond the former limit admitted")?
+                .to_string()
+                == "proof entries must be sorted by source and type name"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expanded_catalog_enforces_actual_source_after_the_former_limit() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path().canonicalize()?;
+        let policy = proof_catalog(130);
+        fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
+        let source =
+            "struct Claim; pub struct Permit { claim: Claim } impl Permit { pub fn send(self) {} }";
+        for entry in policy["proofs"].as_array().unwrap() {
+            let path = root.join(entry["source"].as_str().unwrap());
+            fs::create_dir_all(path.parent().unwrap())?;
+            fs::write(&path, source)?;
+        }
+        check(&root)?;
+        let last = root.join(policy["proofs"][129]["source"].as_str().unwrap());
+        fs::write(
+            &last,
+            format!("{source} impl Permit {{ pub fn raw(&self) {{}} }}"),
+        )?;
+        let error = check(&root)
+            .err()
+            .context("unreviewed API in the 130th source was not enforced")?;
+        ensure!(format!("{error:#}").contains("unreviewed proof method"));
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_requests_keep_each_128_selector_budget() -> Result<()> {
+        for (field, refusal) in [
+            ("destructors", "proof candidate destructor budget"),
+            ("proof_uses", "proof candidate use selector budget"),
+            ("owning_apis", "owning API selector budget"),
+        ] {
+            let mut selections = (0..128)
+                .map(|index| {
+                    let mut value = serde_json::json!({
+                        "source": "crates/example/src/proofs.rs",
+                        "type_name": format!("Permit_{index}")
+                    });
+                    if field == "owning_apis" {
+                        value["kind"] = "consuming".into();
+                        value["owning_children"] = serde_json::json!([]);
+                    }
+                    value
+                })
+                .collect::<Vec<_>>();
+            let mut descriptor = serde_json::json!({
+                "version": 1, "trait_checks": [], "destructors": []
+            });
+            descriptor[field] = serde_json::to_value(&selections)?;
+            validate_candidate(&serde_json::from_value(descriptor.clone())?)?;
+            let mut extra = selections[0].clone();
+            extra["type_name"] = "Permit_128".into();
+            selections.push(extra);
+            descriptor[field] = serde_json::to_value(selections)?;
+            let error = validate_candidate(&serde_json::from_value(descriptor)?)
+                .err()
+                .context("129 candidate selectors admitted")?;
+            ensure!(error.to_string() == refusal, "{field}");
+        }
+        Ok(())
     }
 
     #[test]

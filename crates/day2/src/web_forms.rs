@@ -684,6 +684,32 @@ pub(crate) fn bind(view: &View<'_>, markup: &str) -> Result<Markup> {
         .map(|form| form.id())
         .collect();
     ensure!(forms.len() <= 128, "rendered_form_budget");
+    // A catalog can repeat the same command on every card. Check each distinct
+    // command in one current SQL snapshot, rather than acquiring a native
+    // storage/epoch scope for every form. These decisions live only for this
+    // render; submitting a signed form still checks current authority.
+    let commands: BTreeSet<_> = document
+        .select(&selector("form[data-command]"))
+        .filter_map(|form| form.value().attr("data-command").map(str::to_owned))
+        .collect();
+    let allowed = if commands.is_empty() {
+        BTreeSet::new()
+    } else {
+        view.runtime.sql_read(|tx| {
+            Ok(commands
+                .into_iter()
+                .filter(|operation| {
+                    crate::authority_state::authorize_in(
+                        tx,
+                        view.runtime,
+                        operation,
+                        &view.session.actor,
+                    )
+                    .is_ok()
+                })
+                .collect::<BTreeSet<_>>())
+        })?
+    };
     for form_id in forms {
         let form = ElementRef::wrap(document.tree.get(form_id).context("form missing")?)
             .context("form element")?;
@@ -859,11 +885,7 @@ pub(crate) fn bind(view: &View<'_>, markup: &str) -> Result<Markup> {
                 editable.push(field.to_owned());
             }
         }
-        if view
-            .runtime
-            .authorize(&operation, &view.session.actor)
-            .is_err()
-        {
+        if !allowed.contains(&operation) {
             document.tree.get_mut(form_id).context("form")?.detach();
             continue;
         }

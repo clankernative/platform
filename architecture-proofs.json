@@ -67,6 +67,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+      "scope": "const",
+      "fingerprint": "sha256:1bd422f2a5e17fe475e618f391b17f51176ec15463dc014cd4c1bcd1e758aac3",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
       "scope": "const",
       "fingerprint": "sha256:5722fc840604c24fc0bba2020f0c7c8b028266eba9e5e625d07eafb731f54736",
@@ -938,6 +944,7 @@
         "fn pending (owner : & 'owner mut PendingWriter < 'stage , 'role > , commit : SqlCommit) -> Self",
         "pub (crate) fn prepare (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn require_native_registry_read (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (crate) fn require_write (& mut self) -> Result < () >",
         "pub (crate) fn rollback_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
         "fn runtime (owner : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self"
@@ -976,6 +983,10 @@
         {
           "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn require_native_registry_read (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
         },
         {
           "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
@@ -4570,6 +4581,165 @@
       ]
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_host_clock.rs",
+      "type_name": "UnfencedHostClock",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >",
+        "pub (super) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < HostTimeData >",
+        "pub (super) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn capture (stage : & mut EnrolledRoleStage < '_ > , scope : & AuthorityScope) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < HostTimeData >"
+        },
+        {
+          "owner": "UnfencedHostClock",
+          "signature": "pub (super) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_webauthn.rs",
+      "type_name": "TrustedKey",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn binding (& self) -> Result < Digest >",
+        "fn validate (& self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "RegistryCeremony",
+          "signature": "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn verify (key : & TrustedKey < '_ > , challenge : & Challenge , expected_request : & Digest , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        },
+        {
+          "owner": "TrustedKey < '_ >",
+          "signature": "fn binding (& self) -> Result < Digest >"
+        },
+        {
+          "owner": "TrustedKey < '_ >",
+          "signature": "fn validate (& self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn.rs",
+            "module": "registry"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+            "module": "file"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+      "type_name": "Origin",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn check_local (& self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "RegistryCeremony",
+          "signature": "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Origin < '_ >",
+          "signature": "pub (super) fn check_local (& self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+            "module": "file"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+      "type_name": "RegistryCeremony",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn begin_attempt (& self) -> Result < () >",
+        "pub (super) fn capture (runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >",
+        "fn challenge (& self) -> Result < Challenge >",
+        "pub (super) fn encoded_challenge (& self) -> Result < String >",
+        "fn observe (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ >) -> Result < () >",
+        "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+      ],
+      "factories": [
+        {
+          "owner": "RegistryCeremony",
+          "signature": "pub (super) fn capture (runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , credential_id : & [u8] , request : Digest) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RegistryCeremony",
+          "signature": "fn begin_attempt (& self) -> Result < () >"
+        },
+        {
+          "owner": "RegistryCeremony",
+          "signature": "fn challenge (& self) -> Result < Challenge >"
+        },
+        {
+          "owner": "RegistryCeremony",
+          "signature": "fn observe (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RegistryCeremony",
+          "signature": "pub (super) fn encoded_challenge (& self) -> Result < String >"
+        },
+        {
+          "owner": "RegistryCeremony",
+          "signature": "pub (super) fn verify_current (& self , runtime : & Runtime , sql : & mut RuntimeSql < '_ , '_ , '_ , '_ > , stored_counter : u32 , assertion : & Assertion) -> Result < AssertionFacts >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_webauthn/registry/file.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_webauthn/registry.rs",
+            "module": "file"
+          }
+        }
+      ]
+    },
+    {
       "source": "crates/day2/src/security_epoch/serving.rs",
       "type_name": "CurrentShellServingPhase",
       "owning_children": [
@@ -6017,6 +6187,8 @@
         "fn close (& mut self) -> Result < () >",
         "fn fail (& mut self)",
         "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db Connection) -> Result < T >) -> Result < T >",
+        "pub (crate) fn refuse_registry (& mut self)",
+        "pub (crate) fn require_native_registry_read (& mut self , runtime : & Runtime) -> Result < () >",
         "fn unit < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
         "pub (crate) fn with_owner < T > (runtime : & Runtime , mut owner : SqlOwner < 'owner , 'stage , 'role , 'original > , operation : impl for < 'sql > FnOnce (& 'sql mut Self) -> Result < T >) -> Result < T >",
         "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ >) -> Result < SqlDecision < T > >) -> Result < T >"
@@ -6047,6 +6219,14 @@
         {
           "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
           "signature": "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn refuse_registry (& mut self)"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn require_native_registry_read (& mut self , runtime : & Runtime) -> Result < () >"
         },
         {
           "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",

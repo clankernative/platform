@@ -37,3 +37,18 @@ publication or serving constructor is added by this foundation. The next
 mechanical step must retain the actual staged creator and freshly verify its
 private frozen reset image plus genuinely current settled/fenced root and real
 P3/writer/peer admission under this same original.
+
+Native resource authorization refuses object upload/download grants and GitHub
+signed log URLs before resource resolution, credential loading, signing or
+provider preparation. The one provider registry explicitly classifies every
+action's response as data or an external bearer; adding an action requires that
+classification. Read-only actions can still return bearers. The advertised
+`expires_in` on a URL is response data, not a qualified expiry or revocation
+proof. These native bearer profiles remain unsupported until a genuine fence
+exists.
+
+Passing that refusal filter supplies no complete-stop witness. Dispatch permits,
+prepared observations, delegated work, reveal delivery and pending or ambiguous
+provider effects still require their actual lifetime or fencing proof. A response
+finishing cannot establish that those separate rights have ended. This refusal
+boundary adds no stop, fenced continuation, counter-write loan or restored writer.

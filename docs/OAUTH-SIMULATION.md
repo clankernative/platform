@@ -97,16 +97,22 @@ relationships. Earlier versions, partial units, missing guards, orphaned
 references and substituted schemas fail closed without repair. Admission does
 not migrate tables, restamp versions or disable foreign-key enforcement.
 
-There is one exception, kept only for GoLinks' persisted links (AGENTS.md).
-Builds before the version-2 credential unit installed a version-1 unit in every
-store, whether or not the app declares managed credentials. When
-`Runtime::initialize` opens a store whose credential unit is version 1, holds
-only objects a version-1 installer created and has no row in any credential
-table, it drops that unit, and the ordinary fresh installation then creates the
-current unit in the same transaction
-(`managed_credentials::store::replace_empty_version_1_unit`). A version-1 unit
-holding any credential row or any other object is refused, and every other
-version is refused as before. Nothing else is migrated.
+Runtime initialization can recreate a known historical credential unit that
+contains no credential state. Earlier installers created these units in every
+app store, including apps with no managed credentials. The supported layouts are
+version 1 and the frozen version-2 layout before verifier revisions. The unit
+must contain only recognized installer objects, with every credential table
+empty. Version 2 also requires the complete frozen invariant-trigger set and
+exact trigger bodies. The initializer drops that unused unit and the current
+installer creates its replacement in the same admission and caller transaction
+(`managed_credentials::store::replace_empty_historical_unit`). Application rows
+are preserved. Occupied, partial, altered or unknown historical units refuse
+without repair. The native fresh-owner installer can also recreate its exact
+empty version-1 unit from before action-specific credential intents, validating
+all frozen objects and the version marker before DDL. Any owner history refuses
+unchanged. Both replacements share runtime initialization's bounded admission
+and transaction; a later refusal rolls back an earlier replacement. Credential
+records are never converted.
 
 Current databases reject inserts and updates containing partial
 refresh receipts, partial account/scope evidence, empty required identities,

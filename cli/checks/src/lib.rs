@@ -28,6 +28,37 @@ mod tests {
             .expect("current CLI source directory")
     }
 
+    fn compiler() -> Command {
+        let cli = root();
+        // Admission rehashes both archives and complete trees against source
+        // pins; a missing/poisoned input cannot consult a warm default cache.
+        let admitted = Command::new(cli.join("xtask"))
+            .arg("admit-roc-packages")
+            .current_dir(cli.parent().unwrap())
+            .status()
+            .unwrap();
+        assert!(
+            admitted.success(),
+            "run xtask bootstrap and cli for current offline package inputs"
+        );
+        let pins: Value =
+            serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
+        let mut command = Command::new(cli.join("../../.toolchains/roc"));
+        for p in pins["packages"].as_array().unwrap() {
+            let name = p["name"].as_str().unwrap();
+            let version = p["version"].as_str().unwrap();
+            let archive = p["archive"].as_str().unwrap();
+            let hash = archive.strip_suffix(".tar.zst").unwrap();
+            command
+                .arg("--replace-dep")
+                .arg(format!(
+                    "https://github.com/roc-lang/{name}/releases/download/{version}/{archive}"
+                ))
+                .arg(cli.join(".cache/roc-packages").join(hash).join("main.roc"));
+        }
+        command
+    }
+
     fn binary() -> &'static PathBuf {
         static BINARY: OnceLock<PathBuf> = OnceLock::new();
         BINARY.get_or_init(|| {
@@ -44,13 +75,12 @@ mod tests {
                     .expect("run xtask cli before CLI checks");
                 temporary.persist(root.join(name)).unwrap();
             }
-            let roc = root.join("../../.toolchains/roc");
             for args in [
                 vec!["check", "main.roc"],
                 vec!["test", "main.roc"],
                 vec!["build", "main.roc", "--output=day2"],
             ] {
-                let output = Command::new(&roc)
+                let output = compiler()
                     .args(args)
                     .current_dir(&root)
                     .env("ROC_CACHE_DIR", root.join(".cache"))
@@ -65,6 +95,48 @@ mod tests {
             }
             root.join("day2")
         })
+    }
+
+    #[test]
+    fn compiler_checks_use_local_packages_with_network_unavailable_and_poisoned_default_cache() {
+        let scratch = Scratch::new();
+        let pins: Value =
+            serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
+        for p in pins["packages"].as_array().unwrap() {
+            let hash = p["archive"]
+                .as_str()
+                .unwrap()
+                .strip_suffix(".tar.zst")
+                .unwrap();
+            let cached = scratch.0.join("roc/packages").join(hash);
+            fs::create_dir_all(&cached).unwrap();
+            fs::write(
+                cached.join("main.roc"),
+                "intentionally invalid package contents",
+            )
+            .unwrap();
+        }
+        let output = compiler()
+            .args(["check", "--no-cache", "main.roc"])
+            .current_dir(root())
+            .env("ROC_CACHE_DIR", &scratch.0)
+            .env("XDG_CACHE_HOME", &scratch.0)
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("https_proxy", "http://127.0.0.1:1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env("all_proxy", "http://127.0.0.1:1")
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "offline current-source compiler check failed: code {:?}, stderr bytes {}",
+            output.status.code(),
+            output.stderr.len()
+        );
     }
 
     fn run(args: &[&str], instance: Option<&Path>) -> Output {
@@ -331,7 +403,7 @@ mod tests {
         )
         .unwrap();
         let check = || {
-            Command::new(root().join("../../.toolchains/roc"))
+            compiler()
                 .args(["check", "--no-cache", "main.roc"])
                 .current_dir(&scratch.0)
                 .env("ROC_CACHE_DIR", root().join(".cache"))

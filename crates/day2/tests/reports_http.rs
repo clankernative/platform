@@ -959,7 +959,10 @@ fn real_http_datastar_form_command_scheduler_html_and_audit_survive_restart() ->
             .send()?;
         assert_eq!(image.status(), StatusCode::OK);
         assert_eq!(image.headers()["content-type"], "image/png");
-        assert_eq!(image.headers()["cache-control"], "private, no-cache");
+        assert_eq!(
+            image.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
         let etag = image.headers()["etag"].clone();
         assert!(!image.bytes()?.is_empty());
         let cached = client
@@ -967,7 +970,10 @@ fn real_http_datastar_form_command_scheduler_html_and_audit_survive_restart() ->
             .header("If-None-Match", etag)
             .send()?;
         assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
-        assert_eq!(cached.headers()["cache-control"], "private, no-cache");
+        assert_eq!(
+            cached.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
         assert!(cached.bytes()?.is_empty());
     }
     let mut submit = fields(&html, "form.command")?;

@@ -561,6 +561,9 @@ pub struct Runtime {
     pub(crate) credentials: Option<Arc<dyn crate::managed_credentials::issuance::Authority>>,
     pub(crate) connections: Option<Arc<dyn crate::oauth::usage::Authority>>,
     instance_path: PathBuf,
+    // Original published selector DATA, captured before native input path
+    // canonicalization. Only native Runtime construction carries it forward.
+    restore_registry_selector: Option<PathBuf>,
     app: String,
     db: PathBuf,
     scope: String,
@@ -578,6 +581,7 @@ pub struct Runtime {
 /// Loading it never inspects or creates the installation's serving state.
 pub(crate) struct InitialStoreMetadata {
     instance_path: PathBuf,
+    instance_selector: PathBuf,
     instance_digest: day2_capabilities::Digest,
     app: String,
     scope: String,
@@ -586,6 +590,16 @@ pub(crate) struct InitialStoreMetadata {
 }
 
 impl InitialStoreMetadata {
+    /// Bind the canonical layout already checked by the caller to this input.
+    /// The original published selector remains separate DATA for later checks.
+    pub(crate) fn require_input_path(&self, selected: &Path) -> Result<()> {
+        ensure!(
+            self.instance_path == selected,
+            "native_runtime_input_path_changed"
+        );
+        Ok(())
+    }
+
     /// Desired configuration checks only, before enrollment or inside a genuine
     /// native scope. Neither this metadata nor the returned Instance creates a
     /// role, native acquisition or authority; consumers supply their own scope.
@@ -636,16 +650,18 @@ impl InitialStoreMetadata {
     }
 
     pub(crate) fn load(instance_path: &Path, app: &str) -> Result<Self> {
+        let instance_selector = instance_path.to_path_buf();
         let instance_path = instance_path.canonicalize()?;
         let instance = Instance::load(&instance_path)?;
         let binding = instance.apps.get(app).context("app_not_installed")?;
         let parent = instance_path.parent().context("instance directory")?;
         let artifact = LoadedArtifact::load(&parent.join(&binding.artifact))?;
-        Self::admit(instance_path, app, instance, artifact)
+        Self::admit(instance_path, instance_selector, app, instance, artifact)
     }
 
     fn admit(
         instance_path: PathBuf,
+        instance_selector: PathBuf,
         app: &str,
         instance: Instance,
         artifact: LoadedArtifact,
@@ -656,6 +672,7 @@ impl InitialStoreMetadata {
             scope: instance.scope(app)?,
             instance_digest: day2_capabilities::Digest::of(&instance)?,
             instance_path,
+            instance_selector,
             app: app.to_owned(),
             artifact,
             host: crate::host::System(crate::host_inputs::Inputs::default()),
@@ -669,7 +686,8 @@ impl InitialStoreMetadata {
         artifact: LoadedArtifact,
     ) -> Result<Self> {
         let instance = Instance::load(&instance_path)?;
-        Self::admit(instance_path, app, instance, artifact)
+        let instance_selector = instance_path.clone();
+        Self::admit(instance_path, instance_selector, app, instance, artifact)
     }
 
     pub(crate) fn app(&self) -> &str {
@@ -851,9 +869,9 @@ impl SchemaInitialization<'_> {
         upgrade_selection_cursors(tx)?;
         crate::authority_state::upgrade(tx)?;
         crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
-            // GoLinks' persisted links are the one data migration AGENTS.md
-            // allows; this replaces only an empty version-1 credential unit.
-            crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
+            // Recreate only exact historical credential units containing no
+            // credential rows, within this same initialization transaction.
+            crate::managed_credentials::store::replace_empty_historical_unit(db)?;
             crate::managed_credentials::store::install_schema(db)?;
             crate::managed_credentials::issuance::install(db)?;
             // Admit the fresh-owner unit on the actual runtime connection,
@@ -950,6 +968,7 @@ impl Runtime {
                 .get(&app)
                 .and_then(|binding| binding.runtime.as_ref())
                 .is_some_and(|profile| profile.rolling()),
+            restore_registry_selector: None,
             scope: instance.scope(&app)?,
             hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
             instance_path,
@@ -992,6 +1011,14 @@ impl Runtime {
 
     pub fn instance_path(&self) -> &Path {
         &self.instance_path
+    }
+
+    /// Selection DATA only. The registry source still requires its genuine
+    /// native owner and checks this actual selector through retained handles.
+    pub(crate) fn restore_registry_path(&self) -> Result<&Path> {
+        self.restore_registry_selector
+            .as_deref()
+            .context("restore_registry_native_selector_required")
     }
 
     pub fn app(&self) -> &str {
@@ -1154,6 +1181,7 @@ impl Runtime {
             credentials: None,
             connections: None,
             rolling,
+            restore_registry_selector: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,
@@ -2544,6 +2572,7 @@ pub fn require_no_managed_credential_restore_state(connection: &Connection) -> R
         !connection.is_autocommit(),
         "credential_restore_requires_transaction"
     );
+    crate::oauth::restore::require_no_history(connection)?;
     crate::managed_credentials::store::require_no_restore_state(connection)
 }
 
