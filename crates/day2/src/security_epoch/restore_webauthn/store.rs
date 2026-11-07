@@ -48,6 +48,16 @@ const DDL: &str = "
         signed_record TEXT,
         CHECK((state='published' AND signed_record IS NOT NULL) OR
               (state!='published' AND signed_record IS NULL))
+    ) STRICT;
+    CREATE TABLE main.restore_approval_execution_attempts (
+        grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=71),
+        signed_digest TEXT NOT NULL CHECK(length(signed_digest)=71),
+        operation TEXT NOT NULL CHECK(length(operation)=71),
+        challenge_id TEXT NOT NULL CHECK(length(challenge_id)=71),
+        binding TEXT NOT NULL CHECK(length(binding)=71),
+        key_version INTEGER NOT NULL CHECK(key_version>0),
+        counter INTEGER NOT NULL CHECK(counter BETWEEN 0 AND 4294967295),
+        completion_digest TEXT NOT NULL CHECK(length(completion_digest)=71)
     ) STRICT;";
 
 /// SQL shape admission only. The caller must retain its actual native file
@@ -73,7 +83,7 @@ pub(in crate::security_epoch) fn require_existing_schema(db: &Connection) -> Res
             name.to_owned(),
             Some(format!("CREATE TABLE {declaration}")),
         ));
-        // Both canonical tables have one non-integer PRIMARY KEY. SQLite
+        // Each canonical table has one non-integer PRIMARY KEY. SQLite
         // creates exactly this internal index; no other index is admitted.
         expected.push((
             "index".to_owned(),
@@ -393,6 +403,93 @@ pub(super) fn verified_snapshot(
     ))?;
     key.check_sqlite(tx)?;
     Ok((version, snapshot))
+}
+
+fn execution_attempt_binding(
+    tx: &Transaction<'_>,
+    key: &TrustedKey<'_>,
+    challenge: &Challenge,
+    signed: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+    operation: &Digest,
+    completed: (u32, i64, &Digest),
+) -> Result<(Digest, Digest)> {
+    ensure!(
+        challenge.request == super::execution_request(signed, operation)?,
+        "restore_execution_attempt_request_changed"
+    );
+    let current = verified_snapshot(tx, key, challenge, completed.0)?;
+    ensure!(
+        current.0 == completed.1 && &current.1 == completed.2,
+        "restore_execution_attempt_completion_changed"
+    );
+    Ok((
+        challenge_id(challenge)?,
+        Digest::of(&("day2-restore-execution-attempt-v1", signed))?,
+    ))
+}
+
+/// Create-only, grant-keyed May DATA in the caller's actual authentication
+/// transaction. The native caller must commit and complete ALL same-owner
+/// postchecks before any reservation send. A row cannot reconstruct that owner.
+/// New challenges, logins and operations never create a second use of a grant.
+pub(super) fn mark_may_execute(
+    tx: &Transaction<'_>,
+    key: &TrustedKey<'_>,
+    challenge: &Challenge,
+    signed: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+    operation: &Digest,
+    completed: (u32, i64, &Digest),
+) -> Result<()> {
+    let (id, signed_digest) =
+        execution_attempt_binding(tx, key, challenge, signed, operation, completed)?;
+    let inserted = tx.execute(
+        "INSERT INTO main.restore_approval_execution_attempts
+         (grant_id,signed_digest,operation,challenge_id,binding,key_version,counter,completion_digest)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![signed.statement.request.grant_id.as_str(),signed_digest.as_str(),
+            operation.as_str(),id.as_str(),key.binding()?.as_str(),completed.1,
+            completed.0,completed.2.as_str()],
+    );
+    let checked = key.check_sqlite(tx);
+    let inserted = inserted?;
+    checked?;
+    ensure!(inserted == 1, "restore_execution_attempt_not_created");
+    Ok(())
+}
+
+/// Exact historical marker equality, not recovery or permission. There is no
+/// deletion, reset, retry adoption, clock renewal or row-to-native factory.
+pub(super) fn check_may_execute(
+    tx: &Transaction<'_>,
+    key: &TrustedKey<'_>,
+    challenge: &Challenge,
+    signed: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+    operation: &Digest,
+    completed: (u32, i64, &Digest),
+) -> Result<()> {
+    let (id, signed_digest) =
+        execution_attempt_binding(tx, key, challenge, signed, operation, completed)?;
+    let present = tx.query_row(
+        "SELECT count(*) FROM main.restore_approval_execution_attempts
+         WHERE grant_id=?1 AND signed_digest=?2 AND operation=?3 AND challenge_id=?4
+           AND binding=?5 AND key_version=?6 AND counter=?7 AND completion_digest=?8",
+        params![
+            signed.statement.request.grant_id.as_str(),
+            signed_digest.as_str(),
+            operation.as_str(),
+            id.as_str(),
+            key.binding()?.as_str(),
+            completed.1,
+            completed.0,
+            completed.2.as_str()
+        ],
+        |row| row.get::<_, i64>(0),
+    );
+    let checked = key.check_sqlite(tx);
+    let present = present?;
+    checked?;
+    ensure!(present == 1, "restore_execution_attempt_changed");
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
