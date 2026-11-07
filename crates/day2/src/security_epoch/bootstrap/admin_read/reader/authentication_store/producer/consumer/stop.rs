@@ -108,11 +108,9 @@ impl RestoreAttempt<'_, '_, '_> {
     }
 }
 
-impl Drop for RestoreAttempt<'_, '_, '_> {
-    fn drop(&mut self) {
-        if let Some(auth) = &mut self.auth { auth.refuse(); }
-    }
-}
+// Normal Rust field destruction drops this actual executor, including its
+// RestoreOriginalGuard and NativeApprovalSource terminal refusal destructors.
+// No generic destructor, detachable guard or row-based recovery is introduced.
 
 impl AuthenticatedRestoreExecution<'_, '_, '_> {
     /// One native acquisition of the whole exact archive key set, before the
@@ -791,10 +789,18 @@ mod tests {
             Ok(observed)
         });
         assert_eq!(check.to_token_stream().to_string(), expected.to_token_stream().to_string());
-        let drop = source_method(source, "RestoreAttempt", "drop")?;
-        let expected: syn::Block = syn::parse_quote!({
-            if let Some(auth) = &mut self.auth { auth.refuse(); }
-        });
+        let parsed = syn::parse_file(source)?;
+        let owner = parsed.items.iter().find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "RestoreAttempt" => Some(item),
+            _ => None,
+        }).ok_or_else(|| anyhow::anyhow!("actual attempt owner"))?;
+        let auth = owner.fields.iter().find(|field| field.ident.as_ref().is_some_and(|name| name == "auth"))
+            .ok_or_else(|| anyhow::anyhow!("actual retained executor field"))?;
+        let expected_type: syn::Type = syn::parse_quote!(Option<AuthenticatedRestoreExecution<'metadata, 'storage, 'role>>);
+        assert_eq!(auth.ty.to_token_stream().to_string(), expected_type.to_token_stream().to_string());
+        assert!(source_method(source, "RestoreAttempt", "drop").is_err());
+        let drop = source_method(include_str!("../../../../../../restore_original.rs"), "RestoreOriginalGuard", "drop")?;
+        let expected: syn::Block = syn::parse_quote!({ self.refuse(); });
         assert_eq!(drop.to_token_stream().to_string(), expected.to_token_stream().to_string());
         Ok(())
     }
