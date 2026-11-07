@@ -7,6 +7,240 @@ use day2_capabilities::Digest;
 use rusqlite::{Connection, TransactionBehavior, params};
 use std::{collections::BTreeSet, path::Path};
 
+#[test]
+fn current_use_admits_its_connect_dependency_once_through_the_actual_owner() -> Result<()> {
+    use syn::visit::{self, Visit};
+    fn call(expression: &syn::Expr, target: &str) -> bool {
+        let syn::Expr::Try(tried) = expression else {
+            return false;
+        };
+        let syn::Expr::Call(call) = &*tried.expr else {
+            return false;
+        };
+        let syn::Expr::Path(path) = &*call.func else {
+            return false;
+        };
+        path.path
+            .segments
+            .iter()
+            .map(|p| p.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::")
+            == target
+            && call.args.len() == 1
+            && matches!(call.args.first(),Some(syn::Expr::Path(p)) if p.path.is_ident("db"))
+    }
+    fn present(expression: &syn::Expr, name: &str) -> bool {
+        let syn::Expr::Call(call) = expression else {
+            return false;
+        };
+        matches!(&*call.func,syn::Expr::Path(p) if p.path.is_ident("present"))
+            && call.args.len() == 1
+            && matches!(call.args.first(),Some(syn::Expr::Lit(l)) if matches!(&l.lit,syn::Lit::Str(s) if s.value()==name))
+    }
+    #[derive(Default)]
+    struct Calls {
+        guards: Vec<u8>,
+        connect: usize,
+        usage: usize,
+        valid: bool,
+    }
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+            let guard = if present(&node.cond, "oauth_connect_schema_version") {
+                1
+            } else if matches!(&*node.cond,syn::Expr::Unary(u) if matches!(u.op,syn::UnOp::Not(_)) && present(&u.expr,"oauth_use_schema_version"))
+            {
+                2
+            } else if present(&node.cond, "oauth_use_schema_version") {
+                3
+            } else {
+                0
+            };
+            self.visit_expr(&node.cond);
+            self.guards.push(guard);
+            self.visit_block(&node.then_branch);
+            self.guards.pop();
+            if let Some((_, otherwise)) = &node.else_branch {
+                self.visit_expr(otherwise);
+            }
+        }
+        fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+            let expression = syn::Expr::Try(node.clone());
+            if call(&expression, "super::connect::install_schema") {
+                self.connect += 1;
+                self.valid &= self.guards.last() == Some(&2) && self.guards.contains(&1);
+            }
+            if call(&expression, "super::usage::install") {
+                self.usage += 1;
+                self.valid &= self.guards.last() == Some(&3);
+            }
+            visit::visit_expr_try(self, node);
+        }
+    }
+    fn valid(source: &str, usage: &str) -> Result<bool> {
+        let syntax = syn::parse_file(source)?;
+        let captures: Vec<_> = syntax
+            .items
+            .iter()
+            .filter_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                matches!(&*item.self_ty,syn::Type::Path(p) if p.path.is_ident("Snapshot"))
+                    .then_some(item)
+            })
+            .flat_map(|item| item.items.iter())
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(f) if f.sig.ident == "capture" => Some(&f.block),
+                _ => None,
+            })
+            .collect();
+        ensure!(captures.len() == 1, "test_snapshot_capture_target");
+        let mut calls = Calls {
+            valid: true,
+            ..Default::default()
+        };
+        calls.visit_block(captures[0]);
+        let syntax = syn::parse_file(usage)?;
+        let installs: Vec<_> = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(f) if f.sig.ident == "install" => Some(&f.block),
+                _ => None,
+            })
+            .collect();
+        ensure!(installs.len() == 1, "test_use_install_target");
+        let first = matches!(installs[0].stmts.first(),Some(syn::Stmt::Expr(e,_)) if call(e,"super::connect::install_schema"));
+        let mut dependency = Calls {
+            valid: true,
+            ..Default::default()
+        };
+        dependency.visit_block(installs[0]);
+        Ok(calls.valid
+            && calls.connect == 1
+            && calls.usage == 1
+            && first
+            && dependency.connect == 1)
+    }
+    let source = include_str!("restore.rs");
+    let usage = include_str!("usage.rs");
+    assert!(valid(source, usage)?);
+    let direct = "super::connect::install_schema(db)?;";
+    let use_call = "super::usage::install(db)?;";
+    let condition = "if !present(\"oauth_use_schema_version\")";
+    assert_eq!(source.matches(direct).count(), 1);
+    assert_eq!(source.matches(use_call).count(), 1);
+    assert_eq!(source.matches(condition).count(), 1);
+    assert!(!valid(&source.replace(condition, "if true"), usage)?);
+    assert!(!valid(&source.replace(direct, "();"), usage)?);
+    assert!(!valid(
+        &source.replace(direct, &format!("{direct}{direct}")),
+        usage
+    )?);
+    assert!(!valid(&source.replace(use_call, "();"), usage)?);
+    assert_eq!(usage.matches(direct).count(), 1);
+    assert!(!valid(source, &usage.replace(direct, "();"))?);
+    assert!(!valid(
+        source,
+        &usage.replace(direct, &format!("let _ = ();{direct}"))
+    )?);
+    Ok(())
+}
+
+#[test]
+fn current_connect_and_use_corruption_keep_first_refusal_and_the_absent_use_route() -> Result<()> {
+    fn rows(db: &Connection, sql: &str) -> Result<Vec<Vec<rusqlite::types::Value>>> {
+        Ok(db
+            .prepare(sql)?
+            .query_map([], |r| {
+                (0..r.as_ref().column_count())
+                    .map(|i| r.get(i))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    fn corrupt(db: &Connection, sql: &str) -> Result<()> {
+        let guards = db
+            .prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        db.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
+        for (name, _) in &guards {
+            db.execute_batch(&format!("DROP TRIGGER {name}"))?;
+        }
+        db.execute_batch(sql)?;
+        for (_, ddl) in guards {
+            db.execute_batch(&ddl)?;
+        }
+        db.execute_batch("PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON")?;
+        Ok(())
+    }
+    for (with_use, bad_connect, bad_use) in [
+        (false, false, false),
+        (false, true, false),
+        (true, true, true),
+        (true, false, true),
+    ] {
+        let mut db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", true)?;
+        db.execute_batch(crate::store::PLATFORM_DDL)?;
+        db.execute(
+            "INSERT INTO day2_meta VALUES('scope','company/canary/calendar')",
+            [],
+        )?;
+        db.execute(
+            "INSERT INTO day2_meta VALUES('schema',?1)",
+            [Digest::new(b"schema").as_str()],
+        )?;
+        if with_use {
+            crate::oauth::usage::install(&db)?;
+        } else {
+            connect::install_schema(&db)?;
+        }
+        db.execute("INSERT INTO oauth_connection_slots VALUES('slot',1,1,1,'profile','account','affinity','active')",[])?;
+        if bad_use {
+            db.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status) VALUES('old','query','alice@example.com','{}',?1,1,'pending')",[Digest::new(b"artifact").as_str()])?;
+            db.execute(
+                "INSERT INTO oauth_use_handles VALUES(?1,'old','{}')",
+                ["x".repeat(43)],
+            )?;
+        }
+        if bad_connect {
+            corrupt(&db, "UPDATE oauth_connection_slots SET generation=0")?;
+        }
+        if bad_use {
+            corrupt(&db, "UPDATE oauth_use_handles SET claims='null'")?;
+        }
+        let before = rows(&db, "SELECT * FROM oauth_connection_slots ORDER BY slot")?;
+        let profile = Profile::prepare()?;
+        let tx = db.transaction()?;
+        let result = Snapshot::capture(&tx, &profile);
+        if bad_connect || bad_use {
+            let error = result
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("test_expected_corruption_refusal"))?;
+            let table = if bad_connect {
+                "oauth_connection_slots"
+            } else {
+                "oauth_use_handles"
+            };
+            assert!(
+                error.chain().any(|e| e.to_string().contains(table)),
+                "wrong canonical dependency refusal"
+            );
+        } else {
+            result?;
+        }
+        tx.rollback()?;
+        assert!(before == rows(&db, "SELECT * FROM oauth_connection_slots ORDER BY slot")?);
+        let present:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='oauth_use_handles')",[],|row|row.get(0))?;
+        assert_eq!(present, with_use);
+    }
+    Ok(())
+}
+
 pub(in crate::oauth) fn database(path: &Path) -> Result<Connection> {
     let db = Connection::open(path)?;
     db.pragma_update(None, "foreign_keys", true)?;
@@ -31,6 +265,7 @@ fn intent(id: &str) -> connect::ConnectIntent {
         expected_generation: None,
         expected_epoch: 1,
         proposed_generation: 1,
+        generation_floor: 0,
         owner: "human_1".into(),
         profile: "google_calendar_v1".into(),
         registration: "registration_1".into(),
@@ -118,6 +353,190 @@ fn histories(db: &Connection) -> Result<(ConnectHistory, RefreshHistory)> {
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok((connects, refresh))
+}
+
+#[test]
+fn restored_generation_floors_preserve_pending_history_and_refuse_raw_adoption() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("generation-floors.sqlite");
+    let mut db = database(&path)?;
+    seed(&mut db)?;
+    assert_eq!(super::generation_floor(&db, "refresh_slot_0")?, None);
+    let mut higher = intent("higher_pending");
+    higher.slot = "refresh_slot_0".into();
+    higher.expected_generation = Some(1);
+    higher.proposed_generation = 2;
+    assert!(connect::begin(&mut db, &higher, 1)?);
+    let history = histories(&db)?;
+    assert_eq!(cut(&mut db, &Profile::prepare()?, 93)?, 8);
+    drop(db);
+    for _ in 0..2 {
+        let mut db = Connection::open(&path)?;
+        db.pragma_update(None, "foreign_keys", true)?;
+        assert_eq!(histories(&db)?, history);
+        for (slot, expected) in [
+            ("refresh_slot_0", 2),
+            ("refresh_slot_1", 1),
+            ("slot_pending", 1),
+            ("slot_sent", 1),
+        ] {
+            assert_eq!(super::generation_floor(&db, slot)?, Some(expected));
+        }
+        assert_eq!(super::generation_floor(&db, "unused_slot")?, None);
+        // Historical rows retain their captured floor; current schema admission
+        // must not reinterpret them against the newly published floor.
+        connect::install_schema(&db)?;
+        assert_eq!(db.query_row("SELECT generation_floor,proposed_generation FROM oauth_connect_attempts WHERE attempt='higher_pending'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?,(0,2));
+        let mut copied = higher.clone();
+        copied.attempt = "raw_new_id".into();
+        copied.expected_epoch = 2;
+        copied.generation_floor = 2;
+        copied.proposed_generation = 3;
+        assert!(!connect::begin(&mut db, &copied, 4)?);
+        assert!(connect::state(&db, &copied.attempt)?.is_none());
+        for statement in [
+            "UPDATE oauth_restore_slot_floors SET generation=3 WHERE slot='refresh_slot_0'",
+            "DELETE FROM oauth_restore_slot_floors WHERE slot='refresh_slot_0'",
+            "INSERT OR REPLACE INTO oauth_restore_slot_floors SELECT slot,3,cut FROM oauth_restore_slot_floors WHERE slot='refresh_slot_0'",
+            "INSERT OR REPLACE INTO oauth_restore_cuts SELECT digest,binding,inventory FROM oauth_restore_cuts",
+            "INSERT OR REPLACE INTO oauth_restore_closed SELECT kind,id,cut FROM oauth_restore_closed WHERE kind='connect' AND id='higher_pending'",
+        ] {
+            assert!(db.execute(statement, []).is_err(), "{statement}");
+        }
+        assert_eq!(super::generation_floor(&db, "refresh_slot_0")?, Some(2));
+        assert!(require_open(&db, Kind::Connect, "higher_pending").is_err());
+        assert_eq!(histories(&db)?, history);
+    }
+    assert_eq!(super::next_generation(Some(1), 2)?, 3);
+    assert_eq!(super::next_generation(None, 9)?, 10);
+    for (current, floor) in [
+        (Some(0), 0),
+        (Some(-1), 0),
+        (None, -1),
+        (None, i64::MAX),
+        (Some(i64::MAX), 0),
+        (None, i64::MAX - 1),
+    ] {
+        assert!(super::next_generation(current, floor).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn each_imported_generation_source_contributes_its_own_conservative_floor() -> Result<()> {
+    // Imported bounded DATA may be undecipherable or inconsistent with a live
+    // slot. It is not a valid provider credential, grant or publication proof.
+    // It must still reserve its generation so fresh authorization cannot adopt
+    // it or collide with old material. Expected values are independent literals.
+    for (source, slot, expected) in [
+        ("slot", "refresh_slot_0", 9),
+        ("refresh", "refresh_slot_0", 10),
+        ("pending", "slot_pending", 11),
+        ("token", "opaque_token_slot", 12),
+        ("quarantine", "opaque_quarantine_slot", 13),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("source.sqlite");
+        let mut db = database(&path)?;
+        seed(&mut db)?;
+        match source {
+            "slot" => {
+                db.execute(
+                    "UPDATE oauth_connection_slots SET generation=9 WHERE slot='refresh_slot_0'",
+                    [],
+                )?;
+            }
+            "refresh" => {
+                db.execute(
+                    "UPDATE oauth_refresh_attempts SET generation=10 WHERE attempt='refresh_0'",
+                    [],
+                )?;
+            }
+            "pending" => {
+                db.execute("UPDATE oauth_connect_attempts SET expected_generation=10,proposed_generation=11 WHERE attempt='pending'",[])?;
+            }
+            "token" => {
+                db.execute("INSERT INTO oauth_private_tokens VALUES('opaque_reference','opaque_token_slot',12,'account','opaque_digest','version',zeroblob(12),zeroblob(16))",[])?;
+            }
+            "quarantine" => {
+                db.execute("INSERT INTO oauth_external_quarantine VALUES('pending','opaque_quarantine_slot',13,'account','scope','challenge',1,'reference','token_digest','version',zeroblob(12),zeroblob(16),'identity_digest','version',zeroblob(12),zeroblob(16))",[])?;
+            }
+            _ => unreachable!(),
+        }
+        cut(&mut db, &Profile::prepare()?, 98)?;
+        drop(db);
+        for _ in 0..2 {
+            let db = Connection::open(&path)?;
+            assert_eq!(
+                super::generation_floor(&db, slot)?,
+                Some(expected),
+                "{source}"
+            );
+            assert_eq!(super::next_generation(None, expected)?, expected + 1);
+            if source == "token" {
+                assert_eq!(db.query_row("SELECT generation,hex(ciphertext) FROM oauth_private_tokens WHERE reference='opaque_reference'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?,(12,"00".repeat(16)));
+            }
+            if source == "quarantine" {
+                assert_eq!(db.query_row("SELECT generation,hex(token_ciphertext) FROM oauth_external_quarantine WHERE attempt='pending'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?,(13,"00".repeat(16)));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn allocation_floor_requires_the_whole_current_unit_without_repair() -> Result<()> {
+    for damaged in [
+        "UPDATE oauth_restore_schema_version SET version=1",
+        "DROP TABLE oauth_restore_slot_floors",
+        "DROP TABLE oauth_restore_closed",
+        "DROP TABLE oauth_restore_cuts",
+    ] {
+        let dir = tempfile::tempdir()?;
+        let db = database(&dir.path().join("partial.sqlite"))?;
+        db.execute_batch(damaged)?;
+        let before:String=db.query_row("SELECT group_concat(name||':'||coalesce(sql,''),'|') FROM (SELECT name,sql FROM sqlite_master ORDER BY name)",[],|r|r.get(0))?;
+        assert!(
+            super::generation_floor(&db, "unknown_slot").is_err(),
+            "{damaged}"
+        );
+        assert_eq!(db.query_row("SELECT group_concat(name||':'||coalesce(sql,''),'|') FROM (SELECT name,sql FROM sqlite_master ORDER BY name)",[],|r|r.get::<_,String>(0))?,before);
+    }
+    Ok(())
+}
+
+#[test]
+fn applied_cut_rejects_another_real_connection_even_with_that_connections_owned_scope() -> Result<()>
+{
+    let a_dir = tempfile::tempdir()?;
+    let b_dir = tempfile::tempdir()?;
+    let mut a = database(&a_dir.path().join("a.sqlite"))?;
+    let mut b = database(&b_dir.path().join("b.sqlite"))?;
+    let profile = Profile::prepare()?;
+    let a_tx = a.transaction()?;
+    let b_tx = b.transaction()?;
+    let before = Snapshot::capture(&a_tx, &profile)?;
+    let cut = crate::security_epoch::restore_cut::fixture(before.digest().clone(), 1234)?;
+    // Private helper access is confined to this child test. The production
+    // whole-reset entry returns counts and cannot export this transaction loan.
+    let applied =
+        crate::oauth::schema::admit(&a_tx, |_| super::apply_in(&a_tx, before, &cut, &profile))?;
+    assert!(
+        applied.require_connection(&a_tx).is_err(),
+        "no live admission scope remains"
+    );
+    crate::oauth::schema::admit(&b_tx, |db| {
+        crate::oauth::schema::require_admission(db)?;
+        assert!(
+            applied.require_connection(&b_tx).is_err(),
+            "foreign metadata is not this loan"
+        );
+        Ok(())
+    })?;
+    crate::oauth::schema::admit(&a_tx, |_| applied.require_connection(&a_tx))?;
+    a_tx.rollback()?;
+    b_tx.rollback()?;
+    Ok(())
 }
 
 #[test]
@@ -415,7 +834,7 @@ fn changed_row_or_identity_inventory_refuses_without_repair() -> Result<()> {
                 )?;
             }
             _ => {
-                tx.execute("INSERT INTO main.oauth_connect_attempts SELECT 'new_identity',slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,code_ref,account,scope_evidence FROM main.oauth_connect_attempts WHERE attempt='pending'",[])?;
+                tx.execute("INSERT INTO main.oauth_connect_attempts SELECT 'new_identity',slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,code_ref,account,scope_evidence,generation_floor FROM main.oauth_connect_attempts WHERE attempt='pending'",[])?;
             }
         }
         assert!(close_in(&mut tx, before, &cut, &profile).is_err());
@@ -494,7 +913,7 @@ fn missing_partial_shadow_and_unknown_units_refuse_before_any_cut() -> Result<()
             3 => db.execute_batch("CREATE TEMP TABLE day2_meta(key TEXT,value TEXT)")?,
             4 => db.execute_batch("ATTACH ':memory:' AS foreign_state")?,
             _ => {
-                db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization')",["invalid\noriginal"])?;
+                db.execute("INSERT INTO oauth_connect_attempts(attempt,slot,expected_generation,expected_epoch,proposed_generation,owner,profile,registration,callback,consent,expires_at,state,generation_floor) VALUES(?1,'slot',NULL,1,1,'human','profile','registration','callback','consent',100,'awaiting_provider_authorization',0)",["invalid\noriginal"])?;
             }
         }
         let tx = db.transaction()?;
@@ -970,6 +1389,15 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
     for name in ["code_exists", "verifier_exists"] {
         specs.push((custody, name, None, "", "Connect", "tx", "&intent.attempt"));
     }
+    specs.push((
+        custody,
+        "delete_attempt_material",
+        None,
+        "",
+        "Connect",
+        "tx",
+        "attempt",
+    ));
     for name in ["load_code", "load_verifier", "load_bundle"] {
         specs.push((custody, name, None, "", "Connect", "db", "&intent.attempt"));
     }
@@ -1013,7 +1441,7 @@ fn actual_continuation_gates_cannot_drop_retarget_duplicate_or_delay_the_cut_che
             id,
         ));
     }
-    assert_eq!(specs.len(), 38);
+    assert_eq!(specs.len(), 39);
     for (source, name, owner, prefix, kind, db, id) in specs {
         let root = if owner.is_some() {
             "crate::oauth::restore"

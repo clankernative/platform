@@ -202,7 +202,7 @@ impl<M: Machine> World<M> {
     fn new(program: &Program) -> Result<Self> {
         let actors = match program.protocol {
             Protocol::Enrollment => [Actor::Client, Actor::Issuer],
-            Protocol::InitialStorage => [Actor::App, Actor::Controller],
+            Protocol::InitialStorage | Protocol::RestoredStorage => [Actor::App, Actor::Controller],
             Protocol::InitialServing => [Actor::Shell, Actor::Controller],
             _ => anyhow::bail!("program must begin with an initial protocol"),
         };

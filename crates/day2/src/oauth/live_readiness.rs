@@ -1452,6 +1452,7 @@ pub(crate) mod tests {
             expected_generation: None,
             expected_epoch: 1,
             proposed_generation: 1,
+            generation_floor: 0,
             owner: identity.email.clone(),
             profile: binding.profile.id.as_str().into(),
             registration: Digest::of(&binding.registration)?.as_str().into(),

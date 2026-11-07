@@ -1561,6 +1561,7 @@ jobs:
           path: |
             artifacts/credential-crash-reopen/failure-*/failure.json
             artifacts/credential-verifier-maintenance/failure-*/failure.json
+            artifacts/credential-restore-application-histories/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Publish actual Notifications campaign coverage

@@ -536,20 +536,59 @@ pub fn refresh_state(db: &Connection, attempt: &str) -> Result<Option<RefreshSta
     .transpose()
 }
 
+/// Reject publication only for the exact currently disconnected material. Old
+/// restore-closed generations and their unknown outcomes remain historical.
+pub(super) fn reject_current_refresh_in(
+    tx: &Transaction<'_>,
+    expected: &RefreshEligibility,
+) -> Result<()> {
+    validate_id(&expected.slot)?;
+    ensure!(
+        !tx.is_autocommit()
+            && expected.generation > 0
+            && expected.base_version > 0
+            && expected.security_epoch > 0,
+        "OAuth disconnect snapshot invalid"
+    );
+    tx.execute("UPDATE oauth_refresh_attempts SET state='publication_rejected'
+        WHERE slot=?1 AND generation=?2 AND base_version=?3 AND security_epoch=?4
+        AND profile=?5 AND account=?6 AND affinity=?7
+        AND state IN ('ready','may_have_been_sent','uncertain')
+        AND NOT EXISTS(SELECT 1 FROM oauth_restore_closed c WHERE c.kind='refresh' AND c.id=oauth_refresh_attempts.attempt)",
+        params![expected.slot,expected.generation,expected.base_version,expected.security_epoch,
+            expected.profile,expected.account,expected.affinity])?;
+    Ok(())
+}
+
 pub fn disable_slot(db: &mut Connection, slot: &str, expected_epoch: i64) -> Result<bool> {
     validate_id(slot)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let captured = tx
+        .query_row(
+            "SELECT generation,token_version,profile,account,affinity FROM oauth_connection_slots
+        WHERE slot=?1 AND security_epoch=?2 AND status='active'",
+            params![slot, expected_epoch],
+            |row| {
+                Ok(RefreshEligibility {
+                    slot: slot.into(),
+                    generation: row.get(0)?,
+                    base_version: row.get(1)?,
+                    security_epoch: expected_epoch,
+                    profile: row.get(2)?,
+                    account: row.get(3)?,
+                    affinity: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
     let changed = tx.execute(
         "UPDATE oauth_connection_slots SET status = 'disabled', security_epoch = security_epoch + 1
          WHERE slot = ?1 AND security_epoch = ?2 AND status = 'active'",
         params![slot, expected_epoch],
     )?;
     if changed == 1 {
-        tx.execute(
-            "UPDATE oauth_refresh_attempts SET state = 'publication_rejected'
-             WHERE slot = ?1 AND state IN ('ready', 'may_have_been_sent', 'uncertain')",
-            [slot],
-        )?;
+        let captured = captured.ok_or_else(|| anyhow::anyhow!("OAuth disconnect snapshot lost"))?;
+        reject_current_refresh_in(&tx, &captured)?;
     }
     tx.commit()?;
     Ok(changed == 1)

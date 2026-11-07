@@ -355,10 +355,7 @@ fn retain(failure: &Failure) -> Result<std::path::PathBuf> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/control-slot-replays");
     std::fs::create_dir_all(&parent)?;
-    let directory = tempfile::Builder::new()
-        .prefix("restore-settlement-crash-")
-        .tempdir_in(parent)?
-        .keep();
+    let directory = private_replay_directory(&parent, "restore-settlement-crash-")?.keep();
     let mut encoded = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let bytes = serde_json::to_vec(failure)?;
     ensure!(bytes.len() <= 1024 * 1024, "restore_crash_evidence_bound");

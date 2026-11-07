@@ -6,6 +6,9 @@ use super::*;
 use crate::security_epoch::restore_fencing::{self as fence, ApprovalIdentity, Binding, Session};
 use std::fs::File;
 
+mod dispatch;
+pub(in crate::security_epoch) use dispatch::{Disposition, Flight};
+
 mod sealed {
     pub trait Source {}
 }
@@ -38,13 +41,13 @@ struct Admission {
 trait Source<F: fence::Source>: sealed::Source {
     fn admit(
         &mut self,
-        session: &mut Session<'_, F>,
+        session: &mut Session<'_, '_, F>,
         target: &Target,
         creator: &File,
     ) -> Result<Admission>;
     fn check(
         &mut self,
-        session: &mut Session<'_, F>,
+        session: &mut Session<'_, '_, F>,
         admission: &Admission,
         creator: &File,
     ) -> Result<()>;
@@ -57,15 +60,15 @@ trait Source<F: fence::Source>: sealed::Source {
 /// staging without this entry can never acquire a later admission candidate.
 fn stage<A: Checks, F: fence::Source>(
     owner: &mut A,
-    session: &mut Session<'_, F>,
+    session: &mut Session<'_, '_, F>,
     binding: &Binding,
 ) -> Result<Projection> {
-    struct Birth<'a, 'original, A: Checks, F: fence::Source> {
+    struct Birth<'a, 'original, 'source, A: Checks, F: fence::Source> {
         owner: &'a mut A,
-        session: &'a mut Session<'original, F>,
+        session: &'a mut Session<'original, 'source, F>,
         done: bool,
     }
-    impl<A: Checks, F: fence::Source> Drop for Birth<'_, '_, A, F> {
+    impl<A: Checks, F: fence::Source> Drop for Birth<'_, '_, '_, A, F> {
         fn drop(&mut self) {
             if !self.done {
                 self.owner.state().refused = true;
@@ -155,13 +158,13 @@ impl Target {
     }
 }
 
-struct Guard<'a, 'original, A: Checks, F: fence::Source, W: Source<F>> {
+struct Guard<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>> {
     owner: &'a mut A,
-    session: &'a mut Session<'original, F>,
+    session: &'a mut Session<'original, 'source, F>,
     source: &'a mut W,
     done: bool,
 }
-impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Guard<'_, '_, A, F, W> {
+impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Guard<'_, '_, '_, A, F, W> {
     fn drop(&mut self) {
         if !self.done {
             self.owner.state().refused = true;
@@ -171,7 +174,7 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Guard<'_, '_, A, F, W> 
         }
     }
 }
-impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
+impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, '_, A, F, W> {
     fn retained(&mut self, target: &Target) -> Result<()> {
         self.session
             .require_join(&target.binding, &target.original)?;
@@ -256,17 +259,19 @@ impl<A: Checks, F: fence::Source, W: Source<F>> Guard<'_, '_, A, F, W> {
 
 /// A borrow of the actual staging, drain and admission sources, never a new
 /// native writer. No FD/Connection getter, publication or serving conversion.
-struct Candidate<'a, 'original, A: Checks, F: fence::Source, W: Source<F>> {
+struct Candidate<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>> {
     owner: &'a mut A,
-    session: &'a mut Session<'original, F>,
+    session: &'a mut Session<'original, 'source, F>,
     source: &'a mut W,
     target: Target,
     admission: Admission,
 }
-impl<'a, 'original, A: Checks, F: fence::Source, W: Source<F>> Candidate<'a, 'original, A, F, W> {
+impl<'a, 'original, 'source, A: Checks, F: fence::Source, W: Source<F>>
+    Candidate<'a, 'original, 'source, A, F, W>
+{
     fn admit(
         owner: &'a mut A,
-        session: &'a mut Session<'original, F>,
+        session: &'a mut Session<'original, 'source, F>,
         source: &'a mut W,
         binding: Binding,
         settled_root: Digest,
@@ -341,7 +346,7 @@ impl<'a, 'original, A: Checks, F: fence::Source, W: Source<F>> Candidate<'a, 'or
         Ok(())
     }
 }
-impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Candidate<'_, '_, A, F, W> {
+impl<A: Checks, F: fence::Source, W: Source<F>> Drop for Candidate<'_, '_, '_, A, F, W> {
     fn drop(&mut self) {
         self.owner.state().refused = true;
         self.owner.refuse();
