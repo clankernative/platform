@@ -22,7 +22,12 @@ Verify :: [].{
 	fast! = |host!| {
 		_ = Capability.call!("verify-format", Json.to_str({ scope: "all" }), host!)?
 		_ = Capability.call!("verify-lint", "{}", host!)?
-		_ = Capability.call!("verify-tests", Json.to_str({ suite: "fast-libraries" }), host!)?
+		_ =
+			Capability.call!(
+				"verify-tests",
+				Json.to_str({ suite: "fast-libraries", budget_seconds: 900.U64 }),
+				host!,
+			)?
 		Capability.call!("verify-receipt", Json.to_str({ scope: "fast" }), host!)
 	}
 
