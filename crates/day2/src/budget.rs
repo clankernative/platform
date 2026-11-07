@@ -1147,10 +1147,21 @@ pub fn resolve_overruns_in(
 pub fn invalidate_restored(connection: &Connection) -> Result<()> {
     require_transaction(connection)?;
     upgrade(connection)?;
-    connection.execute(
-        "UPDATE day2_budget_meta SET restored=1 WHERE singleton=1",
-        [],
-    )?;
+    freeze_current_restore_in(connection)
+}
+
+/// SQL-only denial on an already admitted current unit. Never creates a ledger,
+/// repairs a schema, acknowledges unknown usage or releases outstanding holds.
+pub(crate) fn freeze_current_restore_in(connection: &Connection) -> Result<()> {
+    require_transaction(connection)?;
+    let _ = ledger(connection)?;
+    ensure!(
+        connection.execute(
+            "UPDATE day2_budget_meta SET restored=1 WHERE singleton=1",
+            [],
+        )? == 1,
+        "restore_budget_ledger_missing"
+    );
     Ok(())
 }
 

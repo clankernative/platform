@@ -43,6 +43,7 @@ pub(crate) enum Reply {
 }
 
 pub(in crate::oauth) fn install(db: &Connection) -> Result<()> {
+    crate::oauth::restore::install(db)?;
     crate::oauth::schema::install_current(db, "oauth_management_schema_version", 1,
         "CREATE TABLE IF NOT EXISTS oauth_management_schema_version(version INTEGER PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS oauth_management_intents(
@@ -248,6 +249,7 @@ impl Manager {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<(View, String, Option<String>)> {
+        crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, id)?;
         crate::oauth::connect::identifier(id)?;
         let (json, state, session): (String, String, Option<String>) = db.query_row(
             "SELECT view,state,session FROM oauth_management_intents WHERE id=?1",
@@ -267,6 +269,7 @@ impl Manager {
     }
 
     fn check_in(&self, db: &Connection, view: &View, identity: &iap::Verified) -> Result<()> {
+        crate::oauth::restore::require_open(db, crate::oauth::restore::Kind::Management, &view.id)?;
         ensure!(
             self.authority_in(db, identity)? == view.authority
                 && Self::fence(db, &view.slot)? == view.fence,
@@ -1487,6 +1490,73 @@ mod tests {
                 .append_pair("iss", crate::oauth::google::ISSUER);
             Ok((view, session, query.finish()))
         }
+    }
+
+    #[test]
+    fn restore_cut_closes_the_actual_pending_and_finish_checks_without_reclassifying_copies()
+    -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let view =
+                fixture
+                    .manager
+                    .capture("calendar", Action::Connect, &fixture.identity, 100)?;
+            fixture.manager.pending(&view.id, &fixture.identity, 100)?;
+            let path = fixture.manager.runtime.db().to_path_buf();
+            let mut db = store::open(&path)?;
+            fixture
+                .manager
+                .load(&db, &view.id, &fixture.identity, 100)?;
+            fixture.manager.check_in(&db, &view, &fixture.identity)?;
+            let original: String = db.query_row(
+                "SELECT view FROM oauth_management_intents WHERE id=?1",
+                [&view.id],
+                |r| r.get(0),
+            )?;
+            crate::oauth::restore::tests::apply_for_storage(&mut db, 81)?;
+            assert!(
+                fixture
+                    .manager
+                    .pending(&view.id, &fixture.identity, 100)
+                    .is_err()
+            );
+            for _ in 0..2 {
+                drop(db);
+                db = store::open(&path)?;
+                assert!(
+                    fixture
+                        .manager
+                        .load(&db, &view.id, &fixture.identity, 100)
+                        .is_err()
+                );
+                assert!(
+                    fixture
+                        .manager
+                        .check_in(&db, &view, &fixture.identity)
+                        .is_err()
+                );
+                assert_eq!(
+                    db.query_row(
+                        "SELECT view FROM oauth_management_intents WHERE id=?1",
+                        [&view.id],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    original
+                );
+            }
+            let mut copied = view.clone();
+            copied.id = "copied_old_pending_under_new_id".into();
+            db.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state,session) VALUES(?1,?2,?3,'pending',NULL)",
+                params![copied.id,serde_json::to_string(&copied)?,copied.expires_at])?;
+            assert!(
+                fixture
+                    .manager
+                    .pending(&copied.id, &fixture.identity, 100)
+                    .is_err()
+            );
+            assert_eq!(fixture.port.posts.load(SeqCst), 0);
+            Ok(())
+        })
     }
 
     mod native_lifecycle {

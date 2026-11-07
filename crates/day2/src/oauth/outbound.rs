@@ -68,6 +68,7 @@ pub(super) fn handle_callback_in(
     parameters: &CallbackParameters,
     custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
 ) -> Result<CallbackOutcome> {
+    super::restore::require_open(tx, super::restore::Kind::Connect, ingress.attempt)?;
     connect::identifier(ingress.attempt)?;
     let row: Option<(String, i64, String, String)> = tx
         .query_row(
