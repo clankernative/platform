@@ -46,6 +46,11 @@ pub(super) enum Step {
     Known,
     Consumed,
     Released,
+    Frozen,
+    Drained,
+    Fenced,
+    FenceConfirmed,
+    StopReleased,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +132,14 @@ pub(super) struct Transcript {
     waiting: bool,
     refused: bool,
     clock: Option<Observation>,
+    storage_tail: StorageTail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StorageTail {
+    Ordinary,
+    Restore,
 }
 
 impl Protocol {
@@ -235,6 +248,7 @@ impl Transcript {
             waiting: false,
             refused: !selected,
             clock: None,
+            storage_tail: StorageTail::Ordinary,
         }
     }
 
@@ -243,7 +257,10 @@ impl Transcript {
     /// requirements; completing these DATA steps does not settle an operation.
     pub(super) fn begin_current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()> {
         let result = (|| {
-            ensure!(self.complete(), "native_handshake_previous_incomplete");
+            ensure!(
+                self.complete() && self.storage_tail == StorageTail::Ordinary,
+                "native_handshake_previous_incomplete"
+            );
             ensure!(
                 self.sequence.checked_add(1) == Some(sequence),
                 "native_handshake_sequence"
@@ -270,7 +287,7 @@ impl Transcript {
         if self.refused {
             return None;
         }
-        let &(sender, step) = self.protocol.messages().get(self.position)?;
+        let &(sender, step) = self.messages().get(self.position)?;
         let direction = if sender == self.actor {
             Direction::Send
         } else {
@@ -293,6 +310,53 @@ impl Transcript {
                 sequence,
             },
         ))
+    }
+
+    fn messages(&self) -> &'static [(Actor, Step)] {
+        if self.protocol == Protocol::CurrentStorage && self.storage_tail == StorageTail::Restore {
+            &[
+                (Actor::Controller, Step::BeginReady),
+                (Actor::App, Step::Hello),
+                (Actor::Controller, Step::Offer),
+                (Actor::App, Step::Ack),
+                (Actor::Controller, Step::Ready),
+                (Actor::Controller, Step::Frozen),
+                (Actor::App, Step::Drained),
+                (Actor::Controller, Step::Fenced),
+                (Actor::App, Step::FenceConfirmed),
+                (Actor::Controller, Step::StopReleased),
+            ]
+        } else {
+            self.protocol.messages()
+        }
+    }
+
+    /// The one closed restore branch is selected only at the existing result
+    /// slot. This retains the prior clock/sequence and cannot restart a phase.
+    /// Senders select before IO; receivers select from the actual delivered
+    /// frame after IO. Native signatures and semantic stop checks remain owed.
+    pub(super) fn select_frame(&mut self, frame: Frame) -> Result<()> {
+        let result = (|| {
+            if self.protocol == Protocol::CurrentStorage
+                && self.position == 5
+                && self.storage_tail == StorageTail::Ordinary
+                && frame.protocol == Protocol::CurrentStorage
+                && frame.step == Step::Frozen
+                && frame.sequence.is_none()
+            {
+                ensure!(
+                    self.purpose == StagePurpose::CurrentRole,
+                    "restore_stop_current_original_required"
+                );
+                self.storage_tail = StorageTail::Restore;
+            }
+            ensure!(
+                self.next().is_some_and(|(_, expected)| expected == frame),
+                "native_handshake_message_order"
+            );
+            Ok(())
+        })();
+        self.finish_result(result)
     }
 
     pub(super) fn begin(&mut self, direction: Direction, observation: Observation) -> Result<()> {
@@ -351,6 +415,7 @@ impl Transcript {
     /// successful send alone does not advance the remote endpoint's transcript.
     pub(super) fn delivered(&mut self, frame: Frame, observation: Observation) -> Result<()> {
         let result = (|| {
+            self.select_frame(frame)?;
             ensure!(
                 self.busy
                     && !self.waiting
@@ -366,7 +431,7 @@ impl Transcript {
     }
 
     pub(super) fn complete(&self) -> bool {
-        !self.refused && !self.busy && self.position == self.protocol.messages().len()
+        !self.refused && !self.busy && self.position == self.messages().len()
     }
 
     pub(super) fn refuse(&mut self) {
@@ -406,3 +471,221 @@ impl Transcript {
 
 #[cfg(test)]
 pub(in crate::security_epoch) mod simulation;
+
+#[cfg(test)]
+mod restore_stop_tests {
+    use super::*;
+
+    fn clock(tick: u64, current: bool) -> Observation {
+        let origin = if current { 20 } else { 0 };
+        Observation {
+            domain: Digest::new(if current {
+                b"stop-original"
+            } else {
+                b"initial-clock"
+            }),
+            origin: Duration::from_secs(origin),
+            deadline: Duration::from_secs(origin + if current { 5 } else { 10 }),
+            now: Duration::from_secs(origin) + Duration::from_micros(tick),
+        }
+    }
+
+    fn deliver(
+        actual: &mut Transcript,
+        actor: Actor,
+        sender: Actor,
+        frame: Frame,
+        observation: Observation,
+    ) -> Result<()> {
+        let direction = if actor == sender {
+            Direction::Send
+        } else {
+            Direction::Receive
+        };
+        if direction == Direction::Send {
+            actual.select_frame(frame)?;
+        }
+        actual.begin(direction, observation.clone())?;
+        actual.transport(Transport::WouldBlock, observation.clone())?;
+        actual.transport(Transport::Ready, observation.clone())?;
+        actual.delivered(frame, observation)
+    }
+
+    fn prefix(actor: Actor, purpose: StagePurpose) -> Transcript {
+        let mut actual = Transcript::new(Protocol::InitialStorage, actor);
+        for (index, (sender, step)) in [
+            (Actor::Controller, Step::BeginReady),
+            (Actor::App, Step::Hello),
+            (Actor::Controller, Step::Offer),
+            (Actor::App, Step::Confirm),
+            (Actor::Controller, Step::Complete),
+            (Actor::App, Step::Accepted),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            deliver(
+                &mut actual,
+                actor,
+                sender,
+                Frame {
+                    protocol: Protocol::InitialStorage,
+                    step,
+                    sequence: None,
+                },
+                clock(index as u64, false),
+            )
+            .unwrap();
+        }
+        actual.begin_current(1, purpose).unwrap();
+        for (index, (sender, step)) in [
+            (Actor::Controller, Step::BeginReady),
+            (Actor::App, Step::Hello),
+            (Actor::Controller, Step::Offer),
+            (Actor::App, Step::Ack),
+            (Actor::Controller, Step::Ready),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            deliver(
+                &mut actual,
+                actor,
+                sender,
+                Frame {
+                    protocol: Protocol::CurrentStorage,
+                    step,
+                    sequence: (index < 3).then_some(1),
+                },
+                clock(index as u64, true),
+            )
+            .unwrap();
+        }
+        actual
+    }
+
+    #[test]
+    fn stop_transcript_replays_distinct_drain_fence_ack_and_release_against_an_independent_oracle()
+    {
+        // Specification order is independent of the production message table.
+        // No native actor, Stop or known-send owner is made by these frames.
+        let required = [
+            (Actor::Controller, Step::Frozen),
+            (Actor::App, Step::Drained),
+            (Actor::Controller, Step::Fenced),
+            (Actor::App, Step::FenceConfirmed),
+            (Actor::Controller, Step::StopReleased),
+        ];
+        for actor in [Actor::App, Actor::Controller] {
+            let mut actual = prefix(actor, StagePurpose::CurrentRole);
+            let original = actual.clock.clone().unwrap();
+            for (index, &(sender, step)) in required.iter().enumerate() {
+                deliver(
+                    &mut actual,
+                    actor,
+                    sender,
+                    Frame {
+                        protocol: Protocol::CurrentStorage,
+                        step,
+                        sequence: None,
+                    },
+                    clock(10 + index as u64, true),
+                )
+                .unwrap();
+                let current = actual.clock.as_ref().unwrap();
+                assert_eq!(
+                    (&current.domain, current.origin, current.deadline),
+                    (&original.domain, original.origin, original.deadline)
+                );
+                assert_eq!(actual.complete(), index == required.len() - 1);
+            }
+            assert!(actual.begin_current(2, StagePurpose::CurrentRole).is_err());
+            let mut bootstrap = prefix(actor, StagePurpose::StorageBootstrap);
+            assert!(
+                deliver(
+                    &mut bootstrap,
+                    actor,
+                    Actor::Controller,
+                    Frame {
+                        protocol: Protocol::CurrentStorage,
+                        step: Step::Frozen,
+                        sequence: None
+                    },
+                    clock(10, true)
+                )
+                .is_err()
+            );
+            assert!(bootstrap.next().is_none());
+        }
+        for seed in 1_u64..=256 {
+            for actor in [Actor::App, Actor::Controller] {
+                let mut runs = Vec::new();
+                for _ in 0..2 {
+                    let mut random = seed;
+                    let mut actual = prefix(actor, StagePurpose::CurrentRole);
+                    let mut outcomes = Vec::new();
+                    let mut terminal = false;
+                    for (index, &(sender, step)) in required.iter().enumerate() {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        let fault = random % 13;
+                        let mut frame = Frame {
+                            protocol: Protocol::CurrentStorage,
+                            step,
+                            sequence: None,
+                        };
+                        let mut observation = clock(10 + index as u64, true);
+                        match fault {
+                            0 => frame.step = Step::Consumed, // ordinary ACK cannot substitute
+                            1 => frame.step = Step::Released, // ordinary release cannot substitute
+                            2 => observation.now = observation.deadline,
+                            3 => observation.domain = Digest::new(b"replacement-original"),
+                            4 => {
+                                frame.step = if index == 0 {
+                                    Step::Drained
+                                } else {
+                                    required[index - 1].1
+                                }
+                            }
+                            5 => observation.now = observation.origin,
+                            _ => {}
+                        }
+                        let expected = !terminal && fault >= 6;
+                        let result =
+                            deliver(&mut actual, actor, sender, frame, observation).is_ok();
+                        assert_eq!(
+                            result, expected,
+                            "seed={seed} actor={actor:?} index={index} fault={fault}"
+                        );
+                        terminal |= !expected;
+                        assert_eq!(actual.complete(), !terminal && index == required.len() - 1);
+                        outcomes.push(result);
+                        if terminal {
+                            // Repaired time/frame cannot recover the same channel.
+                            assert!(
+                                deliver(
+                                    &mut actual,
+                                    actor,
+                                    sender,
+                                    Frame {
+                                        protocol: Protocol::CurrentStorage,
+                                        step,
+                                        sequence: None
+                                    },
+                                    clock(100 + index as u64, true)
+                                )
+                                .is_err()
+                            );
+                        }
+                    }
+                    // Even known stop completion never starts another ordinary
+                    // current transcript on the stopped incumbent channel.
+                    assert!(actual.begin_current(2, StagePurpose::CurrentRole).is_err());
+                    runs.push(outcomes);
+                }
+                assert_eq!(runs[0], runs[1], "seed={seed} actor={actor:?}");
+            }
+        }
+    }
+}

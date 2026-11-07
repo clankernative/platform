@@ -64,7 +64,7 @@ pub(crate) use storage_peer::{
     CurrentStoragePeerPhase, InitialHolderConnection, InitialHolderListener, InitialHolderServer,
     PendingAppCurrentPeer, QueuedAppCurrentPeer,
 };
-pub(crate) use storage_peer_wire::{SqliteCohort, StoragePeerRequest};
+pub(crate) use storage_peer_wire::{AdminReadAction, SqliteCohort, StoragePeerRequest};
 
 /// Closed current-peer request DATA, never storage or serving permission.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

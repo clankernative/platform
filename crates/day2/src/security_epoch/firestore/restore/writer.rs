@@ -31,8 +31,8 @@ impl Names {
         let base = super::Names::new(selected, request.reservation_data(), &publication.value)?;
         let operation = &request.operation().as_str()[7..];
         let names = Self {
-            terminal: format!("{}/restore_settlements/{operation}", base.initial.root),
-            writer: format!("{}/restore_writers/{operation}", base.initial.root),
+            terminal: format!("{}/restore_settlements/{operation}", base.read.initial.root),
+            writer: format!("{}/restore_writers/{operation}", base.read.initial.root),
             base,
             plan: plan.commitment()?,
             publication: publication.clone(),
@@ -194,7 +194,7 @@ impl Transaction {
         at: i64,
     ) -> Result<Vec<u8>> {
         ensure!(
-            self.names.base.selection == *selected && self.names.plan == plan.commitment()?,
+            self.names.base.read.selection == *selected && self.names.plan == plan.commitment()?,
             "restore_writer_provider_plan_changed"
         );
         let observed = self.observed()?;
@@ -225,9 +225,9 @@ impl Transaction {
         // records and writer absence; neither extra no-op writes nor a second
         // ledger are introduced. Root/sentinel retain explicit version CAS.
         let bytes = serde_json::to_vec(&json!({"transaction":self.token,"writes":[
-            {"update":{"name":self.names.base.initial.root,"fields":encode_fields(serde_json::to_value(&plan.root)?)?},
+            {"update":{"name":self.names.base.read.initial.root,"fields":encode_fields(serde_json::to_value(&plan.root)?)?},
                 "currentDocument":{"updateTime":root.version}},
-            {"update":{"name":self.names.base.initial.sentinel,"fields":encode_fields(serde_json::to_value(&plan.sentinel)?)?},
+            {"update":{"name":self.names.base.read.initial.sentinel,"fields":encode_fields(serde_json::to_value(&plan.sentinel)?)?},
                 "currentDocument":{"updateTime":sentinel.version}},
             receipt_write(&self.names.writer, &plan.receipt, "day2-restore-writer-document-v1")?,
         ]}))?;

@@ -341,7 +341,50 @@ pub(crate) enum StoragePeerRequest {
     AdminRead {
         binding: Digest,
         cohort: SqliteCohort,
+        action: AdminReadAction,
     },
+}
+
+/// Captured request DATA, distinct from authentication and authority. Restore
+/// execution carries BOTH the policy-selection intent and its original action
+/// operation; a plain administrative observation cannot be relabelled a stop.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum AdminReadAction {
+    Inspect { operation: Digest },
+    Restore { intent: Digest, operation: Digest },
+}
+
+impl AdminReadAction {
+    pub(crate) fn admin_operation_data(&self) -> &Digest {
+        match self {
+            Self::Inspect { operation } => operation,
+            Self::Restore { intent, .. } => intent,
+        }
+    }
+
+    pub(crate) fn restore_operation_data(&self) -> Result<&Digest> {
+        match self {
+            Self::Restore { operation, .. } => Ok(operation),
+            Self::Inspect { .. } => anyhow::bail!("native_restore_execution_action_required"),
+        }
+    }
+
+    pub(crate) fn require_admin_operation_data(&self, operation: &Digest) -> Result<()> {
+        ensure!(
+            self.admin_operation_data() == operation,
+            "native_admin_operation_changed"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn require_restore_operation_data(&self, operation: &Digest) -> Result<()> {
+        ensure!(
+            self.restore_operation_data()? == operation,
+            "native_restore_original_operation_changed"
+        );
+        Ok(())
+    }
 }
 
 /// Cross-process identity DATA for the actual retained SQLite cohort. File
@@ -466,6 +509,13 @@ impl StoragePeerRequest {
         cohort.validate()?;
         Ok(cohort)
     }
+
+    pub(crate) fn admin_action_data(&self) -> Result<&AdminReadAction> {
+        let Self::AdminRead { action, .. } = self else {
+            anyhow::bail!("storage_admin_purpose_required");
+        };
+        Ok(action)
+    }
 }
 
 /// Request selection DATA; actual peer authentication is still mandatory.
@@ -487,7 +537,7 @@ impl CurrentExpectation<'_> {
             Self::Serving => matches!(request, StoragePeerRequest::CurrentServing { .. }),
             Self::Exact(expected) => request == *expected,
             Self::AdminRead(binding) => {
-                matches!(request, StoragePeerRequest::AdminRead { binding: actual, cohort } if actual == *binding && cohort.validate().is_ok())
+                matches!(request, StoragePeerRequest::AdminRead { binding: actual, cohort, .. } if actual == *binding && cohort.validate().is_ok())
             }
         }
     }
@@ -599,6 +649,16 @@ pub(in crate::security_epoch::native_enrollment) enum Body {
         exchange: Digest,
         stopped: Digest,
     },
+    CurrentFence {
+        exchange: Digest,
+        stopped: Digest,
+        confirmation: Box<crate::security_epoch::firestore::ReservationConfirmation>,
+    },
+    CurrentFenceConfirmed {
+        exchange: Digest,
+        stopped: Digest,
+        confirmation: Digest,
+    },
     CurrentStopReleased {
         exchange: Digest,
         stopped: Digest,
@@ -648,14 +708,17 @@ impl Body {
             ),
             Self::CurrentAck { .. } => (Protocol::CurrentStorage, Step::Ack, None),
             Self::CurrentReady { .. } => (Protocol::CurrentStorage, Step::Ready, None),
-            Self::CurrentResult { .. } | Self::CurrentStop { .. } => {
-                (Protocol::CurrentStorage, Step::Known, None)
+            Self::CurrentResult { .. } => (Protocol::CurrentStorage, Step::Known, None),
+            Self::CurrentConsumed { .. } => (Protocol::CurrentStorage, Step::Consumed, None),
+            Self::CurrentReleased { .. } => (Protocol::CurrentStorage, Step::Released, None),
+            Self::CurrentStop { .. } => (Protocol::CurrentStorage, Step::Frozen, None),
+            Self::CurrentStopped { .. } => (Protocol::CurrentStorage, Step::Drained, None),
+            Self::CurrentFence { .. } => (Protocol::CurrentStorage, Step::Fenced, None),
+            Self::CurrentFenceConfirmed { .. } => {
+                (Protocol::CurrentStorage, Step::FenceConfirmed, None)
             }
-            Self::CurrentConsumed { .. } | Self::CurrentStopped { .. } => {
-                (Protocol::CurrentStorage, Step::Consumed, None)
-            }
-            Self::CurrentReleased { .. } | Self::CurrentStopReleased { .. } => {
-                (Protocol::CurrentStorage, Step::Released, None)
+            Self::CurrentStopReleased { .. } => {
+                (Protocol::CurrentStorage, Step::StopReleased, None)
             }
         };
         Frame {
@@ -727,6 +790,8 @@ impl Body {
             | Self::CurrentReleased { .. } => current()?,
             Self::CurrentStop { .. }
             | Self::CurrentStopped { .. }
+            | Self::CurrentFence { .. }
+            | Self::CurrentFenceConfirmed { .. }
             | Self::CurrentStopReleased { .. } => {
                 ensure!(
                     expected == StagePurpose::CurrentRole,
@@ -757,7 +822,8 @@ impl Body {
             | Self::CurrentHello { .. }
             | Self::CurrentAck { .. }
             | Self::CurrentConsumed { .. }
-            | Self::CurrentStopped { .. } => NativeRole::AppHost,
+            | Self::CurrentStopped { .. }
+            | Self::CurrentFenceConfirmed { .. } => NativeRole::AppHost,
             Self::InitialReady { .. }
             | Self::Offer { .. }
             | Self::Complete { .. }
@@ -767,6 +833,7 @@ impl Body {
             | Self::CurrentResult { .. }
             | Self::CurrentReleased { .. }
             | Self::CurrentStop { .. }
+            | Self::CurrentFence { .. }
             | Self::CurrentStopReleased { .. } => NativeRole::EpochController,
         }
     }
@@ -937,10 +1004,12 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         Some("current_stop") => {
             require_object(&value, "/body/frozen")?;
             require_object(&value, "/body/frozen/selection")?;
+            require_object(&value, "/body/frozen/selection/stop")?;
             require_stage_objects(&value, "/body/frozen/selection/app")?;
             require_stage_objects(&value, "/body/frozen/selection/controller")?;
         }
-        Some("current_stopped" | "current_stop_released") => {}
+        Some("current_fence") => require_object(&value, "/body/confirmation")?,
+        Some("current_stopped" | "current_fence_confirmed" | "current_stop_released") => {}
         Some(
             "confirm" | "complete" | "accepted" | "current_ack" | "current_ready"
             | "current_result" | "current_consumed" | "current_released",
@@ -958,6 +1027,7 @@ fn require_request_object(value: &serde_json::Value, path: &str) -> Result<()> {
         == Some("admin_read")
     {
         require_object(value, &format!("{path}/cohort"))?;
+        require_object(value, &format!("{path}/action"))?;
     }
     Ok(())
 }

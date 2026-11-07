@@ -73,7 +73,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
       "scope": "const",
-      "fingerprint": "sha256:af7a8427525c557173a24bd4b8ca4c743c384e6c6bd3ef8b913f882fe90ce082",
+      "fingerprint": "sha256:943c99ed7d31030125bdfa7a2b779f8da941f5be726c59d85327dfcc29072ab6",
       "registration": null
     },
     {
@@ -1690,6 +1690,7 @@
       "methods": [
         "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >",
+        "pub (in crate :: security_epoch) fn confirm_restore_reservation (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & firestore :: RestoreConfirmationNames) -> Result < crate :: security_epoch :: kernel :: Snapshot >",
         "pub (in crate :: security_epoch) fn finish (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
@@ -1718,6 +1719,10 @@
         {
           "owner": "CounterRequest < '_ >",
           "signature": "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >"
+        },
+        {
+          "owner": "CounterRequest < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn confirm_restore_reservation (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & firestore :: RestoreConfirmationNames) -> Result < crate :: security_epoch :: kernel :: Snapshot >"
         },
         {
           "owner": "CounterRequest < '_ >",
@@ -2127,7 +2132,7 @@
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
         "pub (in crate :: security_epoch) async fn with_serving_async < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
-        "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
+        "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & crate :: security_epoch :: native_enrollment :: AdminReadAction , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -2162,7 +2167,7 @@
         },
         {
           "owner": "ActiveAppStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & crate :: security_epoch :: native_enrollment :: AdminReadAction , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -3090,11 +3095,11 @@
       "methods": [
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < RestoreObservation >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >",
         "pub (super) fn check_source (& mut self) -> Result < RestoreObservation >",
         "pub (in crate :: security_epoch) fn require_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >",
         "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >",
-        "fn begin_restore_attempt (mut self , intent : & kernel :: restore :: Intent) -> Result < RestoreAttempt < 'metadata , 'storage , 'role > >"
+        "fn begin_restore_attempt (mut self , intent : & kernel :: restore :: Intent) -> Result < RestoreAttempt < 'metadata , 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn stop_for_restore (mut self , intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
       ],
       "factories": [
         {
@@ -3112,10 +3117,6 @@
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
         },
         {
-          "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
-        },
-        {
           "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn require_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >"
         },
@@ -3130,6 +3131,10 @@
         {
           "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
           "signature": "fn begin_restore_attempt (mut self , intent : & kernel :: restore :: Intent) -> Result < RestoreAttempt < 'metadata , 'storage , 'role > >"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
         }
       ],
       "proof_uses": []
@@ -3192,6 +3197,14 @@
         {
           "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
           "signature": "pub (super) fn check_source (& mut self) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn check (& mut self) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >"
+        },
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn reserve (mut self) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
         }
       ],
       "material_uses": [
@@ -3321,7 +3334,11 @@
       "factories": [
         {
           "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+        },
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn reserve (mut self) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
         }
       ],
       "material_uses": [
@@ -3369,6 +3386,184 @@
       "proof_uses": [],
       "owning_children": [],
       "destructor": "sha256:ff86d3827decf4c697e13e9d9944ae3b265085d59a0cb243d771e2288fce7942"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "NativeReservation",
+      "kind": "private_material",
+      "consuming_methods": [
+        "reserve"
+      ],
+      "owning_children": [],
+      "methods": [
+        "fn check (& mut self) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >",
+        "fn refuse (& mut self)",
+        "fn reserve (mut self) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn check (& mut self) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >"
+        },
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn reserve (mut self) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "ReservationReadUnit",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn begin_retained_sql (& mut self , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (crate) fn check_current (& mut self) -> Result < () >",
+        "pub (crate) fn check_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (crate) fn check_metadata (& mut self , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >",
+        "pub (crate) fn end_retained_sql (& mut self , db : & rusqlite :: Connection , completed : & Result < () >) -> Result < () >",
+        "pub (crate) fn end_sql (& mut self , completed : & Result < () >) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ReservationRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn registry_data (& mut self) -> Result < crate :: security_epoch :: ControllerRegistryData >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ReservationReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn begin_retained_sql (& mut self , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "ReservationReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_current (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ReservationReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_database (& mut self , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "ReservationReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check_metadata (& mut self , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >"
+        },
+        {
+          "owner": "ReservationReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn end_retained_sql (& mut self , db : & rusqlite :: Connection , completed : & Result < () >) -> Result < () >"
+        },
+        {
+          "owner": "ReservationReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn end_sql (& mut self , completed : & Result < () >) -> Result < () >"
+        },
+        {
+          "owner": "ReservationReadUnit < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "ReservationRegistryLoan",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn registry_data (& mut self) -> Result < crate :: security_epoch :: ControllerRegistryData >"
+      ],
+      "factories": [
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , source : & mut crate :: security_epoch :: storage_authority :: NativeApprovalSource) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ReservationRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ReservationRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ReservationRegistryLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn registry_data (& mut self) -> Result < crate :: security_epoch :: ControllerRegistryData >"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "ReservationSourceLoan",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn arm_commit (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn begin (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check (& mut self , source : & mut crate :: security_epoch :: storage_authority :: NativeApprovalSource) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >",
+        "fn check_local (& mut self , source : & mut crate :: security_epoch :: storage_authority :: NativeApprovalSource) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >",
+        "pub (in crate :: security_epoch) fn known (& mut self , observed : & Snapshot) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn require_dispatch_data (& mut self , source : & crate :: security_epoch :: storage_authority :: NativeApprovalSource , selected : & day2_capabilities :: security_epoch :: EpochStore , plan : & kernel :: restore :: approval_use :: Plan , current : & kernel :: restore :: Current , at : i64 , publication : & crate :: security_epoch :: restore_approval :: publication :: Publication) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn check (& mut self) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >"
+        },
+        {
+          "owner": "NativeReservation < 'metadata , 'storage , 'role >",
+          "signature": "fn reserve (mut self) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "fn check_local (& mut self , source : & mut crate :: security_epoch :: storage_authority :: NativeApprovalSource) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >"
+        },
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn arm_commit (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn begin (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , source : & mut crate :: security_epoch :: storage_authority :: NativeApprovalSource) -> Result < crate :: security_epoch :: restore_original :: RestoreObservation >"
+        },
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn known (& mut self , observed : & Snapshot) -> Result < () >"
+        },
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ReservationSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_dispatch_data (& mut self , source : & crate :: security_epoch :: storage_authority :: NativeApprovalSource , selected : & day2_capabilities :: security_epoch :: EpochStore , plan : & kernel :: restore :: approval_use :: Plan , current : & kernel :: restore :: Current , at : i64 , publication : & crate :: security_epoch :: restore_approval :: publication :: Publication) -> Result < () >"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
@@ -4891,7 +5086,7 @@
         },
         {
           "owner": "FrozenRoleIssuer",
-          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , operation : & Digest , fenced_root : & Digest) -> Result < FrozenRoleIssuer >"
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < FrozenRoleIssuer >"
         },
         {
           "owner": "FrozenRoleIssuer",
@@ -4940,7 +5135,7 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , operation : & Digest , fenced_root : & Digest) -> Result < FrozenRoleIssuer >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < FrozenRoleIssuer >",
         "pub (in crate :: security_epoch) fn check (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn digest_data (& self) -> Result < Digest >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
@@ -4949,7 +5144,7 @@
       "factories": [
         {
           "owner": "FrozenRoleIssuer",
-          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , operation : & Digest , fenced_root : & Digest) -> Result < FrozenRoleIssuer >"
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn capture_restore (storage : & mut EnrolledStorageStage < '_ , '_ > , app : & super :: storage_peer_wire :: StageStatement , admin_binding : & Digest , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < FrozenRoleIssuer >"
         }
       ],
       "material_uses": [
@@ -5725,10 +5920,14 @@
         "pub (in crate :: security_epoch) fn await_restore_release (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
         "pub (in crate :: security_epoch) fn await_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < super :: super :: AuthorityStopData >",
         "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , fenced_root : & Digest) -> Result < super :: super :: FrozenRoleIssuer >",
+        "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stage : & mut EnrolledRoleStage < '_ > , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < super :: super :: FrozenRoleIssuer >",
         "pub (in crate :: security_epoch) fn release_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
-        "fn stop_packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , expected : Completion , next : Completion , send : bool) -> Result < () >"
+        "fn stop_packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , expected : Completion , next : Completion , send : bool) -> Result < () >",
+        "pub (in crate :: security_epoch) fn acknowledge_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >",
+        "pub (in crate :: security_epoch) fn announce_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >",
+        "pub (in crate :: security_epoch) fn await_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < crate :: security_epoch :: firestore :: ReservationConfirmation >",
+        "pub (in crate :: security_epoch) fn await_restore_fence_confirmed (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
       ],
       "factories": [
         {
@@ -5827,7 +6026,7 @@
         },
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
-          "signature": "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , fenced_root : & Digest) -> Result < super :: super :: FrozenRoleIssuer >"
+          "signature": "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stage : & mut EnrolledRoleStage < '_ > , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < super :: super :: FrozenRoleIssuer >"
         },
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
@@ -5836,6 +6035,22 @@
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
           "signature": "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn acknowledge_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn announce_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < crate :: security_epoch :: firestore :: ReservationConfirmation >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_fence_confirmed (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -6450,11 +6665,11 @@
         },
         {
           "owner": "ExecutionCompletion",
-          "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+          "signature": "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >"
         },
         {
           "owner": "ExecutionCompletion",
-          "signature": "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >"
+          "signature": "fn check_transition (& self , mut reader : TransitionReader < '_ , '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
         }
       ],
       "material_uses": [
@@ -6625,11 +6840,11 @@
         },
         {
           "owner": "ExecutionCompletion",
-          "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+          "signature": "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >"
         },
         {
           "owner": "ExecutionCompletion",
-          "signature": "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >"
+          "signature": "fn check_transition (& self , mut reader : TransitionReader < '_ , '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
         }
       ],
       "material_uses": [
@@ -6869,7 +7084,9 @@
         "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >",
-        "pub (in crate :: security_epoch) fn record_attempt (& mut self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles)) -> Result < () >"
+        "pub (in crate :: security_epoch) fn record_attempt (& mut self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles)) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_reservation (& self , reader : & mut crate :: security_epoch :: bootstrap :: ReservationRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >",
+        "fn check_transition (& self , mut reader : TransitionReader < '_ , '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
       ],
       "factories": [
         {
@@ -6893,6 +7110,14 @@
         {
           "owner": "ExecutionCompletion",
           "signature": "pub (in crate :: security_epoch) fn record_attempt (& mut self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles)) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "fn check_transition (& self , mut reader : TransitionReader < '_ , '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "pub (in crate :: security_epoch) fn check_reservation (& self , reader : & mut crate :: security_epoch :: bootstrap :: ReservationRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
         }
       ],
       "proof_uses": []
@@ -6960,7 +7185,7 @@
         "pub (crate) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn shell (peer : super :: native_enrollment :: ShellServingPeer) -> Self",
-        "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
+        "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & super :: native_enrollment :: AdminReadAction , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -7027,7 +7252,7 @@
         },
         {
           "owner": "ServingParticipant",
-          "signature": "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & Digest , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
+          "signature": "pub (crate) fn admin_read (& mut self , stage : & mut EnrolledRoleStage < '_ > , operation : & super :: native_enrollment :: AdminReadAction , cohort : & mut crate :: oauth :: native_management :: AppAuthorityStop < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -7143,7 +7368,7 @@
       "type_name": "AppInitialStorageContinuity",
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch) fn begin_admin_read < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentAppStoragePhase < 'storage > >",
+        "pub (in crate :: security_epoch) fn begin_admin_read < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , action : & crate :: security_epoch :: native_enrollment :: AdminReadAction) -> Result < CurrentAppStoragePhase < 'storage > >",
         "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >",
         "pub (in crate :: security_epoch) fn begin_current < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentAppStoragePhase < 'storage > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
@@ -7166,7 +7391,7 @@
         },
         {
           "owner": "AppInitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_admin_read < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentAppStoragePhase < 'storage > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_admin_read < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , action : & crate :: security_epoch :: native_enrollment :: AdminReadAction) -> Result < CurrentAppStoragePhase < 'storage > >"
         },
         {
           "owner": "AppInitialStorageContinuity",
@@ -7258,12 +7483,14 @@
         "pub (in crate :: security_epoch) fn acknowledge_restore_stop (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >",
         "pub (in crate :: security_epoch) fn await_admin_result (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < crate :: security_epoch :: native_enrollment :: AdminPeerResult >",
         "pub (in crate :: security_epoch) fn await_restore_release (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >",
-        "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn acknowledge_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >",
+        "pub (in crate :: security_epoch) fn await_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < crate :: security_epoch :: firestore :: ReservationConfirmation >"
       ],
       "factories": [
         {
           "owner": "AppInitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_admin_read < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentAppStoragePhase < 'storage > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_admin_read < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , action : & crate :: security_epoch :: native_enrollment :: AdminReadAction) -> Result < CurrentAppStoragePhase < 'storage > >"
         },
         {
           "owner": "AppInitialStorageContinuity",
@@ -7318,6 +7545,14 @@
         {
           "owner": "CurrentAppStoragePhase < '_ >",
           "signature": "pub (in crate :: security_epoch) fn finish_restore_stopped (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn acknowledge_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_fence (& mut self , stage : & mut EnrolledRoleStage < '_ > , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < crate :: security_epoch :: firestore :: ReservationConfirmation >"
         }
       ],
       "proof_uses": [],
@@ -7342,8 +7577,10 @@
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn announce_restore_stop (& mut self , issuer : & mut crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer) -> Result < () >",
         "pub (in crate :: security_epoch) fn await_restore_stopped (& mut self) -> Result < crate :: security_epoch :: native_enrollment :: AuthorityStopData >",
-        "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , operation : & Digest , root : & Digest) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >",
-        "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >"
+        "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >",
+        "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >",
+        "pub (in crate :: security_epoch) fn announce_restore_fence (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >",
+        "pub (in crate :: security_epoch) fn await_restore_fence_confirmed (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
       ],
       "factories": [
         {
@@ -7414,11 +7651,19 @@
         },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , operation : & Digest , root : & Digest) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >"
+          "signature": "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >"
         },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn announce_restore_fence (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn await_restore_fence_confirmed (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData , confirmation : & crate :: security_epoch :: firestore :: ReservationConfirmation) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -7953,7 +8198,9 @@
         "fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn require_qualified (& mut self , operation : & Digest) -> Result < () >",
         "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , owner : & mut ExecutionSourceLoan < '_ , '_ , '_ , '_ > , intent : & Intent) -> Result < HistoricalKeyAvailability >",
-        "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >"
+        "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >",
+        "pub (in crate :: security_epoch) fn refuse_reservation (& mut self)",
+        "pub (in crate :: security_epoch) fn reserve_restore (& mut self , loan : & mut ReservationSourceLoan < '_ , '_ , '_ , '_ > , plan : & approval_use :: Plan , current : & Current , at : i64 , publication : & Publication) -> Result < (RestoreObserved , ReservationConfirmation) >"
       ],
       "factories": [
         {
@@ -8005,6 +8252,14 @@
         {
           "owner": "PortOwner < '_ , '_ , '_ , '_ >",
           "signature": "fn check (& mut self , source : & mut NativeApprovalSource) -> Result < () >"
+        },
+        {
+          "owner": "NativeApprovalSource",
+          "signature": "pub (in crate :: security_epoch) fn refuse_reservation (& mut self)"
+        },
+        {
+          "owner": "NativeApprovalSource",
+          "signature": "pub (in crate :: security_epoch) fn reserve_restore (& mut self , loan : & mut ReservationSourceLoan < '_ , '_ , '_ , '_ > , plan : & approval_use :: Plan , current : & Current , at : i64 , publication : & Publication) -> Result < (RestoreObserved , ReservationConfirmation) >"
         }
       ],
       "proof_uses": [],
@@ -8793,7 +9048,8 @@
         "pub (crate) fn open (loan : & mut ControllerAdminReadLoan < '_ , '_ >) -> Result < Self >",
         "pub (crate) fn read (& mut self , loan : & mut ControllerAdminReadLoan < '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >",
         "pub (crate) fn read_fenced (& mut self , loan : & mut crate :: security_epoch :: FencedReadUnit < '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >",
-        "fn read_unit (& mut self , mut loan : ReadLoan < '_ , '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
+        "fn read_unit (& mut self , mut loan : ReadLoan < '_ , '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >",
+        "pub (crate) fn read_reserving (& mut self , loan : & mut crate :: security_epoch :: ReservationReadUnit < '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
       ],
       "factories": [
         {
@@ -8821,6 +9077,10 @@
         {
           "owner": "ControllerAdminSqlite",
           "signature": "pub (crate) fn read_fenced (& mut self , loan : & mut crate :: security_epoch :: FencedReadUnit < '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
+        },
+        {
+          "owner": "ControllerAdminSqlite",
+          "signature": "pub (crate) fn read_reserving (& mut self , loan : & mut crate :: security_epoch :: ReservationReadUnit < '_ , '_ , '_ > , metadata : & InitialStoreMetadata) -> Result < ControllerAdminData >"
         }
       ],
       "proof_uses": [],

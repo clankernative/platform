@@ -291,6 +291,41 @@ impl CounterRequest<'_> {
         result
     }
 
+    /// One fixed read-only confirmation on THIS retained request and original.
+    /// It supplies no write port or owner reconstructed from reservation DATA.
+    pub(in crate::security_epoch) fn confirm_restore_reservation(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        selection: &EpochStore,
+        names: &firestore::RestoreConfirmationNames,
+    ) -> Result<crate::security_epoch::kernel::Snapshot> {
+        let requested = (|| {
+            ensure!(
+                self.connection.store == *selection && names.matches_selection(selection),
+                "epoch_counter_restore_selection_changed"
+            );
+            self.check(stage)?;
+            let mut budget = self.request.acquisition.budget()?;
+            let mut port = CounterReadPort {
+                request: self,
+                stage,
+            };
+            let bytes = budget.call(&mut port, &names.endpoint(), &names.body()?)?;
+            let observed = names.confirm(&bytes)?;
+            budget.remaining_decoding(&mut port)?;
+            Ok(observed.snapshot)
+        })();
+        // Evaluate the real postcheck even if the read, decoding or equality
+        // check failed. Preserve that first failure and permanently refuse.
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let snapshot = requested?;
+        checked?;
+        Ok(snapshot)
+    }
+
     pub(in crate::security_epoch) fn finish(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -498,6 +533,56 @@ mod tests {
         ] {
             assert!(counter_read_route(denied).is_err());
         }
+    }
+
+    #[test]
+    fn restore_confirmation_keeps_the_actual_read_request_and_unconditional_postcheck() {
+        let source = include_str!("connection.rs");
+        let name = "confirm_restore_reservation";
+        let calls = method_calls(source, "CounterRequest", name);
+        assert_eq!(calls.iter().filter(|call| *call == "budget").count(), 1);
+        assert_eq!(calls.iter().filter(|call| *call == "call").count(), 1);
+        assert_eq!(calls.iter().filter(|call| *call == "confirm").count(), 1);
+        assert_eq!(calls.iter().filter(|call| *call == "check").count(), 2);
+        for denied in [
+            "request",
+            "acquire",
+            "begin",
+            "finish",
+            "commit_and_readback",
+            "post",
+        ] {
+            assert!(!calls.iter().any(|call| call == denied));
+        }
+        // The actual source keeps both Results alive until the permanent
+        // refusal decision; `requested?` must not bypass the real postcheck.
+        let parsed = syn::parse_file(source).unwrap();
+        let method = parsed.items.iter().find_map(|item| match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="CounterRequest")) => item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident==name => Some(method),
+                _=>None,
+            }),
+            _=>None,
+        }).unwrap();
+        fn checked_before_try(body: &syn::Block) -> bool {
+            let statements = &body.stmts;
+            matches!(statements.get(1), Some(syn::Stmt::Local(local))
+                if matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="checked")
+                && local.init.as_ref().is_some_and(|i|matches!(&*i.expr,syn::Expr::MethodCall(call) if call.method=="check")))
+                && matches!(
+                    statements.get(2),
+                    Some(syn::Stmt::Expr(syn::Expr::If(_), _))
+                )
+                && matches!(statements.get(3), Some(syn::Stmt::Local(local))
+                    if local.init.as_ref().is_some_and(|i|matches!(&*i.expr,syn::Expr::Try(_))))
+        }
+        assert!(checked_before_try(&method.block));
+        let mut reordered = method.block.clone();
+        reordered.stmts.swap(1, 3);
+        assert!(!checked_before_try(&reordered));
+        let mut missing = method.block.clone();
+        missing.stmts.remove(1);
+        assert!(!checked_before_try(&missing));
     }
 
     fn method_calls(source: &str, owner: &str, method: &str) -> Vec<String> {

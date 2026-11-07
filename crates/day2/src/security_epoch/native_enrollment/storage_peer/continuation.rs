@@ -140,6 +140,7 @@ pub(crate) struct CurrentStoragePeerPhase<'peer> {
     remote_request: super::super::storage_peer_wire::OriginalInterval,
     completion: Completion,
     stopped: Option<super::super::AuthorityStopData>,
+    fence: Option<crate::security_epoch::firestore::ReservationConfirmation>,
     #[cfg(target_os = "linux")]
     peer: Peer,
 }
@@ -510,6 +511,7 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
                 stopped: None,
+                fence: None,
                 remote_request: peer.statement().original.clone(),
                 owner: self.owner,
                 acquisition,
@@ -747,6 +749,7 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
                 stopped: None,
+                fence: None,
                 remote_request: peer.statement().original.clone(),
                 owner: self.owner,
                 acquisition,
@@ -773,6 +776,10 @@ enum Completion {
     AppStopObserved,
     AppStopAcknowledged,
     ControllerStopped,
+    AppFenceObserved,
+    ControllerFenceAnnounced,
+    AppFenceAcknowledged,
+    ControllerFenceConfirmed,
     AppStoppedTerminal,
     ControllerStoppedTerminal,
     Refused,
@@ -782,8 +789,7 @@ impl CurrentStoragePeerPhase<'_> {
     pub(in crate::security_epoch) fn freeze_restore_issuer(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-        operation: &Digest,
-        fenced_root: &Digest,
+        stop: &crate::security_epoch::kernel::restore::StopSelection,
     ) -> Result<super::super::FrozenRoleIssuer> {
         let requested = (|| {
             self.check(stage)?;
@@ -795,9 +801,13 @@ impl CurrentStoragePeerPhase<'_> {
                     && self.local.stage.data.role == NativeRole::EpochController,
                 "native_restore_same_admin_peer_required"
             );
+            self.exchange
+                .request
+                .admin_action_data()?
+                .require_restore_operation_data(&stop.restore_operation)?;
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (operation, fenced_root);
+                let _ = stop;
                 anyhow::bail!("native_restore_peer_platform_unsupported");
             }
             #[cfg(target_os = "linux")]
@@ -809,8 +819,7 @@ impl CurrentStoragePeerPhase<'_> {
                     &mut stage.storage()?,
                     &app,
                     self.exchange.request.binding(),
-                    operation,
-                    fenced_root,
+                    stop,
                 )
             }
         })();
@@ -1038,17 +1047,206 @@ impl CurrentStoragePeerPhase<'_> {
         )?;
         Ok(data)
     }
+    /// A distinct message AFTER the Controller's actual known reservation.
+    /// This projection never supplies the native known-send owner itself.
+    pub(in crate::security_epoch) fn announce_restore_fence(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.completion == Completion::ControllerStopped
+                    && self.stopped.as_ref() == Some(data)
+                    && self.fence.is_none()
+                    && self.local.stage.data.role == NativeRole::EpochController,
+                "native_restore_fence_peer_order"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = confirmation;
+                anyhow::bail!("native_restore_peer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let message = stage.storage()?.sign_storage_message(Body::CurrentFence {
+                    exchange: self.exchange.digest()?,
+                    stopped: data.stopped.clone(),
+                    confirmation: Box::new(confirmation.clone()),
+                })?;
+                self.owner
+                    .channel
+                    .send_storage(&message, stage, &mut self.acquisition)?;
+                self.check(stage)?;
+                self.fence = Some(confirmation.clone());
+                self.completion = Completion::ControllerFenceAnnounced;
+                Ok(())
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// The App remains drained and owns the same exclusion while it waits.
+    pub(in crate::security_epoch) fn await_restore_fence(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+    ) -> Result<crate::security_epoch::firestore::ReservationConfirmation> {
+        let result = (|| {
+            ensure!(
+                self.completion == Completion::AppStopAcknowledged
+                    && self.stopped.as_ref() == Some(data)
+                    && self.fence.is_none()
+                    && self.local.stage.data.role == NativeRole::AppHost,
+                "native_restore_fence_peer_order"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native_restore_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let (message, process) = self
+                    .owner
+                    .channel
+                    .receive_storage(stage, &mut self.acquisition)?;
+                self.peer
+                    .accept_message(&message, process, stage, &mut self.acquisition)?;
+                self.check(stage)?;
+                let Body::CurrentFence {
+                    exchange,
+                    stopped,
+                    confirmation,
+                } = message.body
+                else {
+                    anyhow::bail!("native_restore_fence_message_required");
+                };
+                ensure!(
+                    exchange == self.exchange.digest()? && stopped == data.stopped,
+                    "native_restore_fence_peer_changed"
+                );
+                self.fence = Some((*confirmation).clone());
+                self.completion = Completion::AppFenceObserved;
+                Ok(*confirmation)
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// Only the fixed App caller, after its independent complete fresh read
+    /// and cohort check, reaches this distinct acknowledgement operation.
+    pub(in crate::security_epoch) fn acknowledge_restore_fence(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.completion == Completion::AppFenceObserved
+                    && self.stopped.as_ref() == Some(data)
+                    && self.fence.as_ref() == Some(confirmation)
+                    && self.local.stage.data.role == NativeRole::AppHost,
+                "native_restore_fence_ack_order"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native_restore_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let message =
+                    stage
+                        .storage()?
+                        .sign_storage_message(Body::CurrentFenceConfirmed {
+                            exchange: self.exchange.digest()?,
+                            stopped: data.stopped.clone(),
+                            confirmation: confirmation.digest_data()?,
+                        })?;
+                self.owner
+                    .channel
+                    .send_storage(&message, stage, &mut self.acquisition)?;
+                self.check(stage)?;
+                self.completion = Completion::AppFenceAcknowledged;
+                Ok(())
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn await_restore_fence_confirmed(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.completion == Completion::ControllerFenceAnnounced
+                    && self.stopped.as_ref() == Some(data)
+                    && self.fence.as_ref() == Some(confirmation)
+                    && self.local.stage.data.role == NativeRole::EpochController,
+                "native_restore_fence_ack_order"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native_restore_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let (message, process) = self
+                    .owner
+                    .channel
+                    .receive_storage(stage, &mut self.acquisition)?;
+                self.peer
+                    .accept_message(&message, process, stage, &mut self.acquisition)?;
+                self.check(stage)?;
+                ensure!(
+                    matches!(message.body, Body::CurrentFenceConfirmed { exchange, stopped, confirmation: actual }
+                    if exchange == self.exchange.digest()? && stopped == data.stopped && actual == confirmation.digest_data()?),
+                    "native_restore_fence_ack_changed"
+                );
+                self.completion = Completion::ControllerFenceConfirmed;
+                Ok(())
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn require_restore_stopped(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
         data: &super::super::AuthorityStopData,
     ) -> Result<()> {
-        self.check(stage)?;
-        ensure!(
-            self.completion == Completion::ControllerStopped && self.stopped.as_ref() == Some(data),
-            "native_restore_stop_not_retained"
-        );
-        Ok(())
+        let result = (|| {
+            self.check(stage)?;
+            ensure!(
+                self.completion == Completion::ControllerFenceConfirmed
+                    && self.stopped.as_ref() == Some(data)
+                    && self.fence.is_some(),
+                "native_restore_stop_not_retained"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
     }
     pub(in crate::security_epoch) fn release_restore_stop(
         &mut self,
@@ -1058,7 +1256,7 @@ impl CurrentStoragePeerPhase<'_> {
         self.stop_packet(
             stage,
             data,
-            Completion::ControllerStopped,
+            Completion::ControllerFenceConfirmed,
             Completion::ControllerStoppedTerminal,
             true,
         )
@@ -1071,7 +1269,7 @@ impl CurrentStoragePeerPhase<'_> {
         self.stop_packet(
             stage,
             data,
-            Completion::AppStopAcknowledged,
+            Completion::AppFenceAcknowledged,
             Completion::AppStoppedTerminal,
             false,
         )
@@ -1292,8 +1490,7 @@ fn stop_data(
     );
     Ok(super::super::AuthorityStopData {
         admin_binding: frozen.selection.admin_binding.clone(),
-        operation: frozen.selection.operation.clone(),
-        root: frozen.selection.fenced_root.clone(),
+        selection: frozen.selection.stop.clone(),
         stopped: Digest::of(&(
             "day2-native-stopped-peer-v1",
             exchange.digest()?,

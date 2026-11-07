@@ -1478,7 +1478,7 @@ pub(crate) fn record_unfenced_runtime(runtime: &crate::store::Runtime) -> Result
 /// business callback or ordinary SQL facade is lent while OWNERS is borrowed.
 pub(crate) fn await_controller_admin_read(
     runtime: &crate::store::Runtime,
-    operation: &day2_capabilities::Digest,
+    operation: &crate::security_epoch::native_enrollment::AdminReadAction,
 ) -> Result<()> {
     ensure!(
         runtime.uses_native_storage(),

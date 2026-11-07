@@ -17,10 +17,11 @@ use day2_capabilities::{Digest, restore_signing::KeySelection, security_epoch::E
 use std::time::Duration;
 
 mod consumer;
-pub(crate) use consumer::FencedReadUnit;
 pub(in crate::security_epoch) use consumer::{
-    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
+    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, ReservationRegistryLoan,
+    ReservationSourceLoan, RestoreWriteLoan,
 };
+pub(crate) use consumer::{FencedReadUnit, ReservationReadUnit};
 
 pub(in crate::security_epoch) struct PendingApproval {
     ceremony: ControllerCeremony,

@@ -693,12 +693,13 @@ Its retained writer loan has fixed `require_staging_input`,
 directory descriptors, their identities and the unchanged original. There is
 no root constructor, resource getter, caller-selected phase or clock renewal.
 
-These interfaces currently refuse and permanently refuse the actual owner;
-they do not perform reservation, stopping, root admission or writer transitions.
-They exist so the consuming composition can bind to concrete signatures while
-the genuine suppliers are implemented. Files, target reports and holder records
-are inputs, never authority. Successful implementations and their proof-policy,
-test and native qualification evidence remain pending.
+The stop entry now retains the actual executor through the durable grant-attempt
+marker, issuer freeze, App drain, known reservation and separate peer
+confirmation. Its Fenced continuation keeps the same original, files and fixed
+readiness interval. The four target/root/writer operations above remain refusing
+interfaces in this composition; their genuine suppliers are separate work.
+Files, target reports and holder records are inputs, never authority. Native
+qualification and the complete accepting writer remain pending.
 
 ### Historical restore-key availability supplier
 

@@ -1313,8 +1313,7 @@ impl FrozenRoleIssuer {
         storage: &mut EnrolledStorageStage<'_, '_>,
         app: &super::storage_peer_wire::StageStatement,
         admin_binding: &Digest,
-        operation: &Digest,
-        fenced_root: &Digest,
+        stop: &crate::security_epoch::kernel::restore::StopSelection,
     ) -> Result<FrozenRoleIssuer> {
         let stage = &mut *storage.stage;
         let requested: Result<FrozenRoleIssuer> = (|| {
@@ -1325,7 +1324,7 @@ impl FrozenRoleIssuer {
             );
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (app, admin_binding, operation, fenced_root);
+                let _ = (app, admin_binding, stop);
                 anyhow::bail!("native_restore_issuer_platform_unsupported");
             }
             #[cfg(target_os = "linux")]
@@ -1335,8 +1334,7 @@ impl FrozenRoleIssuer {
                     app: app.clone(),
                     controller,
                     admin_binding: admin_binding.clone(),
-                    operation: operation.clone(),
-                    fenced_root: fenced_root.clone(),
+                    stop: stop.clone(),
                 };
                 let mut original = stage.narrow_io_acquisition(5)?;
                 let request = protocol::nonce("restore-issuer-freeze-request")?;

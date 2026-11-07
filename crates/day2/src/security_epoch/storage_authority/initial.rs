@@ -796,10 +796,15 @@ impl AppInitialStorageContinuity {
         &'storage mut self,
         stage: &mut EnrolledRoleStage<'_>,
         binding: Digest,
+        action: &crate::security_epoch::native_enrollment::AdminReadAction,
     ) -> Result<CurrentAppStoragePhase<'storage>> {
         let queued = self.ready.begin()?;
         let cohort = self.file.sqlite_cohort(stage)?;
-        let request = StoragePeerRequest::AdminRead { binding, cohort };
+        let request = StoragePeerRequest::AdminRead {
+            binding,
+            cohort,
+            action: action.clone(),
+        };
         let peer = self.peer.begin_current(queued, stage, request)?;
         let mut phase = CurrentAppStoragePhase {
             file: &mut self.file,
@@ -1010,6 +1015,40 @@ impl CurrentAppStoragePhase<'_> {
         checked
     }
 
+    pub(in crate::security_epoch) fn await_restore_fence(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+    ) -> Result<crate::security_epoch::firestore::ReservationConfirmation> {
+        self.check(stage)?;
+        let requested = self.peer.await_restore_fence(stage, stopped);
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let confirmation = requested?;
+        checked?;
+        Ok(confirmation)
+    }
+
+    pub(in crate::security_epoch) fn acknowledge_restore_fence(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        self.check(stage)?;
+        let requested = self
+            .peer
+            .acknowledge_restore_fence(stage, stopped, confirmation);
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn await_restore_release(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -1211,15 +1250,14 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
 
     pub(in crate::security_epoch) fn freeze_restore_issuer(
         &mut self,
-        operation: &Digest,
-        root: &Digest,
+        stop: &crate::security_epoch::kernel::restore::StopSelection,
     ) -> Result<crate::security_epoch::native_enrollment::FrozenRoleIssuer> {
         let requested = (|| {
             self.check()?;
             let PeerFence::Current(peer) = &mut self.peer else {
                 anyhow::bail!("native_restore_same_admin_peer_required");
             };
-            peer.freeze_restore_issuer(self.file.controller_stage_after_check()?, operation, root)
+            peer.freeze_restore_issuer(self.file.controller_stage_after_check()?, stop)
         })();
         let checked = self.check();
         if requested.is_err() || checked.is_err() {
@@ -1266,6 +1304,54 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         let stopped = requested?;
         checked?;
         Ok(stopped)
+    }
+
+    pub(in crate::security_epoch) fn announce_restore_fence(
+        &mut self,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check()?;
+            let PeerFence::Current(peer) = &mut self.peer else {
+                anyhow::bail!("native_restore_same_admin_peer_required");
+            };
+            peer.announce_restore_fence(
+                self.file.controller_stage_after_check()?,
+                stopped,
+                confirmation,
+            )
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    pub(in crate::security_epoch) fn await_restore_fence_confirmed(
+        &mut self,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check()?;
+            let PeerFence::Current(peer) = &mut self.peer else {
+                anyhow::bail!("native_restore_same_admin_peer_required");
+            };
+            peer.await_restore_fence_confirmed(
+                self.file.controller_stage_after_check()?,
+                stopped,
+                confirmation,
+            )
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
     }
 
     pub(in crate::security_epoch) fn require_restore_stopped(

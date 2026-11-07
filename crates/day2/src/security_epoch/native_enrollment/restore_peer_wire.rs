@@ -94,8 +94,7 @@ fn target_only<'de, D: Deserializer<'de>>(
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::security_epoch) struct AuthorityStopData {
     pub admin_binding: Digest,
-    pub operation: Digest,
-    pub root: Digest,
+    pub selection: crate::security_epoch::kernel::restore::StopSelection,
     pub stopped: Digest,
 }
 

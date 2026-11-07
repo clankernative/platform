@@ -276,6 +276,166 @@ fn calls(source: &str, owner: &str, name: &str) -> Vec<String> {
 fn before(calls: &[String], first: &str, second: &str) -> bool {
     matches!((calls.iter().position(|x| x == first), calls.iter().position(|x| x == second)), (Some(a), Some(b)) if a < b)
 }
+
+fn app_two_phase_stop(method: &syn::ImplItemFn) -> bool {
+    let mut calls = Calls::default();
+    calls.visit_block(&method.block);
+    let selected: Vec<&str> = calls
+        .0
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            matches!(
+                *name,
+                "seal"
+                    | "check_active_data"
+                    | "check_drained"
+                    | "acknowledge_restore_stop"
+                    | "await_restore_fence"
+                    | "confirm_restore_reservation"
+                    | "acknowledge_restore_fence"
+                    | "await_restore_release"
+                    | "finish_restore_stopped"
+            )
+        })
+        .collect();
+    #[derive(Default)]
+    struct CapturedOperation {
+        count: usize,
+        valid: bool,
+        captures: usize,
+        captured: bool,
+    }
+    impl<'ast> Visit<'ast> for CapturedOperation {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "check_active_data" {
+                self.count += 1;
+                self.valid = matches!(call.args.get(1),Some(syn::Expr::Path(path)) if path.path.is_ident("restore_operation"));
+            }
+            if call.method == "restore_operation_data" {
+                self.captures += 1;
+                self.captured = matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("operation"))
+                    && call.args.is_empty();
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut operation = CapturedOperation::default();
+    operation.visit_block(&method.block);
+    selected
+        == [
+            "seal",
+            "check_active_data",
+            "check_drained",
+            "acknowledge_restore_stop",
+            "await_restore_fence",
+            "check_drained",
+            "confirm_restore_reservation",
+            "check_drained",
+            "acknowledge_restore_fence",
+            "await_restore_release",
+            "check_drained",
+            "finish_restore_stopped",
+        ]
+        && operation.count == 1
+        && operation.valid
+        && operation.captures == 1
+        && operation.captured
+        && !calls.0.iter().any(|name| name == "check_fenced_initial")
+}
+
+#[test]
+fn actual_app_stop_drains_active_then_confirms_known_fence_on_the_same_original() {
+    use quote::ToTokens as _;
+    let actual = method(
+        include_str!("../admin_read.rs"),
+        "ActiveAppStorageContinuity",
+        "admin_read",
+    );
+    assert!(app_two_phase_stop(&actual));
+    let rendered = actual.to_token_stream().to_string();
+    let parse = |rendered: &str| {
+        method(
+            &format!("impl Dummy {{ {rendered} }}"),
+            "Dummy",
+            "admin_read",
+        )
+    };
+    for target in [
+        "check_active_data",
+        "acknowledge_restore_stop",
+        "await_restore_fence",
+        "confirm_restore_reservation",
+        "acknowledge_restore_fence",
+        "await_restore_release",
+    ] {
+        assert_eq!(rendered.matches(target).count(), 1, "{target}");
+        assert!(
+            !app_two_phase_stop(&parse(&rendered.replacen(target, "unchecked_data", 1))),
+            "{target}"
+        );
+    }
+    #[derive(Default)]
+    struct SelectedCall(Vec<syn::ExprMethodCall>);
+    impl<'ast> Visit<'ast> for SelectedCall {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "check_active_data" {
+                self.0.push(call.clone());
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut selected = SelectedCall::default();
+    selected.visit_block(&actual.block);
+    assert_eq!(selected.0.len(), 1);
+    let mut changed = selected.0.pop().unwrap();
+    let original = changed.to_token_stream().to_string();
+    assert_eq!(rendered.matches(&original).count(), 1);
+    changed.args[1] = syn::parse_quote!(&stopped.selection.restore_operation);
+    assert!(!app_two_phase_stop(&parse(&rendered.replacen(
+        &original,
+        &changed.to_token_stream().to_string(),
+        1
+    ))));
+    let captured = "restore_operation_data";
+    assert_eq!(rendered.matches(captured).count(), 1);
+    assert!(!app_two_phase_stop(&parse(&rendered.replacen(
+        captured,
+        "unchecked_data",
+        1
+    ))));
+    let controller = calls(
+        include_str!("../admin_read.rs"),
+        "ActiveControllerStorageContinuity",
+        "begin_admin_read",
+    );
+    assert_eq!(
+        controller
+            .iter()
+            .filter(|name| *name == "require_admin_operation_data")
+            .count(),
+        1
+    );
+    assert!(before(&controller, "require_admin_operation_data", "read"));
+    let freeze = calls(
+        include_str!("../../native_enrollment/storage_peer/continuation.rs"),
+        "CurrentStoragePeerPhase",
+        "freeze_restore_issuer",
+    );
+    assert_eq!(
+        freeze
+            .iter()
+            .filter(|name| *name == "require_restore_operation_data")
+            .count(),
+        1
+    );
+    assert!(before(
+        &freeze,
+        "require_restore_operation_data",
+        "capture_restore"
+    ));
+}
+
 fn ordered(source: &str) -> bool {
     let read = calls(source, "InitialStoreMetadata", "controller_admin_data");
     [

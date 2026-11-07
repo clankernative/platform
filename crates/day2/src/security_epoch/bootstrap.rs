@@ -22,11 +22,11 @@ use day2_capabilities::{
 use std::{cell::RefCell, rc::Rc};
 
 mod admin_read;
-pub(crate) use admin_read::FencedReadUnit;
 pub(in crate::security_epoch) use admin_read::{
     CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation,
-    RestoreAuthenticationAction, RestoreWriteLoan,
+    ReservationRegistryLoan, ReservationSourceLoan, RestoreAuthenticationAction, RestoreWriteLoan,
 };
+pub(crate) use admin_read::{FencedReadUnit, ReservationReadUnit};
 mod app_serving;
 pub(crate) use admin_read::{
     ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData,

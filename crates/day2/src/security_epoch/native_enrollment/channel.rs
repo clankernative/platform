@@ -87,6 +87,11 @@ impl Channel {
         acquisition: &NativeAcquisition,
     ) -> Result<()> {
         if let Some(transcript) = &mut self.transcript {
+            if direction == Direction::Send {
+                transcript.select_frame(
+                    frame.ok_or_else(|| anyhow::anyhow!("native_handshake_packet_kind"))?,
+                )?;
+            }
             if direction == Direction::Send && transcript.next().map(|(_, next)| next) != frame {
                 transcript.refuse();
                 anyhow::bail!("native_handshake_send_order");

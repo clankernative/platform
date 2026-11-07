@@ -123,8 +123,7 @@ pub(super) struct SignedStage {
 #[serde(deny_unknown_fields)]
 pub(super) struct FreezeSelection {
     pub admin_binding: Digest,
-    pub operation: Digest,
-    pub fenced_root: Digest,
+    pub stop: crate::security_epoch::kernel::restore::StopSelection,
     pub app: super::storage_peer_wire::StageStatement,
     pub controller: super::storage_peer_wire::StageStatement,
 }
@@ -356,6 +355,12 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Packet> {
         ensure!(
             value
                 .pointer(path)
+                .is_some_and(serde_json::Value::is_object),
+            "native_enrollment_freeze_object_required"
+        );
+        ensure!(
+            value
+                .pointer(&format!("{path}/stop"))
                 .is_some_and(serde_json::Value::is_object),
             "native_enrollment_freeze_object_required"
         );

@@ -34,12 +34,21 @@ impl UseRecord {
                 && self.approval.target.authority == selected.authority_key()?,
             "restore_use_selection_changed"
         );
-        Digest::of(&(
-            "day2-restore-approval-use-key-v1",
-            selected.authority_key()?,
-            &self.approval.grant_id,
-        ))
+        use_key_data(selected, &self.approval.grant_id)
     }
+}
+
+/// Exact historical selector DATA, never grant consumption or permission.
+pub(in crate::security_epoch) fn use_key_data(
+    selected: &EpochStore,
+    grant: &Digest,
+) -> Result<Digest> {
+    selected.validate()?;
+    Digest::of(&(
+        "day2-restore-approval-use-key-v1",
+        selected.authority_key()?,
+        grant,
+    ))
 }
 
 /// All five writes and every read-version/absence condition are one provider

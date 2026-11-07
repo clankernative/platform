@@ -9,26 +9,13 @@ use super::{
     approval_window,
 };
 use crate::security_epoch::{
-    kernel::{self, restore::approval_use},
+    kernel::{self, Snapshot, restore::approval_use},
     native_enrollment::{AuthorityStopData, FrozenRoleIssuer},
     restore_original::RestoreObservation,
 };
 use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 use std::{cell::Cell, rc::Rc};
-
-impl<'metadata, 'storage, 'role> AuthenticatedRestoreExecution<'metadata, 'storage, 'role> {
-    /// Consume the actual authenticated executor and retain its same original
-    /// through known reservation, complete stop and writer handoff. This source
-    /// interface refuses until those accepting operations are implemented.
-    pub(in crate::security_epoch) fn stop_for_restore(
-        mut self,
-        _intent: &kernel::restore::Intent,
-    ) -> Result<FencedRestoreContinuation<'metadata, 'storage, 'role>> {
-        self.refuse();
-        anyhow::bail!("native_restore_stop_supplier_unavailable")
-    }
-}
 
 /// A closed borrow of the actual authenticated executor's fields, keeping its
 /// native source separately borrowable. No factory accepts replacement fields
@@ -283,6 +270,7 @@ pub(in crate::security_epoch) struct FencedRestoreContinuation<'metadata, 'stora
     stopped: AuthorityStopData,
     writer_borrowed: Cell<bool>,
     refused: Rc<Cell<bool>>,
+    readiness: Readiness,
 }
 
 /// Exclusive, one-use loan. Parent keeps this exact borrow across creation,
@@ -519,6 +507,12 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
             )?;
             self.issuer
                 .check(&mut physical.controller_stage()?.storage()?)?;
+            self.auth
+                .source
+                .require_qualified(&self.auth.time_operation)?;
+            let time = self.auth.source.current_fenced_time(physical)?;
+            self.readiness
+                .check(approval_window(&self.auth.record, &time)?)?;
             let (domain, origin, deadline) = observed.interval_data();
             ensure!(
                 origin < deadline
@@ -578,7 +572,8 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
                 .as_mut()
                 .context("native_restore_physical_closed")?;
             let time = self.auth.source.current_fenced_time(physical)?;
-            approval_window(&self.auth.record, &time)?;
+            self.readiness
+                .check(approval_window(&self.auth.record, &time)?)?;
             let names = crate::security_epoch::bootstrap::request_names(
                 &self.auth.action.reader.loan.selection,
                 &self.auth.action.reader.loan.completion,
@@ -590,7 +585,8 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
             )?;
             ensure!(
                 fresh.snapshot() == &self.observed
-                    && self.stopped.root == Digest::of(&self.plan.reservation.advance.root)?
+                    && self.stopped.selection.fenced_root
+                        == Digest::of(&self.plan.reservation.advance.root)?
                     && self
                         .observed
                         .root
@@ -627,6 +623,7 @@ impl<'metadata, 'storage, 'role> FencedRestoreContinuation<'metadata, 'storage, 
 
     fn refuse(&mut self) {
         self.refused.set(true);
+        self.readiness.refuse();
         self.auth.refuse();
         self.issuer.refuse();
     }
@@ -697,6 +694,727 @@ impl RestoreWriteLoan<'_, '_, '_, '_> {
 // OriginalGuard, issuer and CounterUseGuard; the old active continuation was
 // pessimistically false before acquisition and is never restored here.
 
+/// Additional fixed ceiling, never a clock or authorization source. The same
+/// captured value moves through known settlement into the Fenced owner.
+struct Readiness {
+    observed_at: i64,
+    ready_until: i64,
+    refused: std::cell::Cell<bool>,
+}
+
+impl Readiness {
+    fn new(observed_at: i64, ready_until: i64) -> Result<Self> {
+        ensure!(
+            observed_at >= 0 && observed_at < ready_until,
+            "native_restore_readiness_interval"
+        );
+        Ok(Self {
+            observed_at,
+            ready_until,
+            refused: std::cell::Cell::new(false),
+        })
+    }
+    fn check(&self, at: i64) -> Result<()> {
+        if self.refused.get() || at < self.observed_at || at >= self.ready_until {
+            self.refuse();
+            anyhow::bail!("native_restore_reservation_readiness_expired");
+        }
+        Ok(())
+    }
+    fn refuse(&self) {
+        self.refused.set(true);
+    }
+}
+
+// A local reducer only, not a source of native authority. The real owner below
+// must retain every actual guard; no parsed receipt can construct that owner.
+enum ObservationPhase {
+    Created,
+    Reading,
+    May,
+    Known(Box<Snapshot>),
+    Refused,
+}
+
+struct ReservationView {
+    before: Snapshot,
+    root: kernel::AuthorityRecord,
+    sentinel: kernel::SentinelRecord,
+    phase: std::cell::RefCell<ObservationPhase>,
+}
+
+impl ReservationView {
+    fn begin(&mut self) -> Result<()> {
+        if !matches!(self.phase.get_mut(), ObservationPhase::Created) {
+            self.refuse();
+            anyhow::bail!("native_restore_reservation_already_attempted");
+        }
+        *self.phase.get_mut() = ObservationPhase::Reading;
+        Ok(())
+    }
+
+    fn arm_commit(&mut self) -> Result<()> {
+        if !matches!(self.phase.get_mut(), ObservationPhase::Reading) {
+            self.refuse();
+            anyhow::bail!("native_restore_reservation_commit_spent");
+        }
+        // Spend before the first possible commit call, including an unwind.
+        *self.phase.get_mut() = ObservationPhase::May;
+        Ok(())
+    }
+
+    fn is_after(&self, observed: &Snapshot) -> bool {
+        observed.create == self.before.create
+            && observed.activate == self.before.activate
+            && observed.root.as_ref().is_some_and(|row| {
+                row.value == self.root
+                    && self
+                        .before
+                        .root
+                        .as_ref()
+                        .is_some_and(|old| row.version != old.version)
+            })
+            && observed.sentinel.as_ref().is_some_and(|row| {
+                row.value == self.sentinel
+                    && self
+                        .before
+                        .sentinel
+                        .as_ref()
+                        .is_some_and(|old| row.version != old.version)
+            })
+    }
+
+    fn check(&self, observed: &Snapshot) -> Result<()> {
+        let matches = match &*self.phase.borrow() {
+            ObservationPhase::Created | ObservationPhase::Reading => observed == &self.before,
+            ObservationPhase::May => observed == &self.before || self.is_after(observed),
+            ObservationPhase::Known(known) => observed == known.as_ref(),
+            ObservationPhase::Refused => false,
+        };
+        if !matches {
+            self.refuse();
+            anyhow::bail!("native_restore_private_reservation_observation_changed");
+        }
+        Ok(())
+    }
+
+    fn known(&mut self, observed: Snapshot) -> Result<()> {
+        if !matches!(self.phase.get_mut(), ObservationPhase::May) || !self.is_after(&observed) {
+            self.refuse();
+            anyhow::bail!("native_restore_reservation_not_known");
+        }
+        *self.phase.get_mut() = ObservationPhase::Known(Box::new(observed));
+        Ok(())
+    }
+
+    fn refuse(&self) {
+        self.phase.replace(ObservationPhase::Refused);
+    }
+}
+
+/// A distinct, private-purpose read loan. It never broadens the existing
+/// Active-only or Known-Fenced loans and cannot execute business callbacks.
+pub(crate) struct ReservationReadUnit<'borrow, 'storage, 'role> {
+    loan: &'borrow mut ControllerAdminReadLoan<'storage, 'role>,
+    metadata: &'borrow crate::store::InitialStoreMetadata,
+    view: &'borrow ReservationView,
+}
+
+impl ReservationReadUnit<'_, '_, '_> {
+    pub(crate) fn check_current(&mut self) -> Result<()> {
+        let requested = (|| {
+            self.loan.disposition.require_closed()?;
+            self.loan.check_local()?;
+            self.metadata.require_native_selection(
+                &self.loan.selection,
+                &self.loan.policy.runtime_profile.app_artifact,
+                &self.loan.policy,
+            )?;
+            let physical = self
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?;
+            let names = crate::security_epoch::bootstrap::request_names(
+                &self.loan.selection,
+                &self.loan.completion,
+            )?;
+            let mut observed =
+                self.loan
+                    .reads
+                    .read(physical.controller_stage()?, &self.loan.selection, &names)?;
+            self.view.check(observed.snapshot())?;
+            self.loan
+                .reads
+                .check_observation(physical.controller_stage()?, &mut observed)?;
+            self.loan.check_local()
+        })();
+        let checked = self.loan.check_local();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    pub(crate) fn check_metadata(
+        &mut self,
+        metadata: &crate::store::InitialStoreMetadata,
+    ) -> Result<()> {
+        if !std::ptr::eq(self.metadata, metadata) {
+            self.refuse();
+            anyhow::bail!("native_restore_reservation_metadata_substituted");
+        }
+        self.check_current()
+    }
+
+    pub(crate) fn check_database(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        self.loan.check_database(db)
+    }
+    pub(crate) fn begin_retained_sql(&mut self, db: &rusqlite::Connection) -> Result<()> {
+        self.loan.begin_retained_sql(db)
+    }
+    pub(crate) fn end_retained_sql(
+        &mut self,
+        db: &rusqlite::Connection,
+        completed: &Result<()>,
+    ) -> Result<()> {
+        self.loan.end_retained_sql(db, completed)
+    }
+    pub(crate) fn end_sql(&mut self, completed: &Result<()>) -> Result<()> {
+        self.loan.end_sql(completed)
+    }
+    pub(crate) fn refuse(&mut self) {
+        self.loan.refuse();
+    }
+}
+
+pub(in crate::security_epoch) struct ReservationRegistryLoan<'borrow, 'metadata, 'storage, 'role> {
+    reader: &'borrow mut ControllerAdminReader<'metadata, 'storage, 'role>,
+    view: &'borrow ReservationView,
+}
+
+impl ReservationRegistryLoan<'_, '_, '_, '_> {
+    pub(in crate::security_epoch) fn registry_data(
+        &mut self,
+    ) -> Result<crate::security_epoch::ControllerRegistryData> {
+        let requested: Result<crate::security_epoch::ControllerRegistryData> = (|| {
+            let reader = &mut *self.reader;
+            let mut unit = ReservationReadUnit {
+                loan: &mut reader.loan,
+                metadata: reader.metadata,
+                view: self.view,
+            };
+            let data = reader.sqlite.read_reserving(&mut unit, reader.metadata)?;
+            reader.selected.check(&data)?;
+            let (selector, instance) = reader.metadata.restore_registry_selector_data();
+            Ok(crate::security_epoch::ControllerRegistryData {
+                selector,
+                instance,
+                scope: reader.metadata.scope().to_owned(),
+                app: reader.metadata.app().to_owned(),
+                artifact: reader.metadata.artifact().id().to_owned(),
+                authority: reader.selected.authority.clone(),
+                operation: reader.selected.operation.clone(),
+                approver: reader.selected.approver.clone(),
+                executor: reader.selected.executor.clone(),
+            })
+        })();
+        let checked = self.check_local();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let data = requested?;
+        checked?;
+        Ok(data)
+    }
+
+    pub(in crate::security_epoch) fn check_local(&mut self) -> Result<()> {
+        self.reader.check_registry_local()
+    }
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.reader.refuse();
+    }
+}
+
+/// Only the actual consuming reservation method constructs this lexical loan.
+/// It borrows every executor field, the frozen issuer and retained key material;
+/// no Source/stage/clock/descriptor getter or transferable dispatch permit exists.
+pub(in crate::security_epoch) struct ReservationSourceLoan<'borrow, 'metadata, 'storage, 'role> {
+    executor: ExecutionSourceLoan<'borrow, 'metadata, 'storage, 'role>,
+    issuer: &'borrow mut crate::security_epoch::native_enrollment::FrozenRoleIssuer,
+    keys: &'borrow mut crate::security_epoch::storage_authority::HistoricalKeyAvailability,
+    intent: &'borrow kernel::restore::Intent,
+    view: &'borrow mut ReservationView,
+    plan: &'borrow kernel::restore::approval_use::Plan,
+    current: &'borrow kernel::restore::Current,
+    readiness: &'borrow Readiness,
+    at: i64,
+    source: *const crate::security_epoch::storage_authority::NativeApprovalSource,
+}
+
+impl ReservationSourceLoan<'_, '_, '_, '_> {
+    /// Compare the actual source and exact captured DATA before any SQL or
+    /// provider work. Equal selection/clock DATA cannot substitute another owner.
+    pub(in crate::security_epoch) fn require_dispatch_data(
+        &mut self,
+        source: &crate::security_epoch::storage_authority::NativeApprovalSource,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+        plan: &kernel::restore::approval_use::Plan,
+        current: &kernel::restore::Current,
+        at: i64,
+        publication: &crate::security_epoch::restore_approval::publication::Publication,
+    ) -> Result<()> {
+        let requested = (|| {
+            ensure!(
+                std::ptr::eq(self.source, std::ptr::from_ref(source))
+                    && std::ptr::eq(self.plan, plan)
+                    && std::ptr::eq(self.current, current)
+                    && self.at == at
+                    && selected == &self.executor.action.reader.loan.selection,
+                "native_restore_reservation_owner_substituted"
+            );
+            publication.require_exact(selected, self.executor.record)?;
+            ensure!(
+                plan.reservation.before == self.view.before
+                    && plan.reservation.advance.root == self.view.root
+                    && plan.reservation.advance.sentinel == self.view.sentinel
+                    && current.grant.approval == self.executor.record.statement.request
+                    && current.grant.intent == self.intent.commitment(selected)?
+                    && self.readiness.observed_at == current.observed_at
+                    && self.readiness.ready_until == current.ready_until,
+                "native_restore_reservation_data_substituted"
+            );
+            Ok(())
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    pub(in crate::security_epoch) fn begin(&mut self) -> Result<()> {
+        self.view.begin()
+    }
+    pub(in crate::security_epoch) fn arm_commit(&mut self) -> Result<()> {
+        self.view.arm_commit()
+    }
+    pub(in crate::security_epoch) fn known(&mut self, observed: &Snapshot) -> Result<()> {
+        self.view.known(observed.clone())
+    }
+
+    fn check_local(
+        &mut self,
+        source: &mut crate::security_epoch::storage_authority::NativeApprovalSource,
+    ) -> Result<crate::security_epoch::restore_original::RestoreObservation> {
+        self.executor.action.check_local()?;
+        let physical = self
+            .executor
+            .action
+            .reader
+            .loan
+            .physical
+            .as_mut()
+            .context("native_restore_physical_closed")?;
+        let observed = self.executor.original.check_join(
+            physical.controller_stage()?,
+            &self.executor.record.statement.request,
+            self.executor.operation,
+        )?;
+        self.issuer
+            .check(&mut physical.controller_stage()?.storage()?)?;
+        source.check_phase(physical)?;
+        source.require_qualified(self.executor.time_operation)?;
+        let time = source.current_fenced_time(physical)?;
+        self.readiness
+            .check(approval_window(self.executor.record, &time)?)?;
+        self.executor.action.check_local()?;
+        Ok(observed)
+    }
+
+    pub(in crate::security_epoch) fn check(
+        &mut self,
+        source: &mut crate::security_epoch::storage_authority::NativeApprovalSource,
+    ) -> Result<crate::security_epoch::restore_original::RestoreObservation> {
+        if *self.executor.refused || !std::ptr::eq(self.source, std::ptr::from_ref(&*source)) {
+            self.refuse();
+            source.refuse_reservation();
+            anyhow::bail!("native_restore_reservation_refused");
+        }
+        // A caught unwind cannot resume this same lexical owner as healthy.
+        *self.executor.refused = true;
+        let requested: Result<()> = (|| {
+            self.check_local(source)?;
+            self.keys
+                .require(self.intent, self.executor.record, self.executor.operation)?;
+            super::super::super::require_outside_unit(
+                self.executor
+                    .action
+                    .sqlite
+                    .as_ref()
+                    .context("restore_auth_sqlite_closed")?,
+            )?;
+            let mut registry = ReservationRegistryLoan {
+                reader: &mut self.executor.action.reader,
+                view: self.view,
+            };
+            self.executor.completion.check_reservation(
+                &mut registry,
+                (
+                    self.executor
+                        .action
+                        .sqlite
+                        .as_mut()
+                        .context("restore_auth_sqlite_closed")?,
+                    &mut self.executor.action.files,
+                ),
+                self.executor.record,
+                self.executor.operation,
+            )?;
+            source.require_qualified(self.executor.time_operation)?;
+            let physical = self
+                .executor
+                .action
+                .reader
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?;
+            let time = source.current_fenced_time(physical)?;
+            let at = approval_window(self.executor.record, &time)?;
+            self.readiness.check(at)?;
+            Ok(())
+        })();
+        let checked = self.check_local(source).and_then(|observed| {
+            ensure!(
+                &self.current.grant.clock_domain == observed.interval_data().0,
+                "native_restore_reservation_clock_changed"
+            );
+            Ok(observed)
+        });
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            source.refuse_reservation();
+        }
+        requested?;
+        let observed = checked?;
+        *self.executor.refused = false;
+        Ok(observed)
+    }
+
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.view.refuse();
+        self.readiness.refuse();
+        self.executor.refuse();
+        self.issuer.refuse();
+    }
+}
+
+// Sole accepting construction path. All fields below are actual owned guards;
+// the scalar kernel plan and ACK projections are not accepted as substitutes.
+struct NativeReservation<'metadata, 'storage, 'role> {
+    auth: Option<AuthenticatedRestoreExecution<'metadata, 'storage, 'role>>,
+    issuer: crate::security_epoch::native_enrollment::FrozenRoleIssuer,
+    stopped: crate::security_epoch::native_enrollment::AuthorityStopData,
+    intent: kernel::restore::Intent,
+    plan: kernel::restore::approval_use::Plan,
+    current: kernel::restore::Current,
+    readiness: Readiness,
+    at: i64,
+    view: ReservationView,
+}
+
+impl<'metadata, 'storage, 'role> AuthenticatedRestoreExecution<'metadata, 'storage, 'role> {
+    /// Consume the actual executor, durably mark this grant before any stop or
+    /// reservation packet, drain the genuine incumbent, then make ONE CAS.
+    pub(in crate::security_epoch) fn stop_for_restore(
+        mut self,
+        intent: &kernel::restore::Intent,
+    ) -> Result<FencedRestoreContinuation<'metadata, 'storage, 'role>> {
+        if self.historical_keys.is_none() {
+            self.retain_historical_keys(intent)?;
+        }
+        let mut attempt = self.begin_restore_attempt(intent)?;
+        attempt.check()?;
+        let requested = (|| {
+            let auth = attempt
+                .auth
+                .as_mut()
+                .context("restore_attempt_owner_closed")?;
+            let selection = auth.action.reader.loan.selection.clone();
+            let before = auth.action.reader.loan.observed.snapshot().clone();
+            let stop = kernel::restore::StopSelection::new(
+                &selection,
+                intent,
+                &auth.action.reader.loan.completion,
+                &before,
+            )?;
+            let physical = auth
+                .action
+                .reader
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?;
+            let mut issuer = physical.freeze_restore_issuer(&stop)?;
+            physical.announce_restore_stop(&mut issuer)?;
+            let stopped = physical.await_restore_stopped()?;
+            ensure!(
+                stopped.selection == stop,
+                "native_restore_stop_selection_changed"
+            );
+            issuer.check(&mut physical.controller_stage()?.storage()?)?;
+            auth.require_historical_keys(intent)?;
+            let physical = auth
+                .action
+                .reader
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?;
+            let time = auth.source.current_fenced_time(physical)?;
+            let observation = auth.original.check_join(
+                physical.controller_stage()?,
+                &auth.record.statement.request,
+                &auth.operation,
+            )?;
+            let at = approval_window(&auth.record, &time)?;
+            let (domain, _, deadline) = observation.interval_data();
+            let remaining = deadline
+                .checked_sub(observation.observation_data().1)
+                .context("native_restore_original_expired")?;
+            // Conservative UTC projection of the ACTUAL unchanged short
+            // original. It never creates another native clock or extends it.
+            let ready_until = i64::try_from(
+                time.lower
+                    .checked_add(std::time::Duration::from_nanos(remaining))
+                    .context("native_restore_time_overflow")?
+                    .as_secs(),
+            )?
+            .min(auth.record.statement.request.expires_at);
+            let root = before
+                .root
+                .as_ref()
+                .context("native_restore_root_missing")?;
+            let kernel::Phase::ActiveFirstHolder { completion } = &root.value.phase else {
+                anyhow::bail!("native_restore_active_holder_required");
+            };
+            let current = kernel::restore::Current {
+                grant: kernel::restore::Grant {
+                    intent: intent.commitment(&selection)?,
+                    issuer: issuer.digest_data()?,
+                    revision: Digest::of(&auth.action.reader.selected.authority)?,
+                    policy: Digest::of(&auth.action.reader.loan.policy)?,
+                    clock_domain: domain.clone(),
+                    approval: auth.record.statement.request.clone(),
+                    fence: kernel::restore::Fence {
+                        root: Digest::of(&root.value)?,
+                        holder: Digest::of(&completion.holder)?,
+                        receipt: stopped.stopped.clone(),
+                    },
+                },
+                target: auth.record.statement.request.target.clone(),
+                custody: auth.record.statement.request.custody.clone(),
+                executor: auth.record.statement.request.executor.clone(),
+                enabled: true,
+                observed_at: i64::try_from(time.lower.as_secs())?,
+                ready_until,
+                available_keys: intent.archive.required_keys.clone(),
+            };
+            let readiness = Readiness::new(current.observed_at, current.ready_until)?;
+            let request =
+                kernel::restore::Request::new(&selection, intent.clone(), &current, at, &before)?;
+            let reservation = request.prepare(&selection, &current, at, &before, None)?;
+            let plan = kernel::restore::approval_use::Plan::new(
+                reservation,
+                &selection,
+                &current,
+                at,
+                &before,
+                None,
+                None,
+            )?;
+            let view = ReservationView {
+                before,
+                root: plan.reservation.advance.root.clone(),
+                sentinel: plan.reservation.advance.sentinel.clone(),
+                phase: std::cell::RefCell::new(ObservationPhase::Created),
+            };
+            let auth = attempt
+                .auth
+                .take()
+                .context("restore_attempt_owner_closed")?;
+            NativeReservation {
+                auth: Some(auth),
+                issuer,
+                stopped,
+                intent: intent.clone(),
+                plan,
+                current,
+                readiness,
+                at,
+                view,
+            }
+            .reserve()
+        })();
+        if requested.is_err()
+            && let Some(auth) = &mut attempt.auth
+        {
+            auth.refuse();
+        }
+        requested
+    }
+}
+
+impl<'metadata, 'storage, 'role> NativeReservation<'metadata, 'storage, 'role> {
+    fn check(&mut self) -> Result<crate::security_epoch::restore_original::RestoreObservation> {
+        let auth = self
+            .auth
+            .as_mut()
+            .context("native_restore_reservation_closed")?;
+        let source = std::ptr::from_ref(&auth.source);
+        let mut loan = ReservationSourceLoan {
+            executor: ExecutionSourceLoan {
+                action: &mut auth.action,
+                original: &mut auth.original,
+                completion: &mut auth.completion,
+                record: &auth.record,
+                operation: &auth.operation,
+                time_operation: &auth.time_operation,
+                refused: &mut auth.refused,
+            },
+            issuer: &mut self.issuer,
+            keys: auth
+                .historical_keys
+                .as_mut()
+                .context("restore_keys_not_retained")?,
+            intent: &self.intent,
+            view: &mut self.view,
+            plan: &self.plan,
+            current: &self.current,
+            readiness: &self.readiness,
+            at: self.at,
+            source,
+        };
+        loan.check(&mut auth.source)
+    }
+
+    fn reserve(mut self) -> Result<FencedRestoreContinuation<'metadata, 'storage, 'role>> {
+        let requested = (|| {
+            self.check()?;
+            let (observed, confirmation) = {
+                let auth = self
+                    .auth
+                    .as_mut()
+                    .context("native_restore_reservation_closed")?;
+                let publication =
+                    crate::security_epoch::restore_approval::publication::Publication::record_data(
+                        &auth.action.reader.loan.selection,
+                        auth.record.clone(),
+                    )?;
+                let source = std::ptr::from_ref(&auth.source);
+                let mut loan = ReservationSourceLoan {
+                    executor: ExecutionSourceLoan {
+                        action: &mut auth.action,
+                        original: &mut auth.original,
+                        completion: &mut auth.completion,
+                        record: &auth.record,
+                        operation: &auth.operation,
+                        time_operation: &auth.time_operation,
+                        refused: &mut auth.refused,
+                    },
+                    issuer: &mut self.issuer,
+                    keys: auth
+                        .historical_keys
+                        .as_mut()
+                        .context("restore_keys_not_retained")?,
+                    intent: &self.intent,
+                    view: &mut self.view,
+                    plan: &self.plan,
+                    current: &self.current,
+                    readiness: &self.readiness,
+                    at: self.at,
+                    source,
+                };
+                auth.source.reserve_restore(
+                    &mut loan,
+                    &self.plan,
+                    &self.current,
+                    self.at,
+                    &publication,
+                )?
+            };
+            self.check()?;
+            let physical = self
+                .auth
+                .as_mut()
+                .context("native_restore_reservation_closed")?
+                .action
+                .reader
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?;
+            physical.announce_restore_fence(&self.stopped, &confirmation)?;
+            self.check()?;
+            let physical = self
+                .auth
+                .as_mut()
+                .context("native_restore_reservation_closed")?
+                .action
+                .reader
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?;
+            physical.await_restore_fence_confirmed(&self.stopped, &confirmation)?;
+            self.check()?;
+            self.auth
+                .as_mut()
+                .context("native_restore_reservation_closed")?
+                .action
+                .reader
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?
+                .require_restore_stopped(&self.stopped)?;
+            Ok(observed.snapshot)
+        })();
+        let observed = match requested {
+            Ok(observed) => observed,
+            Err(error) => {
+                self.refuse();
+                return Err(error);
+            }
+        };
+        let mut owner = FencedRestoreContinuation {
+            auth: self
+                .auth
+                .take()
+                .context("native_restore_reservation_closed")?,
+            issuer: self.issuer,
+            plan: self.plan,
+            observed,
+            stopped: self.stopped,
+            writer_borrowed: std::cell::Cell::new(false),
+            refused: std::rc::Rc::new(std::cell::Cell::new(false)),
+            readiness: self.readiness,
+        };
+        owner.check_current()?;
+        Ok(owner)
+    }
+
+    fn refuse(&mut self) {
+        self.view.refuse();
+        self.readiness.refuse();
+        if let Some(auth) = &mut self.auth {
+            auth.refuse();
+        }
+        self.issuer.refuse();
+    }
+}
+
 // Compiler controls complement the exact owning-module API inventory. None of
 // these retained owners/loans is reconstructible, transferable or serializable.
 const _: () = {
@@ -721,6 +1439,10 @@ const _: () = {
             let _ = <RestoreWriteLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <FencedReadUnit<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <FencedRegistryLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <ReservationReadUnit<'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <ReservationRegistryLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <ReservationSourceLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <NativeReservation<'static, 'static, 'static> as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);
@@ -1355,3 +2077,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "stop/reservation_tests.rs"]
+mod reservation_tests;

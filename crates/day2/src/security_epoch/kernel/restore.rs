@@ -113,10 +113,168 @@ impl Intent {
     fn advance_operation(&self, selected: &EpochStore) -> Result<Digest> {
         // The existing fenced phase must itself name this exact archive and
         // target, rather than an operation reusable for a different restore.
-        Digest::of(&(
-            "day2-secure-restore-advance-operation-v1",
-            self.commitment(selected)?,
-        ))
+        advance_operation(&self.commitment(selected)?)
+    }
+}
+
+fn advance_operation(intent: &Digest) -> Result<Digest> {
+    Digest::of(&("day2-secure-restore-advance-operation-v1", intent))
+}
+
+/// The exact predecessor and intended successor for the real peer's drain.
+/// This is only DATA: it cannot establish that an issuer or any right stopped,
+/// authorize a write, or supply an original. Native callers must obtain fresh
+/// observations at the two different boundaries and retain their actual owners.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::security_epoch) struct StopSelection {
+    pub restore_operation: Digest,
+    pub intent: Digest,
+    pub advance_operation: Digest,
+    pub before: Digest,
+    pub fenced_root: Digest,
+    pub fenced_sentinel: Digest,
+}
+
+impl StopSelection {
+    /// Derive before the drain, without inventing a completed Stop receipt.
+    /// The existing advance kernel owns the successor calculation; its request
+    /// depends on the captured Active state, not the later restore grant.
+    pub(in crate::security_epoch) fn new(
+        selected: &EpochStore,
+        intent: &Intent,
+        initial: &super::Request,
+        before: &Snapshot,
+    ) -> Result<Self> {
+        let commitment = intent.commitment(selected)?;
+        let root = &before
+            .root
+            .as_ref()
+            .context("restore_stop_root_missing")?
+            .value;
+        ensure!(
+            root.epoch.value() == 1
+                && root.bootstrap.manifest.database_incarnation
+                    == intent.archive.source_incarnation,
+            "restore_stop_archive_incarnation_changed"
+        );
+        Self::derive(selected, &commitment, &intent.operation, initial, before)
+    }
+
+    fn derive(
+        selected: &EpochStore,
+        intent: &Digest,
+        operation: &Digest,
+        initial: &super::Request,
+        before: &Snapshot,
+    ) -> Result<Self> {
+        initial.validate(selected)?;
+        ensure!(
+            matches!(
+                initial,
+                super::Request::CompleteInitialFirstActivation { .. }
+            ) && before.activate.as_ref().map(|row| &row.value.request) == Some(initial)
+                && operation != initial.operation()
+                && operation != &initial.bootstrap().create_operation,
+            "restore_stop_initial_owner_or_operation_changed"
+        );
+        let advance_operation = advance_operation(intent)?;
+        ensure!(
+            &advance_operation != operation,
+            "restore_stop_operation_domains_changed"
+        );
+        let plan = advance::Request::new(selected, advance_operation.clone(), before)?
+            .prepare(selected, before)?;
+        Ok(Self {
+            restore_operation: operation.clone(),
+            intent: intent.clone(),
+            advance_operation,
+            before: crate::security_epoch::journal::snapshot_digest(before)?,
+            fenced_root: Digest::of(&plan.root)?,
+            fenced_sentinel: Digest::of(&plan.sentinel)?,
+        })
+    }
+
+    /// The Controller still binds the complete actual archive/target intent.
+    /// Neither a peer-supplied digest nor this comparison verifies approval.
+    pub(in crate::security_epoch) fn require_intent_data(
+        &self,
+        selected: &EpochStore,
+        intent: &Intent,
+        initial: &super::Request,
+        before: &Snapshot,
+    ) -> Result<()> {
+        ensure!(
+            self == &Self::new(selected, intent, initial, before)?,
+            "restore_stop_intent_changed"
+        );
+        Ok(())
+    }
+
+    /// Pre-CAS DATA check. A Fenced root is deliberately NOT accepted here.
+    /// The App must run it on its real fresh read before acknowledging drain.
+    /// expected_operation must come from the retained original peer request,
+    /// never from this descriptor or a newly decoded replacement context.
+    pub(in crate::security_epoch) fn check_active_data(
+        &self,
+        selected: &EpochStore,
+        expected_operation: &Digest,
+        initial: &super::Request,
+        observed: &Snapshot,
+    ) -> Result<()> {
+        ensure!(
+            &self.restore_operation == expected_operation,
+            "restore_stop_original_operation_changed"
+        );
+        ensure!(
+            self == &Self::derive(
+                selected,
+                &self.intent,
+                expected_operation,
+                initial,
+                observed
+            )?,
+            "restore_stop_active_selection_changed"
+        );
+        Ok(())
+    }
+
+    /// Separate post-CAS DATA check. The real peer must additionally read the
+    /// complete eight-record reservation and exact acknowledged versions. This
+    /// function never treats an Active read, stored receipt or digest as Stop.
+    pub(in crate::security_epoch) fn check_fenced_data(
+        &self,
+        selected: &EpochStore,
+        expected_operation: &Digest,
+        initial: &super::Request,
+        before: &Snapshot,
+        observed: &Snapshot,
+    ) -> Result<()> {
+        self.check_active_data(selected, expected_operation, initial, before)?;
+        advance::check_fenced_initial(
+            selected,
+            initial,
+            observed,
+            &self.fenced_root,
+            &self.advance_operation,
+        )?;
+        let root = observed
+            .root
+            .as_ref()
+            .context("restore_stop_fenced_root_missing")?;
+        let sentinel = observed
+            .sentinel
+            .as_ref()
+            .context("restore_stop_fenced_sentinel_missing")?;
+        ensure!(
+            Digest::of(&sentinel.value)? == self.fenced_sentinel
+                && observed.create == before.create
+                && observed.activate == before.activate
+                && Some(&root.version) != before.root.as_ref().map(|row| &row.version)
+                && Some(&sentinel.version) != before.sentinel.as_ref().map(|row| &row.version),
+            "restore_stop_fenced_history_or_versions_changed"
+        );
+        Ok(())
     }
 }
 
@@ -438,4 +596,20 @@ pub(in crate::security_epoch) fn native_input_fixture(seed: u64) -> (EpochStore,
     let intent = tests::intent(&selected, seed);
     let current = tests::current(&selected, &intent, &before);
     (selected, intent, current)
+}
+
+/// Conditional-plan DATA for the private observation reducer's independent
+/// model. This creates no actual approval, stopped cohort or native owner.
+#[cfg(test)]
+pub(in crate::security_epoch) fn reservation_observation_fixture(
+    seed: u64,
+) -> Result<(Snapshot, approval_use::Plan)> {
+    let (selected, before) = tests::initial();
+    let intent = tests::intent(&selected, seed);
+    let current = tests::current(&selected, &intent, &before);
+    let request = Request::new(&selected, intent, &current, 1000, &before)?;
+    let reservation = request.prepare(&selected, &current, 1000, &before, None)?;
+    let plan =
+        approval_use::Plan::new(reservation, &selected, &current, 1000, &before, None, None)?;
+    Ok((before, plan))
 }

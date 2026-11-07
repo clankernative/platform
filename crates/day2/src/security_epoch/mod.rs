@@ -59,7 +59,7 @@ pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort, Retaine
 pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
     ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData, CurrentAppServingPhase,
-    FencedReadUnit,
+    FencedReadUnit, ReservationReadUnit,
 };
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;

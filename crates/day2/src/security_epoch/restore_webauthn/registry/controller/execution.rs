@@ -18,6 +18,58 @@ use std::{
     marker::PhantomData,
 };
 
+// No Active variant: the self-CAS and Known-Fenced purposes cannot be selected
+// by relabelling an ordinary reader or passing a flag to its current checker.
+enum TransitionReader<'borrow, 'transition, 'metadata, 'storage, 'role> {
+    Fenced(
+        &'borrow mut crate::security_epoch::bootstrap::FencedRegistryLoan<
+            'transition,
+            'metadata,
+            'storage,
+            'role,
+        >,
+    ),
+    Reserving(
+        &'borrow mut crate::security_epoch::bootstrap::ReservationRegistryLoan<
+            'transition,
+            'metadata,
+            'storage,
+            'role,
+        >,
+    ),
+}
+
+impl<'transition, 'metadata, 'storage, 'role>
+    TransitionReader<'_, 'transition, 'metadata, 'storage, 'role>
+{
+    fn registry_data(&mut self) -> Result<ControllerRegistryData> {
+        match self {
+            Self::Fenced(reader) => reader.registry_data(),
+            Self::Reserving(reader) => reader.registry_data(),
+        }
+    }
+    fn check_local(&mut self) -> Result<()> {
+        match self {
+            Self::Fenced(reader) => reader.check_local(),
+            Self::Reserving(reader) => reader.check_local(),
+        }
+    }
+    fn refuse(&mut self) {
+        match self {
+            Self::Fenced(reader) => reader.refuse(),
+            Self::Reserving(reader) => reader.refuse(),
+        }
+    }
+    fn authentication(
+        &mut self,
+    ) -> AuthenticationReader<'_, 'transition, 'metadata, 'storage, 'role> {
+        match self {
+            Self::Fenced(reader) => AuthenticationReader::Fenced(reader),
+            Self::Reserving(reader) => AuthenticationReader::Reserving(reader),
+        }
+    }
+}
+
 // Pure checks against a complete actual snapshot supplied by the fixed native
 // caller below. This helper never creates a TrustedKey or a native origin.
 fn approval_record(
@@ -590,14 +642,28 @@ impl ExecutionCompletion {
         signed: &SignedApprovalRecord,
         operation: &Digest,
     ) -> Result<()> {
+        self.check_transition(TransitionReader::Fenced(reader), sql, signed, operation)
+    }
+
+    pub(in crate::security_epoch) fn check_reservation(
+        &self,
+        reader: &mut crate::security_epoch::bootstrap::ReservationRegistryLoan<'_, '_, '_, '_>,
+        sql: (&mut rusqlite::Connection, &mut AuthenticationStoreFiles),
+        signed: &SignedApprovalRecord,
+        operation: &Digest,
+    ) -> Result<()> {
+        self.check_transition(TransitionReader::Reserving(reader), sql, signed, operation)
+    }
+
+    fn check_transition(
+        &self,
+        mut reader: TransitionReader<'_, '_, '_, '_, '_>,
+        sql: (&mut rusqlite::Connection, &mut AuthenticationStoreFiles),
+        signed: &SignedApprovalRecord,
+        operation: &Digest,
+    ) -> Result<()> {
         let (db, files) = sql;
-        let observe = |reader: &mut crate::security_epoch::bootstrap::FencedRegistryLoan<
-            '_,
-            '_,
-            '_,
-            '_,
-        >|
-         -> Result<()> {
+        let observe = |reader: &mut TransitionReader<'_, '_, '_, '_, '_>| -> Result<()> {
             ensure!(
                 !self.ceremony.ceremony.refused.get(),
                 "restore_registry_ceremony_refused"
@@ -632,10 +698,10 @@ impl ExecutionCompletion {
                 "restore_executor_completion_owner_changed"
             );
             ensure!(db.is_autocommit(), "restore_auth_transaction_open");
-            observe(reader)?;
+            observe(&mut reader)?;
             let challenge = self.ceremony.ceremony.challenge()?;
             let mut borrow = AuthenticationBorrow {
-                reader: AuthenticationReader::Fenced(&mut *reader),
+                reader: reader.authentication(),
                 held: &self.ceremony.ceremony.held,
                 files: &mut *files,
             };
@@ -667,7 +733,7 @@ impl ExecutionCompletion {
             held?;
             native?;
             ensure!(db.is_autocommit(), "restore_auth_transaction_open");
-            observe(reader)
+            observe(&mut reader)
         })();
         if requested.is_err() || checked.is_err() {
             self.ceremony.ceremony.refused.set(true);

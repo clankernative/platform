@@ -17,13 +17,38 @@ pub(super) struct Model {
     outstanding: Option<bool>,
     terminal: bool,
     last_clock: Option<Observation>,
+    restore_stop: bool,
 }
 
 impl Model {
     pub(super) fn complete(&self) -> bool {
-        !self.terminal
-            && self.outstanding.is_none()
-            && self.accepted.len() == contract(self.protocol, self.sequence).len()
+        !self.terminal && self.outstanding.is_none() && self.accepted.len() == self.contract().len()
+    }
+
+    fn contract(&self) -> Vec<(Actor, Frame)> {
+        let mut wire = contract(self.protocol, self.sequence);
+        if self.restore_stop {
+            // Independent specification: keep the captured five-step prefix,
+            // then require every distinct stop and known-reservation phase.
+            wire.truncate(5);
+            for (sender, step) in [
+                (Actor::Controller, super::super::Step::Frozen),
+                (Actor::App, super::super::Step::Drained),
+                (Actor::Controller, super::super::Step::Fenced),
+                (Actor::App, super::super::Step::FenceConfirmed),
+                (Actor::Controller, super::super::Step::StopReleased),
+            ] {
+                wire.push((
+                    sender,
+                    Frame {
+                        protocol: Protocol::CurrentStorage,
+                        step,
+                        sequence: None,
+                    },
+                ));
+            }
+        }
+        wire
     }
 }
 
@@ -174,6 +199,7 @@ impl Machine for Model {
             outstanding: None,
             terminal: !allowed,
             last_clock: None,
+            restore_stop: false,
         }
     }
 
@@ -181,7 +207,7 @@ impl Machine for Model {
         if self.terminal {
             return None;
         }
-        let contract = contract(self.protocol, self.sequence);
+        let contract = self.contract();
         let &(sender, frame) = contract.get(self.accepted.len())?;
         Some((
             if sender == self.actor {
@@ -235,6 +261,19 @@ impl Machine for Model {
 
     fn delivered(&mut self, frame: Frame, clock: Observation) -> Result<()> {
         let result = (|| {
+            if self.protocol == Protocol::CurrentStorage
+                && self.accepted.len() == 5
+                && !self.restore_stop
+                && frame.protocol == Protocol::CurrentStorage
+                && frame.step == super::super::Step::Frozen
+                && frame.sequence.is_none()
+            {
+                ensure!(
+                    self.purpose == StagePurpose::CurrentRole,
+                    "model restore purpose"
+                );
+                self.restore_stop = true;
+            }
             ensure!(
                 self.outstanding == Some(false)
                     && self.next().is_some_and(|(_, next)| next == frame),
@@ -250,9 +289,10 @@ impl Machine for Model {
 
     fn current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()> {
         let result = (|| {
-            let contract = contract(self.protocol, self.sequence);
+            let contract = self.contract();
             ensure!(
                 !self.terminal
+                    && !self.restore_stop
                     && self.outstanding.is_none()
                     && self.accepted
                         == contract.iter().map(|(_, frame)| *frame).collect::<Vec<_>>(),
@@ -312,6 +352,7 @@ impl Machine for Model {
             "protocol":self.protocol,"purpose":self.purpose,"actor":self.actor,"sequence":self.sequence,
             "position":self.accepted.len(),"busy":self.outstanding.is_some(),
             "waiting":self.outstanding == Some(true),"refused":self.terminal,"clock":self.last_clock,
+            "storage_tail":if self.restore_stop { "restore" } else { "ordinary" },
         })
     }
 }

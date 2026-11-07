@@ -407,7 +407,7 @@ impl ServingParticipant {
     pub(crate) fn admin_read(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-        operation: &Digest,
+        operation: &super::native_enrollment::AdminReadAction,
         cohort: &mut crate::oauth::native_management::AppAuthorityStop<'_>,
     ) -> Result<()> {
         let ParticipantOwner::App(app) = &mut self.native else {

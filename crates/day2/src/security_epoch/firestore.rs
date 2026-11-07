@@ -21,10 +21,12 @@ pub(in crate::security_epoch) use approval::{advance_approval_time, publish_rest
 mod paired;
 mod restore;
 pub(super) use paired::{ActionTransaction, begin_action, read_with_slot};
-#[cfg(test)]
-pub(super) use restore::{
-    Names as RestoreNames, Transaction as RestoreTransaction, commit_reply as restore_commit_reply,
+pub(in crate::security_epoch) use restore::{
+    ConfirmationNames as RestoreConfirmationNames, Names as RestoreNames,
+    Observed as RestoreObserved, ReservationConfirmation,
 };
+#[cfg(test)]
+pub(super) use restore::{Transaction as RestoreTransaction, commit_reply as restore_commit_reply};
 
 const MAX_BYTES: usize = 65_536;
 const ACQUISITION_BUDGET: Duration = Duration::from_secs(5);

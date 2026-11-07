@@ -10,11 +10,11 @@ use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 
 mod authentication_store;
-pub(crate) use authentication_store::FencedReadUnit;
 pub(in crate::security_epoch) use authentication_store::{
     CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation,
-    RestoreAuthenticationAction, RestoreWriteLoan,
+    ReservationRegistryLoan, ReservationSourceLoan, RestoreAuthenticationAction, RestoreWriteLoan,
 };
+pub(crate) use authentication_store::{FencedReadUnit, ReservationReadUnit};
 
 /// Fields drop in declaration order: SQLite closes before the actual native
 /// loan unwinds. No transaction, Connection, descriptor or native owner getter.
