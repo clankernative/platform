@@ -389,6 +389,14 @@ fn wiring(source: &str) -> bool {
     let mut methods = std::collections::BTreeMap::new();
     let mut complete = Vec::new();
     for item in &file.items {
+        if let syn::Item::Fn(function) = item {
+            // The same real verified-row SQL unit is now a free helper used
+            // by both closed Active/Fenced borrowers, not a second verifier.
+            let mut calls = Calls(Vec::new(), Vec::new());
+            calls.visit_block(&function.block);
+            complete.extend(calls.1);
+            methods.insert(function.sig.ident.to_string(), calls.0);
+        }
         if let syn::Item::Impl(item) = item {
             for member in &item.items {
                 if let syn::ImplItem::Fn(method) = member {
@@ -448,14 +456,36 @@ fn wiring(source: &str) -> bool {
         "completion_snapshot",
         &[
             "observe",
+            "Active",
+            "AuthenticationBorrow",
+            "TrustedKey",
+            "verified_completion_snapshot",
+            "check_authentication_sqlite",
+            "check_registry_local",
+            "observe",
+            "refuse",
+        ],
+    ) && ordered(
+        "verified_completion_snapshot",
+        &[
             "check_sqlite",
             "transaction",
             "verified_snapshot",
             "check_sqlite",
             "commit",
             "check_sqlite",
+        ],
+    ) && ordered(
+        "check_fenced",
+        &[
+            "eq",
+            "observe",
+            "Fenced",
+            "AuthenticationBorrow",
+            "TrustedKey",
+            "verified_completion_snapshot",
             "check_authentication_sqlite",
-            "check_registry_local",
+            "check_local",
             "observe",
             "refuse",
         ],
@@ -476,6 +506,22 @@ fn actual_execution_units_keep_opaque_native_loan_commit_postchecks_and_purpose(
     assert!(wiring(&source));
     for (before, after) in [
         ("self . ceremony . begin_attempt () ? ;", ""),
+        (
+            "verified_completion_snapshot (db , & key , & challenge , counter)",
+            "unreachable!()",
+        ),
+        (
+            "verified_completion_snapshot (db , & key , & challenge , self . counter)",
+            "unreachable!()",
+        ),
+        (
+            "AuthenticationReader :: Fenced (& mut * reader)",
+            "AuthenticationReader :: Active (& mut * reader)",
+        ),
+        (
+            "let native = reader . check_local () ;",
+            "let native = Ok (()) ;",
+        ),
         ("key . check_sqlite (& tx) ? ;", ""),
         (
             "let checked = key . check_sqlite (db) ;",

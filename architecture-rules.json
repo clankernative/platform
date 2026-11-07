@@ -364,6 +364,7 @@
     "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store.rs",
     "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer.rs",
     "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer.rs",
+    "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
     "crates/day2/src/security_epoch/bootstrap/admin_read/reader/tests.rs",
     "crates/day2/src/security_epoch/bootstrap/admin_read/tests.rs",
     "crates/day2/src/security_epoch/bootstrap/app_serving.rs",

@@ -22,7 +22,11 @@ use day2_capabilities::{
 use std::{cell::RefCell, rc::Rc};
 
 mod admin_read;
-pub(in crate::security_epoch) use admin_read::{CompletedCeremony, RestoreAuthenticationAction};
+pub(crate) use admin_read::FencedReadUnit;
+pub(in crate::security_epoch) use admin_read::{
+    CompletedCeremony, FencedRegistryLoan, FencedRestoreContinuation, RestoreAuthenticationAction,
+    RestoreWriteLoan,
+};
 mod app_serving;
 pub(crate) use admin_read::{
     ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData,
@@ -895,6 +899,31 @@ pub(super) fn check_active_snapshot(
     );
     Ok(())
 }
+
+// The exported loan boundary must retain the leaf owner's negative traits.
+// This verifies the concrete facade used by the fixed native writer, without
+// a constructor, permission DTO or a different owner hidden behind an alias.
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <FencedRestoreContinuation<'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <RestoreWriteLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
 
 #[cfg(test)]
 mod tests {
