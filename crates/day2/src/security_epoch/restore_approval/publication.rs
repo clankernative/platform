@@ -155,6 +155,10 @@ impl Publication {
         Ok(value)
     }
 
+    pub(in crate::security_epoch) fn grant_id_data(&self) -> &Digest {
+        &self.record.statement.request.grant_id
+    }
+
     fn validate(&self, selected: &EpochStore, grant: &Digest) -> Result<()> {
         selected.validate()?;
         let request = &self.record.statement.request;
@@ -194,6 +198,17 @@ impl Publication {
             "restore_approval_publication_bound"
         );
         Ok(bytes)
+    }
+
+    /// Full request equality is DATA validation only. It authenticates neither
+    /// the signed record nor its executor and constructs no consuming owner.
+    pub(in crate::security_epoch) fn require_request_data(
+        &self,
+        selected: &EpochStore,
+        expected: &super::ApprovalRequest,
+    ) -> Result<()> {
+        self.validate(selected, &expected.grant_id)?;
+        self.record.statement.request.require_exact(expected)
     }
 
     pub(in crate::security_epoch) fn require_exact(

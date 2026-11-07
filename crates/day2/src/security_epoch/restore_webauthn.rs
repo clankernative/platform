@@ -325,5 +325,44 @@ pub(super) fn verify(
 mod registry;
 pub(super) use registry::ControllerCeremony;
 pub(super) use registry::SigningUnit;
+pub(super) use registry::{ControllerExecutionCeremony, ExecutionCompletion};
+
+/// Checks the current reviewed grant selection, never executor authentication,
+/// clock qualification, durable consumption or accepting permission.
+pub(super) fn check_approval_record(
+    reader: &mut crate::security_epoch::ControllerAdminReader<'_, '_, '_>,
+    record: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+) -> Result<()> {
+    ControllerExecutionCeremony::check_approval_record(reader, record)
+}
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($type:ty, $bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$type as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(ControllerExecutionCeremony, Clone);
+    assert_not_impl!(ControllerExecutionCeremony, Copy);
+    assert_not_impl!(ControllerExecutionCeremony, Default);
+    assert_not_impl!(ControllerExecutionCeremony, std::fmt::Debug);
+    assert_not_impl!(ControllerExecutionCeremony, Send);
+    assert_not_impl!(ControllerExecutionCeremony, Sync);
+    assert_not_impl!(ControllerExecutionCeremony, serde::Serialize);
+    assert_not_impl!(ControllerExecutionCeremony, serde::Deserialize<'static>);
+    assert_not_impl!(ExecutionCompletion, Clone);
+    assert_not_impl!(ExecutionCompletion, Copy);
+    assert_not_impl!(ExecutionCompletion, Default);
+    assert_not_impl!(ExecutionCompletion, std::fmt::Debug);
+    assert_not_impl!(ExecutionCompletion, Send);
+    assert_not_impl!(ExecutionCompletion, Sync);
+    assert_not_impl!(ExecutionCompletion, serde::Serialize);
+    assert_not_impl!(ExecutionCompletion, serde::Deserialize<'static>);
+};
+
 #[cfg(test)]
 mod tests;

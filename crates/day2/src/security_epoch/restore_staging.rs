@@ -19,6 +19,8 @@ use zeroize::Zeroizing;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
+mod application;
+
 mod sealed {
     pub(super) trait Sealed {}
 }
@@ -585,3 +587,4 @@ fn execute<A: Checks>(owner: &mut A) -> Result<Projection> {
 pub(super) mod tests;
 
 mod writer;
+pub(in crate::security_epoch) use writer::{Disposition, Flight};

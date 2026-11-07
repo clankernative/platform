@@ -345,6 +345,56 @@ pub(super) fn complete(
     result.context("restore_passkey_completion_refused")
 }
 
+/// Snapshot DATA for the fixed execution completion. The native caller must
+/// own this entire SQL unit and retain the returned version/counter commitment
+/// only after its actual commit and file/native postchecks have succeeded.
+pub(super) fn verified_snapshot(
+    tx: &Transaction<'_>,
+    key: &TrustedKey<'_>,
+    challenge: &Challenge,
+    completed_counter: u32,
+) -> Result<(i64, Digest)> {
+    let (version, counter) = current(tx, key)?;
+    let id = challenge_id(challenge)?;
+    let (saved_version, saved_counter, created_at, expires_at): (i64, u32, i64, i64) = tx
+        .query_row(
+            "SELECT key_version,counter,created_at,expires_at FROM main.restore_passkey_challenges
+         WHERE id=?1 AND state='verified' AND request=?2 AND binding=?3 AND nonce=?4",
+            params![
+                id.as_str(),
+                challenge.request.as_str(),
+                key.binding()?.as_str(),
+                challenge.nonce.as_slice()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    ensure!(
+        challenge.enrollment == key.binding()?
+            && counter == completed_counter
+            && saved_version.checked_add(1) == Some(version)
+            && created_at >= 0
+            && expires_at
+                .checked_sub(created_at)
+                .is_some_and(|span| (1..=MAX_CEREMONY_SECONDS).contains(&span)),
+        "restore_executor_completion_changed"
+    );
+    let snapshot = Digest::of(&(
+        "day2-restore-executor-completion-v1",
+        &id,
+        &challenge.request,
+        &challenge.enrollment,
+        &challenge.nonce,
+        saved_version,
+        saved_counter,
+        created_at,
+        expires_at,
+        version,
+        counter,
+    ))?;
+    key.check_sqlite(tx)?;
+    Ok((version, snapshot))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cut {
     AfterClaim,

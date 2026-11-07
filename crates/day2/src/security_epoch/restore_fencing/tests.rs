@@ -33,7 +33,7 @@ fn lease(kind: Kind, tag: &str, end: u64) -> Outstanding {
         expires_upper: end,
     }
 }
-fn approval(expires: u64) -> Approval {
+fn approval(expires: u64) -> Approval<'static> {
     Approval {
         origin: ApprovalOrigin::UnqualifiedModel,
         binding: binding(),
@@ -106,7 +106,7 @@ impl Model {
 }
 impl sealed::Source for Model {}
 impl Source for Model {
-    fn current(&mut self, _: &Approval) -> Result<Clock> {
+    fn current(&mut self, _: &Approval<'_>) -> Result<Clock> {
         self.samples += 1;
         assert!(
             self.panic_sample != Some(self.samples),
@@ -128,7 +128,7 @@ impl Source for Model {
             upper,
         })
     }
-    fn stop(&mut self, _: &Approval) -> Result<Stopped> {
+    fn stop(&mut self, _: &Approval<'_>) -> Result<Stopped> {
         ensure!(
             !self.refused && !self.gate_closed,
             "controlled_stop_repeated"
@@ -148,7 +148,7 @@ impl Source for Model {
             outstanding: self.leases.clone(),
         })
     }
-    fn check_stopped(&mut self, _: &Approval, cut: &Stopped) -> Result<()> {
+    fn check_stopped(&mut self, _: &Approval<'_>, cut: &Stopped) -> Result<()> {
         assert!(!self.panic_stopped, "controlled_stop_check_panic");
         ensure!(
             !self.refused
@@ -363,6 +363,7 @@ fn production_approval_stop_proofs_and_sources_have_no_construction_or_default_p
     #[derive(Default)]
     struct Audit {
         approval: usize,
+        typed_native: bool,
         stop: usize,
         impls: usize,
         defaults: usize,
@@ -390,6 +391,13 @@ fn production_approval_stop_proofs_and_sources_have_no_construction_or_default_p
                 .count();
             if item.ident == "ApprovalOrigin" {
                 self.approval += n;
+                let native = item.variants.iter().find(|v| v.ident == "Native");
+                self.typed_native = native.is_some_and(|v| match &v.fields {
+                    syn::Fields::Unnamed(fields) if fields.unnamed.len() == 1 =>
+                        matches!(&fields.unnamed[0].ty, syn::Type::Path(p)
+                            if p.path.segments.last().is_some_and(|s| s.ident == "ConsumedRestoreApproval")),
+                    _ => false,
+                });
             }
             if item.ident == "StopOrigin" {
                 self.stop += n;
@@ -413,25 +421,59 @@ fn production_approval_stop_proofs_and_sources_have_no_construction_or_default_p
                 .count();
         }
     }
-    fn closed(source: &str) -> bool {
+    fn closed(source: &str, native: &str) -> bool {
         let mut audit = Audit::default();
         audit.visit_file(&syn::parse_file(source).unwrap());
-        audit.approval == 0 && audit.stop == 0 && audit.impls == 0 && audit.defaults == 0
+        let input = syn::parse_file(native).unwrap();
+        let origins: Vec<_> = input
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Enum(e) if e.ident == "NativeOrigin" => Some(e),
+                _ => None,
+            })
+            .collect();
+        // No cfg(test) exemption here: a model NativeOrigin would let DATA
+        // manufacture the very typed owner whose absence keeps this closed.
+        audit.approval == 1
+            && audit.typed_native
+            && audit.stop == 0
+            && audit.impls == 0
+            && audit.defaults == 0
+            && origins.len() == 1
+            && origins[0].variants.is_empty()
     }
     let source = include_str!("../restore_fencing.rs");
-    assert!(closed(source));
-    assert!(!closed(&source.replacen(
-        "enum ApprovalOrigin {",
-        "enum ApprovalOrigin { UntrustedData,",
-        1
-    )));
-    assert!(!closed(&source.replacen(
-        "enum StopOrigin {",
-        "enum StopOrigin { Receipt,",
-        1
-    )));
+    let native = include_str!("../restore_approval/native.rs");
+    assert!(closed(source, native));
+    let anchor = "enum ApprovalOrigin<'source> {";
+    assert_eq!(source.matches(anchor).count(), 1);
     assert!(!closed(
-        &(source.to_owned() + "\nimpl Source for UntrustedData {}")
+        &source.replacen(anchor, "enum ApprovalOrigin<'source> { UntrustedData,", 1),
+        native
+    ));
+    assert!(!closed(
+        &source.replacen("enum StopOrigin {", "enum StopOrigin { Receipt,", 1),
+        native
+    ));
+    assert!(!closed(
+        &(source.to_owned() + "\nimpl Source for UntrustedData {}"),
+        native
+    ));
+    assert!(!closed(
+        &source.replace("Native(ConsumedRestoreApproval<'source>)", "Native(Digest)"),
+        native
+    ));
+    assert!(!closed(
+        source,
+        &native.replace("enum NativeOrigin {}", "enum NativeOrigin { WireData }")
+    ));
+    assert!(!closed(
+        source,
+        &native.replace(
+            "enum NativeOrigin {}",
+            "enum NativeOrigin { #[cfg(test)] Model }"
+        )
     ));
     macro_rules! opaque {
         ($ty:ty,$bound:path) => {{
@@ -443,12 +485,12 @@ fn production_approval_stop_proofs_and_sources_have_no_construction_or_default_p
             let _ = <$ty as Ambiguous<_>>::check;
         }};
     }
-    opaque!(Approval, Clone);
-    opaque!(Approval, Default);
-    opaque!(Approval, serde::Serialize);
-    opaque!(Approval, serde::Deserialize<'static>);
-    opaque!(Approval, Send);
-    opaque!(Approval, Sync);
+    opaque!(Approval<'static>, Clone);
+    opaque!(Approval<'static>, Default);
+    opaque!(Approval<'static>, serde::Serialize);
+    opaque!(Approval<'static>, serde::Deserialize<'static>);
+    opaque!(Approval<'static>, Send);
+    opaque!(Approval<'static>, Sync);
     opaque!(Stopped, Clone);
     opaque!(Stopped, Default);
     opaque!(Stopped, serde::Serialize);
@@ -520,7 +562,7 @@ fn continuity_data_never_replaces_the_same_fresh_session_or_target() -> Result<(
 }
 
 // Controlled model ONLY; no native or production supplier is exposed.
-pub(in crate::security_epoch) fn configured(binding: Binding) -> (Approval, Model) {
+pub(in crate::security_epoch) fn configured(binding: Binding) -> (Approval<'static>, Model) {
     let mut original = approval(100);
     original.binding = binding.clone();
     let mut source = Model::new(vec![]);
@@ -529,14 +571,184 @@ pub(in crate::security_epoch) fn configured(binding: Binding) -> (Approval, Mode
 }
 
 // Test-only clock cut on the actual controlled retained Session.
-pub(in crate::security_epoch) fn at(session: &mut Session<'_, Model>, lower: u64, upper: u64) {
+pub(in crate::security_epoch) fn at(session: &mut Session<'_, '_, Model>, lower: u64, upper: u64) {
     session.source.at(lower, upper);
 }
 
 pub(in crate::security_epoch) fn clock_handle(
-    session: &mut Session<'_, Model>,
+    session: &mut Session<'_, '_, Model>,
 ) -> Rc<Cell<(u64, u64)>> {
     let clock = Rc::new(Cell::new((session.source.lower, session.source.upper)));
     session.source.external_clock = Some(clock.clone());
     clock
+}
+
+fn native_binding_data() -> (EpochStore, Intent, Binding, ApprovalRequest) {
+    let (selected, intent, current) = super::super::kernel::restore::native_input_fixture(91);
+    let expected = current.grant.approval;
+    let binding = Binding {
+        scope: selected.scope.clone(),
+        selection: Digest::of(&selected).unwrap(),
+        incumbent_root: current.grant.fence.root,
+        incumbent_holder: current.grant.fence.holder,
+        intent: intent.commitment(&selected).unwrap(),
+        operation: intent.operation.clone(),
+        binding_generation: expected.target.binding_generation,
+        source_epoch: intent.archive.security_epoch,
+        target_epoch: expected.target.security_epoch,
+        target_incarnation: expected.target.incarnation.clone(),
+    };
+    (selected, intent, binding, expected)
+}
+
+#[test]
+fn native_entry_checks_archive_target_and_operation_without_constructing_an_input() -> Result<()> {
+    let (selected, intent, binding, expected) = native_binding_data();
+    require_native_binding(&selected, &intent, &binding, &expected)?;
+    for cut in 0..12 {
+        let mut binding = binding.clone();
+        let mut expected = expected.clone();
+        match cut {
+            0 => expected.full_archive_digest = digest("foreign-complete-archive"),
+            1 => expected.target.authority = digest("foreign-authority"),
+            2 => expected.target.selection = digest("foreign-selection"),
+            3 => expected.target.incarnation = digest("foreign-incarnation"),
+            4 => expected.target.artifact = digest("foreign-artifact"),
+            5 => expected.target.schema = digest("foreign-schema"),
+            6 => binding.intent = digest("foreign-intent"),
+            7 => binding.operation = digest("foreign-operation"),
+            8 => binding.binding_generation += 1,
+            9 => binding.source_epoch += 1,
+            10 => binding.target_epoch += 1,
+            _ => binding.scope.app = "other-app".to_owned().try_into()?,
+        }
+        assert!(
+            require_native_binding(&selected, &intent, &binding, &expected).is_err(),
+            "cut={cut}"
+        );
+    }
+    // These are shape/binding checks only. Executor/custody authentication and
+    // the fixed signed interval still belong to the ACTUAL input.consume.
+    Ok(())
+}
+
+#[test]
+fn actual_native_factory_moves_the_typed_consumed_owner_and_preserves_original_clock_dataflow() {
+    use quote::ToTokens;
+    fn method(source: &str, name: &str) -> syn::ImplItemFn {
+        syn::parse_file(source)
+            .unwrap()
+            .items
+            .into_iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                item.items.into_iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(f) if f.sig.ident == name => Some(f),
+                    _ => None,
+                })
+            })
+            .unwrap()
+    }
+    fn factory(source: &str) -> bool {
+        let m = method(source, "consume_native");
+        let typed = m.sig.inputs.iter().any(|input| match input {
+            syn::FnArg::Typed(input) => {
+                matches!(input.pat.as_ref(), syn::Pat::Ident(p) if p.ident=="input")
+                    && input.ty.to_token_stream().to_string() == "NativeRestoreApproval < 'source >"
+            }
+            _ => false,
+        });
+        let b = m.block.to_token_stream().to_string();
+        let bind = "require_native_binding (selected , intent , & binding , expected) ?";
+        let consume = "input . consume (expected , & binding . operation) ?";
+        let observe = "native . check () ?";
+        let carried = "origin : ApprovalOrigin :: Native (native)";
+        typed
+            && [bind, consume, observe, carried]
+                .iter()
+                .all(|s| b.matches(s).count() == 1)
+            && b.find(bind) < b.find(consume)
+            && b.find(consume) < b.find(observe)
+            && b.find(observe) < b.find(carried)
+            && b.contains("issued_at : origin")
+            && b.contains("expires_at : deadline")
+            && !b.contains("approved_at")
+    }
+    fn refresh(source: &str) -> bool {
+        let m = method(source, "refresh");
+        let arm = m
+            .block
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                syn::Stmt::Expr(syn::Expr::Match(m), _) => m
+                    .arms
+                    .iter()
+                    .find(|a| a.pat.to_token_stream().to_string() == "ApprovalOrigin :: Native (_)")
+                    .map(|a| a.body.to_token_stream().to_string()),
+                _ => None,
+            })
+            .unwrap();
+        arm.matches("self . observe_native ()").count() == 2
+            && arm.matches("source . current (self)").count() == 1
+            && arm.matches("self . observe (clock)").count() == 1
+            && ["let post = self . observe_native ()", "result ?", "post ?"]
+                .iter()
+                .all(|marker| arm.matches(marker).count() == 1)
+            && arm.find("self . observe_native ()") < arm.find("source . current (self)")
+            && arm.find("let post = self . observe_native ()") < arm.find("result ?")
+            && arm.find("result ?") < arm.find("post ?")
+            && arm.find("self . observe (clock)") < arm.find("let post = self . observe_native ()")
+            && !arm.contains("clock . lower")
+            && !arm.contains("clock . upper")
+    }
+    fn native_observer(source: &str) -> bool {
+        let m = method(source, "observe_native");
+        let b = m.block.to_token_stream().to_string();
+        ["native . check () ?", "observation . interval_data ()", "observation . observation_data ()",
+            "self . observe (Clock", "binding : self . binding . clone ()", "domain : domain . clone ()"]
+            .iter().all(|token| b.matches(token).count()==1)
+            && b.contains("domain == & self . domain && origin == self . issued_at && deadline == self . expires_at")
+            && b.contains("let (lower , upper) = observation . observation_data ()")
+    }
+    let source = include_str!("../restore_fencing.rs");
+    assert!(factory(source));
+    assert!(refresh(source));
+    assert!(native_observer(source));
+    for (from, to) in [
+        (
+            "require_native_binding(selected, intent, &binding, expected)?;",
+            "Ok::<(), anyhow::Error>(())?;",
+        ),
+        (
+            "input.consume(expected, &binding.operation)?",
+            "input.consume(expected, &binding.intent)?",
+        ),
+        (
+            "let observed = native.check()?;",
+            "let observed = untrusted_data();",
+        ),
+    ] {
+        assert_eq!(source.matches(from).count(), 1);
+        assert!(!factory(&source.replacen(from, to, 1)));
+    }
+    let from = "let post = self.observe_native();";
+    assert_eq!(source.matches(from).count(), 1);
+    assert!(!refresh(&source.replacen(
+        from,
+        "let post = Ok::<(), anyhow::Error>(());",
+        1
+    )));
+    let from = ".and_then(|clock| self.observe(clock))";
+    assert_eq!(source.matches(from).count(), 1);
+    assert!(!refresh(&source.replacen(from, ".map(|_| ())", 1)));
+    let from = "ApprovalOrigin::Native(native) => native.check()?";
+    assert_eq!(source.matches(from).count(), 1);
+    assert!(!native_observer(&source.replacen(
+        from,
+        "ApprovalOrigin::Native(_) => untrusted_data()",
+        1
+    )));
 }

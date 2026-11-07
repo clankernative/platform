@@ -32,6 +32,7 @@ mod process;
 mod protocol;
 #[cfg(target_os = "linux")]
 mod qualification;
+mod restore_peer_wire;
 mod root_kms;
 #[cfg(target_os = "linux")]
 mod runtime;

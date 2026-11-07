@@ -19,7 +19,12 @@ use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 mod approval;
 pub(in crate::security_epoch) use approval::{advance_approval_time, publish_restore_approval};
 mod paired;
+mod restore;
 pub(super) use paired::{ActionTransaction, begin_action, read_with_slot};
+#[cfg(test)]
+pub(super) use restore::{
+    Names as RestoreNames, Transaction as RestoreTransaction, commit_reply as restore_commit_reply,
+};
 
 const MAX_BYTES: usize = 65_536;
 const ACQUISITION_BUDGET: Duration = Duration::from_secs(5);
