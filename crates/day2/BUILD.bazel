@@ -6,6 +6,7 @@ package(default_visibility = ["//visibility:public"])
 filegroup(name = "font_fixture_bytes", srcs = ["tests/fixtures/fonts/test-subset.rs"])
 
 COMPILE_INPUTS = [
+    "//build/bazel:roc-packages.json",
     ":font_fixture_bytes",
     "//crates/worker:src/first_request.rs",
     "//:Cargo.lock",
@@ -23,6 +24,7 @@ COMPILE_INPUTS = [
     "//:assets/icons/shield-check.svg",
     "//:assets/navigation.js",
     "//:assets/reactive-queries.js",
+    "//:assets/restore-passkey-export.js",
     "//:assets/web.css",
     "//:build-dependencies/clanker-ui.json",
     "//:deploy/gke/stacks/day2-app/tests/oauth-instance.json",
@@ -73,6 +75,8 @@ COMPILE_INPUTS = [
     "//crates/day2-capabilities:src/security_epoch.rs",
     "//crates/day2:Cargo.toml",
     "//crates/day2:fixtures/credential-schema-v1.sql",
+    "//crates/day2:fixtures/credential-schema-v2-empty.sql",
+    "//crates/day2:fixtures/fresh-owner-schema-v1-empty.sql",
     "//crates/day2:fixtures/provider-responses/carta.access_token.json",
     "//crates/day2:fixtures/provider-responses/carta.optionGrants.json",
     "//crates/day2:fixtures/provider-responses/carta.stakeholders.json",
@@ -394,6 +398,8 @@ platform_rust_test(
 exports_files([
     "Cargo.toml",
     "fixtures/credential-schema-v1.sql",
+    "fixtures/credential-schema-v2-empty.sql",
+    "fixtures/fresh-owner-schema-v1-empty.sql",
     "fixtures/provider-responses/carta.access_token.json",
     "fixtures/provider-responses/carta.optionGrants.json",
     "fixtures/provider-responses/carta.stakeholders.json",

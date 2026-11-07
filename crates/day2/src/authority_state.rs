@@ -3,6 +3,7 @@
 //! Authority updates and business transactions serialize on the same SQLite
 //! writer lock. An epoch additionally fences work copied from a restored backup.
 
+use crate::security_epoch::restore_authority::PreparedRestoreFence;
 use crate::{
     artifact::{AppBinding, Instance, LoadedArtifact, Operation},
     authority::{DOMAIN_PREFIX, Policy, admits, covers},
@@ -617,7 +618,7 @@ fn require_transaction(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn scope_matches(connection: &Connection, runtime: &Runtime) -> Result<()> {
+pub(crate) fn scope_matches(connection: &Connection, runtime: &Runtime) -> Result<()> {
     let scope: String =
         connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
             row.get(0)
@@ -688,6 +689,19 @@ fn store(
     require_transaction(connection)?;
     crate::budget::initialize_in(connection, &active.stamp.epoch)?;
     crate::budget::sync_definitions_in(connection, &active.document.resources.budgets)?;
+    store_record_in(connection, active, operator, reason)?;
+    release_blocked_cursor_pins(connection)
+}
+
+// The same authority record writes serve a pre-admitted restore denial. This
+// leaf neither initializes budget state nor discards retained cursor history.
+pub(crate) fn store_record_in(
+    connection: &Connection,
+    active: &ActiveAuthority,
+    operator: &str,
+    reason: &str,
+) -> Result<()> {
+    require_transaction(connection)?;
     let document = serde_json::to_string(&active.document)?;
     let revision = i64::try_from(active.stamp.revision)?;
     connection.execute(
@@ -715,7 +729,6 @@ fn store(
          WHERE i.status='pending' AND (a.invocation IS NULL OR a.epoch!=?1 OR a.revision!=?2)",
         params![active.stamp.epoch, revision],
     )?;
-    release_blocked_cursor_pins(connection)?;
     Ok(())
 }
 
@@ -1306,6 +1319,7 @@ pub fn invalidate_restored(connection: &Connection, artifact_path: &Path) -> Res
     crate::store::require_no_managed_credential_restore_state(connection)?;
     upgrade(connection)?;
     if !exists(connection)? {
+        discard_restored_sessions_in(connection)?;
         return Ok(());
     }
     let active = current(connection)?;
@@ -1319,25 +1333,44 @@ pub fn invalidate_restored(connection: &Connection, artifact_path: &Path) -> Res
 
 fn fence_restored_in(
     connection: &Connection,
-    mut active: ActiveAuthority,
+    active: ActiveAuthority,
     relocated: &Path,
 ) -> Result<()> {
     require_transaction(connection)?;
-    crate::budget::invalidate_restored(connection)?;
-    crate::delegation_commands::invalidate_restored(connection)?;
+    let not_before = crate::delegation_commands::now_seconds()?;
     let mut entropy = [0_u8; 32];
     getrandom::fill(&mut entropy)
         .map_err(|error| anyhow::anyhow!("authority restore entropy: {error}"))?;
-    active.stamp.epoch = crate::digest(&entropy);
-    active.stamp.revision = active
-        .stamp
-        .revision
-        .checked_add(1)
-        .context("authority_revision_exhausted")?;
-    active.document.enabled = false;
-    active.artifact_path = relocated.to_string_lossy().into_owned();
-    store(connection, &active, "platform-restore", "restore-fence")?;
+    let prepared = PreparedRestoreFence::new(active, relocated, Digest::new(&entropy), not_before)?;
+    // Preserve the existing unmanaged restore contract and caller hook. The
+    // separate secure leaf never borrows this ordinary initialization path.
+    crate::budget::invalidate_restored(connection)?;
+    crate::delegation_commands::restore_fence_in(connection, not_before)?;
+    store(
+        connection,
+        &prepared.into_disabled(),
+        "platform-restore",
+        "restore-fence",
+    )?;
+    discard_restored_sessions_in(connection)?;
     crate::rollout::invalidate(connection)
+}
+
+// Shared with the complete offline reset through the same prepared fence.
+// Imported profile/DDL admission remains the enclosing owner's obligation.
+pub(crate) fn discard_restored_sessions_in(connection: &Connection) -> Result<()> {
+    require_transaction(connection)?;
+    for table in ["day2_web_sessions", "day2_web_secret"] {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if exists {
+            connection.execute(&format!("DELETE FROM main.{table}"), [])?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

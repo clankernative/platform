@@ -875,9 +875,9 @@ impl SchemaInitialization<'_> {
         upgrade_selection_cursors(tx)?;
         crate::authority_state::upgrade(tx)?;
         crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
-            // GoLinks' persisted links are the one data migration AGENTS.md
-            // allows; this replaces only an empty version-1 credential unit.
-            crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
+            // Recreate only exact historical credential units containing no
+            // credential rows, within this same initialization transaction.
+            crate::managed_credentials::store::replace_empty_historical_unit(db)?;
             crate::managed_credentials::store::install_schema(db)?;
             crate::managed_credentials::issuance::install(db)?;
             // Admit the fresh-owner unit on the actual runtime connection,
@@ -2579,6 +2579,7 @@ pub fn require_no_managed_credential_restore_state(connection: &Connection) -> R
         !connection.is_autocommit(),
         "credential_restore_requires_transaction"
     );
+    crate::oauth::restore::require_no_history(connection)?;
     crate::managed_credentials::store::require_no_restore_state(connection)
 }
 

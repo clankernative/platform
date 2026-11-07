@@ -247,6 +247,18 @@ checks, not current schema/key/epoch admission: backup verification remains
 historical inspection, and restoring private security state still needs genuine
 outside-backup fencing and its own qualified workflow.
 
+Runtime initialization can replace an exact historical empty credential unit
+with the current unit inside the same admission and caller transaction. The
+supported frozen layouts are version 1 and version 2 before verifier revisions.
+The native fresh-owner installer likewise recreates its exact empty version-1
+unit from before action-specific credential intents. It checks the complete
+frozen table, index and trigger set, the version marker, and absence of owner
+history before replacing anything. This runs within the same bounded admission
+and caller transaction, so refusal of either unit rolls both changes back.
+All credential tables must be empty; current app rows are preserved. Missing
+invariant guards, changed SQL, unknown objects or retained credential records
+refuse without mutation. The current installer supplies the replacement schema.
+
 Private SQLite tests retain consistent copies before and after rotation,
 revocation and delivery acknowledgement, including a copy while a rotation is
 uncommitted. The old copy can still accept a then-valid bearer under its old
@@ -366,7 +378,7 @@ ciphertext. Preparation authenticates the existing envelope and reseals in a
 closed zeroizing workspace; no plaintext getter or callback is added.
 
 Independent maintenance authorization is checked on the actual current target
-before exact-version key access, after provider work, and again in the caller's
+before exact-version key access, after each provider load, and again in the caller's
 transaction immediately before the conditional update. Key-provider and nonce
 work require preparation outside that connection's transaction. The update
 requires the unchanged active head, namespace, family, lineage revision, epoch,
@@ -376,9 +388,25 @@ expiry remain unchanged, with equality refused and the latest preparation
 clock retained. A pending marker proves staging only; rollback and ambiguous
 commit do not establish maintenance success.
 
-This is a controlled-port core, without a production maintenance authorizer,
-native-purpose factory, operator command or route. A future adapter must supply
-genuine maintenance permission and the existing SQL owner; issuance/reveal
+The custody adapter now accepts an explicit trusted local source. Each actual
+observation must bind the exact full family/binding, current row fingerprint,
+version, epoch, policy revision and accepted/replacement custody-key pair. Its
+first successful selection and readiness window remain fixed for the attempt;
+changed/denied/stale source observations, source errors and clock rewinds
+observed by the adapter latch refusal.
+A panic poisons that same state. Provider errors keep primary precedence while
+their actual postcheck still runs. Temporary returned key bytes use zeroizing
+ownership before fallible identity/postchecks. No provider I/O runs in SQL.
+Construction samples no clock or keys and cannot mint or renew a maintenance
+original. A copied grant is not a genuine source; its future native caller must
+supply the real maintenance original, current authority and retained SQL owner.
+
+This remains a controlled-source adapter, without a genuine native maintenance
+source, native-purpose factory, operator command or route. The adapter does not
+replace the genuine caller's refusal on the whole action, including an earlier
+row/clock-read error before a valid target exists or a provider unwind. That
+caller must latch those failures under the same original. A future caller must
+supply genuine maintenance permission and the existing SQL owner; issuance/reveal
 permission and a copied selection are insufficient. OAuth custody uses a
 different storage format and is not wired to this core. Key retirement and
 verifier maintenance remain separate work.

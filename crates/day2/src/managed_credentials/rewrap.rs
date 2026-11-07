@@ -16,7 +16,10 @@ use day2_capabilities::{
     credentials::{CredentialFamilyBinding, ManagedProfile, ManifestFamily},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
+
+#[path = "custody_authority.rs"]
+pub(crate) mod custody_authority;
 
 #[path = "maintenance_authority.rs"]
 pub(crate) mod maintenance_authority;
@@ -208,6 +211,11 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
 
 fn authorize(authority: &dyn Authority, target: &Target, now: i64) -> Result<Selection> {
     let selected = authority.authorize(target, now)?;
+    validate_selection(&selected, target, now)?;
+    Ok(selected)
+}
+
+fn validate_selection(selected: &Selection, target: &Target, now: i64) -> Result<()> {
     ensure!(
         selected.security_epoch == target.identity.security_epoch
             && selected.previous.binding == target.binding.custody
@@ -223,22 +231,43 @@ fn authorize(authority: &dyn Authority, target: &Target, now: i64) -> Result<Sel
                 .is_some_and(|n| n <= 300),
         "credential rewrap maintenance selection unavailable or changed"
     );
-    Ok(selected)
+    Ok(())
 }
 
 fn key(provider: &dyn ApprovalKeyProvider, reference: &ApprovalKeyRef) -> Result<RewrapKey> {
     let mut material = provider.load(reference, ApprovalKeyPurpose::CustodyEncryption)?;
-    let result = (|| {
-        ensure!(
-            material.binding == reference.binding
-                && material.version == reference.version
-                && material.purpose == ApprovalKeyPurpose::CustodyEncryption,
-            "credential rewrap key lease identity changed"
-        );
-        RewrapKey::new(&material.bytes, reference.version.clone())
-    })();
-    material.bytes.zeroize();
-    result
+    let bytes = Zeroizing::new(std::mem::take(&mut material.bytes));
+    ensure!(
+        material.binding == reference.binding
+            && material.version == reference.version
+            && material.purpose == ApprovalKeyPurpose::CustodyEncryption,
+        "credential rewrap key lease identity changed"
+    );
+    RewrapKey::new(&bytes, reference.version.clone())
+}
+
+fn reobserve(
+    db: &Connection,
+    authority: &dyn Authority,
+    request: &Request<'_>,
+    original: &Row,
+    selected: &Selection,
+    previous: i64,
+) -> Result<i64> {
+    let now = effects::wall_time()?;
+    let (target, observed) = current(db, request, now)?;
+    // Observe the real current source even if the local row/time comparison
+    // also refuses, so an observed source refusal cannot be repaired later.
+    let checked = authorize(authority, &target, now);
+    ensure!(
+        now >= previous && observed == *original,
+        "credential rewrap preparation became stale"
+    );
+    ensure!(
+        checked? == *selected,
+        "credential rewrap maintenance authority changed"
+    );
+    Ok(now)
 }
 
 /// Opaque, one-use ciphertext staging. It cannot reveal or publish a token.
@@ -266,16 +295,16 @@ pub(crate) fn prepare(
     let started = effects::wall_time()?;
     let (target, original) = current(db, &request, started)?;
     let selected = authorize(authority, &target, started)?;
-    let old = key(provider, &selected.previous)?;
-    let replacement = key(provider, &selected.replacement)?;
-    // Re-select after provider I/O. No changed current row is decrypted merely
-    // because its earlier metadata was self-consistent.
-    let now = effects::wall_time()?;
-    let (target, observed) = current(db, &request, now)?;
-    ensure!(
-        observed == original && now >= started && authorize(authority, &target, now)? == selected,
-        "credential rewrap preparation became stale"
-    );
+    // Every provider boundary gets its actual postcheck, including on error;
+    // preserve the provider's error as primary. Keys are owned before checking.
+    let loaded = key(provider, &selected.previous);
+    let checked = reobserve(db, authority, &request, &original, &selected, started);
+    let old = loaded?;
+    let after_old = checked?;
+    let loaded = key(provider, &selected.replacement);
+    let checked = reobserve(db, authority, &request, &original, &selected, after_old);
+    let replacement = loaded?;
+    let now = checked?;
     let envelope = crypto::prepare_rewrap(
         &old,
         &replacement,

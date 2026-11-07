@@ -19,11 +19,13 @@ Workflow :: [].{
 		LocalDev(List(Str)),
 		Backup(Str, Str, Str),
 		Restore(Str, Str),
+		RestoreInspect(Str),
 		Infra(Str, Str),
 		AuthorityInspect(Str, Str),
 		AuthorityApply(Str, Str, Str, Str, Str),
 		AuthorityActivate(Str, Str, Str, Str, Str, Str),
 		AuthorityAdmin(Str, Str),
+		Owners(Str, Str, Str, Str, Str),
 		Resources(Str, Str, Str, Str, Str),
 		Provision(Str, Str, Str, Str),
 		Maintain(Str, Str),
@@ -55,10 +57,18 @@ Workflow :: [].{
 		["maintain", "rollout", request_file] => Ok(Maintain("rollout", request_file))
 		["maintain", "mark-activated", request_file] => Ok(Maintain("mark-activated", request_file))
 		["backup", instance, app_name, output] => Ok(Backup(instance, app_name, output))
+		["restore", "inspect", backup] => Ok(RestoreInspect(backup))
 		["restore", backup, output] => Ok(Restore(backup, output))
 		["infra", "plan", configuration, output] => Ok(Infra(configuration, output))
 		["authority", "inspect", instance, app_name] => Ok(AuthorityInspect(instance, app_name))
 		["authority", "admin", instance, operator] => Ok(AuthorityAdmin(instance, operator))
+		["owners", action, instance, app_name, operator, input_json] => {
+			if ["list", "check", "add", "remove"].contains(action) {
+				Ok(Owners(action, instance, app_name, operator, input_json))
+			} else {
+				Err("unknown owner operation")
+			}
+		}
 		["provision-credentials", instance, app_name, operator, plan_file] => {
 			Ok(Provision(instance, app_name, operator, plan_file))
 		}
@@ -98,7 +108,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
+			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
 		)
 	}
 
@@ -114,9 +124,11 @@ Workflow :: [].{
 					"local-dev [SOURCE] [OPTIONS]",
 					"backup INSTANCE APP NEW_DIRECTORY",
 					"restore BACKUP NEW_DIRECTORY",
+					"restore inspect BACKUP",
 					"infra plan CONFIG NEW_DIRECTORY",
 					"authority inspect INSTANCE APP",
 					"authority admin INSTANCE LOCAL_OPERATOR",
+					"owners list|check|add|remove INSTANCE APP LOCAL_OPERATOR INPUT_JSON",
 					"provision-credentials OPERATOR_INSTANCE APP LOCAL_OPERATOR PROVISIONING_PLAN",
 					"resources preview|reviews|catalog|company-setup INSTANCE APP LOCAL_OPERATOR",
 					"resources save|attach|propose|decide|allocate|recover|resolve-overruns INSTANCE APP LOCAL_OPERATOR INPUT_JSON_FILE",
@@ -135,9 +147,13 @@ Workflow :: [].{
 		LocalDev(args) => LocalDev.run!(args, host!)
 		Backup(instance, app_name, output) => Backup.take!(instance, app_name, output, host!)
 		Restore(backup, output) => Backup.restore!(backup, output, host!)
+		RestoreInspect(backup) => Backup.inspect!(backup, host!)
 		Infra(configuration, output) => Infra.run!(configuration, output, host!)
 		AuthorityInspect(instance, app_name) => Authority.inspect!(instance, app_name, host!)
 		AuthorityAdmin(instance, operator) => Authority.admin!(instance, operator, host!)
+		Owners(action, instance, app_name, operator, input_json) => {
+			Authority.owners!(action, instance, app_name, operator, input_json, host!)
+		}
 		Provision(instance, app_name, operator, plan_file) => {
 			Provision.run!(instance, app_name, operator, plan_file, host!)
 		}

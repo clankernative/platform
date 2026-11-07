@@ -902,6 +902,34 @@ pub(crate) fn configuration(root: &Path) -> Result<BTreeMap<String, String>> {
     Ok(files)
 }
 
+// Retries stay inside the caller's one HTTP budget, including each response body.
+fn bazel_response(
+    budget: Duration,
+    backoff: Duration,
+    mut request: impl FnMut(Duration) -> reqwest::Result<reqwest::blocking::Response>,
+) -> Result<reqwest::blocking::Response> {
+    let started = std::time::Instant::now();
+    for attempt in 1..=3 {
+        let remaining = budget
+            .checked_sub(started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .context("pinned Bazel download exhausted its original HTTP budget")?;
+        let result = request(remaining);
+        let transient = match &result {
+            Ok(response) => response.status().is_server_error(),
+            Err(error) => error.is_timeout() || error.is_connect(),
+        };
+        if !transient || attempt == 3 || budget.saturating_sub(started.elapsed()) <= backoff {
+            return result?.error_for_status().map_err(Into::into);
+        }
+        // Only an idempotent pinned GET is retried; no response body or URL is logged.
+        drop(result);
+        eprintln!("Transient pinned Bazel download after attempt {attempt} of 3; retrying");
+        std::thread::sleep(backoff);
+    }
+    unreachable!("the final attempt returns its actual request result")
+}
+
 /// Stage the standalone, checksum-pinned launcher for private offline builds.
 /// Bazelisk and the operator's download cache never enter an isolated job.
 pub(crate) fn standalone(root: &Path) -> Result<PathBuf> {
@@ -938,12 +966,18 @@ pub(crate) fn standalone(root: &Path) -> Result<PathBuf> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()?;
-        let response = client
-            .get(format!(
-                "https://github.com/bazelbuild/bazel/releases/download/9.3.0/{asset}"
-            ))
-            .send()?
-            .error_for_status()?;
+        let response = bazel_response(
+            Duration::from_secs(120),
+            Duration::from_secs(2),
+            |remaining| {
+                client
+                    .get(format!(
+                        "https://github.com/bazelbuild/bazel/releases/download/9.3.0/{asset}"
+                    ))
+                    .timeout(remaining)
+                    .send()
+            },
+        )?;
         let received = std::io::copy(
             &mut std::io::Read::take(response, bytes + 1),
             &mut temporary,
@@ -1108,6 +1142,85 @@ pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scripted_download(
+        statuses: Vec<u16>,
+    ) -> Result<(Result<reqwest::blocking::Response>, usize)> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let url = format!("http://{}/fixture", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> Result<()> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            for status in statuses {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            ensure!(
+                                std::time::Instant::now() < deadline,
+                                "fixture accept budget"
+                            );
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                ensure!(stream.read(&mut [0; 4096])? > 0, "fixture request required");
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Fixture\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture"
+                )?;
+            }
+            Ok(())
+        });
+        let mut attempts = 0;
+        let result = (|| {
+            let client = reqwest::blocking::Client::builder().no_proxy().build()?;
+            bazel_response(Duration::from_secs(2), Duration::ZERO, |remaining| {
+                attempts += 1;
+                client.get(&url).timeout(remaining).send()
+            })
+        })();
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("HTTP fixture thread panicked"))??;
+        Ok((result, attempts))
+    }
+
+    #[test]
+    fn pinned_download_retries_actual_transient_http_responses() -> Result<()> {
+        let (response, attempts) = scripted_download(vec![504, 502, 200])?;
+        assert_eq!(attempts, 3);
+        assert_eq!(response?.text()?, "fixture");
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_download_does_not_retry_permanent_http_refusal() -> Result<()> {
+        let (response, attempts) = scripted_download(vec![404])?;
+        assert_eq!(attempts, 1);
+        assert!(response.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_download_stops_after_three_actual_server_failures() -> Result<()> {
+        let (response, attempts) = scripted_download(vec![503; 3])?;
+        assert_eq!(attempts, 3);
+        assert!(response.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_download_exhausted_parent_cannot_start_a_request() {
+        let response = bazel_response(Duration::ZERO, Duration::ZERO, |_| {
+            panic!("exhausted download must not start a request")
+        });
+        assert!(response.is_err());
+    }
 
     #[test]
     fn dependency_metadata_pins_compiler_and_disables_configured_codegen_wrappers() -> Result<()> {

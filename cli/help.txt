@@ -14,6 +14,7 @@ PLATFORM OPERATIONS
   platform local-dev [SOURCE] [options]    Build, watch and serve a local app.
   platform backup INSTANCE APP NEW_DIR      Take an online SQLite backup.
   platform restore BACKUP NEW_DIR           Restore into a new directory.
+  platform restore inspect BACKUP           Verify and identify an archive; grants no restore approval.
   platform infra plan CONFIG NEW_DIR        Run the pinned OpenTofu planner.
 
   Platform operations return JSON receipts; errors use stderr and a nonzero
