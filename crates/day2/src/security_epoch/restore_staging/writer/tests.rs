@@ -317,11 +317,28 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
                     }) {
                         return false;
                     }
+                    let context = matches!(&*item.self_ty, syn::Type::Path(ty)
+                        if ty.path.segments.last().is_some_and(|part| part.ident == "StagingContext"));
                     for member in item.items {
                         if let syn::ImplItem::Fn(f) = member
                             && !matches!(f.vis, syn::Visibility::Inherited)
                         {
-                            return false;
+                            let permitted = context
+                                && matches!(&f.vis, syn::Visibility::Restricted(v)
+                                    if v.in_token.is_none() && v.path.is_ident("super"))
+                                && [
+                                    "portable",
+                                    "state",
+                                    "current",
+                                    "local_sql",
+                                    "application",
+                                    "refuse",
+                                ]
+                                .iter()
+                                .any(|name| f.sig.ident == *name);
+                            if !permitted {
+                                return false;
+                            }
                         }
                     }
                 }
@@ -356,6 +373,141 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
 }
 
 #[test]
+fn actual_concrete_context_keeps_native_checks_and_portable_models_separate() -> Result<()> {
+    use quote::ToTokens as _;
+    fn closed(source: &str) -> Result<bool> {
+        let file = syn::parse_file(source)?;
+        let expected = [
+            ("native", "Self { source: StagingSource::Native(parent) }"),
+            (
+                "portable",
+                "Self { source: StagingSource::Portable(owner) }",
+            ),
+            (
+                "state",
+                "match &mut self.source { StagingSource::Native(parent) => parent.state(), StagingSource::Portable(owner) => owner.state(), }",
+            ),
+            (
+                "current",
+                "match &mut self.source { StagingSource::Native(parent) => parent.current(), StagingSource::Portable(owner) => owner.current(), }",
+            ),
+            (
+                "local_sql",
+                "match &mut self.source { StagingSource::Native(parent) => parent.local_sql(), StagingSource::Portable(owner) => owner.local_sql(), }",
+            ),
+            (
+                "application",
+                "match &mut self.source { StagingSource::Native(parent) => parent.application(source), StagingSource::Portable(owner) => owner.application(source), }",
+            ),
+            (
+                "refuse",
+                "match &mut self.source { StagingSource::Native(parent) => parent.refuse(), StagingSource::Portable(owner) => owner.refuse(), }",
+            ),
+        ];
+        let mut seen = 0;
+        let mut variants = 0;
+        for item in file.items {
+            if let syn::Item::Enum(item) = &item
+                && item.ident == "StagingSource"
+            {
+                variants += 1;
+                if item.variants.len() != 2
+                    || item.variants[0].ident != "Native"
+                    || item.variants[1].ident != "Portable"
+                {
+                    return Ok(false);
+                }
+            }
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty, syn::Type::Path(ty) if ty.path.segments.last().is_some_and(|part| part.ident == "StagingContext"))
+            {
+                if item.trait_.is_some() || item.items.len() != expected.len() {
+                    return Ok(false);
+                }
+                for member in item.items {
+                    let syn::ImplItem::Fn(method) = member else {
+                        return Ok(false);
+                    };
+                    let Some((name, body)) =
+                        expected.iter().find(|(name, _)| method.sig.ident == *name)
+                    else {
+                        return Ok(false);
+                    };
+                    if *name == "native" || *name == "portable" {
+                        let [syn::Stmt::Expr(syn::Expr::Struct(value), None)] =
+                            method.block.stmts.as_slice()
+                        else {
+                            return Ok(false);
+                        };
+                        if !value.path.is_ident("Self")
+                            || value.rest.is_some()
+                            || value.fields.len() != 1
+                        {
+                            return Ok(false);
+                        }
+                        let field = &value.fields[0];
+                        if !matches!(&field.member, syn::Member::Named(name) if name == "source") {
+                            return Ok(false);
+                        }
+                        let syn::Expr::Call(call) = &field.expr else {
+                            return Ok(false);
+                        };
+                        let expected: syn::Expr = syn::parse_str(if *name == "native" {
+                            "StagingSource::Native(parent)"
+                        } else {
+                            "StagingSource::Portable(owner)"
+                        })?;
+                        if call.to_token_stream().to_string()
+                            != expected.to_token_stream().to_string()
+                        {
+                            return Ok(false);
+                        }
+                    } else {
+                        let wanted = syn::parse_str::<syn::Block>(&format!("{{{body}}}"))?;
+                        if method.block.to_token_stream().to_string()
+                            != wanted.to_token_stream().to_string()
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    if *name == "native" && !matches!(method.vis, syn::Visibility::Inherited) {
+                        return Ok(false);
+                    }
+                    seen += 1;
+                }
+            }
+        }
+        Ok(seen == expected.len() && variants == 1)
+    }
+    let source = include_str!("../writer.rs");
+    assert!(closed(source)?);
+    for (old, new) in [
+        (
+            "StagingSource::Native(parent) => parent.current(),",
+            "StagingSource::Native(parent) => parent.local_sql(),",
+        ),
+        (
+            "StagingSource::Native(parent) => parent.local_sql(),",
+            "StagingSource::Native(parent) => parent.current(),",
+        ),
+        ("    fn native(", "    pub(super) fn native("),
+    ] {
+        assert_eq!(
+            source.matches(old).count(),
+            1,
+            "actual native-context mutation target"
+        );
+        assert!(!closed(&source.replacen(old, new, 1))?);
+    }
+    assert!(!closed(&source.replacen(
+        "    Native(&'owner",
+        "    Forged, Native(&'owner",
+        1
+    ))?);
+    Ok(())
+}
+
+#[test]
 fn candidate_and_admission_are_not_copyable_serialized_transferable_permissions() {
     type Borrowed =
         Candidate<'static, 'static, 'static, super::super::tests::Fixture, drain::Model, Model>;
@@ -381,6 +533,24 @@ fn candidate_and_admission_are_not_copyable_serialized_transferable_permissions(
     opaque!(Admission, serde::Deserialize<'static>);
     opaque!(Admission, Send);
     opaque!(Admission, Sync);
+    type Native = NativeParent<'static, 'static, 'static, 'static, 'static>;
+    opaque!(Native, Clone);
+    opaque!(Native, Copy);
+    opaque!(Native, Default);
+    opaque!(Native, std::fmt::Debug);
+    opaque!(Native, serde::Serialize);
+    opaque!(Native, serde::Deserialize<'static>);
+    opaque!(Native, Send);
+    opaque!(Native, Sync);
+    type Context = StagingContext<'static, 'static, 'static, 'static, 'static, 'static>;
+    opaque!(Context, Clone);
+    opaque!(Context, Copy);
+    opaque!(Context, Default);
+    opaque!(Context, std::fmt::Debug);
+    opaque!(Context, serde::Serialize);
+    opaque!(Context, serde::Deserialize<'static>);
+    opaque!(Context, Send);
+    opaque!(Context, Sync);
 }
 
 #[test]

@@ -328,9 +328,16 @@ fn scope_pointer_and_target_root_symlink_cannot_retarget_an_owner() -> Result<()
 
 #[test]
 fn no_production_default_or_data_impl_can_supply_staging_checks() {
+    use quote::ToTokens as _;
     struct Implementations {
+        writer: bool,
         production: usize,
         defaults: usize,
+        writer_owners: usize,
+        closed_writer: bool,
+        parents: usize,
+        parent_impls: usize,
+        closed: bool,
     }
     impl<'ast> Visit<'ast> for Implementations {
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
@@ -343,6 +350,9 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
             visit::visit_item_mod(self, item)
         }
         fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let parent = matches!(&*item.self_ty, syn::Type::Path(t)
+                if t.qself.is_none() && t.path.segments.len() == 1
+                    && t.path.segments[0].ident == "NativeParent");
             if item
                 .trait_
                 .as_ref()
@@ -350,10 +360,79 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
             {
                 self.production += 1;
             }
+            if parent {
+                self.parent_impls += 1;
+                let names = [
+                    "state",
+                    "current",
+                    "local_sql",
+                    "application",
+                    "refuse",
+                    "execute_staging",
+                ];
+                let allowed = item.trait_.is_none()
+                    && item.items.len() == names.len()
+                    && names.into_iter().all(|name| item.items.iter().filter(|member| matches!(member,
+                        syn::ImplItem::Fn(method) if method.sig.ident == name && matches!(method.vis, syn::Visibility::Inherited))).count() == 1);
+                self.closed &= self.writer && allowed;
+            }
+            if let Some((_, path, _)) = &item.trait_
+                && path
+                    .segments
+                    .last()
+                    .is_some_and(|name| name.ident == "WriterOwner")
+            {
+                self.writer_owners += 1;
+                self.closed_writer &= self.writer
+                    && matches!(&*item.self_ty, syn::Type::Path(ty)
+                        if ty.qself.is_none() && ty.path.segments.len() == 1
+                            && ty.path.segments[0].ident == "PortableWriter");
+            }
             visit::visit_item_impl(self, item)
         }
+        fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+            if item.ident == "NativeParent" {
+                self.parents += 1;
+                let fields: Vec<_> = item.fields.iter().collect();
+                let expected = [
+                    (
+                        "loan",
+                        "crate::security_epoch::bootstrap::RestoreWriteLoan<'borrow,'metadata,'storage,'role>",
+                    ),
+                    ("state", "State"),
+                    ("selection", "super::application::Selection<'selection>"),
+                ];
+                self.closed &= self.writer
+                    && matches!(item.vis, syn::Visibility::Inherited)
+                    && item.attrs.iter().all(|a| a.path().is_ident("doc"))
+                    && fields.len() == expected.len()
+                    && fields.iter().zip(expected).all(|(field, (name, ty))| {
+                        matches!(field.vis, syn::Visibility::Inherited)
+                            && field.ident.as_ref().is_some_and(|i| i == name)
+                            && field.ty.to_token_stream().to_string()
+                                == syn::parse_str::<syn::Type>(ty)
+                                    .unwrap()
+                                    .to_token_stream()
+                                    .to_string()
+                    });
+            }
+            visit::visit_item_struct(self, item)
+        }
+        fn visit_expr_struct(&mut self, expression: &'ast syn::ExprStruct) {
+            // No actual parent construction until the genuine approved target
+            // join is implemented. In particular, a DATA helper cannot fill it.
+            if expression
+                .path
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == "NativeParent")
+            {
+                self.closed = false;
+            }
+            visit::visit_expr_struct(self, expression)
+        }
         fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
-            if item.ident == "Checks" {
+            if item.ident == "Checks" || item.ident == "WriterOwner" {
                 self.defaults += item
                     .items
                     .iter()
@@ -365,34 +444,47 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
     }
     fn closed(sources: [&str; 4]) -> bool {
         let mut seen = Implementations {
+            writer: false,
             production: 0,
             defaults: 0,
+            writer_owners: 0,
+            closed_writer: true,
+            parents: 0,
+            parent_impls: 0,
+            closed: true,
         };
-        for source in sources {
+        for (index, source) in sources.into_iter().enumerate() {
+            seen.writer = index == 1;
             seen.visit_file(&syn::parse_file(source).unwrap());
         }
-        seen.production == 0 && seen.defaults == 0
+        seen.production == 0
+            && seen.parents == 1
+            && seen.parent_impls == 1
+            && seen.defaults == 0
+            && seen.closed
+            && seen.writer_owners == 2
+            && seen.closed_writer
     }
     let source = include_str!("../restore_staging.rs");
-    // Match the actual closed production child catalog, including the writer
-    // where the future concrete native adapter will live. A parent-only scan
-    // must not silently accept an implementation supplied by another child.
-    let sources = [
-        source,
-        include_str!("writer.rs"),
-        include_str!("application.rs"),
-        include_str!("writer/dispatch.rs"),
-    ];
-    assert!(closed(sources));
-    for index in 0..sources.len() {
+    let writer = include_str!("writer.rs");
+    let application = include_str!("application.rs");
+    let dispatch = include_str!("writer/dispatch.rs");
+    assert!(closed([source, writer, application, dispatch]));
+    for index in 0..4 {
         for implementation in [
             "\nimpl Checks for UntrustedData {}",
             "\nmod nested { impl super::Checks for UntrustedData {} }",
+            "\nimpl WriterOwner for UntrustedData {}",
+            "\nmod nested { impl super::WriterOwner for UntrustedData {} }",
         ] {
-            let mutant = sources[index].to_owned() + implementation;
-            let mut changed = sources;
-            changed[index] = &mutant;
-            assert!(!closed(changed), "source {index}: {implementation}");
+            let mut sources = [
+                source.to_owned(),
+                writer.to_owned(),
+                application.to_owned(),
+                dispatch.to_owned(),
+            ];
+            sources[index].push_str(implementation);
+            assert!(!closed(std::array::from_fn(|i| sources[i].as_str())));
         }
     }
     let begin = source.find("fn current(").unwrap();
@@ -400,9 +492,41 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
     assert!(!source[begin..end].contains('{'));
     let mut mutant = source.to_owned();
     mutant.replace_range(end..=end, " { Ok(()) }");
-    let mut changed = sources;
-    changed[0] = &mutant;
-    assert!(!closed(changed));
+    assert!(!closed([&mutant, writer, application, dispatch]));
+    for (from, to) in [
+        (
+            "impl NativeParent<'_, '_, '_, '_, '_>",
+            "impl UntrustedData",
+        ),
+        (
+            "loan: crate::security_epoch::bootstrap::RestoreWriteLoan",
+            "loan: UntrustedData",
+        ),
+        (
+            "struct NativeParent<",
+            "#[derive(Default)] struct NativeParent<",
+        ),
+    ] {
+        assert_eq!(writer.matches(from).count(), 1);
+        assert!(!closed([
+            source,
+            &writer.replacen(from, to, 1),
+            application,
+            dispatch
+        ]));
+    }
+    for constructor in [
+        "impl NativeParent<'_, '_, '_, '_, '_> { fn from_receipt() -> Self { unreachable!() } }",
+        "fn adopt_data() { let parent = NativeParent { loan: receipt, state, selection }; }",
+        "impl Drop for NativeParent<'_, '_, '_, '_, '_> { fn drop(&mut self) {} }",
+    ] {
+        assert!(!closed([
+            source,
+            &(writer.to_owned() + constructor),
+            application,
+            dispatch
+        ]));
+    }
     macro_rules! assert_not_impl {
         ($bound:path) => {{
             trait Ambiguous<A> {
@@ -808,7 +932,7 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
             let post = owner.local_sql();
             let reset = reset?;
             post?;
-            close_sql(owner)?;
+            close_sql_context(owner)?;
             Ok(reset)
         });
         if functions[0].block.stmts.len() < tail.stmts.len()
@@ -837,7 +961,7 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
             "db . serialize (MAIN_DB)",
             "drop (loan)",
             "owner . local_sql ()",
-            "close_sql (owner)",
+            "close_sql_context (owner)",
         ];
         let mut previous = None;
         for expected in ordered {
@@ -904,6 +1028,10 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
         (
             "let post = owner.local_sql();",
             "let post = if reset.is_ok() { owner.local_sql() } else { Ok(()) };",
+        ),
+        (
+            "close_sql_context(owner)?;",
+            "Ok::<(), anyhow::Error>(())?;",
         ),
         ("drop(loan);", "drop(unrelated);"),
         ("drop(loan);", "drop(loan); let reset=reset?;"),
