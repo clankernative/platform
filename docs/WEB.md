@@ -21,6 +21,31 @@ pin, ports, limits and failure behavior.
 [Chart Live verification](../examples/chart-live/VERIFICATION.md) separates
 deterministic simulations, real adapters, builds and remaining browser/full gates.
 
+## Cached anonymous startup shells
+
+An input-free page without preparation or live updates may declare one
+`data-ui-startup-cache="anonymous"` element. Admission checks every template
+branch and include again with only `company.name`, assets and route helpers;
+query/actor/input references, forms and request-time presentations are refused.
+This validation also runs on artifacts produced by older builders.
+
+Only a successful ordinary GET for that page receives
+`Cache-Control: private, max-age=86400`. A response issuing a session cookie,
+a query-cache proof response, an error and ordinary signed pages remain
+`no-store`. The cached document contains no actor, session token or signed form.
+An async `/assets/platform/startup.js` module checks the document after paint
+using `fetch(..., {cache: "no-store"})`, throttled to once per minute across tabs.
+This avoids locking the HTTP cache while a new tab is reading it. A changed
+document (including branding/module versions) reloads once and warms the cache; failed module loads trigger one guarded recovery.
+The bootstrap never persists HTML or credentials in localStorage. App code owns
+any bounded saved-data preview and must validate its current session and native
+query proof before publishing fresh forms or enabling native actions.
+
+Fresh cached navigations need no server round trip. The first visit, a browser
+hard reload and an evicted/expired cache still require the server. This is not an
+offline authorization mechanism; fresh session, query and command requests retain
+all existing authority checks.
+
 ## Checked reactive GET forms
 
 A non-live page may opt a registered query form into the host's latest-read
@@ -957,7 +982,8 @@ HEAD returns GET's headers without a body. Validation still performs server
 work and verifies disk bytes; it saves transfer, not those checks.
 
 Rendered pages, Datastar event streams, commands, sign-in/sign-out, audit and
-error responses retain `no-store`. The HTML templates are not static browser
+error responses retain `no-store`, except the explicitly checked anonymous startup
+shells described above. Ordinary HTML templates are not static browser
 documents: rendering inserts current query data and expiring session-bound
 command tickets. Browser-held query presentation data requires the explicit freshness contract below. Public
 immutable assets already cached by a browser may remain reusable after a
@@ -1181,10 +1207,15 @@ token before and after rendering, after any declared preparation. A successful
 response carries the same header only if the token stayed unchanged. A client may
 store data under that token only after checking the current session/token again.
 A changed actor, permission denial, epoch/revision change, artifact change or
-business revision invalidates the cache. An A -> B -> A grant cannot revive it.
+business revision invalidates the verified cache. An A -> B -> A grant cannot
+make its old proof current.
 The application must additionally bound expiry by all external/time-dependent
 observations used by the query. Persist data only, never rendered HTML, CSRF tokens
-or signed command forms. A failed or unverifiable identity check clears the view.
+or signed command forms. A permission denial or verified account change clears
+the view immediately. An app may separately show an explicitly bounded saved
+presentation before validation finishes, including during an outage. That preview
+must have its own short display deadline and age limit, contain no native forms,
+and must never be treated as a current grant or extend the original native proof.
 
 Every page template can address its checked output through `view`, independent of
 the registered page name. `view` is a reserved page context name. This lets warm

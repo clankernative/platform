@@ -1057,16 +1057,17 @@ pub fn validate_page(
     path: &str,
     context: &Type,
     assets: &assets::Catalog,
-) -> Result<()> {
-    analyze_with_presentations(
-        &sources(directory, catalog)?,
+) -> Result<bool> {
+    let sources = sources(directory, catalog)?;
+    let (_, variants) = analyze_with_presentations(
+        &sources,
         path,
         context,
         assets,
         None,
         presentation_catalog(catalog)?,
     )?;
-    Ok(())
+    validate_startup_shell(&sources, path, assets, None, &variants)
 }
 
 pub fn validate_routed_page(
@@ -1076,16 +1077,61 @@ pub fn validate_routed_page(
     context: &Type,
     assets: &assets::Catalog,
     routes: &crate::routing::Catalog,
-) -> Result<()> {
-    analyze_with_presentations(
-        &sources(directory, catalog)?,
+) -> Result<bool> {
+    let sources = sources(directory, catalog)?;
+    let (_, variants) = analyze_with_presentations(
+        &sources,
         path,
         context,
         assets,
         Some(routes),
         presentation_catalog(catalog)?,
     )?;
-    Ok(())
+    validate_startup_shell(&sources, path, assets, Some(routes), &variants)
+}
+
+// HTTP-cached documents must not carry a query result, actor, input or native
+// credentials. Check the entire include/branch graph again with public branding
+// as its only context. This also runs when an older builder produced the artifact.
+fn validate_startup_shell(
+    sources: &BTreeMap<String, String>,
+    path: &str,
+    assets: &assets::Catalog,
+    routes: Option<&crate::routing::Catalog>,
+    variants: &[String],
+) -> Result<bool> {
+    let marker = Selector::parse("[data-ui-startup-cache]").unwrap();
+    if !variants.iter().any(|markup| {
+        Html::parse_fragment(markup)
+            .select(&marker)
+            .next()
+            .is_some()
+    }) {
+        return Ok(false);
+    }
+    let context = Type::Record(BTreeMap::from([(
+        "company".into(),
+        Type::Record(BTreeMap::from([("name".into(), Type::String)])),
+    )]));
+    let (_, anonymous) =
+        analyze_with_presentations(sources, path, &context, assets, routes, BTreeMap::new())
+            .context("startup shell must use only public branding, assets and routes")?;
+    let forbidden =
+        Selector::parse("form, [data-live], [data-query], [data-ui-presentation]").unwrap();
+    for markup in &anonymous {
+        let html = Html::parse_fragment(markup);
+        let markers = html.select(&marker).collect::<Vec<_>>();
+        ensure!(
+            markers.len() == 1
+                && markers[0].value().attr("data-ui-startup-cache") == Some("anonymous"),
+            "startup shell requires exactly one literal anonymous marker in every branch"
+        );
+        ensure!(
+            html.select(&forbidden).next().is_none(),
+            "startup shell cannot contain forms, live queries or presentations"
+        );
+    }
+    Ok(true)
 }
 
 /// Live regions keep the same targets in every admitted template branch. Their
@@ -2624,6 +2670,56 @@ pub(crate) fn validate_fragments(html: &Html) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn startup(source: &str, included: &str) -> Result<bool> {
+        let sources = BTreeMap::from([
+            ("pages/shell.html".into(), source.into()),
+            ("components/child.html".into(), included.into()),
+        ]);
+        let context = Type::Record(BTreeMap::from([
+            ("private".into(), Type::String),
+            ("ready".into(), Type::Boolean),
+            (
+                "company".into(),
+                Type::Record(BTreeMap::from([("name".into(), Type::String)])),
+            ),
+        ]));
+        let assets = assets::Catalog::new();
+        let (_, variants) = analyze(&sources, "pages/shell.html", &context, &assets, None)?;
+        validate_startup_shell(&sources, "pages/shell.html", &assets, None, &variants)
+    }
+
+    #[test]
+    fn startup_shells_are_anonymous_across_the_entire_template_graph() -> Result<()> {
+        let shell = r#"<section data-ui-startup-cache="anonymous">{{ company.name }}{% include "components/child.html" %}</section>"#;
+        assert!(startup(shell, "<p>Public shell</p>")?);
+        assert!(!startup("<p>{{ private }}</p>", "")?);
+        for (source, included) in [
+            (shell, "<p>{{ private }}</p>"),
+            (shell, "{% if ready %}<p>Private branch</p>{% endif %}"),
+            (shell, "<form><input name=secret></form>"),
+            (shell, "<template><form><input name=secret></form></template>"),
+            (shell, "<section id=live data-live>Live</section>"),
+            (
+                r#"<p data-ui-startup-cache="{{ private }}">Dynamic marker</p>"#,
+                "",
+            ),
+            (
+                r#"<p data-ui-startup-cache="anonymous"></p><p data-ui-startup-cache="anonymous"></p>"#,
+                "",
+            ),
+            (
+                r#"{% if ready %}<p data-ui-startup-cache="anonymous"></p>{% else %}<p>No marker</p>{% endif %}"#,
+                "",
+            ),
+        ] {
+            assert!(
+                startup(source, included).is_err(),
+                "must reject {source}: {included}"
+            );
+        }
+        Ok(())
+    }
 
     fn admit_live(source: &str) -> Result<()> {
         let sources = BTreeMap::from([("pages/live.html".into(), source.into())]);

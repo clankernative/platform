@@ -417,6 +417,7 @@ pub struct LoadedArtifact {
     contract: Artifact,
     executable: Arc<Mutex<Option<PrivateWorker>>>,
     retained: Option<Arc<tempfile::TempDir>>,
+    startup_shells: BTreeSet<String>,
 }
 
 /// The admitted worker bytes, the private copy executed from them, and the
@@ -541,6 +542,7 @@ impl LoadedArtifact {
             contract,
             executable: Arc::default(),
             retained: None,
+            startup_shells: BTreeSet::new(),
         }
     }
 }
@@ -864,6 +866,7 @@ impl LoadedArtifact {
         crate::redirects::Catalog::from_artifact(&contract)?;
         ensure!(contract.pages.len() <= 32, "page count budget");
         let mut pages = BTreeSet::new();
+        let mut startup_shells = BTreeSet::new();
         for page in &contract.pages {
             page.validate_live()?;
             day2_contracts::names::identifier(&page.name)?;
@@ -921,8 +924,8 @@ impl LoadedArtifact {
             }
             if contract.format >= 6 {
                 let context = contract.page_context_schema(page)?;
-                if let Some(routes) = &routes {
-                    crate::web_templates::validate_routed_page(
+                let startup = if let Some(routes) = &routes {
+                    let startup = crate::web_templates::validate_routed_page(
                         &directory,
                         &contract.templates,
                         &page.template,
@@ -939,8 +942,9 @@ impl LoadedArtifact {
                         routes,
                         &contract,
                     )?;
+                    startup
                 } else {
-                    crate::web_templates::validate_page(
+                    let startup = crate::web_templates::validate_page(
                         &directory,
                         &contract.templates,
                         &page.template,
@@ -956,6 +960,16 @@ impl LoadedArtifact {
                         &contract.operations,
                         &contract.schema,
                     )?;
+                    startup
+                };
+                if startup {
+                    ensure!(
+                        !page.live
+                            && page.preparation.is_empty()
+                            && contract.schema.inputs[&query.input_type].fields.is_empty(),
+                        "startup shell requires an input-free page without preparation or live updates"
+                    );
+                    startup_shells.insert(page.name.clone());
                 }
                 if page.live {
                     crate::web_templates::validate_live_page(
@@ -980,6 +994,7 @@ impl LoadedArtifact {
             contract,
             executable: Arc::default(),
             retained: None,
+            startup_shells,
         };
         if loaded.contract.format == CURRENT_FORMAT {
             let executable = loaded.materialize_worker()?;
@@ -1174,6 +1189,10 @@ impl LoadedArtifact {
             .iter()
             .find(|page| page.name == name)
             .context(crate::error::Failure::UnknownPage)
+    }
+
+    pub fn is_startup_shell(&self, name: &str) -> bool {
+        self.startup_shells.contains(name)
     }
     pub(crate) fn route(&self, name: &str) -> Result<&Operation> {
         match name.strip_prefix("$page.") {
@@ -3010,6 +3029,7 @@ mod output_contract_tests {
         Ok(LoadedArtifact {
             id: "fixture".into(),
             directory: PathBuf::new(),
+            startup_shells: BTreeSet::new(),
             executable: Arc::default(),
             retained: None,
             contract: serde_json::from_value(json!({
