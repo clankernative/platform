@@ -2,15 +2,21 @@ use super::*;
 use crate::{
     authority_state, budget,
     managed_credentials::{effects, simulation, store as credentials},
+    security_epoch::restore_staging::MemoryAdmission,
 };
-use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
-use rusqlite::types::Value;
+use anyhow::Context;
+use day2_capabilities::{
+    Digest,
+    resources::{BudgetDefinition, BudgetLimits, BudgetScope},
+};
+use rusqlite::{Connection, MAIN_DB, TransactionBehavior, types::Value};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
-struct Fixture {
-    db: Connection,
+pub(in crate::security_epoch::restore_staging) struct Fixture {
+    pub(in crate::security_epoch::restore_staging) db: Connection,
     namespace: Namespace,
+    artifact: crate::artifact::LoadedArtifact,
     previous: authority_state::ActiveAuthority,
     fence: restore_authority::PreparedRestoreFence,
     authority_schema: restore_authority::RestoreFenceSchema,
@@ -21,12 +27,36 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Result<Self> {
+    pub(in crate::security_epoch::restore_staging) fn new() -> Result<Self> {
+        let schema: crate::schema::Schema = serde_json::from_value(
+            serde_json::json!({"models":{"fixture_business":{"fields":{"value":"text"}}},"inputs":{},"foreign_keys":[]}),
+        )?;
+        let schema_digest = schema.hash()?;
+        // Actual host tests lend a typed immutable contract without running a
+        // compiler. This cfg(test) constructor is not native artifact admission.
+        let contract: crate::artifact::Artifact = serde_json::from_value(serde_json::json!({
+            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"restore-model-fixture",
+            "verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+            "worker_digest":"restore-model-fixture","schema_digest":schema_digest,"schema":schema,
+            "operations":[],"sources":{},"admission":"local-spike-only"
+        }))?;
+        let artifact = crate::artifact::LoadedArtifact::from_contract_for_tests(
+            Digest::new(b"artifact").as_str().into(),
+            PathBuf::new(),
+            contract,
+        );
         let mut db = Connection::open_in_memory()?;
         db.pragma_update(None, "temp_store", "MEMORY")?;
         db.pragma_update(None, "journal_mode", "MEMORY")?;
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch(crate::store::PLATFORM_DDL)?;
+        for ddl in artifact.contract().schema.ddl()? {
+            db.execute_batch(&ddl)?;
+        }
+        db.execute(
+            "INSERT INTO fixture_business(id,version,created_at,value) VALUES(1,1,100,'keep-data')",
+            [],
+        )?;
         let namespace = credentials::tests::namespace();
         let scope = format!(
             "{}/{}/{}",
@@ -37,7 +67,7 @@ impl Fixture {
         db.execute("INSERT INTO day2_meta VALUES('scope',?1)", [&scope])?;
         db.execute(
             "INSERT INTO day2_meta VALUES('schema',?1)",
-            [Digest::new(b"schema").as_str()],
+            [&artifact.contract().schema_digest],
         )?;
         let previous = authority_state::ActiveAuthority {
             stamp: authority_state::AuthorityStamp {
@@ -155,7 +185,7 @@ impl Fixture {
                 snapshot.digest().clone(),
                 909,
                 &scope,
-                Digest::new(b"schema"),
+                artifact.contract().schema_digest.clone().try_into()?,
                 1,
             )?;
             tx.rollback()?;
@@ -170,6 +200,7 @@ impl Fixture {
         Ok(Self {
             db,
             namespace,
+            artifact,
             previous,
             fence,
             authority_schema,
@@ -180,15 +211,79 @@ impl Fixture {
         })
     }
 
-    fn selection(&self) -> Selection<'_> {
+    pub(in crate::security_epoch::restore_staging) fn selection(&self) -> Selection<'_> {
         Selection {
             namespace: &self.namespace,
             source_epoch: 1,
+            artifact: &self.artifact,
             fence: &self.fence,
             authority_schema: &self.authority_schema,
             oauth_schema: &self.oauth_schema,
             cut: &self.cut,
         }
+    }
+
+    fn begin_reset(&mut self) -> Result<(MemoryAdmission<'_>, Selection<'_>)> {
+        let Self {
+            db,
+            namespace,
+            artifact,
+            fence,
+            authority_schema,
+            oauth_schema,
+            cut,
+            ..
+        } = self;
+        let selected = Selection {
+            namespace,
+            source_epoch: 1,
+            artifact,
+            fence,
+            authority_schema,
+            oauth_schema,
+            cut,
+        };
+        Ok((MemoryAdmission::configure(db)?, selected))
+    }
+
+    fn reset(&mut self) -> Result<Summary> {
+        let (memory, selected) = self.begin_reset()?;
+        let (tx, hook) = memory.begin()?;
+        let result = reset_in(
+            &tx,
+            &hook,
+            &selected,
+            selected.namespace,
+            selected.source_epoch,
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub(in crate::security_epoch::restore_staging) fn require_image(
+        &self,
+        db: &Connection,
+        reset: bool,
+    ) -> Result<()> {
+        assert_eq!(observation(db, &self.token)?, expected(reset));
+        for table in [
+            "day2_credential_material",
+            "day2_credential_receipts",
+            "day2_app_outgoing",
+        ] {
+            assert!(
+                rows(db, table)? == rows(&self.db, table)?,
+                "restore_history_changed"
+            );
+        }
+        let before = ledger(&self.db)?;
+        let after = ledger(db)?;
+        assert_eq!(after.ledger_id, before.ledger_id);
+        assert_eq!(after.accounts, before.accounts);
+        assert_eq!(after.known_usage, before.known_usage);
+        assert_eq!(after.unknown_usage, before.unknown_usage);
+        assert_eq!(after.outstanding_attempts, before.outstanding_attempts);
+        Ok(())
     }
 }
 
@@ -231,7 +326,7 @@ fn ledger(db: &Connection) -> Result<budget::LedgerStatus> {
 #[test]
 fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() -> Result<()> {
     effects::scope(simulation::World::new(98311), || {
-        let fixture = Fixture::new()?;
+        let mut fixture = Fixture::new()?;
         assert!(
             credentials::restore::first_epoch_ingress_for_tests(&fixture.db, &fixture.token, 1)
                 .context("fixture_pre_reset_ingress")?
@@ -243,7 +338,7 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
         assert_eq!(before_budget.known_usage.calls, 2);
         assert_eq!(before_budget.unknown_usage.len(), 1);
         crate::web_security::session_for_token_in(&fixture.db, &"a".repeat(43), 100)?;
-        let summary = reset(&fixture.db, &fixture.selection()).context("actual_complete_reset")?;
+        let summary = fixture.reset().context("actual_complete_reset")?;
         assert_eq!(
             (
                 summary.credentials.lineages,
@@ -340,32 +435,335 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
 }
 
 #[test]
+fn original_sql_work_limit_survives_complete_reset_refusal_and_unwind() -> Result<()> {
+    #[derive(Clone, Copy)]
+    enum Finish {
+        Complete,
+        Refuse,
+        Unwind,
+    }
+    const WORK: &str = "WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<2000) SELECT max(n) FROM work";
+    for finish in [Finish::Complete, Finish::Refuse, Finish::Unwind] {
+        effects::scope(simulation::World::new(98317), || -> Result<()> {
+            let mut fixture = Fixture::new()?;
+            let before = snapshot(&fixture.db)?;
+            let (memory, selected) = fixture.begin_reset()?;
+            // Charge the real configured callback using actual SQLite VM work.
+            // The second half is below a fresh lifetime cap, but exceeds the
+            // SAME original cap when combined with this measured first half.
+            let before_steps = {
+                let mut statement = memory.db.prepare(WORK)?;
+                for _ in 0..512 {
+                    assert_eq!(statement.query_row([], |row| row.get::<_, i64>(0))?, 2000);
+                    if statement.get_status(rusqlite::StatementStatus::VmStep) >= 5_500_000 {
+                        break;
+                    }
+                }
+                let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+                assert!((5_500_000..6_000_000).contains(&steps));
+                steps
+            };
+            let (tx, hook) = memory.begin()?;
+            match finish {
+                Finish::Complete => {
+                    reset_in(&tx, &hook, &selected, selected.namespace, 1)?;
+                }
+                Finish::Refuse => {
+                    assert!(
+                        crate::oauth::restore::reset_application_in(
+                            (&tx, &hook),
+                            selected.fence,
+                            selected.authority_schema,
+                            selected.oauth_schema,
+                            selected.cut,
+                            selected.namespace,
+                            8
+                        )
+                        .is_err()
+                    );
+                }
+                Finish::Unwind => {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _: Result<()> = crate::oauth::schema::admit_retained_memory_transaction(
+                            &tx,
+                            &hook,
+                            |tx| {
+                                tx.execute(
+                                    "UPDATE fixture_business SET value='must-roll-back'",
+                                    [],
+                                )?;
+                                panic!("controlled_memory_admission_unwind");
+                            },
+                        );
+                    }));
+                    assert!(result.is_err());
+                }
+            }
+            tx.commit()?;
+            assert!(memory.begin().is_err());
+            if !matches!(finish, Finish::Complete) {
+                assert!(before == snapshot(memory.db)?);
+            }
+            assert!(
+                crate::oauth::schema::admit_retained_memory_transaction(
+                    &Transaction::new_unchecked(memory.db, TransactionBehavior::Immediate)?,
+                    &hook,
+                    |_| Ok(())
+                )
+                .is_err()
+            );
+            let mut statement = memory.db.prepare(WORK)?;
+            let mut interrupted = false;
+            for _ in 0..512 {
+                match statement.query_row([], |row| row.get::<_, i64>(0)) {
+                    Ok(value) => {
+                        assert_eq!(value, 2000);
+                        if statement.get_status(rusqlite::StatementStatus::VmStep) >= before_steps {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            error.sqlite_error_code(),
+                            Some(rusqlite::ErrorCode::OperationInterrupted)
+                        );
+                        interrupted = true;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                interrupted,
+                "original configured work counter was replaced or renewed"
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reset_selection_cannot_substitute_the_staging_namespace_or_source_epoch() -> Result<()> {
+    effects::scope(simulation::World::new(98314), || {
+        for wrong_epoch in [false, true] {
+            let mut fixture = Fixture::new()?;
+            let before = snapshot(&fixture.db)?;
+            let mut namespace = fixture.namespace.clone();
+            if !wrong_epoch {
+                namespace.binding_generation += 1;
+            }
+            {
+                let (memory, selected) = fixture.begin_reset()?;
+                let (tx, hook) = memory.begin()?;
+                assert!(
+                    reset_in(
+                        &tx,
+                        &hook,
+                        &selected,
+                        &namespace,
+                        if wrong_epoch { 2 } else { 1 }
+                    )
+                    .is_err()
+                );
+                tx.commit()?;
+            }
+            assert!(before == snapshot(&fixture.db)?);
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn cut_rejects_a_foreign_artifact_or_schema_before_any_denial_write() -> Result<()> {
+    effects::scope(simulation::World::new(98315), || {
+        for wrong_schema in [false, true] {
+            let mut fixture = Fixture::new()?;
+            let mut contract = fixture.artifact.contract().clone();
+            let id = if wrong_schema {
+                contract.schema_digest = Digest::new(b"foreign-contract-schema").as_str().into();
+                fixture.artifact.id().to_owned()
+            } else {
+                Digest::new(b"foreign-artifact").as_str().into()
+            };
+            let foreign = crate::artifact::LoadedArtifact::from_contract_for_tests(
+                id,
+                PathBuf::new(),
+                contract,
+            );
+            fixture.cut.require_artifact(&fixture.artifact)?;
+            assert!(fixture.cut.require_artifact(&foreign).is_err());
+            let before = snapshot(&fixture.db)?;
+            {
+                let (memory, mut selected) = fixture.begin_reset()?;
+                selected.artifact = &foreign;
+                let (tx, hook) = memory.begin()?;
+                assert!(reset_in(&tx, &hook, &selected, selected.namespace, 1).is_err());
+                tx.commit()?;
+            }
+            assert!(before == snapshot(&fixture.db)?);
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn a_matching_historical_artifact_is_not_a_current_restore_profile() -> Result<()> {
+    effects::scope(simulation::World::new(98316), || {
+        let mut fixture = Fixture::new()?;
+        let mut contract = fixture.artifact.contract().clone();
+        contract.format = crate::artifact::CURRENT_FORMAT - 1;
+        let historical = crate::artifact::LoadedArtifact::from_contract_for_tests(
+            fixture.artifact.id().into(),
+            PathBuf::new(),
+            contract,
+        );
+        // Binding equality is DATA and cannot replace current API admission.
+        fixture.cut.require_artifact(&historical)?;
+        let before = snapshot(&fixture.db)?;
+        {
+            let (memory, mut selected) = fixture.begin_reset()?;
+            selected.artifact = &historical;
+            let (tx, hook) = memory.begin()?;
+            assert_eq!(
+                reset_in(&tx, &hook, &selected, selected.namespace, 1)
+                    .unwrap_err()
+                    .root_cause()
+                    .to_string(),
+                "artifact_upgrade_required"
+            );
+            tx.commit()?;
+        }
+        assert!(before == snapshot(&fixture.db)?);
+        Ok(())
+    })
+}
+
+#[test]
+fn actual_complete_reset_checks_exact_artifact_then_canonical_model_storage_before_cuts() {
+    use quote::ToTokens as _;
+    let file = syn::parse_file(include_str!("../application.rs")).unwrap();
+    let functions: Vec<_> = file
+        .items
+        .into_iter()
+        .filter_map(|i| match i {
+            syn::Item::Fn(f) if f.sig.ident == "reset_in" => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(functions.len(), 1);
+    let actual = &functions[0];
+    // Use the same source parser for both sides. Compiler-produced quote tokens
+    // retain different opaque macro punctuation spacing; no argument, literal
+    // or ordering may be discarded to make the expected source match.
+    let tail: syn::Block = syn::parse_str(
+        r#"{
+        selected.artifact.require_current_api()?;
+        selected.cut.require_artifact(selected.artifact)?;
+        ensure!(
+            crate::authority_state::current(tx)?.artifact_id == selected.artifact.id(),
+            "complete_restore_source_artifact_changed"
+        );
+        let scope = format!(
+            "{}/{}/{}",
+            namespace.installation.as_str(),
+            namespace.environment.as_str(),
+            namespace.app.as_str()
+        );
+        crate::store::validate_storage_in(tx, selected.artifact, &scope)?;
+        crate::oauth::restore::reset_application_in(
+            (tx, hook),
+            selected.fence,
+            selected.authority_schema,
+            selected.oauth_schema,
+            selected.cut,
+            selected.namespace,
+            selected.source_epoch,
+        )
+    }"#,
+    )
+    .unwrap();
+    let roundtrip: syn::Block = syn::parse_str(&tail.to_token_stream().to_string()).unwrap();
+    assert_eq!(
+        tail.to_token_stream().to_string(),
+        roundtrip.to_token_stream().to_string()
+    );
+    let valid = |f: &syn::ItemFn| {
+        f.block.stmts.len() >= tail.stmts.len()
+            && f.block
+                .stmts
+                .iter()
+                .rev()
+                .take(tail.stmts.len())
+                .zip(tail.stmts.iter().rev())
+                .all(|(a, b)| a.to_token_stream().to_string() == b.to_token_stream().to_string())
+    };
+    assert_eq!(
+        actual
+            .block
+            .stmts
+            .iter()
+            .rev()
+            .take(tail.stmts.len())
+            .map(|s| s.to_token_stream().to_string())
+            .collect::<Vec<_>>(),
+        tail.stmts
+            .iter()
+            .rev()
+            .map(|s| s.to_token_stream().to_string())
+            .collect::<Vec<_>>(),
+        "actual static source tail"
+    );
+    assert!(valid(actual));
+    let start = actual.block.stmts.len() - tail.stmts.len();
+    for index in 0..tail.stmts.len() {
+        let mut removed = actual.clone();
+        removed.block.stmts.remove(start + index);
+        assert!(!valid(&removed));
+    }
+    let mut late_validation = actual.clone();
+    late_validation.block.stmts.swap(start + 4, start + 5);
+    assert!(!valid(&late_validation));
+    let mut foreign = actual.clone();
+    foreign.block.stmts[start + 4] =
+        syn::parse_quote!(crate::store::validate_storage_in(tx,foreign_artifact,&scope)?;);
+    assert!(!valid(&foreign));
+}
+
+#[test]
 fn cut_binding_failure_after_fence_rolls_back_even_when_caller_catches_and_commits() -> Result<()> {
     effects::scope(simulation::World::new(98312), || {
         for after_cut in [false, true] {
-            let fixture = Fixture::new()?;
+            let mut fixture = Fixture::new()?;
             let before = snapshot(&fixture.db)?;
             let wrong = restore_cut::fixture_for_storage_epoch(
                 Digest::new(b"wrong-inventory"),
                 910,
                 "wonderly/dev/transcriber",
-                Digest::new(b"schema"),
+                fixture
+                    .artifact
+                    .contract()
+                    .schema_digest
+                    .clone()
+                    .try_into()?,
                 1,
             )?;
-            let tx = Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
-            assert!(
-                crate::oauth::restore::reset_application_in(
-                    &tx,
-                    &fixture.fence,
-                    &fixture.authority_schema,
-                    &fixture.oauth_schema,
-                    if after_cut { &fixture.cut } else { &wrong },
-                    &fixture.namespace,
-                    if after_cut { 8 } else { 1 }
-                )
-                .is_err()
-            );
-            tx.commit()?;
+            {
+                let (memory, selected) = fixture.begin_reset()?;
+                let (tx, hook) = memory.begin()?;
+                assert!(
+                    crate::oauth::restore::reset_application_in(
+                        (&tx, &hook),
+                        selected.fence,
+                        selected.authority_schema,
+                        selected.oauth_schema,
+                        if after_cut { selected.cut } else { &wrong },
+                        selected.namespace,
+                        if after_cut { 8 } else { 1 }
+                    )
+                    .is_err()
+                );
+                tx.commit()?;
+            }
             assert!(fixture.db.is_autocommit());
             assert!(
                 before == snapshot(&fixture.db)?,
@@ -380,15 +778,21 @@ fn cut_binding_failure_after_fence_rolls_back_even_when_caller_catches_and_commi
 fn credential_only_profile_still_refuses_closed_peer_history_and_nested_budget_cannot_renew()
 -> Result<()> {
     effects::scope(simulation::World::new(98313), || {
-        let fixture = Fixture::new()?;
+        let mut fixture = Fixture::new()?;
         let before = snapshot(&fixture.db)?;
-        let tx = Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
-        assert!(credentials::restore::stage_reset(&tx, &fixture.namespace, 1).is_err());
-        crate::oauth::schema::admit(&tx, |db| {
-            assert!(crate::oauth::schema::admit_memory_transaction(&tx, |_| Ok(())).is_err());
-            crate::oauth::schema::require_admission(db)
-        })?;
-        tx.commit()?;
+        {
+            let (memory, selected) = fixture.begin_reset()?;
+            let (tx, hook) = memory.begin()?;
+            crate::oauth::schema::admit_retained_memory_transaction(&tx, &hook, |tx| {
+                assert!(credentials::restore::stage_reset(tx, selected.namespace, 1).is_err());
+                assert!(
+                    crate::oauth::schema::admit_retained_memory_transaction(tx, &hook, |_| Ok(()))
+                        .is_err()
+                );
+                crate::oauth::schema::require_admission(tx)
+            })?;
+            tx.commit()?;
+        }
         assert!(before == snapshot(&fixture.db)?);
         Ok(())
     })
@@ -520,7 +924,7 @@ fn history(
     captured: &mut HistoryRun,
 ) -> Result<()> {
     effects::scope(simulation::World::new(seed), || {
-        let fixture = Fixture::new()?;
+        let mut fixture = Fixture::new()?;
         let material = rows(&fixture.db, "day2_credential_material")?;
         let receipts = rows(&fixture.db, "day2_credential_receipts")?;
         let mut reset_committed = false;
@@ -530,38 +934,40 @@ fn history(
                 Action::Inspect => {}
                 Action::DropReset | Action::WrongEpoch => {
                     let before = snapshot(&fixture.db)?;
-                    let tx =
-                        Transaction::new_unchecked(&fixture.db, TransactionBehavior::Immediate)?;
-                    let result = crate::oauth::restore::reset_application_in(
-                        &tx,
-                        &fixture.fence,
-                        &fixture.authority_schema,
-                        &fixture.oauth_schema,
-                        &fixture.cut,
-                        &fixture.namespace,
+                    {
+                        let (memory, selected) = fixture.begin_reset()?;
+                        let (tx, hook) = memory.begin()?;
+                        let result = crate::oauth::restore::reset_application_in(
+                            (&tx, &hook),
+                            selected.fence,
+                            selected.authority_schema,
+                            selected.oauth_schema,
+                            selected.cut,
+                            selected.namespace,
+                            if matches!(action, Action::WrongEpoch) {
+                                8
+                            } else {
+                                1
+                            },
+                        );
+                        assert_eq!(
+                            result.is_ok(),
+                            matches!(action, Action::DropReset) && !reset_committed
+                        );
                         if matches!(action, Action::WrongEpoch) {
-                            8
+                            // Even a caller that catches the error and commits the
+                            // surrounding transaction cannot retain a partial cut.
+                            tx.commit()?;
                         } else {
-                            1
-                        },
-                    );
-                    assert_eq!(
-                        result.is_ok(),
-                        matches!(action, Action::DropReset) && !reset_committed
-                    );
-                    if matches!(action, Action::WrongEpoch) {
-                        // Even a caller that catches the error and commits the
-                        // surrounding transaction cannot retain a partial cut.
-                        tx.commit()?;
-                    } else {
-                        // A real complete reset ran, but the actual outer
-                        // transaction drops before its commit or image copy.
-                        drop(tx);
+                            // A real complete reset ran, but the actual outer
+                            // transaction drops before its commit or image copy.
+                            drop(tx);
+                        }
                     }
                     assert!(before == snapshot(&fixture.db)?);
                 }
                 Action::Commit => {
-                    let result = reset(&fixture.db, &fixture.selection());
+                    let result = fixture.reset();
                     assert_eq!(result.is_ok(), !reset_committed);
                     reset_committed = true;
                 }
@@ -631,6 +1037,7 @@ fn implementation() -> Result<Digest> {
         [
             include_str!("../application.rs"),
             include_str!("tests.rs"),
+            include_str!("../../restore_staging.rs"),
             include_str!("../../restore_authority.rs"),
             include_str!("../../restore_cut.rs"),
             include_str!("../../../oauth/restore.rs"),
@@ -661,7 +1068,8 @@ fn implementation() -> Result<Digest> {
             include_str!("../../../../BUILD.bazel"),
             include_str!("../../../../../day2-capabilities/Cargo.toml"),
             include_str!("../../../../../day2-capabilities/BUILD.bazel"),
-        ],
+        ]
+        .as_slice(),
     ))
 }
 

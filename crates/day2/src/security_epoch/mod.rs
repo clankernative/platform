@@ -34,6 +34,9 @@ mod restore_fencing;
 mod restore_host_clock;
 mod restore_original;
 mod restore_staging;
+#[cfg(test)]
+pub(crate) use restore_staging::MemoryAdmission;
+pub(crate) use restore_staging::MemoryHook;
 mod restore_webauthn;
 mod runtime_profile;
 mod seed_core;

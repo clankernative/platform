@@ -2,13 +2,13 @@
 //! native factory, public command, adoption or publication path exists here.
 //! The future genuine owner must PRECEDE creation and keep this same State and
 //! actual creator FD through reset, SQL close, sync and final target admission.
-use crate::managed_credentials::store::restore::{self, ResetSummary};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{Digest, credentials::Namespace};
 use ring::digest::{Context as Hash, SHA256};
 use rusqlite::{Connection, MAIN_DB, Transaction, TransactionBehavior};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::{
+    cell::Cell,
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
@@ -21,6 +21,123 @@ const CHUNK: usize = 64 * 1024;
 
 mod application;
 
+/// Continuous ownership of the one configured scratch connection. Only the
+/// fixed image builder constructs this in production, before deserialize or
+/// other SQL work. It is not native storage or restore authority.
+pub(crate) struct MemoryAdmission<'db> {
+    db: &'db mut Connection,
+    begun: Cell<bool>,
+    local: std::marker::PhantomData<Rc<()>>,
+}
+
+/// A one-use admission borrow, tied to the actual still-held configured owner.
+/// Neither memory PRAGMA data nor a connection address can construct it.
+pub(crate) struct MemoryHook<'db> {
+    db: &'db Connection,
+    used: Cell<bool>,
+}
+
+impl<'db> MemoryAdmission<'db> {
+    fn configure(db: &'db mut Connection) -> Result<Self> {
+        ensure!(
+            db.is_autocommit(),
+            "restore_memory_configuration_inside_transaction"
+        );
+        ensure!(
+            db.path().is_none_or(str::is_empty),
+            "restore_memory_connection_required"
+        );
+        ensure!(
+            db.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
+            "restore_memory_temp_required"
+        );
+        crate::store::configure_connection(db)?;
+        Ok(Self {
+            db,
+            begun: Cell::new(false),
+            local: std::marker::PhantomData,
+        })
+    }
+
+    fn begin(&self) -> Result<(Transaction<'_>, MemoryHook<'_>)> {
+        ensure!(
+            !self.begun.replace(true),
+            "restore_memory_transaction_spent"
+        );
+        ensure!(
+            self.db.is_autocommit(),
+            "restore_memory_transaction_already_open"
+        );
+        let db: &Connection = &*self.db;
+        let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        Ok((
+            tx,
+            MemoryHook {
+                db,
+                used: Cell::new(false),
+            },
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_for_tests(db: &'db mut Connection) -> Result<Self> {
+        Self::configure(db)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_for_tests(&self) -> Result<(Transaction<'_>, MemoryHook<'_>)> {
+        self.begin()
+    }
+}
+
+impl MemoryHook<'_> {
+    pub(crate) fn enter(&self, tx: &Transaction<'_>) -> Result<()> {
+        ensure!(!self.used.replace(true), "restore_memory_admission_spent");
+        ensure!(
+            std::ptr::eq(self.db, &**tx),
+            "restore_memory_admission_connection_changed"
+        );
+        ensure!(!tx.is_autocommit(), "restore_memory_transaction_required");
+        memory_shape(tx, None)?;
+        Ok(())
+    }
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($owner:ty,$bound:path) => {{
+            trait Ambiguous<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(MemoryAdmission<'static>, Clone);
+    assert_not_impl!(MemoryAdmission<'static>, Copy);
+    assert_not_impl!(MemoryAdmission<'static>, Default);
+    assert_not_impl!(MemoryAdmission<'static>, std::fmt::Debug);
+    assert_not_impl!(MemoryAdmission<'static>, Send);
+    assert_not_impl!(MemoryAdmission<'static>, Sync);
+    assert_not_impl!(MemoryAdmission<'static>, serde::Serialize);
+    assert_not_impl!(MemoryAdmission<'static>, serde::Deserialize<'static>);
+    assert_not_impl!(MemoryAdmission<'static>, std::ops::Deref);
+    assert_not_impl!(MemoryAdmission<'static>, AsRef<Connection>);
+    assert_not_impl!(MemoryAdmission<'static>, std::borrow::Borrow<Connection>);
+    assert_not_impl!(MemoryHook<'static>, Clone);
+    assert_not_impl!(MemoryHook<'static>, Copy);
+    assert_not_impl!(MemoryHook<'static>, Default);
+    assert_not_impl!(MemoryHook<'static>, std::fmt::Debug);
+    assert_not_impl!(MemoryHook<'static>, Send);
+    assert_not_impl!(MemoryHook<'static>, Sync);
+    assert_not_impl!(MemoryHook<'static>, serde::Serialize);
+    assert_not_impl!(MemoryHook<'static>, serde::Deserialize<'static>);
+    assert_not_impl!(MemoryHook<'static>, std::ops::Deref);
+    assert_not_impl!(MemoryHook<'static>, AsRef<Connection>);
+    assert_not_impl!(MemoryHook<'static>, std::borrow::Borrow<Connection>);
+};
+
 mod sealed {
     pub(super) trait Sealed {}
 }
@@ -31,10 +148,11 @@ trait Checks: sealed::Sealed {
     fn current(&mut self) -> Result<()>;
     /// Local current checks only, with no provider/key IO inside SQL.
     fn local_sql(&mut self) -> Result<()>;
-    /// Concrete admitted app/profile validation, mandatory BEFORE creation.
-    /// A future NativeImpl must validate the actual artifact/bundle and refuse
-    /// OAuth/callback/provider/companion state; fixture admission is unqualified.
-    fn application(&mut self, source: &Transaction<'_>) -> Result<()>;
+    /// SQL validation against the already-held admitted app/profile, BEFORE
+    /// creation. A future NativeImpl must retain that actual artifact/bundle
+    /// and lend its same prepared fence/profile/cut without doing external IO.
+    /// Fixture admission is unqualified.
+    fn application(&mut self, source: &Transaction<'_>) -> Result<application::Selection<'_>>;
     fn refuse(&mut self);
 }
 
@@ -76,7 +194,7 @@ struct Projection {
     image: Digest,
     bytes: u64,
     target_incarnation: Digest,
-    reset: ResetSummary,
+    reset: application::Summary,
 }
 
 impl State {
@@ -323,7 +441,10 @@ fn require_single_image(source: &std::path::Path) -> Result<()> {
 
 /// Fixed fresh-memory DATA builder. It accepts no raw connection or callback;
 /// the entire function is reviewed/pinned for its sole serialize operation.
-fn prepare_image<A: Checks>(owner: &mut A, image: &mut Zeroizing<Vec<u8>>) -> Result<ResetSummary> {
+fn prepare_image<A: Checks>(
+    owner: &mut A,
+    image: &mut Zeroizing<Vec<u8>>,
+) -> Result<application::Summary> {
     // This is always a fresh scratch connection. No filename, physical owner,
     // database_list result or caller-supplied Connection can construct it.
     boundary(owner, |s| {
@@ -337,41 +458,47 @@ fn prepare_image<A: Checks>(owner: &mut A, image: &mut Zeroizing<Vec<u8>>) -> Re
     let reset = {
         let current = &mut *loan.owner;
         let db = loan.db.as_mut().context("restore_sql_missing")?;
-        (|| -> Result<ResetSummary> {
+        (|| -> Result<application::Summary> {
             db.pragma_update(None, "temp_store", "MEMORY")?;
-            crate::store::configure_connection(db)?;
-            // Safe pinned API reads a complete in-memory slice, not a fallible FD
-            // stream; exact source bytes were hashed above, before any SQL admit.
-            db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;
-            memory_shape(db, Some(image.len()))?;
-            let page_size: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0))?;
-            db.pragma_update(
-                None,
-                "max_page_count",
-                i64::try_from(MAX_BYTES)? / page_size,
-            )?;
-            db.pragma_update(None, "foreign_keys", true)?;
-            db.pragma_update(None, "journal_mode", "MEMORY")?;
-            ensure!(
-                db.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))? == "memory",
-                "restore_memory_journal_required"
-            );
-            ensure!(
-                db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))? == "ok",
-                "restore_image_integrity"
-            );
+            let memory = MemoryAdmission::configure(db)?;
+            {
+                let db = &mut *memory.db;
+                // Safe pinned API reads a complete in-memory slice, not a fallible FD
+                // stream; exact source bytes were hashed above, before any SQL admit.
+                db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;
+                memory_shape(db, Some(image.len()))?;
+                let page_size: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0))?;
+                db.pragma_update(
+                    None,
+                    "max_page_count",
+                    i64::try_from(MAX_BYTES)? / page_size,
+                )?;
+                db.pragma_update(None, "foreign_keys", true)?;
+                db.pragma_update(None, "journal_mode", "MEMORY")?;
+                ensure!(
+                    db.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))?
+                        == "memory",
+                    "restore_memory_journal_required"
+                );
+                ensure!(
+                    db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))? == "ok",
+                    "restore_image_integrity"
+                );
+            }
             current.local_sql()?;
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (tx, hook) = memory.begin()?;
             let (ns, epoch) = {
                 let s = current.state();
                 (s.input.namespace.clone(), s.input.source_epoch)
             };
-            restore::inspect_source(&tx, &ns, epoch)?;
-            current.application(&tx)?;
-            let reset = restore::stage_reset(&tx, &ns, epoch)?;
+            let reset = {
+                let selected = current.application(&tx)?;
+                application::reset_in(&tx, &hook, &selected, &ns, epoch)?
+            };
             #[cfg(test)]
             tests::cut(tests::Point::BeforeCommit)?;
             current.local_sql()?;
+            let db = &*memory.db;
             tx.commit()?;
             #[cfg(test)]
             tests::cut(tests::Point::AfterCommit)?;
