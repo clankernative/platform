@@ -1542,3 +1542,306 @@ fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
         )));
     }
 }
+
+// The Linux issuer path is inspected on every host without constructing a fake
+// native issuer. Kernel/message-origin qualification remains Linux-only.
+fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
+    use quote::ToTokens as _;
+    let file = syn::parse_file(source)?;
+    let methods: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "freeze" => Some(item),
+            _ => None,
+        })
+        .collect();
+    if methods.len() != 1 {
+        return Ok(false);
+    }
+    #[derive(Default)]
+    struct Freshness {
+        flag_references: usize,
+        current_bindings: usize,
+        snapshot_acquisitions: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Freshness {
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            self.flag_references += usize::from(path.path.is_ident("issuance_closed"));
+            syn::visit::visit_expr_path(self, path);
+        }
+        fn visit_pat_ident(&mut self, binding: &'ast syn::PatIdent) {
+            self.current_bindings += usize::from(binding.ident == "current");
+            syn::visit::visit_pat_ident(self, binding);
+        }
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            self.snapshot_acquisitions += usize::from(matches!(&*call.func, syn::Expr::Path(path)
+                if path.path.segments.iter().any(|s|s.ident=="SelfSnapshot")
+                    && path.path.segments.last().is_some_and(|s|s.ident=="acquire")));
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    use syn::visit::Visit as _;
+    let mut freshness = Freshness::default();
+    freshness.visit_block(&methods[0].block);
+    if freshness.flag_references != 1
+        || freshness.current_bindings != 1
+        || freshness.snapshot_acquisitions != 0
+    {
+        return Ok(false);
+    }
+    let body = &methods[0].block.stmts;
+    let retained: syn::Stmt = syn::parse_str("let (costs, current, peer) = observations;")?;
+    // The concrete mutable entry snapshot is only destructured from the
+    // actual observation borrow; no local constructor or shadow may replace it.
+    if !body
+        .get(2)
+        .is_some_and(|s| s.to_token_stream().to_string() == retained.to_token_stream().to_string())
+    {
+        return Ok(false);
+    }
+    if body.len() < 6 {
+        return Ok(false);
+    }
+    let tail = body[body.len() - 5..]
+        .iter()
+        .map(|s| s.to_token_stream().to_string())
+        .collect::<Vec<_>>();
+    let expected: syn::Block = syn::parse_str(
+        r#"{
+        issuer.certificate.verify(&issuer.policy)?;
+        issuer.parent.check_identity(acquisition, &costs.hashes(Subject::ParentBefore))?;
+        current.check(acquisition)?;
+        acquisition.remaining()?;
+        channel.send(
+            &Packet::FreezeGrant {
+                statement: Box::new(statement),
+                signature,
+            },
+            acquisition,
+        )
+    }"#,
+    )?;
+    if tail
+        != expected
+            .stmts
+            .iter()
+            .map(|s| s.to_token_stream().to_string())
+            .collect::<Vec<_>>()
+    {
+        return Ok(false);
+    }
+    let closed: syn::Stmt = syn::parse_str("*issuance_closed = true;")?;
+    let closed = closed.to_token_stream().to_string();
+    let closes: Vec<_> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.to_token_stream().to_string() == closed)
+        .map(|(i, _)| i)
+        .collect();
+    if closes.len() != 1 {
+        return Ok(false);
+    }
+    let cutoff = closes[0];
+    let bound: syn::Stmt =
+        syn::parse_str(r#"ensure!(enrolled.len() == 2, "native_restore_unclosed_role_cohort");"#)?;
+    Ok(body
+        .get(cutoff + 1)
+        .is_some_and(|s| s.to_token_stream().to_string() == bound.to_token_stream().to_string())
+        && cutoff < body.len() - 5
+        && methods[0].sig.inputs.iter().any(|arg| {
+            matches!(arg, syn::FnArg::Typed(arg)
+            if matches!(&*arg.pat, syn::Pat::Ident(p) if p.ident=="observations")
+                && arg.ty.to_token_stream().to_string() == syn::parse_str::<syn::Type>("(&Costs, &mut SelfSnapshot, &mut MessageProcess)").unwrap().to_token_stream().to_string())
+        }))
+}
+
+fn issuer_loop_keeps_the_same_closure(source: &str) -> anyhow::Result<bool> {
+    use quote::ToTokens as _;
+    use syn::visit::Visit as _;
+    let file = syn::parse_file(source)?;
+    let runs: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "run" => Some(item),
+            _ => None,
+        })
+        .collect();
+    if runs.len() != 1 {
+        return Ok(false);
+    }
+    let expected: syn::Stmt = syn::parse_str("let mut issuance_closed = false;")?;
+    let declarations: Vec<_> = runs[0]
+        .block
+        .stmts
+        .iter()
+        .enumerate()
+        .filter(|(_, stmt)| {
+            stmt.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if declarations.len() != 1 {
+        return Ok(false);
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::Loop(_), _)) = runs[0].block.stmts.last() else {
+        return Ok(false);
+    };
+    if declarations[0] >= runs[0].block.stmts.len() - 1 {
+        return Ok(false);
+    }
+    #[derive(Default)]
+    struct Uses {
+        bindings: usize,
+        references: usize,
+        forwarded: usize,
+    }
+    impl<'a> syn::visit::Visit<'a> for Uses {
+        fn visit_pat_ident(&mut self, p: &'a syn::PatIdent) {
+            self.bindings += usize::from(p.ident == "issuance_closed");
+            syn::visit::visit_pat_ident(self, p);
+        }
+        fn visit_expr_path(&mut self, p: &'a syn::ExprPath) {
+            self.references += usize::from(p.path.is_ident("issuance_closed"));
+            syn::visit::visit_expr_path(self, p);
+        }
+        fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+            if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("serve"))
+                && call.args.len() == 6
+                && matches!(&call.args[2],syn::Expr::Reference(r) if r.mutability.is_some() && matches!(&*r.expr,syn::Expr::Path(p) if p.path.is_ident("issuance_closed")))
+            {
+                self.forwarded += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut uses = Uses::default();
+    uses.visit_block(&runs[0].block);
+    Ok(uses.bindings == 1 && uses.references == 1 && uses.forwarded == 1)
+}
+
+#[test]
+fn actual_issuer_loop_does_not_reconstruct_closure_on_each_request() -> anyhow::Result<()> {
+    use quote::ToTokens as _;
+    let source = include_str!("service.rs");
+    assert!(issuer_loop_keeps_the_same_closure(source)?);
+    for mutation in 0..2 {
+        let mut file = syn::parse_file(source)?;
+        let run = file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "run" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let syn::Stmt::Expr(syn::Expr::Loop(body), _) = run.block.stmts.last_mut().unwrap() else {
+            unreachable!()
+        };
+        body.body.stmts.insert(
+            0,
+            if mutation == 0 {
+                syn::parse_str("let mut issuance_closed = false;")?
+            } else {
+                syn::parse_str("issuance_closed = false;")?
+            },
+        );
+        assert!(!issuer_loop_keeps_the_same_closure(
+            &file.to_token_stream().to_string()
+        )?);
+    }
+    Ok(())
+}
+
+#[test]
+fn issuer_freeze_keeps_same_snapshot_publication_guards_and_irreversible_cut() -> anyhow::Result<()>
+{
+    let source = include_str!("service.rs");
+    assert!(frozen_publication_source(source)?);
+    use quote::ToTokens as _;
+    for mutation in 0..8 {
+        let mut changed = syn::parse_file(source)?;
+        let function = changed
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "freeze" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let count = function.block.stmts.len();
+        match mutation {
+            0 => {
+                function.block.stmts.remove(count - 3);
+            }
+            1 => {
+                function.block.stmts.remove(count - 5);
+            }
+            2 | 3 => {
+                let arm: syn::Stmt = syn::parse_quote! { *issuance_closed = true; };
+                let matches: Vec<_> = function
+                    .block
+                    .stmts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| {
+                        s.to_token_stream().to_string() == arm.to_token_stream().to_string()
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(matches.len(), 1);
+                let index = matches[0];
+                if mutation == 2 {
+                    function.block.stmts[index] = syn::parse_quote! { *issuance_closed = false; };
+                } else {
+                    function.block.stmts[index + 1] = syn::parse_quote! { ensure!(enrolled.len() <= 2, "native_restore_unclosed_role_cohort"); };
+                }
+            }
+            4 => {
+                let mut modified = 0;
+                for argument in &mut function.sig.inputs {
+                    if let syn::FnArg::Typed(argument) = argument
+                        && matches!(&*argument.pat,syn::Pat::Ident(p) if p.ident=="observations")
+                        && let syn::Type::Tuple(tuple) = &mut *argument.ty
+                        && let syn::Type::Reference(reference) = &mut tuple.elems[1]
+                    {
+                        assert!(reference.mutability.take().is_some());
+                        modified += 1;
+                    }
+                }
+                assert_eq!(modified, 1);
+            }
+            5 => {
+                // Move the actual current check AFTER send, keeping valid Rust
+                // and its returned Result. Merely swapping the semicolon-free
+                // return into the middle would only test a syntax error.
+                let current = function.block.stmts.remove(count - 3);
+                let send = function.block.stmts.pop().unwrap();
+                function.block.stmts.push(syn::parse_str(&format!(
+                    "let sent = {};",
+                    send.to_token_stream()
+                ))?);
+                function.block.stmts.push(current);
+                let mut returned: syn::Block = syn::parse_str("{ sent }")?;
+                function.block.stmts.push(returned.stmts.pop().unwrap());
+            }
+            6 => function
+                .block
+                .stmts
+                .insert(count - 5, syn::parse_str("*issuance_closed = false;")?),
+            7 => function.block.stmts.insert(
+                count - 5,
+                syn::parse_str(
+                    "let mut current = SelfSnapshot::acquire(replacement, acquisition, costs)?;",
+                )?,
+            ),
+            _ => unreachable!(),
+        }
+        assert!(
+            !frozen_publication_source(&changed.to_token_stream().to_string())?,
+            "must refuse mutation {mutation}"
+        );
+    }
+    Ok(())
+}

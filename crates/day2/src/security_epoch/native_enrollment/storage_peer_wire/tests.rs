@@ -3625,3 +3625,212 @@ fn authentication_cohort_comparison_rejects_every_app_alias_and_candidate_alias(
     }
     Ok(())
 }
+
+// Build the sequence that the plain derived visitor ACTUALLY admits, rather
+// than an arbitrary JSON-map ordering which would already be malformed.
+fn freeze_sequence_control(record: &serde_json::Value, path: &str) -> serde_json::Value {
+    let fields: &[&str] = if path.ends_with("/selection") {
+        &[
+            "admin_binding",
+            "operation",
+            "fenced_root",
+            "app",
+            "controller",
+        ]
+    } else if path.ends_with("/frozen") || path.ends_with("/statement") {
+        &[
+            "selection",
+            "policy",
+            "issuer",
+            "cohort",
+            "request",
+            "challenge",
+        ]
+    } else if path.ends_with("/app") || path.ends_with("/controller") {
+        &["certificate", "stage", "original"]
+    } else if path.ends_with("/stage") {
+        &["data", "signature"]
+    } else if path.ends_with("/process") {
+        &["process", "start_ticks", "code", "boot", "namespaces"]
+    } else if path.ends_with("/original") {
+        &["purpose", "domain", "origin_ns", "deadline_ns"]
+    } else {
+        panic!("unregistered sequence control")
+    };
+    let object = record.as_object().unwrap();
+    assert_eq!(object.len(), fields.len());
+    serde_json::Value::Array(
+        fields
+            .iter()
+            .map(|field| object.get(*field).unwrap().clone())
+            .collect(),
+    )
+}
+
+#[test]
+fn freeze_records_are_map_only_through_both_actual_wire_decoders() -> anyhow::Result<()> {
+    use super::super::protocol::{FreezeSelection, FrozenIssuance, Packet};
+    let (_, app, key, issuer) = fixture_with_issuer(NativeRole::AppHost);
+    let mut controller = app.clone();
+    controller.stage.data.role = NativeRole::EpochController;
+    let selection = FreezeSelection {
+        admin_binding: Digest::new(b"admin"),
+        operation: Digest::new(b"advance"),
+        fenced_root: Digest::new(b"fenced-root"),
+        app: app.clone(),
+        controller,
+    };
+    let frozen = FrozenIssuance {
+        policy: app.stage.data.policy.clone(),
+        issuer: app.certificate.digest()?,
+        cohort: selection.history_digest()?,
+        selection: selection.clone(),
+        request: Digest::new(b"request"),
+        challenge: Digest::new(b"nonce"),
+    };
+    let freeze_signature = issuer.sign("restore-issuer-frozen", &frozen)?;
+    let message = signed(
+        &app,
+        &key,
+        Body::CurrentStop {
+            exchange: Digest::new(b"exchange"),
+            frozen: Box::new(frozen.clone()),
+            signature: freeze_signature.clone(),
+        },
+    );
+    let storage = serde_json::to_value(message)?;
+    decode(&serde_json::to_vec(&storage)?)?;
+    for path in [
+        "/body/frozen",
+        "/body/frozen/selection",
+        "/body/frozen/selection/app",
+        "/body/frozen/selection/app/stage",
+        "/body/frozen/selection/controller/certificate/data/process",
+        "/body/frozen/selection/app/original",
+    ] {
+        let mut changed = storage.clone();
+        let record = changed.pointer_mut(path).unwrap();
+        *record = freeze_sequence_control(record, path);
+        assert!(
+            serde_json::from_value::<Message>(changed.clone()).is_ok(),
+            "control must admit actual field order {path}"
+        );
+        assert!(
+            decode(&serde_json::to_vec(&changed)?).is_err(),
+            "storage record {path}"
+        );
+    }
+    for packet in [
+        Packet::FreezeHello {
+            selection: Box::new(selection.clone()),
+            request: frozen.request.clone(),
+        },
+        Packet::FreezeBind {
+            selection: Box::new(selection),
+            request: frozen.request.clone(),
+            challenge: frozen.challenge.clone(),
+            signature: freeze_signature.clone(),
+        },
+        Packet::FreezeGrant {
+            statement: Box::new(frozen),
+            signature: freeze_signature,
+        },
+    ] {
+        let value = serde_json::to_value(packet)?;
+        protocol::decode(&serde_json::to_vec(&value)?)?;
+        let prefix = if value["kind"] == "freeze_grant" {
+            "/statement/selection"
+        } else {
+            "/selection"
+        };
+        for path in [
+            prefix.to_owned(),
+            format!("{prefix}/app"),
+            format!("{prefix}/app/stage"),
+            format!("{prefix}/controller/certificate/data/process"),
+            format!("{prefix}/app/original"),
+        ] {
+            let mut changed = value.clone();
+            let record = changed.pointer_mut(&path).unwrap();
+            *record = freeze_sequence_control(record, &path);
+            assert!(
+                serde_json::from_value::<Packet>(changed.clone()).is_ok(),
+                "control must admit actual field order {path}"
+            );
+            assert!(
+                protocol::decode(&serde_json::to_vec(&changed)?).is_err(),
+                "issuer record {path}"
+            );
+        }
+        if value["kind"] == "freeze_grant" {
+            let mut changed = value.clone();
+            let record = changed.pointer_mut("/statement").unwrap();
+            *record = freeze_sequence_control(record, "/statement");
+            assert!(serde_json::from_value::<Packet>(changed.clone()).is_ok());
+            assert!(protocol::decode(&serde_json::to_vec(&changed)?).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn issuer_freeze_preserves_historical_admission_and_fresh_current_request() -> anyhow::Result<()> {
+    let (policy, mut app, _, issuer) = fixture_with_issuer(NativeRole::AppHost);
+    // A legitimate retained first-holder can have an expired historical
+    // bootstrap grant. Only its actual fresh request supplies this interval.
+    app.stage.data.purpose = StagePurpose::StorageBootstrap;
+    app.stage.data.deadline_ns = 160_000_000_000;
+    app.stage.signature = issuer.sign("role-stage", &app.stage.data)?;
+    app.original.origin_ns = 200_000_000_000;
+    app.original.deadline_ns = 205_000_000_000;
+    let now = Duration::from_secs(202);
+    app.validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)?;
+    assert!(
+        app.validate_issued_request_data(
+            &policy,
+            &app.certificate,
+            NativeRole::EpochController,
+            now
+        )
+        .is_err()
+    );
+    assert!(
+        app.validate_issued_request_data(
+            &policy,
+            &app.certificate,
+            NativeRole::AppHost,
+            Duration::from_secs(205)
+        )
+        .is_err()
+    );
+    let mut bootstrap_request = app.clone();
+    bootstrap_request.original.purpose = StagePurpose::StorageBootstrap;
+    assert!(
+        bootstrap_request
+            .validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)
+            .is_err()
+    );
+    let mut extension = app.clone();
+    extension.original.deadline_ns += 1;
+    assert!(
+        extension
+            .validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)
+            .is_err()
+    );
+    let mut later_origin = app.clone();
+    later_origin.original.origin_ns += 1;
+    later_origin.validate_issued_request_data(
+        &policy,
+        &app.certificate,
+        NativeRole::AppHost,
+        now,
+    )?;
+    let mut unsigned = app.clone();
+    unsigned.stage.data.process.boot.push('x');
+    assert!(
+        unsigned
+            .validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)
+            .is_err()
+    );
+    Ok(())
+}
