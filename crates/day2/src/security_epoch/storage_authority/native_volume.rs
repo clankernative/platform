@@ -1512,6 +1512,30 @@ fn mount(bytes: &[u8], expected: u64, major: u32, minor: u32) -> Result<()> {
     Ok(())
 }
 
+// Closed source interface for the retained physical root. No accepting constructor.
+pub(in crate::security_epoch) struct RestoreCreatorRoot {
+    volume: File,
+    directory: File,
+    volume_identity: DirectoryIdentity,
+    directory_identity: DirectoryIdentity,
+    original: NativeAcquisition,
+}
+
+impl RestoreCreatorRoot {
+    /// Keep the same signature as the actual physical implementation. Until
+    /// that implementation is installed, no supplied FD can pass this check.
+    pub(in crate::security_epoch) fn check(&mut self, _held_root: &File) -> Result<()> {
+        self.original.refuse();
+        anyhow::bail!("native_restore_creator_root_check_unavailable")
+    }
+}
+
+impl Drop for RestoreCreatorRoot {
+    fn drop(&mut self) {
+        self.original.refuse();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
