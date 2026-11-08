@@ -234,9 +234,12 @@ fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
     // with no managed credentials. Exercise the actual maintenance CLI chain,
     // keeping every app row and admitting the current layout afterwards.
     let historical_v2 = format!(
-        "{DROP_CREDENTIAL_UNIT}{} DROP TABLE native_fresh_owners; DROP TABLE native_fresh_schema_version;{}",
+        "{DROP_CREDENTIAL_UNIT}{} DROP TABLE native_fresh_owners; DROP TABLE native_fresh_schema_version;{}
+         DROP TABLE oauth_restore_slot_floors; DROP TABLE oauth_restore_closed;
+         DROP TABLE oauth_restore_cuts; DROP TABLE oauth_restore_schema_version;{}",
         include_str!("../fixtures/credential-schema-v2-empty.sql"),
-        include_str!("../fixtures/fresh-owner-schema-v1-empty.sql")
+        include_str!("../fixtures/fresh-owner-schema-v1-empty.sql"),
+        include_str!("../fixtures/restore-schema-v1-empty.sql")
     );
     let (copy, replaced) = rehearse(&world, Some(&historical_v2))?;
     succeeded(&replaced)?;
@@ -253,6 +256,14 @@ fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
         |row| row.get(0),
     )?;
     assert!(fresh_owners.contains("'CredentialIssueIntent'"));
+    assert_eq!(
+        rusqlite::Connection::open(&store)?.query_row(
+            "SELECT version FROM oauth_restore_schema_version",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        2
+    );
 
     // A later occupied fresh-owner unit must also roll back replacement of
     // the earlier empty credential unit in this same runtime admission.
