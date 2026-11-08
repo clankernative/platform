@@ -67,6 +67,56 @@ pub(crate) struct NativeAcquisition {
     fixture_time: Option<Duration>,
 }
 
+/// Negative capability for an actual retained original and its connection join.
+/// It can only refuse; there is no sample, clock, deadline or permission output.
+/// This is safe to invoke during unwind while a resource RefCell is borrowed.
+pub(super) struct NativeOriginalRefusal {
+    observation: Rc<Cell<OriginalObservation>>,
+    connection_observation: Option<Rc<Cell<OriginalObservation>>>,
+}
+
+impl NativeOriginalRefusal {
+    /// Identity and negative disposition only. In particular this never
+    /// samples a completed original or proves that any clock is still live.
+    pub(super) fn require_same(&self, other: &Self) -> Result<()> {
+        let connection_same = match (&self.connection_observation, &other.connection_observation) {
+            (Some(first), Some(second)) => Rc::ptr_eq(first, second),
+            (None, None) => true,
+            _ => false,
+        };
+        let refused = |original: &Self| {
+            original.observation.get().refused
+                || original
+                    .connection_observation
+                    .as_ref()
+                    .is_some_and(|shared| shared.get().refused)
+        };
+        if !Rc::ptr_eq(&self.observation, &other.observation)
+            || !connection_same
+            || refused(self)
+            || refused(other)
+        {
+            self.refuse();
+            other.refuse();
+            anyhow::bail!("epoch_native_original_identity_changed_or_refused");
+        }
+        Ok(())
+    }
+
+    pub(super) fn refuse(&self) {
+        self.observation.set(OriginalObservation {
+            refused: true,
+            ..self.observation.get()
+        });
+        if let Some(shared) = &self.connection_observation {
+            shared.set(OriginalObservation {
+                refused: true,
+                ..shared.get()
+            });
+        }
+    }
+}
+
 /// A cold stage owns its actual original; an HTTP callback exclusively borrows
 /// the request's actual stored original. Borrowing creates no narrowed copy,
 /// so a counter/peer meet remains on the request after the callback returns.
@@ -106,6 +156,30 @@ impl<'a> StageAcquisition<'a> {
         }
     }
 
+    /// Fixed Controller native transition. A borrowed response original must
+    /// remain owned by its actual request; it can never become a following
+    /// request supplier through this operation.
+    pub(super) fn retire_owned(
+        &mut self,
+        clock: &mut NativeConnectionClock,
+    ) -> Result<NativeOriginalRefusal> {
+        match &mut self.original {
+            StageOriginal::Owned(original) => {
+                let refusal = original.retained_refusal();
+                clock.retire_checked(original)?;
+                Ok(refusal)
+            }
+            StageOriginal::Borrowed(original) => {
+                original.refuse();
+                clock.observation.set(OriginalObservation {
+                    refused: true,
+                    ..clock.observation.get()
+                });
+                anyhow::bail!("epoch_native_borrowed_original_cannot_detach")
+            }
+        }
+    }
+
     /// Only the new-request constructor consumes a freshly owned stage.
     /// A borrowed original cannot be detached from its actual request owner.
     pub(super) fn into_owned(self) -> Result<NativeAcquisition> {
@@ -128,6 +202,8 @@ impl<'a> StageAcquisition<'a> {
 struct OriginalObservation {
     latest: Duration,
     refused: bool,
+    // Original permission ends without deleting the admitted clock history.
+    retired_at: Option<Duration>,
 }
 
 /// The actual completed admission's clock continuity, never its permission or
@@ -149,6 +225,7 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <NativeConnectionClock as Ambiguous<_>>::check;
+            let _ = <NativeOriginalRefusal as Ambiguous<_>>::check;
             let _ = <StageAcquisition<'static> as Ambiguous<_>>::check;
         }};
     }
@@ -178,6 +255,46 @@ impl NativeConnectionClock {
             return Err(error);
         }
         self.join_request(original)
+    }
+
+    /// Retire only the actual still-live original joined to this admitted
+    /// connection. This grants nothing, captures no clock and settles no owner.
+    /// The fixed restore finalizer still owes real ACK/posts and old closes.
+    pub(super) fn retire_checked(&mut self, original: &mut NativeAcquisition) -> Result<()> {
+        let requested = (|| {
+            let same_anchor = match &original.connection_observation {
+                Some(shared) => {
+                    Rc::ptr_eq(shared, &self.observation)
+                        && !Rc::ptr_eq(&original.observation, &self.observation)
+                }
+                None => Rc::ptr_eq(&original.observation, &self.observation),
+            };
+            ensure!(
+                same_anchor
+                    && !self.observation.get().refused
+                    && original.identity_domain == self.identity_domain
+                    && original.process == self.process,
+                "epoch_native_retirement_connection_changed"
+            );
+            // The real final sample uses the SAME old interval. Expiry,
+            // rewind and refusal remain terminal, never completion.
+            original.require_scope(AcquisitionScope::Current)?;
+            let observed = original.observation.get();
+            original.observation.set(OriginalObservation {
+                retired_at: Some(observed.latest),
+                ..observed
+            });
+            original.valid = false;
+            Ok(())
+        })();
+        if requested.is_err() {
+            original.refuse();
+            self.observation.set(OriginalObservation {
+                refused: true,
+                ..self.observation.get()
+            });
+        }
+        requested
     }
 
     pub(super) fn begin_current(&mut self) -> Result<NativeAcquisition> {
@@ -278,9 +395,10 @@ impl AcquisitionProgress {
     }
 
     pub(super) fn last_checked_elapsed_micros(&self) -> Option<u32> {
-        self.observation
-            .get()
-            .latest
+        let observed = self.observation.get();
+        observed
+            .retired_at
+            .unwrap_or(observed.latest)
             .checked_sub(self.origin)
             .and_then(|elapsed| elapsed.as_micros().try_into().ok())
     }
@@ -341,6 +459,7 @@ impl NativeAcquisition {
             observation: Rc::new(Cell::new(OriginalObservation {
                 latest: origin,
                 refused: false,
+                retired_at: None,
             })),
             connection_observation: None,
             deadline,
@@ -377,6 +496,7 @@ impl NativeAcquisition {
         ensure!(
             self.valid
                 && !self.observation.get().refused
+                && self.observation.get().retired_at.is_none()
                 && self
                     .connection_observation
                     .as_ref()
@@ -405,6 +525,7 @@ impl NativeAcquisition {
         ensure!(
             self.valid
                 && !original.refused
+                && original.retired_at.is_none()
                 && self
                     .connection_observation
                     .as_ref()
@@ -424,12 +545,12 @@ impl NativeAcquisition {
         }
         self.observation.set(OriginalObservation {
             latest: now,
-            refused: false,
+            ..original
         });
         if let Some(shared) = &self.connection_observation {
             shared.set(OriginalObservation {
                 latest: now,
-                refused: false,
+                ..shared.get()
             });
         }
         Ok(Sample {
@@ -451,9 +572,10 @@ impl NativeAcquisition {
     /// Another actual narrowed view may have observed it; it does not establish
     /// this handle's last successful I/O or this handle's current validity.
     pub(super) fn last_checked_elapsed_micros(&self) -> Option<u32> {
-        self.observation
-            .get()
-            .latest
+        let observed = self.observation.get();
+        observed
+            .retired_at
+            .unwrap_or(observed.latest)
             .checked_sub(self.origin)
             .and_then(|elapsed| elapsed.as_micros().try_into().ok())
     }
@@ -474,8 +596,20 @@ impl NativeAcquisition {
             self.domain.clone(),
             self.origin,
             self.deadline,
-            self.observation.get().latest,
+            self.observation
+                .get()
+                .retired_at
+                .unwrap_or(self.observation.get().latest),
         )
+    }
+
+    /// Retain only the ability to refuse this actual original. Cloning these
+    /// private cells performs no observation and cannot renew any bound.
+    pub(super) fn retained_refusal(&self) -> NativeOriginalRefusal {
+        NativeOriginalRefusal {
+            observation: Rc::clone(&self.observation),
+            connection_observation: self.connection_observation.as_ref().map(Rc::clone),
+        }
     }
 
     pub(super) fn refuse(&mut self) {
@@ -588,6 +722,77 @@ impl NativeAcquisition {
     /// This permits a shorter legitimate lease without widening either side.
     pub(super) fn exchange_current_views(&mut self, other: &mut Self) -> Result<()> {
         self.exchange_views(other, AcquisitionScope::Current)
+    }
+
+    /// Negative join for the fixed installed-to-Current handoff. The actual
+    /// retired predecessor is identity only: never sample, narrow or revive
+    /// its old interval. The distinct request must belong to the SAME actual
+    /// connection and pass its own fresh sample. This neither creates a
+    /// request nor consumes the separate native socket/cursor transfer.
+    pub(super) fn require_retired_predecessor(&mut self, fresh: &mut Self) -> Result<()> {
+        let requested = (|| {
+            let previous = self.observation.get();
+            let retired = previous
+                .retired_at
+                .ok_or_else(|| anyhow::anyhow!("epoch_native_retired_predecessor_required"))?;
+            let previous_connection = self
+                .connection_observation
+                .as_ref()
+                .unwrap_or(&self.observation);
+            let next_connection = fresh
+                .connection_observation
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("epoch_native_current_connection_required"))?;
+            ensure!(
+                self.scope == AcquisitionScope::Current
+                    && fresh.scope == AcquisitionScope::Current
+                    && !previous.refused
+                    && !previous_connection.get().refused
+                    && Rc::ptr_eq(previous_connection, next_connection)
+                    && !Rc::ptr_eq(&self.observation, &fresh.observation)
+                    && !Rc::ptr_eq(&fresh.observation, next_connection)
+                    && self.identity_domain == fresh.identity_domain
+                    && self.process == fresh.process
+                    && self.domain != fresh.domain
+                    && fresh.origin > self.origin
+                    && fresh.origin >= retired,
+                "epoch_native_retired_current_connection_changed"
+            );
+            // Only the new actual request observes time. Its own deadline,
+            // high-water mark and permanent refusal remain unchanged.
+            fresh.sample().map(|_| ())
+        })();
+        if requested.is_err() {
+            self.refuse();
+            fresh.refuse();
+        }
+        requested
+    }
+
+    /// Bind two actual retired peer views before their native socket/cursor
+    /// transfer. Equal DATA or two different requests on the same connection
+    /// cannot stand in for the SAME original observation. Only fresh is sampled.
+    pub(super) fn require_same_retired_peer(
+        &mut self,
+        peer: &mut Self,
+        fresh: &mut Self,
+    ) -> Result<()> {
+        let requested = (|| {
+            ensure!(
+                Rc::ptr_eq(&self.observation, &peer.observation)
+                    && self.domain == peer.domain
+                    && self.origin == peer.origin,
+                "epoch_native_retired_peer_original_changed"
+            );
+            self.require_retired_predecessor(fresh)?;
+            peer.require_retired_predecessor(fresh)
+        })();
+        if requested.is_err() {
+            self.refuse();
+            peer.refuse();
+            fresh.refuse();
+        }
+        requested
     }
 
     pub(super) fn exchange_storage_bootstrap_views(&mut self, other: &mut Self) -> Result<()> {
@@ -728,6 +933,7 @@ impl NativeAcquisition {
             observation: Rc::new(Cell::new(OriginalObservation {
                 latest: origin,
                 refused: false,
+                retired_at: None,
             })),
             connection_observation: None,
             deadline: origin + limit,
@@ -1145,6 +1351,7 @@ mod tests {
                 2 => connection.observation.set(OriginalObservation {
                     latest: Duration::from_secs(103),
                     refused: false,
+                    retired_at: None,
                 }),
                 3 => captured.fixture_time = Some(Duration::from_secs(107)),
                 _ => captured.refuse(),
@@ -2008,6 +2215,40 @@ mod tests {
     }
 
     #[test]
+    fn retained_negative_original_refuses_siblings_and_connection_without_sampling() {
+        let origin = Duration::from_secs(100);
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"retained-negative"),
+            std::process::id(),
+            origin,
+            Duration::from_secs(5),
+        );
+        let connection = Rc::new(Cell::new(OriginalObservation {
+            latest: origin,
+            refused: false,
+            retired_at: None,
+        }));
+        original.connection_observation = Some(Rc::clone(&connection));
+        let mut sibling = original.narrow(5, origin + Duration::from_secs(5)).unwrap();
+        let negative = original.retained_refusal();
+        let before = original.observation.get().latest;
+        assert!(!original.observation.get().refused);
+        assert!(!connection.get().refused);
+        // Refusal does not consult the clock, even when it is already invalid.
+        original.fixture_time = Some(Duration::ZERO);
+        negative.refuse();
+        assert!(original.observation.get().refused);
+        assert!(connection.get().refused);
+        assert_eq!(original.observation.get().latest, before);
+        original.fixture_time = Some(origin + Duration::from_secs(1));
+        sibling.fixture_time = original.fixture_time;
+        assert!(original.remaining().is_err());
+        assert!(sibling.remaining().is_err());
+        negative.refuse();
+        assert!(connection.get().refused);
+    }
+
+    #[test]
     fn narrowed_io_keeps_original_domain_origin_and_spent_time() {
         let mut original = NativeAcquisition::fixture(
             Digest::new(b"original"),
@@ -2193,6 +2434,86 @@ mod tests {
     #[test]
     fn unsupported_platform_never_substitutes_instant_or_wall_time() {
         assert!(NativeAcquisition::begin(5).is_err());
+    }
+
+    #[test]
+    fn restored_admission_meets_the_tighter_ceiling_without_reopening_spent_time() {
+        for rewind in [false, true] {
+            let origin = Duration::from_secs(100);
+            let mut original = NativeAcquisition::fixture(
+                Digest::new(b"actual-restore-clock-fixture-only"),
+                std::process::id(),
+                origin,
+                MAX_ACQUISITION,
+            );
+            original.fixture_time = Some(origin + Duration::from_secs(1));
+            let domain = original.domain.clone();
+            let ceiling = origin + Duration::from_secs(4);
+            let mut actual_child = original.narrow(5, ceiling).unwrap();
+            original.exchange_current_views(&mut actual_child).unwrap();
+            assert!(Rc::ptr_eq(&original.observation, &actual_child.observation));
+            assert_eq!(original.origin, origin);
+            assert_eq!(original.domain, domain);
+            assert_eq!(original.deadline, ceiling);
+            assert_eq!(original.remaining().unwrap(), Duration::from_secs(3));
+            // A later signed ceiling cannot widen this same original again.
+            let mut later = original.narrow(5, origin + MAX_ACQUISITION).unwrap();
+            original.exchange_current_views(&mut later).unwrap();
+            assert_eq!(original.deadline, ceiling);
+            if rewind {
+                original.observe(origin + Duration::from_secs(3)).unwrap();
+                original.fixture_time = Some(origin + Duration::from_secs(2));
+            } else {
+                original.fixture_time = Some(ceiling);
+            }
+            assert!(original.remaining().is_err());
+            original.fixture_time = Some(origin + Duration::from_secs(1));
+            assert!(original.remaining().is_err());
+            assert!(original.narrow(5, origin + MAX_ACQUISITION).is_err());
+            assert!(actual_child.remaining().is_err());
+            assert!(later.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn restored_client_meets_actual_views_instead_of_joining_a_larger_parent() {
+        use syn::visit::Visit;
+        fn calls(source: &str) -> Vec<String> {
+            struct Calls(Vec<String>);
+            impl<'ast> Visit<'ast> for Calls {
+                fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                    self.0.push(node.method.to_string());
+                    syn::visit::visit_expr_method_call(self, node);
+                }
+            }
+            let file = syn::parse_file(source).unwrap();
+            let method = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Impl(item) => Some(item),
+                    _ => None,
+                })
+                .flat_map(|item| &item.items)
+                .find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == "narrow_authenticated_ceiling" => {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .expect("actual restore client ceiling handoff");
+            let mut calls = Calls(Vec::new());
+            calls.visit_block(&method.block);
+            calls.0
+        }
+        let source = include_str!("native_enrollment/restored/receiver.rs");
+        assert_eq!(calls(source), ["narrow", "exchange_current_views"]);
+        let mutant = source.replace(
+            "exchange_current_views(&mut narrowed)",
+            "join_current_view(narrowed)",
+        );
+        assert_ne!(mutant, source);
+        assert_ne!(calls(&mutant), ["narrow", "exchange_current_views"]);
     }
 
     #[test]
@@ -2390,5 +2711,610 @@ mod tests {
         assert_eq!(before.domain, after.domain);
         assert!(after.elapsed >= before.elapsed);
         assert!(acquisition.remaining().unwrap() <= MAX_ACQUISITION);
+    }
+
+    // Actual clock arithmetic and shared cells only; this constructs no native
+    // enrolled role, kernel peer, physical owner, ACK or restore completion.
+    fn retirement_cold_pair() -> (NativeConnectionClock, NativeAcquisition, NativeAcquisition) {
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"retirement-admission"),
+            std::process::id(),
+            Duration::from_secs(100),
+            MAX_ACQUISITION,
+        );
+        let sibling = original.narrow(5, original.deadline).unwrap();
+        let connection = original
+            .narrow(5, original.deadline)
+            .unwrap()
+            .into_connection_clock()
+            .unwrap();
+        assert!(Rc::ptr_eq(&connection.observation, &original.observation));
+        (connection, original, sibling)
+    }
+
+    #[test]
+    fn successful_original_retirement_is_sticky_across_actual_connection_highwater_updates() {
+        let (mut connection, mut original, mut sibling) = retirement_cold_pair();
+        let progress = original.diagnostic_progress();
+        original.fixture_time = Some(Duration::from_secs(102));
+        connection.retire_checked(&mut original).unwrap();
+        assert_eq!(
+            original.observation.get().retired_at,
+            Some(Duration::from_secs(102))
+        );
+        assert!(!connection.observation.get().refused);
+        for (domain, origin, now) in [
+            (b"following-1".as_slice(), 103, 104),
+            (b"following-2".as_slice(), 106, 107),
+        ] {
+            let mut following = connection
+                .join_request(NativeAcquisition::fixture(
+                    Digest::new(domain),
+                    std::process::id(),
+                    Duration::from_secs(origin),
+                    MAX_ACQUISITION,
+                ))
+                .unwrap();
+            following.fixture_time = Some(Duration::from_secs(now));
+            following.sample().unwrap();
+            assert_eq!(
+                connection.observation.get().latest,
+                Duration::from_secs(now)
+            );
+            assert_eq!(
+                connection.observation.get().retired_at,
+                Some(Duration::from_secs(102))
+            );
+            sibling.fixture_time = Some(Duration::from_secs(now));
+            assert!(sibling.sample().is_err());
+            assert_eq!(progress.last_checked_elapsed_micros(), Some(2_000_000));
+            assert_eq!(original.last_checked_elapsed_micros(), Some(2_000_000));
+            assert_eq!(
+                original.historical_interval_observation().3,
+                Duration::from_secs(102)
+            );
+            assert!(!connection.observation.get().refused);
+        }
+        // Successful retirement never silences a genuine later negative path.
+        sibling.refuse();
+        assert!(connection.observation.get().refused);
+        assert!(
+            connection
+                .join_request(NativeAcquisition::fixture(
+                    Digest::new(b"after-negative"),
+                    std::process::id(),
+                    Duration::from_secs(108),
+                    MAX_ACQUISITION
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn attached_request_retirement_preserves_the_distinct_admission_anchor_and_next_request() {
+        let (mut connection, mut admission, _) = retirement_cold_pair();
+        admission.fixture_time = Some(Duration::from_secs(101));
+        connection.retire_checked(&mut admission).unwrap();
+        let mut request = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"retire-bound-request"),
+                std::process::id(),
+                Duration::from_secs(102),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        assert!(!Rc::ptr_eq(&request.observation, &connection.observation));
+        let mut sibling = request.narrow(5, request.deadline).unwrap();
+        request.fixture_time = Some(Duration::from_secs(103));
+        connection.retire_checked(&mut request).unwrap();
+        let mut following = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"after-bound-request"),
+                std::process::id(),
+                Duration::from_secs(104),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        following.fixture_time = Some(Duration::from_secs(105));
+        following.sample().unwrap();
+        assert_eq!(
+            connection.observation.get().retired_at,
+            Some(Duration::from_secs(101))
+        );
+        assert_eq!(
+            request.observation.get().retired_at,
+            Some(Duration::from_secs(103))
+        );
+        assert_eq!(
+            connection.observation.get().latest,
+            Duration::from_secs(105)
+        );
+        sibling.fixture_time = Some(Duration::from_secs(105));
+        assert!(sibling.remaining().is_err());
+        assert!(!connection.observation.get().refused);
+    }
+
+    #[test]
+    fn retired_predecessor_joins_only_the_actual_later_request_without_resampling_old_time() {
+        for (attached, sibling_view) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (mut connection, mut old, _) = retirement_cold_pair();
+            if attached {
+                old.fixture_time = Some(Duration::from_secs(101));
+                connection.retire_checked(&mut old).unwrap();
+                old = connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"attached-installed-original"),
+                        std::process::id(),
+                        Duration::from_secs(102),
+                        MAX_ACQUISITION,
+                    ))
+                    .unwrap();
+            }
+            old.fixture_time = Some(Duration::from_secs(103));
+            let sibling = old.narrow(5, old.deadline).unwrap();
+            connection.retire_checked(&mut old).unwrap();
+            if sibling_view {
+                old = sibling;
+                // Retirement invalidates the actual shared observation of
+                // every view, without rewriting a sibling's copied valid bit.
+                assert!(old.valid);
+            }
+            let old_history = old.historical_interval_observation();
+            let old_observation = old.observation.get();
+            let mut fresh = connection
+                .join_request(NativeAcquisition::fixture(
+                    Digest::new(b"genuine-following-current"),
+                    std::process::id(),
+                    Duration::from_secs(900),
+                    MAX_ACQUISITION,
+                ))
+                .unwrap();
+            let fresh_observation = Rc::clone(&fresh.observation);
+            let deadline = fresh.deadline;
+            // An attempted old positive sample here would fail after expiry.
+            old.fixture_time = Some(Duration::from_secs(901));
+            fresh.fixture_time = Some(Duration::from_secs(901));
+            old.require_retired_predecessor(&mut fresh).unwrap();
+            assert_eq!(old.historical_interval_observation(), old_history);
+            assert_eq!(old.observation.get().retired_at, old_observation.retired_at);
+            assert!(!old.observation.get().refused);
+            assert_eq!(fresh.origin, Duration::from_secs(900));
+            assert_eq!(fresh.deadline, deadline);
+            assert!(Rc::ptr_eq(&fresh.observation, &fresh_observation));
+            assert_eq!(
+                connection.observation.get().latest,
+                Duration::from_secs(901)
+            );
+            assert!(!connection.observation.get().refused);
+            assert!(old.sample().is_err());
+            fresh.remaining().unwrap();
+            // The comparison is not another clock or permission factory.
+            old.require_retired_predecessor(&mut fresh).unwrap();
+            assert_eq!(fresh.deadline, deadline);
+        }
+    }
+
+    #[test]
+    fn retired_predecessor_rejects_changed_root_scope_identity_and_time_permanently() {
+        for (attached, fault) in [false, true]
+            .into_iter()
+            .flat_map(|attached| (0..17).map(move |fault| (attached, fault)))
+        {
+            let (mut connection, mut old, _) = retirement_cold_pair();
+            if attached {
+                old.fixture_time = Some(Duration::from_secs(100));
+                connection.retire_checked(&mut old).unwrap();
+                old = connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"attached-predecessor-negative"),
+                        std::process::id(),
+                        Duration::from_secs(101),
+                        MAX_ACQUISITION,
+                    ))
+                    .unwrap();
+            }
+            old.fixture_time = Some(Duration::from_secs(102));
+            connection.retire_checked(&mut old).unwrap();
+            let mut fresh = connection
+                .join_request(NativeAcquisition::fixture(
+                    Digest::new(b"following-current-for-negative"),
+                    std::process::id(),
+                    Duration::from_secs(103),
+                    MAX_ACQUISITION,
+                ))
+                .unwrap();
+            let old_root = Rc::clone(&connection.observation);
+            let fresh_state = Rc::clone(&fresh.observation);
+            match fault {
+                0 => old.observation.set(OriginalObservation {
+                    retired_at: None,
+                    ..old.observation.get()
+                }),
+                1 => old.refuse(),
+                2 => old_root.set(OriginalObservation {
+                    refused: true,
+                    ..old_root.get()
+                }),
+                3 => fresh.refuse(),
+                4 => old.scope = AcquisitionScope::StorageBootstrap,
+                5 => fresh.scope = AcquisitionScope::StorageBootstrap,
+                6 => fresh.domain = old.domain.clone(),
+                7 => fresh.origin = old.origin,
+                8 => fresh.origin = Duration::from_secs(101),
+                9 => fresh.identity_domain = Digest::new(b"wrong-native-identity"),
+                10 => fresh.process = fresh.process.wrapping_add(1),
+                11 => fresh.connection_observation = Some(Rc::new(Cell::new(old_root.get()))),
+                12 => fresh.connection_observation = None,
+                13 => fresh.observation = Rc::clone(&old.observation),
+                14 => fresh.fixture_time = Some(fresh.deadline),
+                15 => fresh.fixture_time = Some(Duration::from_secs(102)),
+                _ => fresh.observation = Rc::clone(&old_root),
+            }
+            assert!(
+                old.require_retired_predecessor(&mut fresh).is_err(),
+                "fault{fault}"
+            );
+            assert!(old_root.get().refused, "old root {fault}");
+            assert!(fresh.observation.get().refused, "fresh root {fault}");
+            fresh.fixture_time = Some(Duration::from_secs(104));
+            assert!(fresh.sample().is_err(), "repair {fault}");
+            assert!(
+                old.require_retired_predecessor(&mut fresh).is_err(),
+                "reuse {fault}"
+            );
+            if fault != 13 && fault != 16 {
+                assert!(fresh_state.get().refused);
+            }
+        }
+    }
+
+    #[test]
+    fn equal_data_from_a_different_retired_connection_never_supplies_the_current_root() {
+        let (mut first, mut predecessor, _) = retirement_cold_pair();
+        let (mut other, mut other_predecessor, _) = retirement_cold_pair();
+        predecessor.fixture_time = Some(Duration::from_secs(102));
+        other_predecessor.fixture_time = Some(Duration::from_secs(102));
+        first.retire_checked(&mut predecessor).unwrap();
+        other.retire_checked(&mut other_predecessor).unwrap();
+        assert_eq!(
+            predecessor.historical_interval_observation(),
+            other_predecessor.historical_interval_observation()
+        );
+        let mut foreign = other
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"current-on-the-wrong-real-root"),
+                std::process::id(),
+                Duration::from_secs(103),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        assert!(
+            predecessor
+                .require_retired_predecessor(&mut foreign)
+                .is_err()
+        );
+        assert!(first.observation.get().refused && other.observation.get().refused);
+        assert_eq!(
+            predecessor.observation.get().retired_at,
+            Some(Duration::from_secs(102))
+        );
+        assert_eq!(
+            other_predecessor.observation.get().retired_at,
+            Some(Duration::from_secs(102))
+        );
+        foreign.fixture_time = Some(Duration::from_secs(104));
+        assert!(foreign.remaining().is_err());
+    }
+
+    #[test]
+    fn retired_peer_pair_requires_one_actual_original_even_with_a_shared_connection() {
+        for fault in 0..3 {
+            let (mut connection, mut old, mut peer) = retirement_cold_pair();
+            old.fixture_time = Some(Duration::from_secs(101));
+            connection.retire_checked(&mut old).unwrap();
+            let mut other_root = None;
+            if fault == 1 {
+                peer = connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"another-retired-request-same-real-connection"),
+                        std::process::id(),
+                        Duration::from_secs(102),
+                        MAX_ACQUISITION,
+                    ))
+                    .unwrap();
+                peer.fixture_time = Some(Duration::from_secs(103));
+                connection.retire_checked(&mut peer).unwrap();
+            } else if fault == 2 {
+                let (mut other, mut impostor, _) = retirement_cold_pair();
+                impostor.fixture_time = Some(Duration::from_secs(101));
+                other.retire_checked(&mut impostor).unwrap();
+                assert_eq!(
+                    impostor.historical_interval_observation(),
+                    old.historical_interval_observation()
+                );
+                peer = impostor;
+                other_root = Some(other);
+            }
+            let mut fresh = connection
+                .join_request(NativeAcquisition::fixture(
+                    Digest::new(b"fresh-after-both-retired-views"),
+                    std::process::id(),
+                    Duration::from_secs(104),
+                    MAX_ACQUISITION,
+                ))
+                .unwrap();
+            // Old time is deliberately unusable; only the real new view may
+            // advance the shared live high-water mark.
+            old.fixture_time = Some(Duration::from_secs(900));
+            peer.fixture_time = Some(Duration::from_secs(900));
+            fresh.fixture_time = Some(Duration::from_secs(105));
+            let old_interval = old.historical_interval_observation();
+            assert_eq!(
+                old.require_same_retired_peer(&mut peer, &mut fresh).is_ok(),
+                fault == 0
+            );
+            assert_eq!(old.historical_interval_observation(), old_interval);
+            if fault == 0 {
+                assert!(!connection.observation.get().refused);
+                fresh.remaining().unwrap();
+            } else {
+                assert!(connection.observation.get().refused);
+                if let Some(other) = other_root {
+                    assert!(other.observation.get().refused);
+                }
+                fresh.fixture_time = Some(Duration::from_secs(106));
+                assert!(
+                    old.require_same_retired_peer(&mut peer, &mut fresh)
+                        .is_err()
+                );
+                assert!(fresh.remaining().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn retired_original_views_cannot_narrow_mint_budget_convert_identity_or_repeat_retirement() {
+        for action in 0..7 {
+            let (mut connection, mut original, mut sibling) = retirement_cold_pair();
+            let mut captured_budget = original.budget().unwrap();
+            original.fixture_time = Some(Duration::from_secs(101));
+            connection.retire_checked(&mut original).unwrap();
+            sibling.fixture_time = Some(Duration::from_secs(102));
+            let result = match action {
+                0 => sibling.sample().map(|_| ()),
+                1 => sibling.narrow(5, Duration::from_secs(105)).map(|_| ()),
+                2 => sibling.budget().map(|_| ()),
+                3 => sibling.identity_domain().map(|_| ()),
+                4 => sibling.into_connection_clock().map(|_| ()),
+                5 => captured_budget.remaining_native(&mut sibling).map(|_| ()),
+                _ => connection.retire_checked(&mut sibling),
+            };
+            assert!(result.is_err(), "retired action={action}");
+            assert_eq!(
+                connection.observation.get().retired_at,
+                Some(Duration::from_secs(101))
+            );
+            original.fixture_time = Some(Duration::from_secs(102));
+            assert!(original.sample().is_err());
+        }
+    }
+
+    #[test]
+    fn original_retirement_rejects_deadline_rewind_refusal_scope_and_unbound_or_foreign_identity() {
+        for fault in 0..8 {
+            let (mut connection, mut original, _) = retirement_cold_pair();
+            original.fixture_time = Some(Duration::from_secs(102));
+            original.sample().unwrap();
+            match fault {
+                0 => original.fixture_time = Some(Duration::from_secs(105)),
+                1 => original.fixture_time = Some(Duration::from_secs(101)),
+                2 => original.refuse(),
+                3 => connection.observation.set(OriginalObservation {
+                    refused: true,
+                    ..connection.observation.get()
+                }),
+                4 => original.scope = AcquisitionScope::StorageBootstrap,
+                5 => original.identity_domain = Digest::new(b"foreign-identity"),
+                6 => original.process = original.process.wrapping_add(1),
+                _ => {
+                    original = NativeAcquisition::fixture(
+                        Digest::new(b"retirement-admission"),
+                        std::process::id(),
+                        Duration::from_secs(100),
+                        MAX_ACQUISITION,
+                    )
+                }
+            }
+            assert!(
+                connection.retire_checked(&mut original).is_err(),
+                "fault={fault}"
+            );
+            assert!(connection.observation.get().refused);
+            assert!(original.observation.get().refused);
+            assert_eq!(original.observation.get().retired_at, None);
+            original.fixture_time = Some(Duration::from_secs(103));
+            assert!(original.remaining().is_err());
+            assert!(
+                connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"cannot-repair"),
+                        std::process::id(),
+                        Duration::from_secs(104),
+                        MAX_ACQUISITION
+                    ))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_connection_retirement_refuses_both_real_anchors_without_retiring_either() {
+        let (mut first, _, _) = retirement_cold_pair();
+        let (second, mut second_original, _) = retirement_cold_pair();
+        // Even identical semantic fields cannot replace the SAME actual cell.
+        assert!(!Rc::ptr_eq(&first.observation, &second.observation));
+        assert!(first.retire_checked(&mut second_original).is_err());
+        assert!(first.observation.get().refused && second.observation.get().refused);
+        assert_eq!(first.observation.get().retired_at, None);
+        assert_eq!(second.observation.get().retired_at, None);
+    }
+
+    #[test]
+    fn retired_connection_rejects_new_origins_below_the_full_live_highwater() {
+        for after_following_request in [false, true] {
+            let (mut connection, mut original, _) = retirement_cold_pair();
+            original.fixture_time = Some(Duration::from_secs(102));
+            connection.retire_checked(&mut original).unwrap();
+            let stale_origin = if after_following_request {
+                let mut following = connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"retirement-live-highwater"),
+                        std::process::id(),
+                        Duration::from_secs(103),
+                        MAX_ACQUISITION,
+                    ))
+                    .unwrap();
+                following.fixture_time = Some(Duration::from_secs(104));
+                following.sample().unwrap();
+                Duration::from_millis(103_500)
+            } else {
+                Duration::from_secs(101)
+            };
+            // The lower bound is latest=102 or104, never original100 or the
+            // frozen retirement diagnostic102 after a later request advances.
+            assert!(
+                connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"stale-after-retirement"),
+                        std::process::id(),
+                        stale_origin,
+                        MAX_ACQUISITION
+                    ))
+                    .is_err()
+            );
+            assert!(connection.observation.get().refused);
+            assert_eq!(
+                connection.observation.get().retired_at,
+                Some(Duration::from_secs(102))
+            );
+            assert!(
+                connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"highwater-repair-denied"),
+                        std::process::id(),
+                        Duration::from_secs(105),
+                        MAX_ACQUISITION
+                    ))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn owned_stage_retirement_keeps_real_clock_but_borrowed_stage_cannot_detach() {
+        for borrowed in [false, true] {
+            let (mut connection, mut original, _) = retirement_cold_pair();
+            original.fixture_time = Some(Duration::from_secs(102));
+            if borrowed {
+                {
+                    let mut stage = StageAcquisition::borrowed(&mut original);
+                    assert!(stage.retire_owned(&mut connection).is_err());
+                }
+                assert!(original.observation.get().refused);
+                assert!(connection.observation.get().refused);
+                assert_eq!(original.observation.get().retired_at, None);
+            } else {
+                let mut stage = StageAcquisition::owned(original);
+                let negative = stage.retire_owned(&mut connection).unwrap();
+                assert!(stage.as_mut().sample().is_err());
+                let mut next = connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"following-owned-stage"),
+                        std::process::id(),
+                        Duration::from_secs(103),
+                        MAX_ACQUISITION,
+                    ))
+                    .unwrap();
+                next.sample().unwrap();
+                negative.refuse();
+                assert!(next.sample().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn negative_original_identity_does_not_sample_or_prove_an_unexpired_clock() {
+        let (_, mut original, _) = retirement_cold_pair();
+        let first = original.retained_refusal();
+        let same = original.retained_refusal();
+        let before = original.historical_interval_observation();
+        // The identity comparison must not turn into another sample. Even
+        // here it proves only identity; the actual clock check still refuses.
+        original.fixture_time = Some(Duration::from_secs(1000));
+        first.require_same(&same).unwrap();
+        assert_eq!(original.historical_interval_observation(), before);
+        assert!(original.remaining().is_err());
+        assert!(first.require_same(&same).is_err());
+        original.fixture_time = Some(Duration::from_secs(101));
+        assert!(original.remaining().is_err());
+    }
+
+    #[test]
+    fn negative_original_identity_rejects_another_request_on_the_same_connection() {
+        let (mut connection, _, _) = retirement_cold_pair();
+        let mut first = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"first-consumer-request"),
+                std::process::id(),
+                Duration::from_secs(101),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        let mut second = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"second-consumer-request"),
+                std::process::id(),
+                Duration::from_secs(102),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        assert!(Rc::ptr_eq(
+            first.connection_observation.as_ref().unwrap(),
+            second.connection_observation.as_ref().unwrap()
+        ));
+        assert!(!Rc::ptr_eq(&first.observation, &second.observation));
+        assert!(
+            first
+                .retained_refusal()
+                .require_same(&second.retained_refusal())
+                .is_err()
+        );
+        assert!(first.observation.get().refused && second.observation.get().refused);
+        assert!(connection.observation.get().refused);
+        first.fixture_time = Some(Duration::from_secs(103));
+        second.fixture_time = Some(Duration::from_secs(103));
+        assert!(first.remaining().is_err() && second.remaining().is_err());
+    }
+
+    #[test]
+    fn negative_original_identity_rejects_equal_data_from_another_real_root() {
+        let (first_connection, mut first, _) = retirement_cold_pair();
+        let (second_connection, mut second, _) = retirement_cold_pair();
+        assert_eq!(
+            first.historical_interval_observation(),
+            second.historical_interval_observation()
+        );
+        assert!(
+            first
+                .retained_refusal()
+                .require_same(&second.retained_refusal())
+                .is_err()
+        );
+        assert!(first_connection.observation.get().refused);
+        assert!(second_connection.observation.get().refused);
+        first.fixture_time = Some(Duration::from_secs(101));
+        second.fixture_time = Some(Duration::from_secs(101));
+        assert!(first.remaining().is_err() && second.remaining().is_err());
     }
 }

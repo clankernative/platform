@@ -75,7 +75,8 @@ fn fault(point: Point, action: Action) -> CutScope {
 use super::*;
 use crate::managed_credentials::{effects, simulation, store::tests as fixture};
 use rusqlite::OpenFlags;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::fs::OpenOptions;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use syn::visit::{self, Visit};
 
 pub(super) struct Fixture {
@@ -127,6 +128,12 @@ pub(super) struct World {
     pub(super) owner: Fixture,
     source_digest: Digest,
 }
+impl World {
+    pub(super) fn source_path(&self) -> Result<PathBuf> {
+        Ok(self.source.path().join("app.sqlite").canonicalize()?)
+    }
+}
+
 pub(super) fn world() -> Result<World> {
     let source = tempfile::tempdir()?;
     let mut application = application::tests::Fixture::new()?;
@@ -172,6 +179,16 @@ fn fixture_owner_with_application(
     // of the process umask. Production admission must still refuse public roots.
     std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700))?;
     let root = File::open(&root_path)?;
+    ensure!(
+        source.is_absolute() && source.canonicalize()? == source,
+        "fixture_source_alias"
+    );
+    let source = OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits(),
+        )?)
+        .open(&source)?;
     let scope = Rc::new(());
     let state = State {
         input: Input {
@@ -265,7 +282,7 @@ fn same_io_body_copies_resets_syncs_and_retains_the_actual_creator() -> Result<(
 }
 
 #[test]
-fn unsupported_scope_digest_application_and_source_symlink_create_no_target() -> Result<()> {
+fn unsupported_scope_digest_application_and_non_file_source_create_no_target() -> Result<()> {
     effects::scope(simulation::World::new(2002), || {
         for fault in 0..4 {
             let mut w = world()?;
@@ -274,9 +291,7 @@ fn unsupported_scope_digest_application_and_source_symlink_create_no_target() ->
                 1 => w.owner.state.input.database = Digest::new(b"wrong-image"),
                 2 => w.owner.reject_application = true,
                 _ => {
-                    let alias = w.source.path().join("alias.sqlite");
-                    symlink(&w.owner.state.input.source, &alias)?;
-                    w.owner.state.input.source = alias;
+                    w.owner.state.input.source = File::open(w.source.path())?;
                 }
             }
             assert!(execute(&mut w.owner).is_err());
@@ -329,14 +344,165 @@ fn scope_pointer_and_target_root_symlink_cannot_retarget_an_owner() -> Result<()
 #[test]
 fn no_production_default_or_data_impl_can_supply_staging_checks() {
     use quote::ToTokens as _;
+    fn factory_tokens(mut block: syn::Block) -> String {
+        fn expr(value: &mut syn::Expr) {
+            match value {
+                syn::Expr::Call(call) => {
+                    expr(&mut call.func);
+                    for arg in &mut call.args {
+                        expr(arg);
+                    }
+                    call.args.pop_punct();
+                }
+                syn::Expr::MethodCall(call) => {
+                    expr(&mut call.receiver);
+                    for arg in &mut call.args {
+                        expr(arg);
+                    }
+                    call.args.pop_punct();
+                }
+                syn::Expr::Try(node) => expr(&mut node.expr),
+                syn::Expr::Paren(node) => expr(&mut node.expr),
+                syn::Expr::Closure(node) => expr(&mut node.body),
+                syn::Expr::Block(node) => body(&mut node.block),
+                syn::Expr::If(node) => {
+                    expr(&mut node.cond);
+                    body(&mut node.then_branch);
+                    if let Some((_, other)) = &mut node.else_branch {
+                        expr(other);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn body(value: &mut syn::Block) {
+            for statement in &mut value.stmts {
+                match statement {
+                    syn::Stmt::Local(local) => {
+                        if let Some(init) = &mut local.init {
+                            expr(&mut init.expr);
+                        }
+                    }
+                    syn::Stmt::Expr(value, _) => expr(value),
+                    _ => {}
+                }
+            }
+        }
+        body(&mut block);
+        block.to_token_stream().to_string()
+    }
+    fn archive_factory_flow(body: &syn::Block) -> bool {
+        let mut actual = body.clone();
+        // The State literal is independently checked field-by-field below.
+        // Keep every binding, ordered check, postcheck and consuming call here.
+        let Some(syn::Stmt::Local(requested)) = actual.stmts.get_mut(3) else {
+            return false;
+        };
+        let Some(init) = &mut requested.init else {
+            return false;
+        };
+        let syn::Expr::Call(call) = &mut *init.expr else {
+            return false;
+        };
+        let syn::Expr::Paren(paren) = &mut *call.func else {
+            return false;
+        };
+        let syn::Expr::Closure(closure) = &mut *paren.expr else {
+            return false;
+        };
+        let syn::Expr::Block(closure) = &mut *closure.body else {
+            return false;
+        };
+        let mut count = 0;
+        for statement in &mut closure.block.stmts {
+            if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="state")
+                && let Some(init) = &mut local.init
+                && matches!(&*init.expr,syn::Expr::Struct(value) if value.path.segments.last().is_some_and(|name|name.ident=="State"))
+            {
+                count += 1;
+                *init.expr = syn::parse_quote!(CHECKED_STATE_LITERAL);
+            }
+        }
+        if count != 1 {
+            return false;
+        }
+        let expected: syn::Block = syn::parse_quote!({
+            if self.attempted {
+                if let Some(executor) = self.executor.as_mut() {
+                    executor.refuse();
+                }
+                anyhow::bail!("restore_archive_attempt_spent");
+            }
+            self.attempted = true;
+            let mut executor = self
+                .executor
+                .take()
+                .context("restore_archive_executor_closed")?;
+            let requested: Result<super::State> = (|| {
+                executor.require_historical_keys(&self.intent)?;
+                self.snapshot.tree.check()?;
+                let source = self
+                    .snapshot
+                    .source
+                    .take()
+                    .context("restore_archive_source_spent")?;
+                let root = self
+                    .preparation
+                    .root
+                    .take()
+                    .context("restore_archive_root_spent")?;
+                let scope = std::rc::Rc::new(());
+                let state = CHECKED_STATE_LITERAL;
+                state.require_unstarted()?;
+                Ok(state)
+            })();
+            let checked = executor.require_historical_keys(&self.intent);
+            if requested.is_err() || checked.is_err() {
+                executor.refuse();
+            }
+            let state = requested?;
+            checked?;
+            let selection = super::application::Selection::prepared(
+                &self.preparation.namespace,
+                self.intent.archive.security_epoch,
+                &self.snapshot.artifact,
+                &self.preparation.fence,
+                &self.preparation.authority_schema,
+                &self.preparation.oauth_schema,
+                &self.preparation.cut,
+            )?;
+            super::writer::NativeRestore::consume(
+                executor,
+                &self.intent,
+                state,
+                selection,
+                CapturedRestoreArtifact {
+                    snapshot: &self.snapshot,
+                    local: std::marker::PhantomData,
+                },
+            )
+        });
+        factory_tokens(actual) == factory_tokens(expected)
+    }
     struct Implementations {
         writer: bool,
+        archive: bool,
+        in_archive: bool,
+        archive_factory: bool,
+        archive_factories: usize,
+        in_state: bool,
+        external: Vec<String>,
         production: usize,
         defaults: usize,
         writer_owners: usize,
         closed_writer: bool,
         parents: usize,
         parent_impls: usize,
+        in_parent: bool,
+        parent_factory: bool,
+        parent_constructions: usize,
+        state_constructions: usize,
         closed: bool,
     }
     impl<'ast> Visit<'ast> for Implementations {
@@ -346,6 +512,10 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
                     && matches!(&a.meta,syn::Meta::List(v) if v.tokens.to_string()=="test")
             }) {
                 return;
+            }
+            if item.content.is_none() {
+                self.closed &= item.attrs.iter().all(|a| a.path().is_ident("doc"));
+                self.external.push(item.ident.to_string());
             }
             visit::visit_item_mod(self, item)
         }
@@ -369,11 +539,19 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
                     "application",
                     "refuse",
                     "execute_staging",
+                    "stage_and_settle",
                 ];
+                let names: &[&str] = if item.items.len() == 1
+                    && matches!(&item.items[0], syn::ImplItem::Fn(method) if method.sig.ident == "admit")
+                {
+                    &["admit"]
+                } else {
+                    &names
+                };
                 let allowed = item.trait_.is_none()
                     && item.items.len() == names.len()
-                    && names.into_iter().all(|name| item.items.iter().filter(|member| matches!(member,
-                        syn::ImplItem::Fn(method) if method.sig.ident == name && matches!(method.vis, syn::Visibility::Inherited))).count() == 1);
+                    && names.iter().all(|name| item.items.iter().filter(|member| matches!(member,
+                        syn::ImplItem::Fn(method) if method.sig.ident == *name && matches!(method.vis, syn::Visibility::Inherited))).count() == 1);
                 self.closed &= self.writer && allowed;
             }
             if let Some((_, path, _)) = &item.trait_
@@ -388,7 +566,35 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
                         if ty.qself.is_none() && ty.path.segments.len() == 1
                             && ty.path.segments[0].ident == "PortableWriter");
             }
-            visit::visit_item_impl(self, item)
+            let previous = (self.in_parent, self.in_archive, self.in_state);
+            self.in_parent = parent;
+            self.in_archive = self.archive
+                && item.trait_.is_none()
+                && matches!(&*item.self_ty, syn::Type::Path(t) if t.qself.is_none()
+                    && t.path.segments.len()==1 && t.path.segments[0].ident=="ArchivePrepared");
+            self.in_state = matches!(&*item.self_ty, syn::Type::Path(t)
+                if t.path.segments.last().is_some_and(|name|name.ident=="State"));
+            visit::visit_item_impl(self, item);
+            (self.in_parent, self.in_archive, self.in_state) = previous;
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            let previous = (self.parent_factory, self.archive_factory);
+            self.parent_factory = self.writer && self.in_parent && item.sig.ident == "admit";
+            let mut actual = item.sig.clone();
+            actual.inputs.pop_punct();
+            let mut expected: syn::Signature = syn::parse_quote!(
+                fn start_native(&mut self) -> Result<super::writer::NativeRestore<'metadata, 'storage, 'role, '_>>
+            );
+            expected.inputs.pop_punct();
+            self.archive_factory = self.in_archive
+                && item.vis.to_token_stream().to_string() == "pub (super)"
+                && actual.to_token_stream().to_string() == expected.to_token_stream().to_string();
+            self.archive_factories += usize::from(self.archive_factory);
+            if self.archive_factory {
+                self.closed &= archive_factory_flow(&item.block);
+            }
+            visit::visit_impl_item_fn(self, item);
+            (self.parent_factory, self.archive_factory) = previous;
         }
         fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
             if item.ident == "NativeParent" {
@@ -399,8 +605,20 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
                         "loan",
                         "crate::security_epoch::bootstrap::RestoreWriteLoan<'borrow,'metadata,'storage,'role>",
                     ),
+                    (
+                        "root",
+                        "crate::security_epoch::storage_authority::RestoreCreatorRoot",
+                    ),
                     ("state", "State"),
                     ("selection", "super::application::Selection<'selection>"),
+                    (
+                        "artifact",
+                        "&'selection super::archive::CapturedRestoreArtifact<'selection>",
+                    ),
+                    (
+                        "installed",
+                        "Option<super::archive::InstalledRestoreArtifact>",
+                    ),
                 ];
                 self.closed &= self.writer
                     && matches!(item.vis, syn::Visibility::Inherited)
@@ -419,15 +637,63 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
             visit::visit_item_struct(self, item)
         }
         fn visit_expr_struct(&mut self, expression: &'ast syn::ExprStruct) {
-            // No actual parent construction until the genuine approved target
-            // join is implemented. In particular, a DATA helper cannot fill it.
-            if expression
+            let name = expression
                 .path
                 .segments
                 .last()
-                .is_some_and(|s| s.ident == "NativeParent")
+                .map(|part| part.ident.to_string());
+            if name.as_deref() == Some("State")
+                || (self.in_state && name.as_deref() == Some("Self"))
             {
-                self.closed = false;
+                // Only the real child factory may consume the retained
+                // executor, captured source and protected root into State.
+                self.state_constructions += 1;
+                let expected: syn::ExprStruct = syn::parse_quote!(super::State {
+                    input: super::Input {
+                        source,
+                        operation: self.intent.operation.clone(),
+                        namespace: self.preparation.namespace.clone(),
+                        source_epoch: self.intent.archive.security_epoch,
+                        database: self.intent.archive.image.clone(),
+                        target_incarnation: self.intent.target_incarnation.clone(),
+                    },
+                    root_path: self.preparation.root_path.clone(),
+                    root,
+                    scope: std::rc::Rc::clone(&scope),
+                    expected_scope: scope,
+                    attempted: false,
+                    refused: false,
+                    directory_may_exist: false,
+                    directory: None,
+                    creator: None,
+                    creator_identity: None,
+                    frozen_image: None,
+                    birth_original: None,
+                    source: None,
+                    sql: None,
+                    consumed: 0,
+                    written: 0,
+                    complete: false,
+                    writer_attempted: false,
+                });
+                self.closed &=
+                    self.archive_factory
+                        && expression.rest.is_none()
+                        && expression.fields.len() == expected.fields.len()
+                        && expression.fields.iter().zip(&expected.fields).all(
+                            |(actual, expected)| {
+                                actual.member.to_token_stream().to_string()
+                                    == expected.member.to_token_stream().to_string()
+                                    && actual.expr.to_token_stream().to_string()
+                                        == expected.expr.to_token_stream().to_string()
+                            },
+                        );
+            }
+            if name.as_deref() == Some("NativeParent")
+                || (self.in_parent && name.as_deref() == Some("Self"))
+            {
+                self.parent_constructions += 1;
+                self.closed &= self.parent_factory;
             }
             visit::visit_expr_struct(self, expression)
         }
@@ -442,24 +708,51 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
             visit::visit_item_trait(self, item)
         }
     }
-    fn closed(sources: [&str; 4]) -> bool {
+    fn closed(sources: [&str; 7]) -> bool {
         let mut seen = Implementations {
             writer: false,
+            archive: false,
+            in_archive: false,
+            archive_factory: false,
+            archive_factories: 0,
+            in_state: false,
+            external: Vec::new(),
             production: 0,
             defaults: 0,
             writer_owners: 0,
             closed_writer: true,
             parents: 0,
             parent_impls: 0,
+            in_parent: false,
+            parent_factory: false,
+            parent_constructions: 0,
+            state_constructions: 0,
             closed: true,
         };
         for (index, source) in sources.into_iter().enumerate() {
             seen.writer = index == 1;
+            seen.archive = index == 4;
+            seen.external.clear();
             seen.visit_file(&syn::parse_file(source).unwrap());
+            seen.external.sort();
+            let expected: &[&str] = match index {
+                0 => &["application", "archive", "writer"],
+                1 => &["dispatch", "receiver"],
+                4 => &["installation"],
+                _ => &[],
+            };
+            seen.closed &= seen
+                .external
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied());
         }
         seen.production == 0
             && seen.parents == 1
-            && seen.parent_impls == 1
+            && seen.parent_impls == 2
+            && seen.parent_constructions == 1
+            && seen.state_constructions == 1
+            && seen.archive_factories == 1
             && seen.defaults == 0
             && seen.closed
             && seen.writer_owners == 2
@@ -469,8 +762,19 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
     let writer = include_str!("writer.rs");
     let application = include_str!("application.rs");
     let dispatch = include_str!("writer/dispatch.rs");
-    assert!(closed([source, writer, application, dispatch]));
-    for index in 0..4 {
+    let archive = include_str!("archive.rs");
+    let receiver = include_str!("writer/receiver.rs");
+    let installation = include_str!("archive/installation.rs");
+    assert!(closed([
+        source,
+        writer,
+        application,
+        dispatch,
+        archive,
+        receiver,
+        installation
+    ]));
+    for index in 0..7 {
         for implementation in [
             "\nimpl Checks for UntrustedData {}",
             "\nmod nested { impl super::Checks for UntrustedData {} }",
@@ -482,6 +786,9 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
                 writer.to_owned(),
                 application.to_owned(),
                 dispatch.to_owned(),
+                archive.to_owned(),
+                receiver.to_owned(),
+                installation.to_owned(),
             ];
             sources[index].push_str(implementation);
             assert!(!closed(std::array::from_fn(|i| sources[i].as_str())));
@@ -492,15 +799,19 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
     assert!(!source[begin..end].contains('{'));
     let mut mutant = source.to_owned();
     mutant.replace_range(end..=end, " { Ok(()) }");
-    assert!(!closed([&mutant, writer, application, dispatch]));
+    assert!(!closed([
+        &mutant,
+        writer,
+        application,
+        dispatch,
+        archive,
+        receiver,
+        installation
+    ]));
     for (from, to) in [
         (
             "impl NativeParent<'_, '_, '_, '_, '_>",
             "impl UntrustedData",
-        ),
-        (
-            "loan: crate::security_epoch::bootstrap::RestoreWriteLoan",
-            "loan: UntrustedData",
         ),
         (
             "struct NativeParent<",
@@ -512,19 +823,195 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
             source,
             &writer.replacen(from, to, 1),
             application,
-            dispatch
+            dispatch,
+            archive,
+            receiver,
+            installation
         ]));
+    }
+    // The new admission method also has a loan parameter. Mutate the actual
+    // retained field, not a same-spelled parameter or a formatting substring.
+    let mut foreign_loan = syn::parse_file(writer).unwrap();
+    let parents: Vec<_> = foreign_loan
+        .items
+        .iter_mut()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "NativeParent" => Some(item),
+            _ => None,
+        })
+        .collect();
+    let [parent] = parents.as_slice() else {
+        panic!("one actual NativeParent");
+    };
+    assert_eq!(
+        parent
+            .fields
+            .iter()
+            .filter(|field| field.ident.as_ref().is_some_and(|name| name == "loan"))
+            .count(),
+        1
+    );
+    let parent = parents.into_iter().next().unwrap();
+    let loan = parent
+        .fields
+        .iter_mut()
+        .find(|field| field.ident.as_ref().is_some_and(|name| name == "loan"))
+        .unwrap();
+    loan.ty = syn::parse_quote!(UntrustedData);
+    assert!(!closed([
+        source,
+        &foreign_loan.to_token_stream().to_string(),
+        application,
+        dispatch,
+        archive,
+        receiver,
+        installation
+    ]));
+    for field_name in ["artifact", "installed"] {
+        for cut in 0..2 {
+            let mut changed = syn::parse_file(writer).unwrap();
+            let mut selected = 0;
+            for item in &mut changed.items {
+                if let syn::Item::Struct(item) = item
+                    && item.ident == "NativeParent"
+                {
+                    for field in &mut item.fields {
+                        if field.ident.as_ref().is_some_and(|name| name == field_name) {
+                            selected += 1;
+                            if cut == 0 {
+                                field.ty = syn::parse_quote!(std::fs::File);
+                            } else {
+                                field.vis = syn::parse_quote!(pub);
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(selected, 1);
+            assert!(!closed([
+                source,
+                &changed.to_token_stream().to_string(),
+                application,
+                dispatch,
+                archive,
+                receiver,
+                installation
+            ]));
+        }
     }
     for constructor in [
         "impl NativeParent<'_, '_, '_, '_, '_> { fn from_receipt() -> Self { unreachable!() } }",
         "fn adopt_data() { let parent = NativeParent { loan: receipt, state, selection }; }",
+        "fn raw_state() { let state = State { ..record }; }",
         "impl Drop for NativeParent<'_, '_, '_, '_, '_> { fn drop(&mut self) {} }",
     ] {
         assert!(!closed([
             source,
             &(writer.to_owned() + constructor),
             application,
-            dispatch
+            dispatch,
+            archive,
+            receiver,
+            installation
+        ]));
+    }
+    for addition in [
+        "fn raw_archive_state() { let state = super::State { ..record }; }",
+        "impl super::State { fn raw() -> Self { Self { ..record } } }",
+        "mod unreviewed_child;",
+    ] {
+        assert!(!closed([
+            source,
+            writer,
+            application,
+            dispatch,
+            &(archive.to_owned() + addition),
+            receiver,
+            installation
+        ]));
+    }
+    for (from, to) in [
+        ("pub(super) fn start_native", "pub fn start_native"),
+        ("pub(super) fn start_native", "pub(super) fn adopt_receipt"),
+        ("expected_scope: scope", "expected_scope: untrusted_scope"),
+        (
+            "database: self.intent.archive.image.clone()",
+            "database: untrusted_digest.clone()",
+        ),
+    ] {
+        assert_eq!(archive.matches(from).count(), 1);
+        assert!(!closed([
+            source,
+            writer,
+            application,
+            dispatch,
+            &archive.replacen(from, to, 1),
+            receiver,
+            installation
+        ]));
+    }
+    fn mutate_archive_factory(source: &str, from: &str, to: &str) -> String {
+        let mut parsed = syn::parse_file(source).unwrap();
+        let mut count = 0;
+        for item in &mut parsed.items {
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty,syn::Type::Path(ty) if ty.qself.is_none()
+                    && ty.path.segments.len()==1 && ty.path.segments[0].ident=="ArchivePrepared")
+            {
+                for member in &mut item.items {
+                    if let syn::ImplItem::Fn(method) = member
+                        && method.sig.ident == "start_native"
+                    {
+                        count += 1;
+                        let mut text = method.block.to_token_stream().to_string();
+                        let tokens = |fragment: &str| {
+                            let block: syn::Block =
+                                syn::parse_str(&format!("{{{fragment}}}")).unwrap();
+                            let mut result = proc_macro2::TokenStream::new();
+                            for statement in block.stmts {
+                                statement.to_tokens(&mut result);
+                            }
+                            result.to_string()
+                        };
+                        let (from, to) = (tokens(from), tokens(to));
+                        assert_eq!(
+                            text.matches(&from).count(),
+                            1,
+                            "one actual prepared binding"
+                        );
+                        text = text.replacen(&from, &to, 1);
+                        method.block = syn::parse_str(&text).unwrap();
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 1, "one actual prepared factory");
+        parsed.to_token_stream().to_string()
+    }
+    for (from, to) in [
+        ("self.snapshot.source.take()", "untrusted_source.take()"),
+        ("self.preparation.root.take()", "untrusted_root.take()"),
+        ("self.executor.take()", "untrusted_executor.take()"),
+        ("self.attempted = true;", "self.attempted = false;"),
+        (
+            "let checked = executor.require_historical_keys(&self.intent);",
+            "let checked = Ok(());",
+        ),
+        ("checked?;", "let _ = checked;"),
+        (
+            "super::writer::NativeRestore::consume",
+            "super::writer::NativeRestore::adopt_record",
+        ),
+    ] {
+        let changed = mutate_archive_factory(archive, from, to);
+        assert!(!closed([
+            source,
+            writer,
+            application,
+            dispatch,
+            &changed,
+            receiver,
+            installation
         ]));
     }
     macro_rules! assert_not_impl {
@@ -545,6 +1032,29 @@ fn no_production_default_or_data_impl_can_supply_staging_checks() {
     assert_not_impl!(std::fmt::Debug);
     assert_not_impl!(serde::Serialize);
     assert_not_impl!(serde::Deserialize<'static>);
+
+    // Omitting the actual owning module edge or introducing an unchecked
+    // child in the installer must fail just like any other production source.
+    for (archive_source, installer_source) in [
+        (
+            archive.replacen("mod installation;", "mod unreviewed;", 1),
+            installation.to_owned(),
+        ),
+        (
+            archive.to_owned(),
+            installation.to_owned() + "\nmod unreviewed_child;",
+        ),
+    ] {
+        assert!(!closed([
+            source,
+            writer,
+            application,
+            dispatch,
+            &archive_source,
+            receiver,
+            &installer_source
+        ]));
+    }
 }
 
 #[test]
@@ -766,7 +1276,7 @@ fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_w
     for fault in 0..3 {
         effects::scope(simulation::World::new(2110 + fault), || -> Result<()> {
             let mut w = world()?;
-            let db = Connection::open(&w.owner.state.input.source)?;
+            let db = Connection::open(w.source.path().join("app.sqlite"))?;
             match fault {
                 0 => {
                     db.execute(
@@ -785,7 +1295,7 @@ fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_w
                 }
             }
             drop(db);
-            let bytes = std::fs::read(&w.owner.state.input.source)?;
+            let bytes = std::fs::read(w.source.path().join("app.sqlite"))?;
             let changed = Digest::new(&bytes);
             // Bind the changed image itself. Digest refusal cannot substitute
             // for comparing its actual schema, authority and OAuth inventory.
@@ -825,7 +1335,7 @@ fn changed_complete_source_selection_refuses_before_creator_and_rolls_back_the_w
                 );
             }
             assert_eq!(
-                Digest::new(&std::fs::read(&w.owner.state.input.source)?),
+                Digest::new(&std::fs::read(w.source.path().join("app.sqlite"))?),
                 changed
             );
             Ok(())
@@ -839,7 +1349,7 @@ fn malformed_live_and_tombstoned_model_rows_refuse_before_reset_or_creator() -> 
     for deleted_at in [0, 101] {
         effects::scope(simulation::World::new(2120), || -> Result<()> {
             let mut w = world()?;
-            let db = Connection::open(&w.owner.state.input.source)?;
+            let db = Connection::open(w.source.path().join("app.sqlite"))?;
             db.execute(
                 "UPDATE fixture_business SET value=?1,deleted_at=?2",
                 rusqlite::params!["x".repeat(16385), deleted_at],
@@ -849,7 +1359,7 @@ fn malformed_live_and_tombstoned_model_rows_refuse_before_reset_or_creator() -> 
                 "ok"
             );
             drop(db);
-            let expected = Digest::new(&std::fs::read(&w.owner.state.input.source)?);
+            let expected = Digest::new(&std::fs::read(w.source.path().join("app.sqlite"))?);
             w.owner.state.input.database = expected.clone();
             let error = execute(&mut w.owner).unwrap_err();
             assert_eq!(error.root_cause().to_string(), "invalid field: value");
@@ -890,7 +1400,7 @@ fn malformed_live_and_tombstoned_model_rows_refuse_before_reset_or_creator() -> 
                 1
             );
             assert_eq!(
-                Digest::new(&std::fs::read(&w.owner.state.input.source)?),
+                Digest::new(&std::fs::read(w.source.path().join("app.sqlite"))?),
                 expected
             );
             assert!(execute(&mut w.owner).is_err());
@@ -1068,7 +1578,7 @@ fn independent_failure_frontiers_replay_twice_without_regrant_or_source_mutation
                         assert!(execute(&mut w.owner).is_err());
                         assert_eq!(observe(&mut w.owner, length)?, observed);
                         assert_eq!(
-                            Digest::new(&std::fs::read(&w.owner.state.input.source)?),
+                            Digest::new(&std::fs::read(w.source.path().join("app.sqlite"))?),
                             w.source_digest
                         );
                         Ok(observed)
@@ -1151,7 +1661,7 @@ fn real_process_loss_never_publishes_memory_commit_or_adopts_partial_or_reset_ta
             let marker = control.path().join("ready");
             let config_path = control.path().join("config.json");
             let config = ChildConfig {
-                source: w.owner.state.input.source.clone(),
+                source: w.source_path()?,
                 root: w.owner.state.root_path.clone(),
                 database: w.source_digest.clone(),
                 point,
@@ -1181,7 +1691,7 @@ fn real_process_loss_never_publishes_memory_commit_or_adopts_partial_or_reset_ta
             let status = child.0.wait()?;
             assert!(!status.success());
             let mut restarted = fixture_owner(
-                w.owner.state.input.source.clone(),
+                w.source_path()?,
                 w.owner.state.root_path.clone(),
                 w.source_digest.clone(),
             )?;
@@ -1204,7 +1714,8 @@ fn real_process_loss_never_publishes_memory_commit_or_adopts_partial_or_reset_ta
             }
             if point == Point::FirstWrite {
                 assert!(
-                    path.metadata()?.len() < std::fs::metadata(&w.owner.state.input.source)?.len()
+                    path.metadata()?.len()
+                        < std::fs::metadata(w.source.path().join("app.sqlite"))?.len()
                 );
             }
             let preserved = if present {
@@ -1222,7 +1733,7 @@ fn real_process_loss_never_publishes_memory_commit_or_adopts_partial_or_reset_ta
             assert!(restarted.refused && !restarted.state.complete);
             assert_eq!(Some(Digest::new(&std::fs::read(&path)?)), preserved);
             assert_eq!(
-                Digest::new(&std::fs::read(&w.owner.state.input.source)?),
+                Digest::new(&std::fs::read(w.source.path().join("app.sqlite"))?),
                 w.source_digest
             );
             Ok(())
@@ -1268,12 +1779,12 @@ fn swapped_source_and_target_paths_cannot_redirect_sql_admission_reset_or_file_w
     effects::scope(simulation::World::new(2093), || {
         let mut w = world()?;
         let _scope = SwapScope;
-        SOURCE_SWAP.with(|s| *s.borrow_mut() = Some(w.owner.state.input.source.clone()));
+        SOURCE_SWAP.with(|s| *s.borrow_mut() = Some(w.source.path().join("app.sqlite")));
         TARGET_SWAP.with(|s| s.set(true));
         let result = execute(&mut w.owner)?;
         assert_eq!(result.reset.credentials.newly_revoked, 1);
         assert_eq!(
-            Digest::new(&std::fs::read(&w.owner.state.input.source)?),
+            Digest::new(&std::fs::read(w.source.path().join("app.sqlite"))?),
             w.source_digest
         );
         assert_eq!(
@@ -1352,30 +1863,23 @@ fn actual_sql_constructor_cannot_reopen_either_path_or_deserialize_different_byt
 }
 
 #[test]
-fn wal_shm_journal_and_dangling_sidecars_refuse_before_any_target() -> Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        for dangling in [false, true] {
-            effects::scope(simulation::World::new(2099), || -> Result<()> {
-                let mut w = world()?;
-                let mut name = w.owner.state.input.source.as_os_str().to_os_string();
-                name.push(suffix);
-                if dangling {
-                    symlink(w.source.path().join("absent"), PathBuf::from(name))?;
-                } else {
-                    std::fs::write(PathBuf::from(name), b"unqualified-sidecar")?;
-                }
-                assert!(execute(&mut w.owner).is_err());
-                assert!(
-                    w.owner.refused
-                        && !w.owner.state.complete
-                        && !w.owner.state.directory_may_exist
-                );
-                assert!(!w.owner.state.target_dir()?.try_exists()?);
-                Ok(())
-            })?;
-        }
-    }
-    Ok(())
+fn source_path_replacement_before_execution_cannot_replace_the_owned_input_descriptor() -> Result<()>
+{
+    effects::scope(simulation::World::new(2099), || -> Result<()> {
+        let mut w = world()?;
+        let source = w.source.path().join("app.sqlite");
+        std::fs::rename(&source, source.with_extension("retained"))?;
+        std::fs::write(&source, b"wrong-world")?;
+        let projection = execute(&mut w.owner)?;
+        assert!(w.owner.state.complete);
+        assert_eq!(projection.reset.credentials.newly_revoked, 1);
+        assert_eq!(std::fs::read(&source)?, b"wrong-world");
+        assert_eq!(
+            Digest::new(&std::fs::read(w.owner.state.target_path()?)?),
+            projection.image
+        );
+        Ok(())
+    })
 }
 
 thread_local! {static CREATE_SWAP:Cell<bool>=const{Cell::new(false)};}
@@ -1446,4 +1950,123 @@ fn production_staging_refuses_a_public_root_without_repairing_it() -> Result<()>
     assert_eq!(std::fs::metadata(&root)?.mode() & 0o777, 0o755);
     assert!(!w.owner.state.target_dir()?.try_exists()?);
     Ok(())
+}
+
+#[test]
+fn native_archive_entry_consumes_genuine_executor_and_exposes_no_frame_or_parts() {
+    use quote::ToTokens;
+    fn valid(source: &str) -> bool {
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let mut definition = None;
+        let mut methods = Vec::new();
+        for item in file.items {
+            match item {
+                syn::Item::Struct(item) if item.ident == "PreparedNativeRestoreArchive" => {
+                    definition = Some(item)
+                }
+                syn::Item::Impl(item) if matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("PreparedNativeRestoreArchive")||path.path.segments.last().is_some_and(|s|s.ident=="PreparedNativeRestoreArchive")) =>
+                {
+                    if item.trait_.is_some() {
+                        return false;
+                    }
+                    for method in item.items {
+                        if let syn::ImplItem::Fn(method) = method {
+                            methods.push(method);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(definition) = definition else {
+            return false;
+        };
+        if definition.fields.len() != 1
+            || definition
+                .fields
+                .iter()
+                .any(|f| !matches!(f.vis, syn::Visibility::Inherited))
+            || !definition.attrs.iter().all(|a| a.path().is_ident("doc"))
+        {
+            return false;
+        }
+        let field = definition.fields.iter().next().unwrap();
+        let expected: syn::Type =
+            syn::parse_quote!(archive::ArchivePrepared<'metadata, 'storage, 'role>);
+        if field.ident.as_ref().is_none_or(|i| i != "prepared")
+            || field.ty.to_token_stream().to_string() != expected.to_token_stream().to_string()
+        {
+            return false;
+        }
+        if methods.len() != 1 {
+            return false;
+        }
+        let mut method = methods.remove(0);
+        let mut expected: syn::ImplItemFn = syn::parse_quote! {
+            pub(in crate::security_epoch) fn capture(
+                executor:crate::security_epoch::bootstrap::AuthenticatedRestoreExecution<'metadata,'storage,'role>,
+                directory:&std::path::Path,
+                intent:&crate::security_epoch::kernel::restore::Intent,
+            )->Result<Self> {
+                let prepared=archive::NativeArchive::capture(executor,directory,intent)?.prepare()?;
+                Ok(Self {prepared})
+            }
+        };
+        fn normalize_executor_generic_separator(method: &mut syn::ImplItemFn) -> bool {
+            let Some(syn::FnArg::Typed(arg)) = method.sig.inputs.first_mut() else {
+                return false;
+            };
+            let syn::Type::Path(path) = &mut *arg.ty else {
+                return false;
+            };
+            let Some(segment) = path.path.segments.last_mut() else {
+                return false;
+            };
+            let syn::PathArguments::AngleBracketed(args) = &mut segment.arguments else {
+                return false;
+            };
+            args.args = args.args.clone().into_iter().collect();
+            true
+        }
+        normalize_executor_generic_separator(&mut method)
+            && normalize_executor_generic_separator(&mut expected)
+            && method.to_token_stream().to_string() == expected.to_token_stream().to_string()
+    }
+    let source = include_str!("../restore_staging.rs");
+    assert!(valid(source));
+    let optional = "'role,\n        >";
+    assert_eq!(source.matches(optional).count(), 1);
+    assert!(valid(&source.replacen(optional, "'role\n        >", 1)));
+    for (before, after) in [
+        (
+            "archive::NativeArchive::capture(executor, directory, intent)?.prepare()?",
+            "other.prepare()?",
+        ),
+        (
+            "capture(executor, directory, intent)",
+            "capture(other, directory, intent)",
+        ),
+        (
+            "capture(executor, directory, intent)",
+            "capture(executor, other, intent)",
+        ),
+        (
+            "capture(executor, directory, intent)",
+            "capture(executor, directory, other)",
+        ),
+        ("?.prepare()?", "?.prepare().unwrap()"),
+        (
+            "prepared: archive::ArchivePrepared",
+            "pub(crate) prepared: archive::ArchivePrepared",
+        ),
+    ] {
+        assert_eq!(source.matches(before).count(), 1, "{before}");
+        assert!(!valid(&source.replacen(before, after, 1)), "{after}");
+    }
+    let getter = format!(
+        "{source}\nimpl PreparedNativeRestoreArchive<'_, '_, '_> {{fn raw(&self)->&archive::ArchivePrepared<'_, '_, '_>{{&self.prepared}}}}"
+    );
+    assert!(!valid(&getter));
 }

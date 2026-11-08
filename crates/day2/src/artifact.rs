@@ -519,6 +519,71 @@ fn decode_persisted_contract(mut value: serde_json::Value) -> Result<Artifact> {
     Ok(serde_json::from_value(value)?)
 }
 
+// Only the closed restore borrow can select bounded restore admission. There
+// is one validator body; historical artifact DATA never constructs this loan.
+enum ArtifactAdmission<'borrow, 'capture, 'owner, 'metadata, 'storage, 'role> {
+    Ordinary(Option<Box<crate::worker::Worker>>),
+    Restore(
+        &'borrow mut crate::security_epoch::RestoreArtifactAdmission<
+            'capture,
+            'owner,
+            'metadata,
+            'storage,
+            'role,
+        >,
+    ),
+    RestoredApp(
+        &'borrow mut crate::security_epoch::native_enrollment::RestoredArtifactAdmission<'capture>,
+    ),
+}
+
+pub(crate) enum ContractQuery {
+    App,
+    Credentials,
+    Connections,
+    Manifest,
+}
+
+impl ContractQuery {
+    pub(crate) fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::App => b"app-contract",
+            Self::Credentials => b"credential-contract",
+            Self::Connections => b"connection-contract",
+            Self::Manifest => b"manifest",
+        }
+    }
+}
+
+impl ArtifactAdmission<'_, '_, '_, '_, '_, '_> {
+    fn start(&mut self, artifact: &LoadedArtifact) -> Result<Arc<tempfile::TempPath>> {
+        match self {
+            Self::Ordinary(worker) => {
+                ensure!(
+                    worker.is_none(),
+                    "artifact_admission_worker_already_started"
+                );
+                let executable = artifact.materialize_worker()?;
+                *worker = Some(Box::new(crate::worker::Worker::start(&executable)?));
+                Ok(executable)
+            }
+            Self::Restore(guard) => guard.start(artifact),
+            Self::RestoredApp(guard) => guard.start(artifact),
+        }
+    }
+
+    fn exchange(&mut self, query: ContractQuery) -> Result<Vec<u8>> {
+        match self {
+            Self::Ordinary(worker) => worker
+                .as_mut()
+                .context("artifact_admission_worker_not_started")?
+                .exchange(query.bytes()),
+            Self::Restore(guard) => guard.exchange(query),
+            Self::RestoredApp(guard) => guard.exchange(query),
+        }
+    }
+}
+
 impl LoadedArtifact {
     pub(crate) fn retain(&mut self, directory: Arc<tempfile::TempDir>) {
         self.retained = Some(directory);
@@ -632,6 +697,28 @@ impl LoadedArtifact {
     }
 
     pub fn load(directory: &Path) -> Result<Self> {
+        Self::load_admitted(directory, &mut ArtifactAdmission::Ordinary(None))
+    }
+
+    pub(crate) fn load_restore(
+        directory: &Path,
+        guard: &mut crate::security_epoch::RestoreArtifactAdmission<'_, '_, '_, '_, '_>,
+    ) -> Result<Self> {
+        Self::load_admitted(directory, &mut ArtifactAdmission::Restore(guard))
+    }
+
+    pub(crate) fn load_restored_app(
+        directory: &Path,
+        guard: &mut crate::security_epoch::native_enrollment::RestoredArtifactAdmission<'_>,
+    ) -> Result<Self> {
+        guard.require_directory(directory)?;
+        Self::load_admitted(directory, &mut ArtifactAdmission::RestoredApp(guard))
+    }
+
+    fn load_admitted(
+        directory: &Path,
+        admission: &mut ArtifactAdmission<'_, '_, '_, '_, '_, '_>,
+    ) -> Result<Self> {
         let directory = directory.canonicalize()?;
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.join("artifact.json"))?)?;
@@ -997,11 +1084,11 @@ impl LoadedArtifact {
             startup_shells,
         };
         if loaded.contract.format == CURRENT_FORMAT {
-            let executable = loaded.materialize_worker()?;
-            let mut worker = crate::worker::Worker::start(&executable)
+            let executable = admission
+                .start(&loaded)
                 .context("artifact admission worker start")?;
             let compiled = crate::app_contract::decode(
-                &worker.exchange(b"app-contract").with_context(|| {
+                &admission.exchange(ContractQuery::App).with_context(|| {
                     app_contract_exchange_context(
                         &loaded.id,
                         &loaded.contract.worker_digest,
@@ -1016,8 +1103,8 @@ impl LoadedArtifact {
             );
             if !loaded.contract.credential_declarations.is_empty() {
                 let compiled = crate::credential_declaration::decode(
-                    &worker
-                        .exchange(b"credential-contract")
+                    &admission
+                        .exchange(ContractQuery::Credentials)
                         .context("artifact admission credential-contract exchange")?,
                     &loaded.contract,
                 )?;
@@ -1028,8 +1115,8 @@ impl LoadedArtifact {
             }
             {
                 let compiled = crate::oauth::declaration::decode(
-                    &worker
-                        .exchange(b"connection-contract")
+                    &admission
+                        .exchange(ContractQuery::Connections)
                         .context("artifact admission connection-contract exchange")?,
                     &loaded.contract,
                 )?;
@@ -1039,8 +1126,8 @@ impl LoadedArtifact {
                 );
             }
             let mut manifest: serde_json::Value = serde_json::from_slice(
-                &worker
-                    .exchange(b"manifest")
+                &admission
+                    .exchange(ContractQuery::Manifest)
                     .context("artifact admission manifest exchange")?,
             )?;
             // Earlier format-14 workers predate optional live-page metadata.

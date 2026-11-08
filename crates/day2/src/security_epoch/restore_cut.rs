@@ -76,6 +76,17 @@ impl Cut {
         Ok(Self { record, digest })
     }
 
+    /// Exact denial DATA binding; the returned digest is not native approval,
+    /// archive admission, a current epoch or permission to create a file.
+    pub(in crate::security_epoch) fn require_intent(&self, intent: &Intent) -> Result<Digest> {
+        ensure!(
+            intent == &self.record.intent
+                && self.record.full_archive == intent.archive.full_archive_digest,
+            "restore_cut_intent_changed"
+        );
+        intent.commitment(&self.record.selection)
+    }
+
     pub(crate) fn digest(&self) -> &Digest {
         &self.digest
     }
@@ -294,6 +305,30 @@ mod tests {
             );
             assert!(refused.is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn native_preparation_cannot_substitute_an_intent_or_full_archive() -> Result<()> {
+        let cut = fixture(Digest::new(b"complete-inventory"), 78)?;
+        let original = &cut.record.intent;
+        assert_eq!(
+            cut.require_intent(original)?,
+            original.commitment(&cut.record.selection)?
+        );
+        let mut changed = original.clone();
+        changed.operation = Digest::new(b"different-operation");
+        assert!(cut.require_intent(&changed).is_err());
+        let mut changed = original.clone();
+        changed.archive.full_archive_digest = changed.archive.image.clone();
+        assert_ne!(
+            changed.archive.full_archive_digest,
+            original.archive.full_archive_digest
+        );
+        assert!(cut.require_intent(&changed).is_err());
+        let mut changed = original.clone();
+        changed.target_incarnation = Digest::new(b"other-target");
+        assert!(cut.require_intent(&changed).is_err());
         Ok(())
     }
 }

@@ -631,7 +631,7 @@ mod tests {
             subject: "accounts.google.com:alice".into(),
         };
         effects::scope(Arc::new(Port(AtomicU64::new(1))), || -> Result<()> {
-            let manager = crate::oauth::management::app::Manager::new(runtime, authority);
+            let manager = crate::oauth::management::app::Manager::new(Arc::new(runtime), authority);
             let view = manager.capture("calendar", Action::Connect, &identity, 102)?;
             // Fixture times stay within the original pending interval.
             let proof =

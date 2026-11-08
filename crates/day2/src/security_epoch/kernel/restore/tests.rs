@@ -10,6 +10,185 @@ mod history;
 mod process;
 mod provider_wire;
 
+#[test]
+fn stop_selection_derives_the_same_successor_without_an_approval_or_stop_receipt() -> Result<()> {
+    let (selected, before) = initial();
+    let initial = &before.activate.as_ref().unwrap().value.request;
+    for seed in 0..3 {
+        let intent = intent(&selected, seed);
+        let original_operation = intent.operation.clone();
+        let stop = StopSelection::new(&selected, &intent, initial, &before)?;
+        assert_eq!(stop.restore_operation, intent.operation);
+        assert_ne!(stop.restore_operation, stop.advance_operation);
+        stop.require_intent_data(&selected, &intent, initial, &before)?;
+        stop.check_active_data(&selected, &original_operation, initial, &before)?;
+        let current = current(&selected, &intent, &before);
+        let request = Request::new(&selected, intent, &current, 1000, &before)?;
+        let plan = request.prepare(&selected, &current, 1000, &before, None)?;
+        assert_eq!(stop.fenced_root, Digest::of(&plan.advance.root)?);
+        assert_eq!(stop.fenced_sentinel, Digest::of(&plan.advance.sentinel)?);
+        assert_eq!(plan.advance.root.epoch.value(), 2);
+        assert_eq!(
+            plan.advance.root.bootstrap,
+            before.root.as_ref().unwrap().value.bootstrap
+        );
+        // This projection has neither time, a grant nor a claimed Stop receipt.
+        let encoded = serde_json::to_value(&stop)?;
+        assert_eq!(encoded.as_object().unwrap().len(), 6);
+        assert!(encoded.get("grant").is_none());
+        assert!(encoded.get("receipt").is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn stop_selection_rejects_changed_fields_worlds_and_equal_value_version_rewrites() -> Result<()> {
+    let (selected, before) = initial();
+    let initial = &before.activate.as_ref().unwrap().value.request;
+    let intent = intent(&selected, 811);
+    let original_operation = intent.operation.clone();
+    let stop = StopSelection::new(&selected, &intent, initial, &before)?;
+    assert!(
+        stop.check_active_data(
+            &selected,
+            &Digest::new(b"another original"),
+            initial,
+            &before
+        )
+        .is_err()
+    );
+    let encoded = serde_json::to_value(&stop)?;
+    let fields = [
+        "restore_operation",
+        "intent",
+        "advance_operation",
+        "before",
+        "fenced_root",
+        "fenced_sentinel",
+    ];
+    assert_eq!(encoded.as_object().unwrap().len(), fields.len());
+    for field in fields {
+        let mut changed = encoded.clone();
+        changed[field] = serde_json::json!(Digest::new(b"foreign stop binding"));
+        let changed: StopSelection = serde_json::from_value(changed)?;
+        assert!(
+            changed
+                .check_active_data(&selected, &original_operation, initial, &before)
+                .is_err(),
+            "{field}"
+        );
+        assert!(
+            changed
+                .require_intent_data(&selected, &intent, initial, &before)
+                .is_err(),
+            "{field}"
+        );
+    }
+    for row in 0..4 {
+        let mut changed = before.clone();
+        match row {
+            0 => changed.root.as_mut().unwrap().version = version(8),
+            1 => changed.sentinel.as_mut().unwrap().version = version(8),
+            2 => changed.create.as_mut().unwrap().version = version(8),
+            _ => changed.activate.as_mut().unwrap().version = version(8),
+        }
+        assert!(
+            stop.check_active_data(&selected, &original_operation, initial, &changed)
+                .is_err(),
+            "row={row}"
+        );
+    }
+    let mut foreign = selected.clone();
+    foreign.scope.app = "another-app".to_owned().try_into()?;
+    assert!(
+        stop.check_active_data(&foreign, &original_operation, initial, &before)
+            .is_err()
+    );
+    let mut foreign_intent = intent.clone();
+    foreign_intent.archive.source_incarnation = Digest::new(b"another database");
+    assert!(StopSelection::new(&selected, &foreign_intent, initial, &before).is_err());
+    foreign_intent = intent.clone();
+    foreign_intent.target_incarnation = Digest::new(b"another restore target");
+    assert!(
+        stop.require_intent_data(&selected, &foreign_intent, initial, &before)
+            .is_err()
+    );
+    for operation in [initial.operation(), &initial.bootstrap().create_operation] {
+        foreign_intent = intent.clone();
+        foreign_intent.operation = operation.clone();
+        assert!(StopSelection::new(&selected, &foreign_intent, initial, &before).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn stop_selection_keeps_active_drain_and_fenced_confirmation_distinct() -> Result<()> {
+    let (selected, before) = initial();
+    let initial = &before.activate.as_ref().unwrap().value.request;
+    let intent = intent(&selected, 812);
+    let original_operation = intent.operation.clone();
+    let stop = StopSelection::new(&selected, &intent, initial, &before)?;
+    let current = current(&selected, &intent, &before);
+    let request = Request::new(&selected, intent, &current, 1000, &before)?;
+    let plan = request.prepare(&selected, &current, 1000, &before, None)?;
+    let mut after = before.clone();
+    after.root = Some(Versioned {
+        value: plan.advance.root,
+        version: version(3),
+    });
+    after.sentinel = Some(Versioned {
+        value: plan.advance.sentinel,
+        version: version(3),
+    });
+    stop.check_fenced_data(&selected, &original_operation, initial, &before, &after)?;
+    assert!(
+        stop.check_fenced_data(
+            &selected,
+            &Digest::new(b"another original"),
+            initial,
+            &before,
+            &after
+        )
+        .is_err()
+    );
+    assert!(
+        stop.check_active_data(&selected, &original_operation, initial, &after)
+            .is_err()
+    );
+    assert!(
+        stop.check_fenced_data(&selected, &original_operation, initial, &before, &before)
+            .is_err()
+    );
+    for change in 0..5 {
+        let mut changed = after.clone();
+        match change {
+            0 => {
+                changed.root.as_mut().unwrap().version =
+                    before.root.as_ref().unwrap().version.clone()
+            }
+            1 => {
+                changed.sentinel.as_mut().unwrap().version =
+                    before.sentinel.as_ref().unwrap().version.clone()
+            }
+            2 => changed.create.as_mut().unwrap().version = version(9),
+            3 => changed.activate.as_mut().unwrap().version = version(9),
+            _ => changed.sentinel = before.sentinel.clone(),
+        }
+        assert!(
+            stop.check_fenced_data(&selected, &original_operation, initial, &before, &changed)
+                .is_err(),
+            "change={change}"
+        );
+    }
+    // A valid Fenced DATA observation is not a replacement for the captured
+    // Active predecessor, and does not make an Active checker accept it.
+    assert!(
+        stop.check_fenced_data(&selected, &original_operation, initial, &after, &after)
+            .is_err()
+    );
+    Ok(())
+}
+
 pub(super) fn version(n: u64) -> super::super::UpdateTime {
     format!("2026-11-04T00:00:00.{n:06}Z").try_into().unwrap()
 }

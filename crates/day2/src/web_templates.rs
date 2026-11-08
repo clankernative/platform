@@ -68,7 +68,7 @@ pub fn validate(catalog: &Catalog) -> Result<()> {
     Ok(())
 }
 
-fn blob_name(template: &Template) -> Result<String> {
+pub(crate) fn blob_name(template: &Template) -> Result<String> {
     Ok(format!("{}.html", assets::hash_part(&template.digest)?))
 }
 

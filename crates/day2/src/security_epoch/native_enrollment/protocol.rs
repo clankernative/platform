@@ -9,6 +9,10 @@ use ring::signature::{self, Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, marker::PhantomData, rc::Rc};
 
+#[cfg(test)]
+#[path = "protocol/restore_tests.rs"]
+mod restore_tests;
+
 pub(super) const MAX_PACKET: usize = 8192;
 
 /// Historical process binding, never an owning process handle.
@@ -123,8 +127,7 @@ pub(super) struct SignedStage {
 #[serde(deny_unknown_fields)]
 pub(super) struct FreezeSelection {
     pub admin_binding: Digest,
-    pub operation: Digest,
-    pub fenced_root: Digest,
+    pub stop: crate::security_epoch::kernel::restore::StopSelection,
     pub app: super::storage_peer_wire::StageStatement,
     pub controller: super::storage_peer_wire::StageStatement,
 }
@@ -140,7 +143,443 @@ pub(super) struct FrozenIssuance {
     pub challenge: Digest,
 }
 
+/// Fixed Controller preparation DATA. Only the retained restore driver's
+/// authorizer can obtain a Controller signature over this exact binding. A
+/// decoded object never supplies the native parent or any file/keeper owner.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::security_epoch) struct RestoreAuthorizationData {
+    pub issuer: Digest,
+    pub policy: Digest,
+    pub frozen: Digest,
+    pub controller: Digest,
+    pub operation: Digest,
+    pub approval: Digest,
+    pub grant: Digest,
+    pub intent: Digest,
+    pub full_archive: Digest,
+    /// Digest::of the actual admitted current Instance, not raw file SHA.
+    pub desired_instance: Digest,
+    pub target: crate::security_epoch::restore_approval::TargetBinding,
+    pub report: crate::security_epoch::kernel::restore::completion::TargetReport,
+    pub terminal: Digest,
+    pub terminal_version: crate::security_epoch::kernel::UpdateTime,
+    pub records: Digest,
+    pub parent_clock: Digest,
+    pub parent_origin_ns: u64,
+    pub parent_deadline_ns: u64,
+}
+
+impl RestoreAuthorizationData {
+    pub(super) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&("day2-restore-controller-authorization-v1", self))
+    }
+
+    pub(super) fn validate_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        now: std::time::Duration,
+    ) -> Result<()> {
+        certificate.verify(policy)?;
+        let now = now.as_nanos();
+        ensure!(
+            self.issuer == certificate.digest()?
+                && self.policy == policy.digest()?
+                && self.target.scope == policy.bootstrap.scope
+                && self.target.selection == Digest::of(&policy.store)?
+                && self.target.authority == policy.store.authority_key()?
+                && self.target.binding_generation > 0
+                && self.target.security_epoch == 2
+                && self.report.intent == self.intent
+                && self.report.target_incarnation == self.target.incarnation
+                && self.report.target_epoch == self.target.security_epoch
+                && self.report.artifact == self.target.artifact
+                && self.report.schema == self.target.schema
+                && self.parent_origin_ns < self.parent_deadline_ns
+                && self.parent_deadline_ns - self.parent_origin_ns <= 5_000_000_000
+                && u128::from(self.parent_origin_ns) <= now
+                && now < u128::from(self.parent_deadline_ns),
+            "native_restore_authorization_data_changed"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RestoreAuthorizationStatement {
+    pub data: RestoreAuthorizationData,
+    pub request: Digest,
+    pub challenge: Digest,
+    pub effective_deadline_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SignedRestoreAuthorization {
+    pub statement: RestoreAuthorizationStatement,
+    pub signature: String,
+}
+
+impl SignedRestoreAuthorization {
+    pub(super) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&("day2-signed-restore-authorization-v1", self))
+    }
+
+    pub(super) fn verify_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        now: std::time::Duration,
+    ) -> Result<()> {
+        self.statement
+            .data
+            .validate_data(policy, certificate, now)?;
+        ensure!(
+            self.statement.effective_deadline_ns <= self.statement.data.parent_deadline_ns
+                && u128::from(self.statement.data.parent_origin_ns) <= now.as_nanos()
+                && now.as_nanos() < u128::from(self.statement.effective_deadline_ns),
+            "native_restore_authorization_expired"
+        );
+        verify(
+            &certificate.data.public_key,
+            "restore-controller-authorized-v1",
+            &self.statement,
+            &self.signature,
+        )
+    }
+}
+
+/// The App supplies these bytes from its ACTUAL own five-second admission
+/// original. Native client/server owners independently join/check its kernel
+/// process and clock namespace; this DATA cannot reconstruct either clock.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RestoreAppRequest {
+    pub public_key: String,
+    pub request: Digest,
+    pub receiver_clock: Digest,
+    pub receiver_origin_ns: u64,
+    pub receiver_deadline_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RestoreAdmissionStatement {
+    pub issuer: Digest,
+    pub policy: Digest,
+    pub authorization: Digest,
+    pub process: ProcessData,
+    pub runtime: RuntimeBinding,
+    pub public_key: String,
+    pub request: Digest,
+    pub challenge: Digest,
+    pub receiver_clock: Digest,
+    pub receiver_origin_ns: u64,
+    pub receiver_deadline_ns: u64,
+    pub effective_deadline_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SignedRestoreAdmission {
+    pub statement: RestoreAdmissionStatement,
+    pub signature: String,
+}
+
+impl SignedRestoreAdmission {
+    /// Signature/binding comparison only. No normal role, holder, file, P3 or
+    /// serving owner is constructed or returned by this DATA validator.
+    pub(super) fn verify_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        authorization: &SignedRestoreAuthorization,
+        now: std::time::Duration,
+    ) -> Result<()> {
+        authorization.verify_data(policy, certificate, now)?;
+        let statement = &self.statement;
+        ensure!(
+            statement.issuer == certificate.digest()?
+                && statement.policy == policy.digest()?
+                && statement.authorization == authorization.digest_data()?
+                && statement.receiver_origin_ns < statement.receiver_deadline_ns
+                && statement.receiver_deadline_ns - statement.receiver_origin_ns <= 5_000_000_000
+                && statement.effective_deadline_ns <= statement.receiver_deadline_ns
+                && statement.effective_deadline_ns <= authorization.statement.effective_deadline_ns
+                && u128::from(statement.receiver_origin_ns) <= now.as_nanos()
+                && now.as_nanos() < u128::from(statement.effective_deadline_ns)
+                && statement.process.code == *policy.code(NativeRole::AppHost),
+            "native_restore_app_admission_data_changed"
+        );
+        decode_key(&statement.public_key)?;
+        verify(
+            &certificate.data.public_key,
+            "restore-app-admission-v1",
+            statement,
+            &self.signature,
+        )
+    }
+}
+
+/// Fixed final-exchange DATA. Only the actual native Controller peer may
+/// assemble it from its retained authorization, accepted App, activation and
+/// authenticated keeper acknowledgement. Decoding never supplies those owners.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RestoreIssuerCompletionData {
+    pub frozen: Digest,
+    pub authorization: Digest,
+    pub app: Digest,
+    pub activation: Digest,
+    pub cohort: super::storage_peer_wire::SqliteCohort,
+}
+
+impl RestoreIssuerCompletionData {
+    pub(super) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&("day2-restore-issuer-completion-data-v1", self))
+    }
+
+    /// Signed-chain and exact-identity comparison only. Native callers must
+    /// independently retain/check the actual process and file cohort.
+    pub(super) fn validate_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        app: &super::restore_peer_wire::RestoreAppStatement,
+        now: std::time::Duration,
+    ) -> Result<()> {
+        app.validate(policy, certificate, &app.admission.statement.process, now)?;
+        ensure!(
+            self.frozen == app.authorization.statement.data.frozen
+                && self.authorization == app.authorization.digest_data()?
+                && self.app == app.digest()?,
+            "native_restore_completion_binding_changed"
+        );
+        self.cohort.validate()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RestoreIssuerCompletionStatement {
+    pub data: RestoreIssuerCompletionData,
+    pub request: Digest,
+    pub challenge: Digest,
+    pub effective_deadline_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SignedRestoreIssuerCompletion {
+    pub statement: RestoreIssuerCompletionStatement,
+    pub signature: String,
+}
+
+impl SignedRestoreIssuerCompletion {
+    pub(super) fn verify_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        expected: &RestoreIssuerCompletionData,
+        app: &super::restore_peer_wire::RestoreAppStatement,
+        now: std::time::Duration,
+    ) -> Result<()> {
+        self.statement
+            .data
+            .validate_data(policy, certificate, app, now)?;
+        ensure!(
+            &self.statement.data == expected
+                && self.statement.effective_deadline_ns <= app.original.deadline_ns
+                && self.statement.effective_deadline_ns
+                    <= app.admission.statement.effective_deadline_ns
+                && now.as_nanos() < u128::from(self.statement.effective_deadline_ns),
+            "native_restore_completion_expired_or_changed"
+        );
+        verify(
+            &certificate.data.public_key,
+            "restore-issuer-completed-v1",
+            &self.statement,
+            &self.signature,
+        )
+    }
+}
+
+/// Final role-activation DATA. Validation cannot install a role, reopen the
+/// issuer, complete Controller posts, or adopt an App/SQLite owner.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RestoreRoleActivationStatement {
+    pub completion: Digest,
+    pub stage: SignedStage,
+    pub request: Digest,
+    pub challenge: Digest,
+    pub effective_deadline_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SignedRestoreRoleActivation {
+    pub statement: RestoreRoleActivationStatement,
+    pub signature: String,
+}
+
+impl SignedRestoreIssuerCompletion {
+    pub(super) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&("day2-restore-issuer-completed-data-v1", self))
+    }
+}
+
+impl SignedRestoreRoleActivation {
+    /// Signature and exact comparison only. The actual producer and App must
+    /// independently retain/check their original clocks, kernel peers, key,
+    /// writer authority and first keeper; DATA cannot substitute for them.
+    pub(super) fn verify_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        completion: &SignedRestoreIssuerCompletion,
+        app: &super::restore_peer_wire::RestoreAppStatement,
+        exchange: (&Digest, &Digest),
+        now: std::time::Duration,
+    ) -> Result<()> {
+        let (request, challenge) = exchange;
+        completion.verify_data(policy, certificate, &completion.statement.data, app, now)?;
+        let statement = &self.statement;
+        let stage = &statement.stage.data;
+        ensure!(
+            statement.completion == completion.digest_data()?
+                && &statement.request == request
+                && &statement.challenge == challenge
+                && stage.request == *request
+                && stage.challenge == *challenge
+                && stage.issuer == certificate.digest()?
+                && stage.policy == policy.digest()?
+                && stage.role == NativeRole::AppHost
+                && stage.purpose == StagePurpose::CurrentRole
+                && stage.public_key == app.admission.statement.public_key
+                && stage.process == app.admission.statement.process
+                && stage.runtime == app.admission.statement.runtime
+                && stage.origin_ns == app.original.origin_ns
+                && stage.deadline_ns == statement.effective_deadline_ns
+                && stage.origin_ns < stage.deadline_ns
+                && stage.deadline_ns - stage.origin_ns <= 5_000_000_000
+                && statement.effective_deadline_ns <= completion.statement.effective_deadline_ns
+                && statement.effective_deadline_ns <= app.original.deadline_ns
+                && u128::from(stage.origin_ns) <= now.as_nanos()
+                && now.as_nanos() < u128::from(statement.effective_deadline_ns),
+            "native_restore_role_activation_binding_changed"
+        );
+        verify(
+            &certificate.data.public_key,
+            "role-stage",
+            stage,
+            &statement.stage.signature,
+        )?;
+        verify(
+            &certificate.data.public_key,
+            "restore-app-role-activated-v1",
+            statement,
+            &self.signature,
+        )
+    }
+}
+
+/// Prepared App confirmation comparison DATA only. A valid signature neither
+/// completes Controller resource posts nor admits an ordinary role or keeper.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RestorePreparedConfirmationStatement {
+    pub issuer: Digest,
+    pub decision: Digest,
+    pub completion: Digest,
+    pub app: Digest,
+    pub request: Digest,
+    pub challenge: Digest,
+    pub effective_deadline_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SignedRestorePreparedConfirmation {
+    pub statement: RestorePreparedConfirmationStatement,
+    pub signature: String,
+}
+
+impl SignedRestoreRoleActivation {
+    pub(super) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&("day2-restore-app-role-decision-data-v1", self))
+    }
+}
+
+impl SignedRestorePreparedConfirmation {
+    pub(super) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&("day2-restore-app-prepared-confirmation-data-v1", self))
+    }
+
+    pub(super) fn verify_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        chain: (&SignedRestoreRoleActivation, &SignedRestoreIssuerCompletion),
+        app: &super::restore_peer_wire::RestoreAppStatement,
+        exchange: (&Digest, &Digest),
+        now: std::time::Duration,
+    ) -> Result<()> {
+        let (decision, completion) = chain;
+        decision.verify_data(
+            policy,
+            certificate,
+            completion,
+            app,
+            (&decision.statement.request, &decision.statement.challenge),
+            now,
+        )?;
+        let statement = &self.statement;
+        ensure!(
+            statement.issuer == certificate.digest()?
+                && statement.decision == decision.digest_data()?
+                && statement.completion == completion.digest_data()?
+                && statement.app == app.digest()?
+                && &statement.request == exchange.0
+                && &statement.challenge == exchange.1
+                && statement.effective_deadline_ns <= decision.statement.effective_deadline_ns
+                && now.as_nanos() < u128::from(statement.effective_deadline_ns),
+            "native_restore_prepared_confirmation_expired_or_changed"
+        );
+        verify(
+            &certificate.data.public_key,
+            "restore-app-prepared-confirmed-v1",
+            statement,
+            &self.signature,
+        )
+    }
+}
+
 impl FreezeSelection {
+    /// Request interval DATA only. The actual freeze handler separately binds
+    /// the complete selection to its enrolled actors, fresh signed transcript,
+    /// kernel sender and issuer. This never reconstructs a clock or renews a
+    /// cold grant; the retained native acquisition supplies the other ceiling.
+    pub(super) fn current_deadline_data(
+        &self,
+        now: std::time::Duration,
+    ) -> Result<std::time::Duration> {
+        self.controller
+            .original
+            .validate_request(now, StagePurpose::CurrentRole)?;
+        self.app
+            .original
+            .validate_request(now, StagePurpose::CurrentRole)?;
+        Ok(std::time::Duration::from_nanos(
+            self.controller
+                .original
+                .deadline_ns
+                .min(self.app.original.deadline_ns),
+        ))
+    }
+
     pub(super) fn history_digest(&self) -> Result<Digest> {
         let mut members = [&self.app, &self.controller];
         members.sort_by_key(|s| {
@@ -197,6 +636,97 @@ pub(super) enum Packet {
         statement: Box<FrozenIssuance>,
         signature: String,
     },
+    RestorePrepareHello {
+        authorization: Box<RestoreAuthorizationData>,
+        request: Digest,
+    },
+    RestorePrepareNonce {
+        authorization: Digest,
+        request: Digest,
+        challenge: Digest,
+    },
+    RestorePrepareBind {
+        authorization: Box<RestoreAuthorizationData>,
+        request: Digest,
+        challenge: Digest,
+        signature: String,
+    },
+    RestorePrepareGrant {
+        authorization: Box<SignedRestoreAuthorization>,
+    },
+    RestoreAppHello {
+        request: Box<RestoreAppRequest>,
+    },
+    RestoreAppNonce {
+        certificate: IssuerCertificate,
+        authorization: Box<SignedRestoreAuthorization>,
+        request: Digest,
+        challenge: Digest,
+    },
+    RestoreAppBind {
+        authorization: Digest,
+        request: Box<RestoreAppRequest>,
+        challenge: Digest,
+        signature: String,
+    },
+    RestoreAppGrant {
+        certificate: IssuerCertificate,
+        admission: Box<SignedRestoreAdmission>,
+    },
+    RestoreFinishHello {
+        completion: Box<RestoreIssuerCompletionData>,
+        request: Digest,
+    },
+    RestoreFinishNonce {
+        completion: Digest,
+        request: Digest,
+        challenge: Digest,
+    },
+    RestoreFinishBind {
+        completion: Box<RestoreIssuerCompletionData>,
+        request: Digest,
+        challenge: Digest,
+        signature: String,
+    },
+    RestoreFinishGrant {
+        completion: Box<SignedRestoreIssuerCompletion>,
+    },
+    RestoreRoleHello {
+        completion: Box<SignedRestoreIssuerCompletion>,
+        request: Digest,
+    },
+    RestoreRoleNonce {
+        completion: Digest,
+        request: Digest,
+        challenge: Digest,
+    },
+    RestoreRoleBind {
+        completion: Box<SignedRestoreIssuerCompletion>,
+        request: Digest,
+        challenge: Digest,
+        signature: String,
+    },
+    RestoreRoleGrant {
+        activation: Box<SignedRestoreRoleActivation>,
+    },
+    RestoreAppConfirmHello {
+        decision: Box<SignedRestoreRoleActivation>,
+        request: Digest,
+    },
+    RestoreAppConfirmNonce {
+        decision: Digest,
+        request: Digest,
+        challenge: Digest,
+    },
+    RestoreAppConfirmBind {
+        decision: Box<SignedRestoreRoleActivation>,
+        request: Digest,
+        challenge: Digest,
+        signature: String,
+    },
+    RestoreAppConfirmGrant {
+        confirmation: Box<SignedRestorePreparedConfirmation>,
+    },
     StageHello {
         policy: Digest,
         role: NativeRole,
@@ -228,10 +758,34 @@ impl Packet {
     pub(super) fn frame(&self) -> Option<super::handshake::Frame> {
         use super::handshake::{Frame, Protocol, Step};
         let step = match self {
-            Self::StageHello { .. } | Self::FreezeHello { .. } => Step::Hello,
-            Self::StageNonce { .. } | Self::FreezeNonce { .. } => Step::Challenge,
-            Self::StageBind { .. } | Self::FreezeBind { .. } => Step::Bind,
-            Self::StageGrant { .. } | Self::FreezeGrant { .. } => Step::Grant,
+            Self::StageHello { .. }
+            | Self::FreezeHello { .. }
+            | Self::RestorePrepareHello { .. }
+            | Self::RestoreAppHello { .. }
+            | Self::RestoreFinishHello { .. }
+            | Self::RestoreRoleHello { .. }
+            | Self::RestoreAppConfirmHello { .. } => Step::Hello,
+            Self::StageNonce { .. }
+            | Self::FreezeNonce { .. }
+            | Self::RestorePrepareNonce { .. }
+            | Self::RestoreAppNonce { .. }
+            | Self::RestoreFinishNonce { .. }
+            | Self::RestoreRoleNonce { .. }
+            | Self::RestoreAppConfirmNonce { .. } => Step::Challenge,
+            Self::StageBind { .. }
+            | Self::FreezeBind { .. }
+            | Self::RestorePrepareBind { .. }
+            | Self::RestoreAppBind { .. }
+            | Self::RestoreFinishBind { .. }
+            | Self::RestoreRoleBind { .. }
+            | Self::RestoreAppConfirmBind { .. } => Step::Bind,
+            Self::StageGrant { .. }
+            | Self::FreezeGrant { .. }
+            | Self::RestorePrepareGrant { .. }
+            | Self::RestoreAppGrant { .. }
+            | Self::RestoreFinishGrant { .. }
+            | Self::RestoreRoleGrant { .. }
+            | Self::RestoreAppConfirmGrant { .. } => Step::Grant,
             Self::BirthChallenge { .. } | Self::BirthKey { .. } | Self::BirthGrant { .. } => {
                 return None;
             }
@@ -339,6 +893,100 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Packet> {
         value.is_object(),
         "native_enrollment_packet_object_required"
     );
+    // Keep the new restore wire closed to JSON sequences at every record
+    // boundary, including nested target/scope, native identity and runtime.
+    // The unique raw JSON decoder above still rejects duplicate keys before
+    // any Value-to-typed conversion can discard them.
+    let objects: &[&str] = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("restore_app_confirm_hello" | "restore_app_confirm_bind") => &[
+            "/decision",
+            "/decision/statement",
+            "/decision/statement/stage",
+            "/decision/statement/stage/data",
+            "/decision/statement/stage/data/process",
+            "/decision/statement/stage/data/process/namespaces",
+            "/decision/statement/stage/data/runtime",
+            "/decision/statement/stage/data/runtime/container",
+        ],
+        Some("restore_app_confirm_grant") => &["/confirmation", "/confirmation/statement"],
+        Some("restore_role_hello" | "restore_role_bind") => &[
+            "/completion",
+            "/completion/statement",
+            "/completion/statement/data",
+            "/completion/statement/data/cohort",
+        ],
+        Some("restore_role_grant") => &[
+            "/activation",
+            "/activation/statement",
+            "/activation/statement/stage",
+            "/activation/statement/stage/data",
+            "/activation/statement/stage/data/process",
+            "/activation/statement/stage/data/process/namespaces",
+            "/activation/statement/stage/data/runtime",
+            "/activation/statement/stage/data/runtime/container",
+        ],
+        Some("restore_finish_hello" | "restore_finish_bind") => {
+            &["/completion", "/completion/cohort"]
+        }
+        Some("restore_finish_grant") => &[
+            "/completion",
+            "/completion/statement",
+            "/completion/statement/data",
+            "/completion/statement/data/cohort",
+        ],
+        Some("restore_prepare_hello" | "restore_prepare_bind") => &[
+            "/authorization",
+            "/authorization/target",
+            "/authorization/target/scope",
+            "/authorization/report",
+        ],
+        Some("restore_prepare_grant") => &[
+            "/authorization",
+            "/authorization/statement",
+            "/authorization/statement/data",
+            "/authorization/statement/data/target",
+            "/authorization/statement/data/target/scope",
+            "/authorization/statement/data/report",
+        ],
+        Some("restore_app_nonce") => &[
+            "/authorization",
+            "/authorization/statement",
+            "/authorization/statement/data",
+            "/authorization/statement/data/target",
+            "/authorization/statement/data/target/scope",
+            "/authorization/statement/data/report",
+            "/certificate",
+            "/certificate/data",
+            "/certificate/data/process",
+            "/certificate/data/process/namespaces",
+            "/certificate/data/provisioner",
+            "/certificate/data/provisioner/namespaces",
+        ],
+        Some("restore_app_hello" | "restore_app_bind") => &["/request"],
+        Some("restore_app_grant") => &[
+            "/admission",
+            "/admission/statement",
+            "/admission/statement/process",
+            "/admission/statement/process/namespaces",
+            "/admission/statement/runtime",
+            "/admission/statement/runtime/container",
+            "/certificate",
+            "/certificate/data",
+            "/certificate/data/process",
+            "/certificate/data/process/namespaces",
+            "/certificate/data/provisioner",
+            "/certificate/data/provisioner/namespaces",
+        ],
+        _ => &[],
+    };
+    for path in objects {
+        ensure!(
+            value
+                .pointer(path)
+                .is_some_and(serde_json::Value::is_object),
+            "native_restore_packet_object_required"
+        );
+    }
     let selection = match value.get("kind").and_then(serde_json::Value::as_str) {
         Some("freeze_hello" | "freeze_bind") => Some("/selection"),
         Some("freeze_grant") => {
@@ -356,6 +1004,12 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Packet> {
         ensure!(
             value
                 .pointer(path)
+                .is_some_and(serde_json::Value::is_object),
+            "native_enrollment_freeze_object_required"
+        );
+        ensure!(
+            value
+                .pointer(&format!("{path}/stop"))
                 .is_some_and(serde_json::Value::is_object),
             "native_enrollment_freeze_object_required"
         );

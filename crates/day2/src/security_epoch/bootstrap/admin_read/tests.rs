@@ -276,6 +276,179 @@ fn calls(source: &str, owner: &str, name: &str) -> Vec<String> {
 fn before(calls: &[String], first: &str, second: &str) -> bool {
     matches!((calls.iter().position(|x| x == first), calls.iter().position(|x| x == second)), (Some(a), Some(b)) if a < b)
 }
+
+fn app_two_phase_stop(method: &syn::ImplItemFn) -> bool {
+    use quote::ToTokens as _;
+    let mut calls = Calls::default();
+    calls.visit_block(&method.block);
+    let selected: Vec<&str> = calls
+        .0
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            matches!(
+                *name,
+                "seal"
+                    | "check_initial_restore_stop_data"
+                    | "check_drained"
+                    | "acknowledge_restore_stop"
+                    | "await_restore_fence"
+                    | "confirm_restore_reservation"
+                    | "acknowledge_restore_fence"
+                    | "await_restore_release"
+                    | "finish_restore_stopped"
+            )
+        })
+        .collect();
+    #[derive(Default)]
+    struct CapturedOperation {
+        count: usize,
+        valid: bool,
+        captures: usize,
+        captured: bool,
+    }
+    impl<'ast> Visit<'ast> for CapturedOperation {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "check_initial_restore_stop_data" {
+                self.count += 1;
+                self.valid = call.receiver.to_token_stream().to_string() == "self . lineage"
+                    && call.args.len() == 4
+                    && call.args[0].to_token_stream().to_string() == "& self . store"
+                    && matches!(call.args.get(1),Some(syn::Expr::Path(path)) if path.path.is_ident("restore_operation"))
+                    && call.args[2].to_token_stream().to_string() == "& stopped . selection"
+                    && call.args[3].to_token_stream().to_string() == "& before";
+            }
+            if call.method == "restore_operation_data" {
+                self.captures += 1;
+                self.captured = matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("operation"))
+                    && call.args.is_empty();
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut operation = CapturedOperation::default();
+    operation.visit_block(&method.block);
+    selected
+        == [
+            "seal",
+            "check_initial_restore_stop_data",
+            "check_drained",
+            "acknowledge_restore_stop",
+            "await_restore_fence",
+            "check_drained",
+            "confirm_restore_reservation",
+            "check_drained",
+            "acknowledge_restore_fence",
+            "await_restore_release",
+            "check_drained",
+            "finish_restore_stopped",
+        ]
+        && operation.count == 1
+        && operation.valid
+        && operation.captures == 1
+        && operation.captured
+        && !calls.0.iter().any(|name| name == "check_fenced_initial")
+}
+
+#[test]
+fn actual_app_stop_drains_active_then_confirms_known_fence_on_the_same_original() {
+    use quote::ToTokens as _;
+    let actual = method(
+        include_str!("../admin_read.rs"),
+        "ActiveAppStorageContinuity",
+        "admin_read",
+    );
+    assert!(app_two_phase_stop(&actual));
+    let rendered = actual.to_token_stream().to_string();
+    let parse = |rendered: &str| {
+        method(
+            &format!("impl Dummy {{ {rendered} }}"),
+            "Dummy",
+            "admin_read",
+        )
+    };
+    for target in [
+        "check_initial_restore_stop_data",
+        "acknowledge_restore_stop",
+        "await_restore_fence",
+        "confirm_restore_reservation",
+        "acknowledge_restore_fence",
+        "await_restore_release",
+    ] {
+        assert_eq!(rendered.matches(target).count(), 1, "{target}");
+        assert!(
+            !app_two_phase_stop(&parse(&rendered.replacen(target, "unchecked_data", 1))),
+            "{target}"
+        );
+    }
+    #[derive(Default)]
+    struct SelectedCall(Vec<syn::ExprMethodCall>);
+    impl<'ast> Visit<'ast> for SelectedCall {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "check_initial_restore_stop_data" {
+                self.0.push(call.clone());
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut selected = SelectedCall::default();
+    selected.visit_block(&actual.block);
+    assert_eq!(selected.0.len(), 1);
+    let mut changed = selected.0.pop().unwrap();
+    let original = changed.to_token_stream().to_string();
+    assert_eq!(rendered.matches(&original).count(), 1);
+    let mut wrong_lineage = changed.clone();
+    *wrong_lineage.receiver = syn::parse_quote!(unrelated.lineage);
+    assert!(!app_two_phase_stop(&parse(&rendered.replacen(
+        &original,
+        &wrong_lineage.to_token_stream().to_string(),
+        1
+    ))));
+    changed.args[1] = syn::parse_quote!(&stopped.selection.restore_operation);
+    assert!(!app_two_phase_stop(&parse(&rendered.replacen(
+        &original,
+        &changed.to_token_stream().to_string(),
+        1
+    ))));
+    let captured = "restore_operation_data";
+    assert_eq!(rendered.matches(captured).count(), 1);
+    assert!(!app_two_phase_stop(&parse(&rendered.replacen(
+        captured,
+        "unchecked_data",
+        1
+    ))));
+    let controller = calls(
+        include_str!("../admin_read.rs"),
+        "ActiveControllerStorageContinuity",
+        "begin_admin_read",
+    );
+    assert_eq!(
+        controller
+            .iter()
+            .filter(|name| *name == "require_admin_operation_data")
+            .count(),
+        1
+    );
+    assert!(before(&controller, "require_admin_operation_data", "read"));
+    let freeze = calls(
+        include_str!("../../native_enrollment/storage_peer/continuation.rs"),
+        "CurrentStoragePeerPhase",
+        "freeze_restore_issuer",
+    );
+    assert_eq!(
+        freeze
+            .iter()
+            .filter(|name| *name == "require_restore_operation_data")
+            .count(),
+        1
+    );
+    assert!(before(
+        &freeze,
+        "require_restore_operation_data",
+        "capture_restore"
+    ));
+}
+
 fn ordered(source: &str) -> bool {
     let read = calls(source, "InitialStoreMetadata", "controller_admin_data");
     [
@@ -411,4 +584,177 @@ fn real_loan_retains_originals_and_only_known_final_path_restores_continuations(
         mutant.sig.inputs.push(substituted);
         assert!(!closed_app_admin(&mutant));
     }
+}
+
+#[test]
+fn controller_refresh_checks_the_old_lineage_before_its_replacement() {
+    use quote::ToTokens;
+    use syn::visit::Visit;
+    struct Lineage(Vec<syn::ExprMethodCall>);
+    impl<'ast> Visit<'ast> for Lineage {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.receiver.to_token_stream().to_string() == "self . lineage"
+                && (call.method == "check" || call.method == "read")
+            {
+                self.0.push(call.clone());
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let source = include_str!("../admin_read.rs");
+    let actual = method(source, "ControllerAdminReadLoan", "refresh");
+    let mut selected = Lineage(Vec::new());
+    selected.visit_block(&actual.block);
+    let shapes = |selected: &Lineage| {
+        selected
+            .0
+            .iter()
+            .map(|call| {
+                (
+                    call.method.to_string(),
+                    call.args
+                        .iter()
+                        .map(|arg| arg.to_token_stream().to_string())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        (
+            "check".to_owned(),
+            vec![
+                "& self . selection",
+                "& mut self . reads",
+                "physical . controller_stage () ?",
+                "& mut self . observed",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        ),
+        (
+            "read".to_owned(),
+            vec![
+                "& self . selection",
+                "& mut self . reads",
+                "physical . controller_stage () ?",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        ),
+        (
+            "check".to_owned(),
+            vec![
+                "& self . selection",
+                "& mut self . reads",
+                "physical . controller_stage () ?",
+                "& mut observed",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        ),
+    ];
+    assert_eq!(shapes(&selected), expected);
+    let flow = calls(source, "ControllerAdminReadLoan", "refresh");
+    assert!(before(&flow, "require_closed", "check"));
+    let body = actual.block.to_token_stream().to_string();
+    let first = selected.0[0].to_token_stream().to_string();
+    assert_eq!(body.matches(&first).count(), 1);
+    let changed =
+        syn::parse_str::<syn::Block>(&body.replacen(&first, "Ok::<(),anyhow::Error>(())", 1))
+            .unwrap();
+    let mut removed = Lineage(Vec::new());
+    removed.visit_block(&changed);
+    assert_ne!(shapes(&removed), expected);
+}
+
+#[test]
+fn final_admin_read_passes_the_same_old_observation_into_the_closed_wait_read() {
+    use quote::ToTokens;
+    use syn::visit::Visit;
+    struct Consumed(Vec<syn::ExprMethodCall>);
+    impl<'ast> Visit<'ast> for Consumed {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "announce_and_read_app_consumed" {
+                self.0.push(call.clone());
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let actual = method(
+        include_str!("../admin_read.rs"),
+        "ControllerAdminReadLoan",
+        "finish_checked",
+    );
+    let mut consumed = Consumed(Vec::new());
+    consumed.visit_block(&actual.block);
+    let [call] = consumed.0.as_slice() else {
+        panic!("one actual fixed consumed-read call");
+    };
+    let expected = [
+        "& mut self . reads",
+        "& self . selection",
+        "self . lineage",
+        "& mut self . observed",
+        "self . trace",
+    ];
+    assert_eq!(call.receiver.to_token_stream().to_string(), "physical");
+    assert_eq!(
+        call.args
+            .iter()
+            .map(|arg| arg.to_token_stream().to_string())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let mut different = call.clone();
+    different.args[3] = syn::parse_quote!(&mut other_observed);
+    assert_ne!(
+        different
+            .args
+            .iter()
+            .map(|arg| arg.to_token_stream().to_string())
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn first_restore_snapshot_selector_is_a_fixed_negative_loan_facade() {
+    use quote::ToTokens;
+    fn closed(source: &str) -> bool {
+        let actual = method(
+            source,
+            "ControllerAdminReadLoan",
+            "initial_restore_snapshot_data",
+        );
+        let body = actual.block.to_token_stream().to_string();
+        actual.sig.inputs.len() == 1
+            && matches!(actual.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+                if receiver.reference.is_some() && receiver.mutability.is_some())
+            && calls(
+                source,
+                "ControllerAdminReadLoan",
+                "initial_restore_snapshot_data",
+            ) == ["initial_restore_snapshot_data", "is_err", "refuse"]
+            && body.contains("self . lineage . initial_restore_snapshot_data (& self . observed)")
+            && body.matches("self . refuse ()").count() == 1
+    }
+    let source = include_str!("../admin_read.rs");
+    assert!(closed(source));
+    let actual = method(
+        source,
+        "ControllerAdminReadLoan",
+        "initial_restore_snapshot_data",
+    );
+    let method = actual.to_token_stream().to_string();
+    let wrapped = format!("impl ControllerAdminReadLoan {{ {method} }}");
+    assert!(closed(&wrapped));
+    assert!(!closed(&wrapped.replacen(
+        "self . refuse ()",
+        "unrelated . refuse ()",
+        1
+    )));
 }

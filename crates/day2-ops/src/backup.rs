@@ -1,13 +1,13 @@
 //! Online SQLite snapshots and restore into a new directory. Never copy a live
 //! main database file without its WAL, overwrite an instance, or resume commands.
 use anyhow::{Context, Result, bail, ensure};
-use day2::{artifact::Instance, authority_state, store::Runtime};
+use day2::{artifact::Instance, authority_state, backup_archive::Manifest, store::Runtime};
 use ring::digest::{Context as DigestContext, SHA256};
 use rusqlite::{
     Connection, ErrorCode, OpenFlags,
     backup::{Backup, StepResult},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::BTreeMap,
     ffi::c_int,
@@ -46,35 +46,6 @@ const ONLINE: Pace = Pace {
     stall: Duration::from_secs(15),
     floor_bytes_per_second: 8 << 20,
 };
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Manifest {
-    pub format: u32,
-    pub scope: String,
-    pub artifact: String,
-    pub database: String,
-    /// Reviewed local provider stores. Older format-2 backups predate this field.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub provider_databases: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rollout_artifacts: Option<String>,
-    /// Additional durable companion state, keyed by its path beneath `.state`.
-    pub companion_state: BTreeMap<String, String>,
-    pub app: String,
-    pub authority: authority_state::AuthorityStamp,
-    #[serde(default)]
-    pub resources: day2::authority_state::ResolvedResources,
-    pub instance: Instance,
-}
-
-impl Manifest {
-    /// Binds the stable restore request to the complete verified snapshot graph.
-    /// This is historical identity, never live security authority.
-    pub fn security_restore_digest(&self) -> Result<day2_capabilities::Digest> {
-        day2_capabilities::Digest::of(&("day2-security-backup-v1", self))
-    }
-}
 
 /// Allowlisted historical DATA for selecting an archive in the restore command.
 /// No local JSON, successful inspection or stored digest is approval, a current
@@ -800,18 +771,7 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
         "backup manifest budget"
     );
     let manifest: Manifest = serde_json::from_slice(&fs::read(backup.join("backup.json"))?)?;
-    ensure!(
-        manifest.format == 3
-            && manifest.instance.apps.len() == 1
-            && manifest.instance.scope(&manifest.app)? == manifest.scope,
-        "invalid backup scope"
-    );
-    let artifact_relative = format!("artifacts/{}", day2_assets::hash_part(&manifest.artifact)?);
-    ensure!(
-        manifest.instance.branding.is_none()
-            && manifest.instance.apps[&manifest.app].artifact == artifact_relative,
-        "backup instance must refer to its bundled artifact"
-    );
+    let artifact_relative = manifest.artifact_relative()?;
     ensure!(
         database_digest(&backup.join("app.sqlite"))? == manifest.database,
         "backup database digest mismatch"
@@ -827,25 +787,9 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
     }
     verify_companion_state(backup, &manifest.companion_state)?;
     let artifact = day2::artifact::LoadedArtifact::load(&backup.join(&artifact_relative))?;
-    ensure!(
-        artifact.id() == manifest.artifact,
-        "backup artifact mismatch"
-    );
-    integrity(&backup.join("app.sqlite"))?;
     let mut db =
         Connection::open_with_flags(backup.join("app.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    day2::store::validate_storage_snapshot(&mut db, &artifact, &manifest.scope)?;
-    let active = authority_state::current(&db)?;
-    let binding = &manifest.instance.apps[&manifest.app];
-    ensure!(
-        active.stamp == manifest.authority
-            && active.artifact_id == manifest.artifact
-            && active.document.readers == binding.readers
-            && active.document.writers == binding.writers
-            && active.document.policy == binding.authority
-            && active.document.resources == manifest.resources,
-        "backup authority snapshot mismatch"
-    );
+    day2::backup_archive::verify_snapshot(&manifest, &artifact, &mut db)?;
     Ok(manifest)
 }
 

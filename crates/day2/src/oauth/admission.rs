@@ -4245,7 +4245,7 @@ pub(super) mod tests {
                 email: "alice@example.com".into(),
                 subject: "accounts.google.com:alice".into(),
             };
-            let manager = Manager::new(runtime, authority);
+            let manager = Manager::new(Arc::new(runtime), authority);
             let Reply::Pending { view } = manager.dispatch(
                 Call::Capture {
                     registration: "calendar".into(),

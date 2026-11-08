@@ -416,23 +416,34 @@ impl Drop for AuthenticationStoreFiles {
 
 const _: () = {
     macro_rules! assert_not_impl {
-        ($bound:path) => {{
+        ($owner:ty, $bound:path) => {{
             trait Ambiguous<T> {
                 fn check() {}
             }
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
-            let _ = <AuthenticationStoreFiles as Ambiguous<_>>::check;
+            let _ = <$owner as Ambiguous<_>>::check;
         }};
     }
-    assert_not_impl!(Clone);
-    assert_not_impl!(Copy);
-    assert_not_impl!(Default);
-    assert_not_impl!(std::fmt::Debug);
-    assert_not_impl!(Send);
-    assert_not_impl!(Sync);
-    assert_not_impl!(serde::Serialize);
-    assert_not_impl!(serde::Deserialize<'static>);
+    assert_not_impl!(AuthenticationStoreFiles, Clone);
+    assert_not_impl!(AuthenticationStoreFiles, Copy);
+    assert_not_impl!(AuthenticationStoreFiles, Default);
+    assert_not_impl!(AuthenticationStoreFiles, std::fmt::Debug);
+    assert_not_impl!(AuthenticationStoreFiles, Send);
+    assert_not_impl!(AuthenticationStoreFiles, Sync);
+    assert_not_impl!(AuthenticationStoreFiles, serde::Serialize);
+    assert_not_impl!(AuthenticationStoreFiles, serde::Deserialize<'static>);
+    assert_not_impl!(super::RestoreCreatorRoot, Clone);
+    assert_not_impl!(super::RestoreCreatorRoot, Copy);
+    assert_not_impl!(super::RestoreCreatorRoot, Default);
+    assert_not_impl!(super::RestoreCreatorRoot, std::fmt::Debug);
+    assert_not_impl!(super::RestoreCreatorRoot, Send);
+    assert_not_impl!(super::RestoreCreatorRoot, Sync);
+    assert_not_impl!(super::RestoreCreatorRoot, serde::Serialize);
+    assert_not_impl!(super::RestoreCreatorRoot, serde::Deserialize<'static>);
+    assert_not_impl!(super::RestoreCreatorRoot, std::ops::Deref);
+    assert_not_impl!(super::RestoreCreatorRoot, AsRef<File>);
+    assert_not_impl!(super::RestoreCreatorRoot, std::borrow::Borrow<File>);
 };
 
 #[cfg(test)]

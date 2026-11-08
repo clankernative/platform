@@ -17,10 +17,15 @@ use day2_capabilities::{Digest, restore_signing::KeySelection, security_epoch::E
 use std::time::Duration;
 
 mod consumer;
-pub(crate) use consumer::FencedReadUnit;
 pub(in crate::security_epoch) use consumer::{
-    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
+    AuthenticatedRestoreExecution, ExecutionSourceLoan, FencedRegistryLoan,
+    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
+    RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
+    RestoreWriterActivationLoan, RestoreWriterConfirmation, RestoreWriterExchangeContext,
+    RestoreWriterReleaseLoan, TargetSettlementSourceLoan, WriterConfirmationSourceLoan,
+    WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
+pub(crate) use consumer::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
 
 pub(in crate::security_epoch) struct PendingApproval {
     ceremony: ControllerCeremony,
@@ -193,7 +198,7 @@ impl<'metadata, 'storage, 'role> RestoreAuthenticationAction<'metadata, 'storage
         self.check_approval_source(source)?;
         Ok((
             self.reader.loan.selection.clone(),
-            self.reader.loan.observed.snapshot().clone(),
+            self.reader.loan.initial_restore_snapshot_data()?,
         ))
     }
 }

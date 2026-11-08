@@ -140,6 +140,7 @@ impl Granted {
             connections: None,
             rolling: false,
             restore_registry_selector: None,
+            native_database: None,
             instance_path: path,
             app: "caller".into(),
             db: state.join("caller.sqlite"),
@@ -179,7 +180,7 @@ impl Granted {
     /// ordinary SQLite file; this neither opens a native path nor creates an
     /// enrolled role, storage owner, serving phase or Stop witness.
     pub(crate) fn metadata_native_runtime(&self) -> Result<Runtime> {
-        Runtime::from_artifact_for_tests(
+        Runtime::from_native_metadata_for_tests(
             self.caller.instance_path().to_owned(),
             self.caller.app().into(),
             "/state/day2-native/day2-initial.sqlite".into(),
@@ -579,6 +580,7 @@ impl Impersonating {
             connections: None,
             rolling: false,
             restore_registry_selector: None,
+            native_database: None,
             instance_path: path,
             app: "support".into(),
             db: state.join("support.sqlite"),

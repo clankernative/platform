@@ -10,12 +10,12 @@ use crate::security_epoch::{
     authenticated_reads::{
         AuthenticatedReads, ControllerEpochReads, CounterConnectionSlot, CounterRequest,
     },
+    bootstrap::{ActiveLineage, ActiveObservation},
     controller::{
         bootstrap_timing::BootstrapTiming,
         evidence::{PreparationFailure, PreparationStep},
         preparation_timing::{Operation, Timings},
     },
-    firestore::{EpochObservation, Names},
     kernel::{Bootstrap, Holder, Request},
     native_enrollment::{
         AppHolderPeerContinuity, AuthenticatedAppFirstHolder, ControllerHolderPeerContinuity,
@@ -497,7 +497,7 @@ mod current_acquisition_tests {
         ));
         assert!(request_first(
             &calls(
-                include_str!("../bootstrap/controller_serving.rs"),
+                include_str!("../bootstrap.rs"),
                 "ActiveControllerStorageContinuity",
                 "serve_shell_current"
             ),
@@ -796,10 +796,15 @@ impl AppInitialStorageContinuity {
         &'storage mut self,
         stage: &mut EnrolledRoleStage<'_>,
         binding: Digest,
+        action: &crate::security_epoch::native_enrollment::AdminReadAction,
     ) -> Result<CurrentAppStoragePhase<'storage>> {
         let queued = self.ready.begin()?;
         let cohort = self.file.sqlite_cohort(stage)?;
-        let request = StoragePeerRequest::AdminRead { binding, cohort };
+        let request = StoragePeerRequest::AdminRead {
+            binding,
+            cohort,
+            action: action.clone(),
+        };
         let peer = self.peer.begin_current(queued, stage, request)?;
         let mut phase = CurrentAppStoragePhase {
             file: &mut self.file,
@@ -1010,6 +1015,40 @@ impl CurrentAppStoragePhase<'_> {
         checked
     }
 
+    pub(in crate::security_epoch) fn await_restore_fence(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+    ) -> Result<crate::security_epoch::firestore::ReservationConfirmation> {
+        self.check(stage)?;
+        let requested = self.peer.await_restore_fence(stage, stopped);
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let confirmation = requested?;
+        checked?;
+        Ok(confirmation)
+    }
+
+    pub(in crate::security_epoch) fn acknowledge_restore_fence(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        self.check(stage)?;
+        let requested = self
+            .peer
+            .acknowledge_restore_fence(stage, stopped, confirmation);
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn await_restore_release(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -1059,6 +1098,52 @@ impl CurrentAppStoragePhase<'_> {
 }
 
 impl<'role> CurrentControllerStoragePhase<'_, 'role> {
+    /// Fixed old-peer release only. The accepting owner calls it after its
+    /// final installed ACK/posts and old counter completion, passing the SAME
+    /// retained stop data. Actual protocol state and independent physical
+    /// postchecks remain mandatory even when the send itself fails.
+    pub(in crate::security_epoch) fn release_restore_stop(
+        &mut self,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check()?;
+            let PeerFence::Current(peer) = &mut self.peer else {
+                anyhow::bail!("native_restore_same_admin_peer_required");
+            };
+            peer.release_restore_stop(self.file.controller_stage_after_check()?, stopped)
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    /// Close THIS genuine terminal old peer and physical phase, then consume
+    /// the actual owned native stage last. This returns only the same native
+    /// role borrow; it is no installed ACK, storage, epoch or writer result.
+    pub(in crate::security_epoch) fn retire_restore_native(
+        mut self,
+    ) -> Result<crate::security_epoch::native_enrollment::RetainedControllerNative<'role>> {
+        self.check()?;
+        if !matches!(&self.peer, PeerFence::Current(_)) {
+            self.refuse();
+            anyhow::bail!("native_restore_same_admin_peer_required");
+        }
+        let PeerFence::Current(peer) = self.peer else {
+            unreachable!();
+        };
+        let finished = peer.finish_restore_stopped(self.file.controller_stage_after_check()?);
+        if finished.is_err() {
+            self.file.refuse();
+        }
+        finished?;
+        *self.continuation = false;
+        self.file.retire_restore_native()
+    }
+
     pub(in crate::security_epoch) fn capture_approval_source(
         &mut self,
         scope: &day2_capabilities::security_epoch::AuthorityScope,
@@ -1127,6 +1212,23 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         Ok(files)
     }
 
+    /// Fixed pre-creation admission through the actual retained physical owner.
+    /// The restore-loan facade must bind its own Fenced target before this call.
+    pub(in crate::security_epoch) fn admit_restore_creator_root(
+        &mut self,
+        held_root: &std::fs::File,
+    ) -> Result<super::RestoreCreatorRoot> {
+        self.check()?;
+        let requested = self.file.admit_restore_creator_root(held_root);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let root = requested?;
+        checked?;
+        Ok(root)
+    }
+
     pub(in crate::security_epoch) fn check_opened_admin_database(
         &mut self,
         db: &rusqlite::Connection,
@@ -1168,9 +1270,10 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         &mut self,
         reads: &mut CounterRequest<'_>,
         selection: &EpochStore,
-        names: &Names,
+        lineage: &ActiveLineage,
+        observed: &mut ActiveObservation,
         trace: &crate::security_epoch::controller::serving_timing::ServingTiming,
-    ) -> Result<EpochObservation> {
+    ) -> Result<ActiveObservation> {
         use crate::security_epoch::controller::serving_timing::ServingStep;
         let result = (|| {
             trace.measure(ServingStep::Announcement, || {
@@ -1200,7 +1303,15 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
                 self.check()
             })?;
             trace.measure(ServingStep::CounterAfter, || {
-                reads.read(self.file.controller_stage_after_check()?, selection, names)
+                // The wait spent the SAME original. Check the OLD bound
+                // observation here before any fresh reply can replace it.
+                lineage.check(
+                    selection,
+                    reads,
+                    self.file.controller_stage_after_check()?,
+                    observed,
+                )?;
+                lineage.read(selection, reads, self.file.controller_stage_after_check()?)
             })
         })();
         if result.is_err() {
@@ -1211,15 +1322,14 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
 
     pub(in crate::security_epoch) fn freeze_restore_issuer(
         &mut self,
-        operation: &Digest,
-        root: &Digest,
+        stop: &crate::security_epoch::kernel::restore::StopSelection,
     ) -> Result<crate::security_epoch::native_enrollment::FrozenRoleIssuer> {
         let requested = (|| {
             self.check()?;
             let PeerFence::Current(peer) = &mut self.peer else {
                 anyhow::bail!("native_restore_same_admin_peer_required");
             };
-            peer.freeze_restore_issuer(self.file.controller_stage_after_check()?, operation, root)
+            peer.freeze_restore_issuer(self.file.controller_stage_after_check()?, stop)
         })();
         let checked = self.check();
         if requested.is_err() || checked.is_err() {
@@ -1266,6 +1376,54 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         let stopped = requested?;
         checked?;
         Ok(stopped)
+    }
+
+    pub(in crate::security_epoch) fn announce_restore_fence(
+        &mut self,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check()?;
+            let PeerFence::Current(peer) = &mut self.peer else {
+                anyhow::bail!("native_restore_same_admin_peer_required");
+            };
+            peer.announce_restore_fence(
+                self.file.controller_stage_after_check()?,
+                stopped,
+                confirmation,
+            )
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    pub(in crate::security_epoch) fn await_restore_fence_confirmed(
+        &mut self,
+        stopped: &crate::security_epoch::native_enrollment::AuthorityStopData,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check()?;
+            let PeerFence::Current(peer) = &mut self.peer else {
+                anyhow::bail!("native_restore_same_admin_peer_required");
+            };
+            peer.await_restore_fence_confirmed(
+                self.file.controller_stage_after_check()?,
+                stopped,
+                confirmation,
+            )
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
     }
 
     pub(in crate::security_epoch) fn require_restore_stopped(
@@ -1508,7 +1666,7 @@ mod settlement_boundary_tests {
                 self.repeated_getter += usize::from(node.method == "controller_stage");
                 if node.method == "read" {
                     self.reads += 1;
-                    self.exact_stage += usize::from(matches!(node.args.first(),
+                    self.exact_stage += usize::from(matches!(node.args.iter().nth(2),
                         Some(syn::Expr::Try(stage)) if matches!(&*stage.expr,
                             syn::Expr::MethodCall(call) if call.method == "controller_stage_after_check"
                             && matches!(&*call.receiver, syn::Expr::Field(field)
@@ -1529,12 +1687,12 @@ mod settlement_boundary_tests {
         let source = include_str!("initial.rs");
         assert!(ack_read_has_one_checked_stage_handoff(source));
         let start = source.find("fn announce_and_read_app_consumed(").unwrap();
-        let original = "reads.read(self.file.controller_stage_after_check()?, selection, names)";
+        let original = "lineage.read(selection, reads, self.file.controller_stage_after_check()?)";
         let offset = start + source[start..].find(original).unwrap();
         let mut repeated = source.to_owned();
         repeated.replace_range(
             offset..offset + original.len(),
-            "reads.read(self.controller_stage()?, selection, names)",
+            "lineage.read(selection, reads, self.controller_stage()?)",
         );
         assert!(!ack_read_has_one_checked_stage_handoff(&repeated));
     }
@@ -1552,6 +1710,77 @@ mod settlement_boundary_tests {
                     if call.method == "refuse"
                     && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("self")))
         })
+    }
+
+    fn old_observation_precedes_actual_reread(source: &str) -> bool {
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("lineage"))
+                    && (call.method == "check" || call.method == "read")
+                {
+                    self.0.push(format!("lineage_{}", call.method));
+                } else if call.method == "check"
+                    && matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("self"))
+                {
+                    self.0.push("physical_check".to_owned());
+                } else if call.method == "announce_known" || call.method == "await_acknowledgement"
+                {
+                    self.0.push(call.method.to_string());
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let method = native_method(source, "announce_and_read_app_consumed").unwrap();
+        let mut calls = Calls(Vec::new());
+        calls.visit_block(&method.block);
+        calls.0
+            == [
+                "physical_check",
+                "announce_known",
+                "physical_check",
+                "await_acknowledgement",
+                "physical_check",
+                "lineage_check",
+                "lineage_read",
+            ]
+    }
+
+    #[test]
+    fn actual_consumed_wait_checks_old_observation_before_replacing_it() {
+        use quote::ToTokens;
+        let source = include_str!("initial.rs");
+        assert!(old_observation_precedes_actual_reread(source));
+        let method = native_method(source, "announce_and_read_app_consumed").unwrap();
+        let actual = method.to_token_stream().to_string();
+        let wrap = |body: &str| format!("impl CurrentControllerStoragePhase<'_, '_> {{{body}}}");
+        assert!(old_observation_precedes_actual_reread(&wrap(&actual)));
+        let target = "lineage . check";
+        assert_eq!(actual.matches(target).count(), 1);
+        let missing = actual.replacen(target, "lineage . unchecked", 1);
+        assert!(!old_observation_precedes_actual_reread(&wrap(&missing)));
+        struct ReadCall(Vec<String>);
+        impl<'ast> Visit<'ast> for ReadCall {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if call.method == "read"
+                    && matches!(&*call.receiver,syn::Expr::Path(p) if p.path.is_ident("lineage"))
+                {
+                    self.0.push(call.to_token_stream().to_string());
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let mut read = ReadCall(Vec::new());
+        read.visit_block(&method.block);
+        assert_eq!(read.0.len(), 1);
+        let target = &read.0[0];
+        assert_eq!(actual.matches(target).count(), 1);
+        let repeated = actual.replacen(target, &format!("{{{target}?;{target}}}"), 1);
+        assert!(!old_observation_precedes_actual_reread(&wrap(&repeated)));
+        let missing_wait = actual.replacen("await_acknowledgement", "unchecked_wait", 1);
+        assert!(!old_observation_precedes_actual_reread(&wrap(
+            &missing_wait
+        )));
     }
 
     #[test]
@@ -1582,12 +1811,20 @@ mod settlement_boundary_tests {
         struct Operations(Vec<String>);
         impl<'ast> Visit<'ast> for Operations {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-                if node.method == "check_observation"
-                    || node.method == "announce_and_read_app_consumed"
+                if matches!(&*node.receiver,syn::Expr::Field(field)
+                    if matches!(&*field.base,syn::Expr::Path(p) if p.path.is_ident("self"))
+                        && matches!(&field.member,syn::Member::Named(id) if id=="lineage"))
+                    && (node.method == "check"
+                        || node.method == "read"
+                        || node.method == "snapshot_data")
+                {
+                    self.0.push(format!("lineage_{}", node.method));
+                } else if node.method == "announce_and_read_app_consumed"
                     || node.method == "finish_app_known"
                     || node.method == "announce_app_known"
                     || node.method == "await_app_consumed"
                     || node.method == "read"
+                    || node.method == "check_observation"
                 {
                     self.0.push(node.method.to_string());
                 }
@@ -1597,12 +1834,12 @@ mod settlement_boundary_tests {
                 if matches!(&*node.func, syn::Expr::Path(path)
                     if path.path.segments.last().is_some_and(|part| part.ident == "snapshot_digest"))
                 {
-                    self.0.push("snapshot_digest".to_owned());
+                    self.0.push("raw_snapshot_digest".to_owned());
                 }
                 syn::visit::visit_expr_call(self, node);
             }
         }
-        let file = syn::parse_file(include_str!("../bootstrap/controller_serving.rs")).unwrap();
+        let file = syn::parse_file(include_str!("../bootstrap.rs")).unwrap();
         let method = file
             .items
             .iter()
@@ -1623,13 +1860,122 @@ mod settlement_boundary_tests {
         assert_eq!(
             operations.0,
             [
-                "read",
-                "check_observation",
+                "lineage_read",
+                "lineage_check",
                 "announce_and_read_app_consumed",
-                "check_observation",
-                "snapshot_digest",
+                "lineage_check",
+                "lineage_snapshot_data",
                 "finish_app_known"
             ]
+        );
+    }
+    #[test]
+    fn restore_release_preserves_full_independent_posts_and_send_error_primary() {
+        use quote::ToTokens;
+        let actual = native_method(include_str!("initial.rs"), "release_restore_stop").unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            let requested = (|| {
+                self.check()?;
+                let PeerFence::Current(peer) = &mut self.peer else {
+                    anyhow::bail!("native_restore_same_admin_peer_required");
+                };
+                peer.release_restore_stop(self.file.controller_stage_after_check()?, stopped)
+            })();
+            let checked = self.check();
+            if requested.is_err() || checked.is_err() {
+                self.refuse();
+            }
+            requested?;
+            checked
+        });
+        let same = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(same(&actual.block));
+        for index in 0..actual.block.stmts.len() {
+            let mut changed = actual.block.clone();
+            changed.stmts.remove(index);
+            assert!(!same(&changed));
+        }
+        let mut late_post = actual.block.clone();
+        late_post.stmts.swap(1, 3);
+        assert!(!same(&late_post));
+        let mut reverse_primary = actual.block.clone();
+        reverse_primary.stmts.swap(3, 4);
+        assert!(!same(&reverse_primary));
+    }
+
+    #[test]
+    fn restore_native_finish_requires_real_terminal_peer_before_final_old_physical_close() {
+        use quote::ToTokens;
+        let actual = native_method(include_str!("initial.rs"), "retire_restore_native").unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            self.check()?;
+            if !matches!(&self.peer, PeerFence::Current(_)) {
+                self.refuse();
+                anyhow::bail!("native_restore_same_admin_peer_required");
+            }
+            let PeerFence::Current(peer) = self.peer else {
+                unreachable!();
+            };
+            let finished = peer.finish_restore_stopped(self.file.controller_stage_after_check()?);
+            if finished.is_err() {
+                self.file.refuse();
+            }
+            finished?;
+            *self.continuation = false;
+            self.file.retire_restore_native()
+        });
+        let same = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(same(&actual.block));
+        assert_eq!(actual.sig.inputs.len(), 1);
+        assert!(
+            matches!(actual.sig.inputs.first(),Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_none())
+        );
+        for index in 0..actual.block.stmts.len() {
+            let mut changed = actual.block.clone();
+            changed.stmts.remove(index);
+            assert!(!same(&changed));
+        }
+        let mut premature = actual.block.clone();
+        let end = premature.stmts.len() - 1;
+        premature.stmts.swap(3, end);
+        assert!(!same(&premature));
+        let terminal = include_str!("../native_enrollment/storage_peer/continuation.rs");
+        let method = syn::parse_file(terminal)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item) => Some(item),
+                _ => None,
+            })
+            .flat_map(|item| item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "finish_restore_stopped" => {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(method.len(), 1);
+        let expected: syn::Block = syn::parse_quote!({
+            self.check(stage)?;
+            ensure!(
+                matches!(
+                    self.completion,
+                    Completion::AppStoppedTerminal | Completion::ControllerStoppedTerminal
+                ),
+                "native_restore_stop_not_terminal"
+            );
+            self.owner.disposition.refuse();
+            Ok(())
+        });
+        assert_eq!(
+            method[0].block.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
         );
     }
 }

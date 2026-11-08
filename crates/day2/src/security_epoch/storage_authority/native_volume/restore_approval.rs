@@ -6,8 +6,14 @@ use crate::oauth::approval_keys::{GcpSecretVersion, decode_secret_access_respons
 use crate::security_epoch::restore_approval::signed::{ApprovalStatement, SignedApprovalRecord};
 use crate::security_epoch::{
     NativeAcquisition,
-    bootstrap::ExecutionSourceLoan,
+    bootstrap::{
+        ExecutionSourceLoan, ReservationSourceLoan, TargetSettlementSourceLoan,
+        WriterConfirmationSourceLoan, WriterSendSourceLoan,
+    },
+    firestore::{self, ReservationConfirmation, RestoreObserved},
+    kernel::restore::{Current, approval_use},
     kernel::restore::{ExactKey, Intent, KeyPurpose},
+    restore_approval::publication::Publication,
 };
 use anyhow::{Context, Result, ensure};
 use base64::{
@@ -1224,3 +1230,483 @@ mod tests;
 #[cfg(test)]
 #[path = "restore_approval/keys/tests.rs"]
 mod keys_tests;
+
+impl NativeApprovalSource {
+    pub(in crate::security_epoch) fn refuse_reservation(&mut self) {
+        self.refuse();
+    }
+
+    pub(in crate::security_epoch) fn reserve_restore(
+        &mut self,
+        loan: &mut ReservationSourceLoan<'_, '_, '_, '_>,
+        plan: &approval_use::Plan,
+        current: &Current,
+        at: i64,
+        publication: &Publication,
+    ) -> Result<(RestoreObserved, ReservationConfirmation)> {
+        let requested: Result<(RestoreObserved, ReservationConfirmation)> = (|| {
+            loan.require_dispatch_data(self, &self.store, plan, current, at, publication)?;
+            let names = firestore::RestoreNames::new(&self.store, plan, publication)?;
+            loan.begin()?;
+            loan.check(self)?;
+            let mut budget = self.original.budget()?;
+            let selection = self.store.clone();
+            let bytes = budget.call(
+                &mut ReservationPort { source: self, loan },
+                &names.endpoint("batchGet")?,
+                &names.begin_body()?,
+            )?;
+            let transaction = names.transaction(&bytes)?;
+            loan.check(self)?;
+            // Enter May before the sole possible commit invocation. No callback
+            // or unrelated effect is permitted by this private observation phase.
+            loan.arm_commit()?;
+            let known = transaction.commit_and_readback(
+                &mut ReservationPort { source: self, loan },
+                budget,
+                &selection,
+                plan,
+                current,
+                at,
+            )?;
+            let (observed, confirmation) = known.into_data()?;
+            loan.known(&observed.snapshot)?;
+            Ok((observed, confirmation))
+        })();
+        let checked = loan.check(self);
+        if requested.is_err() || checked.is_err() {
+            loan.refuse();
+            self.refuse();
+        }
+        let known = requested?;
+        checked?;
+        Ok(known)
+    }
+}
+
+struct ReservationPort<'io, 'loan, 'metadata, 'storage, 'role> {
+    source: &'io mut NativeApprovalSource,
+    loan: &'io mut ReservationSourceLoan<'loan, 'metadata, 'storage, 'role>,
+}
+
+impl Port for ReservationPort<'_, '_, '_, '_, '_> {
+    fn sample(&mut self) -> Result<Sample> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            self.source.original.sample()
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            ensure!(
+                max_bytes == 65_536 && body.len() <= 65_536,
+                "restore_reservation_provider_bound"
+            );
+            let route = if url.ends_with("/documents:batchGet") {
+                EpochRoute::EpochRead
+            } else if url.ends_with("/documents:commit") {
+                EpochRoute::EpochCommit
+            } else if url.ends_with("/documents:rollback") {
+                EpochRoute::EpochRollback
+            } else {
+                anyhow::bail!("restore_reservation_provider_route");
+            };
+            ensure!(
+                self.source.material.http.matches(&route, url)?,
+                "restore_reservation_provider_recipient_changed"
+            );
+            let timeout = budget.remaining_native(&mut self.source.original)?;
+            let authorization = self.source.material.controller.authorization()?;
+            let sent = self.source.material.http.request_with_ceiling(
+                route,
+                &authorization,
+                Some(body),
+                &mut self.source.original,
+                timeout,
+            );
+            let checked = self.loan.check(self.source);
+            let bytes = sent?;
+            checked?;
+            budget.remaining_native(&mut self.source.original)?;
+            Ok(EpochReply {
+                status: 200,
+                body: bytes,
+            })
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn refuse(&mut self) {
+        self.loan.refuse();
+        self.source.refuse();
+    }
+}
+
+impl NativeApprovalSource {
+    pub(in crate::security_epoch) fn refuse_target(&mut self) {
+        self.refuse();
+    }
+
+    /// A distinct fixed operation on the same native Controller credential and
+    /// original. Reservation's one-CAS purpose and Port are never broadened.
+    pub(in crate::security_epoch) fn settle_restore_target(
+        &mut self,
+        loan: &mut TargetSettlementSourceLoan<'_, '_, '_, '_, '_, '_>,
+        input: &firestore::RestoreTargetInput<'_>,
+    ) -> Result<firestore::KnownRestoreTarget> {
+        let requested = (|| {
+            loan.begin(self, &self.store, input)?;
+            loan.check(self)?;
+            let names = firestore::RestoreTargetNames::new(
+                &self.store,
+                input.reservation,
+                input.known,
+                input.confirmation,
+                input.plan,
+            )?;
+            let mut budget = self.original.budget()?;
+            let selection = self.store.clone();
+            let bytes = budget.call(
+                &mut TargetSettlementPort { source: self, loan },
+                &names.endpoint("batchGet")?,
+                &names.begin_body()?,
+            )?;
+            let transaction = names.transaction(&bytes)?;
+            loan.check(self)?;
+            // The actual retained parent's one-way Flight is already May before
+            // BEGIN; unknown completion cannot reconstruct a new flight.
+            transaction.commit_and_readback(
+                &mut TargetSettlementPort { source: self, loan },
+                budget,
+                &selection,
+                input.request,
+                input.plan,
+                (input.current, input.at),
+            )
+        })();
+        let checked = loan.check(self);
+        if requested.is_err() || checked.is_err() {
+            loan.refuse(self);
+            self.refuse();
+        }
+        let known = requested?;
+        checked?;
+        Ok(known)
+    }
+}
+
+struct TargetSettlementPort<'io, 'loan, 'metadata, 'storage, 'role, 'target, 'selection> {
+    source: &'io mut NativeApprovalSource,
+    loan:
+        &'io mut TargetSettlementSourceLoan<'loan, 'metadata, 'storage, 'role, 'target, 'selection>,
+}
+
+impl Port for TargetSettlementPort<'_, '_, '_, '_, '_, '_, '_> {
+    fn sample(&mut self) -> Result<Sample> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            self.source.original.sample()
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            ensure!(
+                max_bytes == 65_536 && body.len() <= 65_536,
+                "restore_target_provider_bound"
+            );
+            let route = if url.ends_with("/documents:batchGet") {
+                EpochRoute::EpochRead
+            } else if url.ends_with("/documents:commit") {
+                EpochRoute::EpochCommit
+            } else if url.ends_with("/documents:rollback") {
+                EpochRoute::EpochRollback
+            } else {
+                anyhow::bail!("restore_target_provider_route");
+            };
+            ensure!(
+                self.source.material.http.matches(&route, url)?,
+                "restore_target_provider_recipient_changed"
+            );
+            let timeout = budget.remaining_native(&mut self.source.original)?;
+            let authorization = self.source.material.controller.authorization()?;
+            let sent = self.source.material.http.request_with_ceiling(
+                route,
+                &authorization,
+                Some(body),
+                &mut self.source.original,
+                timeout,
+            );
+            let checked = self.loan.check(self.source);
+            let body = sent?;
+            checked?;
+            budget.remaining_native(&mut self.source.original)?;
+            Ok(EpochReply { status: 200, body })
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn refuse(&mut self) {
+        self.loan.refuse(self.source);
+        self.source.refuse();
+    }
+}
+
+// One native conditional send; no retry or restoration from historical DATA.
+impl NativeApprovalSource {
+    /// The actual one-shot writer CAS. Its distinct May loan remains live
+    /// through strict acknowledgement and a complete strong ten-record read.
+    /// A historical Applied result or lost reply cannot enter this method.
+    pub(in crate::security_epoch) fn send_restored_writer(
+        &mut self,
+        loan: &mut WriterSendSourceLoan<'_, '_, '_, '_, '_, '_>,
+        input: &firestore::RestoreWriterSendInput<'_>,
+    ) -> Result<firestore::KnownRestoredWriter> {
+        let requested = (|| {
+            loan.begin(self, &self.store, input)?;
+            loan.check(self)?;
+            let names = firestore::RestoreWriterNames::new(
+                &self.store,
+                input.request,
+                input.plan,
+                input.publication,
+            )?;
+            let mut budget = self.original.budget()?;
+            let selection = self.store.clone();
+            let bytes = budget.call(
+                &mut WriterSendPort { source: self, loan },
+                &names.endpoint("batchGet")?,
+                &names.begin_body()?,
+            )?;
+            let transaction = names.transaction(&bytes)?;
+            loan.check(self)?;
+            transaction.commit_and_readback(
+                &mut WriterSendPort { source: self, loan },
+                budget,
+                &selection,
+                input.request,
+                input.plan,
+                (input.current, input.at),
+            )
+        })();
+        let checked = loan.check(self);
+        if requested.is_err() || checked.is_err() {
+            loan.refuse(self);
+            self.refuse();
+        }
+        let known = requested?;
+        checked?;
+        Ok(known)
+    }
+}
+
+struct WriterSendPort<'io, 'loan, 'metadata, 'storage, 'role, 'target, 'selection> {
+    source: &'io mut NativeApprovalSource,
+    loan: &'io mut WriterSendSourceLoan<'loan, 'metadata, 'storage, 'role, 'target, 'selection>,
+}
+
+impl Port for WriterSendPort<'_, '_, '_, '_, '_, '_, '_> {
+    fn sample(&mut self) -> Result<Sample> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            self.source.original.sample()
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            ensure!(
+                max_bytes == 65_536 && body.len() <= 65_536,
+                "restore_writer_send_provider_bound"
+            );
+            let route = if url.ends_with("/documents:batchGet") {
+                EpochRoute::EpochRead
+            } else if url.ends_with("/documents:commit") {
+                EpochRoute::EpochCommit
+            } else if url.ends_with("/documents:rollback") {
+                EpochRoute::EpochRollback
+            } else {
+                anyhow::bail!("restore_writer_send_provider_route");
+            };
+            ensure!(
+                self.source.material.http.matches(&route, url)?,
+                "restore_writer_send_provider_recipient"
+            );
+            let timeout = budget.remaining_native(&mut self.source.original)?;
+            let authorization = self.source.material.controller.authorization()?;
+            let sent = self.source.material.http.request_with_ceiling(
+                route,
+                &authorization,
+                Some(body),
+                &mut self.source.original,
+                timeout,
+            );
+            let checked = self.loan.check(self.source);
+            let body = sent?;
+            checked?;
+            budget.remaining_native(&mut self.source.original)?;
+            Ok(EpochReply { status: 200, body })
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn refuse(&mut self) {
+        self.loan.refuse(self.source);
+        self.source.refuse();
+    }
+}
+
+impl NativeApprovalSource {
+    /// A separate strong read after the acknowledged writer CAS. The fixed
+    /// names retain the exact previously captured publication and all ten
+    /// records. This cannot send a commit/rollback or renew any original.
+    pub(in crate::security_epoch) fn confirm_restored_writer(
+        &mut self,
+        loan: &mut WriterConfirmationSourceLoan<'_, '_, '_, '_, '_, '_>,
+        input: &firestore::RestoreWriterConfirmationInput<'_>,
+    ) -> Result<()> {
+        let requested: Result<()> = (|| {
+            loan.begin(self, &self.store, input)?;
+            loan.check(self)?;
+            let names = firestore::RestoreWriterNames::new(
+                &self.store,
+                input.request,
+                input.plan,
+                input.publication,
+            )?;
+            let mut budget = self.original.budget()?;
+            let bytes = budget.call(
+                &mut WriterConfirmationPort { source: self, loan },
+                &names.endpoint("batchGet")?,
+                &names.strong_body()?,
+            )?;
+            let observed = names.strong(&bytes)?;
+            loan.require_observed_data(&observed)?;
+            budget.remaining_decoding(&mut WriterConfirmationPort { source: self, loan })?;
+            Ok(())
+        })();
+        let checked = loan.check(self);
+        if requested.is_err() || checked.is_err() {
+            loan.refuse(self);
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+}
+
+struct WriterConfirmationPort<'io, 'loan, 'metadata, 'storage, 'role, 'target, 'selection> {
+    source: &'io mut NativeApprovalSource,
+    loan: &'io mut WriterConfirmationSourceLoan<
+        'loan,
+        'metadata,
+        'storage,
+        'role,
+        'target,
+        'selection,
+    >,
+}
+
+impl Port for WriterConfirmationPort<'_, '_, '_, '_, '_, '_, '_> {
+    fn sample(&mut self) -> Result<Sample> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            self.source.original.sample()
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        let requested = (|| {
+            self.loan.check(self.source)?;
+            ensure!(
+                max_bytes == 65_536 && body.len() <= 65_536,
+                "restore_writer_confirmation_provider_bound"
+            );
+            ensure!(
+                url.ends_with("/documents:batchGet")
+                    && self
+                        .source
+                        .material
+                        .http
+                        .matches(&EpochRoute::EpochRead, url)?,
+                "restore_writer_confirmation_provider_recipient"
+            );
+            let timeout = budget.remaining_native(&mut self.source.original)?;
+            let authorization = self.source.material.controller.authorization()?;
+            let sent = self.source.material.http.request_with_ceiling(
+                EpochRoute::EpochRead,
+                &authorization,
+                Some(body),
+                &mut self.source.original,
+                timeout,
+            );
+            let checked = self.loan.check(self.source);
+            let body = sent?;
+            checked?;
+            budget.remaining_native(&mut self.source.original)?;
+            Ok(EpochReply { status: 200, body })
+        })();
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
+    fn refuse(&mut self) {
+        self.loan.refuse(self.source);
+        self.source.refuse();
+    }
+}

@@ -69,6 +69,16 @@ impl Disposition {
         result
     }
 
+    /// Negative-only liveness: this grants no phase, target or permission.
+    /// In particular a dropped uncertain flight cannot leave its parent usable.
+    pub(in crate::security_epoch) fn require_live(&self) -> Result<()> {
+        ensure!(
+            !self.state.refused.get() && !matches!(*self.state.value.try_borrow()?, State::Refused),
+            "restore_writer_disposition_refused"
+        );
+        Ok(())
+    }
+
     pub(in crate::security_epoch) fn require_known(&mut self, target: &Digest) -> Result<()> {
         let result = (|| {
             ensure!(
@@ -284,11 +294,101 @@ const _: () = {
         super::StagingContext<'static, 'static, 'static, 'static, 'static, 'static>,
         std::borrow::Borrow<std::fs::File>
     );
+    assert_not_impl!(super::NativeStagedTarget<'static, 'static>, Clone);
+    assert_not_impl!(super::NativeStagedTarget<'static, 'static>, Copy);
+    assert_not_impl!(super::NativeStagedTarget<'static, 'static>, Default);
+    assert_not_impl!(super::NativeStagedTarget<'static, 'static>, std::fmt::Debug);
+    assert_not_impl!(super::NativeStagedTarget<'static, 'static>, Send);
+    assert_not_impl!(super::NativeStagedTarget<'static, 'static>, Sync);
+    assert_not_impl!(
+        super::NativeStagedTarget<'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        super::NativeStagedTarget<'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(super::NativeStagedTarget<'static, 'static>, std::ops::Deref);
+    assert_not_impl!(
+        super::NativeStagedTarget<'static, 'static>,
+        AsRef<std::fs::File>
+    );
+    assert_not_impl!(
+        super::NativeStagedTarget<'static, 'static>,
+        std::borrow::Borrow<std::fs::File>
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        Clone
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        Copy
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        Default
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        Sync
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        std::ops::Deref
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        AsRef<
+            crate::security_epoch::bootstrap::FencedRestoreContinuation<'static, 'static, 'static>,
+        >
+    );
+    assert_not_impl!(
+        super::NativeRestore<'static, 'static, 'static, 'static>,
+        std::borrow::Borrow<
+            crate::security_epoch::bootstrap::FencedRestoreContinuation<'static, 'static, 'static>,
+        >
+    );
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn negative_parent_liveness_never_repairs_a_dropped_or_refused_flight() -> Result<()> {
+        let target = Digest::new(b"actual-parent-target");
+        let mut parent = Disposition::fresh();
+        parent.require_live()?;
+        let flight = parent.arm(&target)?;
+        parent.require_live()?;
+        drop(flight);
+        assert!(parent.require_live().is_err());
+        assert!(parent.arm(&target).is_err());
+        assert!(parent.require_known(&target).is_err());
+        let mut known = Disposition::fresh();
+        known.arm(&target)?.known()?;
+        known.require_live()?;
+        known.refuse();
+        assert!(known.require_live().is_err());
+        Ok(())
+    }
 
     #[test]
     fn dropped_unknown_flight_is_permanently_refused_even_during_an_internal_borrow() -> Result<()>

@@ -909,8 +909,13 @@ fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> 
                     &domain,
                     Box::new(MetadataIapKeys(keys)),
                 )?;
-                let server =
-                    LocalServer::bind_edge_listener(runtime, listener, &edge, verifier, 4)?;
+                let server = LocalServer::bind_edge_listener(
+                    std::sync::Arc::new(runtime),
+                    listener,
+                    &edge,
+                    verifier,
+                    4,
+                )?;
                 sender.send(address)?;
                 server
                     .serve(async {

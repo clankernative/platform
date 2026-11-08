@@ -64,7 +64,7 @@ pub fn validate(catalog: &Catalog) -> Result<()> {
     Ok(())
 }
 
-fn blob_name(file: &File) -> Result<String> {
+pub(crate) fn blob_name(file: &File) -> Result<String> {
     Ok(format!("{}.bin", assets::hash_part(&file.digest)?))
 }
 

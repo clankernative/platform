@@ -1,10 +1,13 @@
 //! One accepted operation original. Routing clones share the actual slot;
 //! no selection DATA or later callback can replace its clock or native owner.
 
-use super::{NativeSelection, OWNERS};
+use super::{NativeConsumerContext, NativeRequestFinalContext, NativeSelection, OWNERS};
 use crate::security_epoch::native_enrollment::{
-    EnrolledCurrentRequest, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeRole,
-    UnselectedShellRequest,
+    EnrolledCurrentRequest, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeConsumerOrigin,
+    NativeRole, UnselectedShellRequest,
+};
+use crate::security_epoch::serving::{
+    CapturedRestoredServingRequest, RestoredAppServingOwner, RestoredServingScope,
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
@@ -71,7 +74,7 @@ enum Original {
     Selected {
         scope: AuthorityScope,
         kind: NativeRole,
-        current: EnrolledCurrentRequest,
+        current: SavedRequest,
     },
     Shell(UnselectedShellRequest),
     // A sealed literal producer supplies no application or native authority.
@@ -81,6 +84,99 @@ enum Original {
     NonNative,
     #[cfg(test)]
     Model(ModelOriginal),
+}
+
+// The routing slot and the async lease own the WHOLE actual saved request.
+// Selecting a restored branch never converts it into an initial native owner
+// or captures a replacement original between synchronous consumer units.
+struct SavedRequest {
+    source: SavedSource,
+}
+
+/// Negative identity of the SAME actual request and routing/lease latch.
+/// Neither field is exposed; this cannot grant or reconstruct a native stage.
+pub(super) struct ConsumerRequestOrigin {
+    native: NativeConsumerOrigin,
+    refused: Rc<Cell<bool>>,
+}
+
+impl ConsumerRequestOrigin {
+    /// Negative identity only. This remains meaningful while the actual
+    /// original is leased or consumed; it never looks up Slot::Live.
+    pub(super) fn same_request(&self, request: &Request) -> bool {
+        request_identity_matches(&self.refused, request)
+    }
+
+    pub(super) fn require_request(&self, request: &Request) -> Result<()> {
+        let result = require_request_identity(&self.refused, request);
+        if result.is_err() {
+            self.native.refuse();
+        }
+        result
+    }
+
+    pub(super) fn check_current(&self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        let selected = self.native.check_current(stage);
+        let live = require_request_latch(&self.refused);
+        if selected.is_err() || live.is_err() {
+            self.refuse();
+        }
+        selected?;
+        live
+    }
+
+    pub(super) fn require_same(&self, actual: &NativeConsumerOrigin) -> Result<()> {
+        let selected = self.native.require_same(actual);
+        let live = require_request_latch(&self.refused);
+        if selected.is_err() || live.is_err() {
+            self.refuse();
+            actual.refuse();
+        }
+        selected?;
+        live
+    }
+
+    pub(super) fn refuse(&self) {
+        self.refused.set(true);
+        self.native.refuse();
+    }
+}
+
+fn request_identity_matches(refused: &Rc<Cell<bool>>, request: &Request) -> bool {
+    Rc::ptr_eq(refused, &request.refused)
+}
+
+fn require_request_identity(refused: &Rc<Cell<bool>>, request: &Request) -> Result<()> {
+    if !request_identity_matches(refused, request) {
+        refused.set(true);
+        anyhow::bail!("native consumer routing request changed");
+    }
+    require_request_latch(refused)
+}
+
+fn require_request_latch(refused: &Cell<bool>) -> Result<()> {
+    ensure!(!refused.get(), "native request refused");
+    Ok(())
+}
+
+enum SavedSource {
+    Enrolled(EnrolledCurrentRequest),
+    Restored(CapturedRestoredServingRequest),
+}
+
+impl SavedRequest {
+    fn enrolled(current: EnrolledCurrentRequest) -> Self {
+        Self {
+            source: SavedSource::Enrolled(current),
+        }
+    }
+
+    fn consumer_origin(&self) -> Result<NativeConsumerOrigin> {
+        match &self.source {
+            SavedSource::Enrolled(current) => Ok(current.consumer_origin()),
+            SavedSource::Restored(current) => current.consumer_origin(),
+        }
+    }
 }
 
 impl Original {
@@ -145,13 +241,59 @@ impl Request {
             Ok(current) => slot.install(Original::Selected {
                 scope: scope.clone(),
                 kind: NativeRole::AppHost,
-                current,
+                current: SavedRequest::enrolled(current),
             }),
             Err(error) => {
                 slot.refuse();
                 Err(error)
             }
         }
+    }
+
+    pub(super) fn capture_restored_app(
+        &self,
+        scope: &AuthorityScope,
+        parent: &mut RestoredAppServingOwner,
+    ) -> Result<()> {
+        ensure!(!self.refused.get(), "native request refused");
+        let mut slot = self.slot.try_borrow_mut()?;
+        slot.begin()?;
+        match parent.capture_request() {
+            Ok(current) => slot.install(Original::Selected {
+                scope: scope.clone(),
+                kind: NativeRole::AppHost,
+                current: SavedRequest {
+                    source: SavedSource::Restored(current),
+                },
+            }),
+            Err(error) => {
+                self.refused.set(true);
+                slot.refuse();
+                parent.refuse();
+                Err(error)
+            }
+        }
+    }
+
+    /// Actual negative identity only. No original clock or stage can escape.
+    pub(super) fn consumer_origin(
+        &self,
+        scope: &AuthorityScope,
+        kind: NativeRole,
+    ) -> Result<ConsumerRequestOrigin> {
+        ensure!(!self.refused.get(), "native request refused");
+        let slot = self.slot.try_borrow()?;
+        let Slot::Live(original) = &*slot else {
+            anyhow::bail!("native request unavailable");
+        };
+        original.require(scope, kind)?;
+        let Original::Selected { current, .. } = original else {
+            unreachable!("checked selected request");
+        };
+        Ok(ConsumerRequestOrigin {
+            native: current.consumer_origin()?,
+            refused: self.refused.clone(),
+        })
     }
 
     pub(super) fn capture_shell(&self) -> Result<()> {
@@ -215,7 +357,7 @@ impl Request {
             *slot = Slot::Live(Original::Selected {
                 scope: selection.scope().clone(),
                 kind,
-                current,
+                current: SavedRequest::enrolled(current),
             });
         }
         let Slot::Live(original) = &mut *slot else {
@@ -225,6 +367,14 @@ impl Request {
         original.require(selection.scope(), kind)?;
         let Original::Selected { current, .. } = original else {
             unreachable!("checked selected request")
+        };
+        let current = match &mut current.source {
+            SavedSource::Enrolled(current) => current,
+            SavedSource::Restored(current) => {
+                current.refuse();
+                self.refused.set(true);
+                anyhow::bail!("restored request needs its whole parent and consumer context");
+            }
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut stage = role.borrow_current_request(current)?;
@@ -286,18 +436,25 @@ impl Request {
                 scope,
                 kind,
                 current,
-            } => OWNERS.with(|owners| {
-                let mut owners = owners.try_borrow_mut()?;
-                let owners = owners
-                    .get_mut(scope.app.as_str())
-                    .context("native request owner missing")?;
-                ensure!(
-                    owners.kind == kind && owners.selection.scope() == &scope,
-                    "native request final owner changed"
-                );
-                let mut role = owners.role.try_borrow_mut()?;
-                current.finish(&mut role)
-            }),
+            } => match current.source {
+                SavedSource::Restored(mut current) => {
+                    current.refuse();
+                    self.refused.set(true);
+                    anyhow::bail!("restored request needs final native settlement");
+                }
+                SavedSource::Enrolled(current) => OWNERS.with(|owners| {
+                    let mut owners = owners.try_borrow_mut()?;
+                    let owners = owners
+                        .get_mut(scope.app.as_str())
+                        .context("native request owner missing")?;
+                    ensure!(
+                        owners.kind == kind && owners.selection.scope() == &scope,
+                        "native request final owner changed"
+                    );
+                    let mut role = owners.role.try_borrow_mut()?;
+                    current.finish(&mut role)
+                }),
+            },
             #[cfg(test)]
             Original::Model(mut model) => model.check(),
         };
@@ -356,7 +513,89 @@ impl Request {
 /// The response future owns this actual original alongside the actual role.
 /// No RefCell borrow survives an await and cancellation drops this original.
 pub(super) struct Lease {
-    held: Held<Original, EnrolledCurrentRequest>,
+    held: Held<Original, SavedRequest>,
+}
+
+/// Only the fixed restored Host installer constructs this from the genuine
+/// request captured BEFORE configuration. HTTP/human routing has no conversion
+/// into this standalone startup action; constructing it never captures a clock.
+pub(super) struct StartupRequest {
+    request: Request,
+    scope: AuthorityScope,
+}
+
+pub(super) struct StartupLease {
+    request: Lease,
+    scope: AuthorityScope,
+}
+
+impl StartupRequest {
+    pub(super) fn from_capture(
+        scope: AuthorityScope,
+        captured: CapturedRestoredServingRequest,
+    ) -> Result<Self> {
+        let request = Request::new();
+        {
+            let mut slot = request.slot.try_borrow_mut()?;
+            slot.begin()?;
+            slot.install(Original::Selected {
+                scope: scope.clone(),
+                kind: NativeRole::AppHost,
+                current: SavedRequest {
+                    source: SavedSource::Restored(captured),
+                },
+            })?;
+        }
+        Ok(Self { request, scope })
+    }
+
+    pub(super) fn consumer_origin(
+        &self,
+        runtime: &crate::store::Runtime,
+    ) -> Result<ConsumerRequestOrigin> {
+        ensure!(
+            runtime.uses_native_storage() && super::sql_runtime_scope(runtime)? == self.scope,
+            "restored startup Runtime selection changed"
+        );
+        self.request
+            .consumer_origin(&self.scope, NativeRole::AppHost)
+    }
+
+    pub(super) fn take(&self) -> Result<StartupLease> {
+        Ok(StartupLease {
+            request: self.request.take(&self.scope, NativeRole::AppHost)?,
+            scope: self.scope.clone(),
+        })
+    }
+}
+
+impl StartupLease {
+    pub(super) fn consumer_origin(
+        &self,
+        runtime: &crate::store::Runtime,
+    ) -> Result<ConsumerRequestOrigin> {
+        ensure!(
+            runtime.uses_native_storage() && super::sql_runtime_scope(runtime)? == self.scope,
+            "restored startup Runtime selection changed"
+        );
+        self.request.consumer_origin()
+    }
+
+    pub(super) fn begin_current<'scope, 'request, 'original>(
+        &'scope mut self,
+        parent: &'scope mut RestoredAppServingOwner,
+        context: NativeConsumerContext<'request, 'original>,
+    ) -> Result<RestoredServingScope<'scope, 'request, 'original>> {
+        self.request.begin_restored_current(parent, context)
+    }
+
+    pub(super) fn finish<'request, 'original>(
+        self,
+        parent: &mut RestoredAppServingOwner,
+        context: NativeRequestFinalContext<'request, 'original>,
+    ) -> Result<()> {
+        self.request.finish_restored(parent, context)
+    }
 }
 
 const _: () = {
@@ -378,6 +617,34 @@ const _: () = {
     assert_not_impl!(Lease, Sync);
     assert_not_impl!(Lease, serde::Serialize);
     assert_not_impl!(Lease, serde::Deserialize<'static>);
+    assert_not_impl!(SavedRequest, Clone);
+    assert_not_impl!(SavedRequest, Copy);
+    assert_not_impl!(SavedRequest, Default);
+    assert_not_impl!(SavedRequest, std::fmt::Debug);
+    assert_not_impl!(SavedRequest, Send);
+    assert_not_impl!(SavedRequest, Sync);
+    assert_not_impl!(SavedRequest, serde::Serialize);
+    assert_not_impl!(SavedRequest, serde::Deserialize<'static>);
+    assert_not_impl!(ConsumerRequestOrigin, Clone);
+    assert_not_impl!(ConsumerRequestOrigin, Copy);
+    assert_not_impl!(ConsumerRequestOrigin, Default);
+    assert_not_impl!(ConsumerRequestOrigin, std::fmt::Debug);
+    assert_not_impl!(ConsumerRequestOrigin, Send);
+    assert_not_impl!(ConsumerRequestOrigin, Sync);
+    assert_not_impl!(ConsumerRequestOrigin, serde::Serialize);
+    assert_not_impl!(ConsumerRequestOrigin, serde::Deserialize<'static>);
+    assert_not_impl!(StartupRequest, Clone);
+    assert_not_impl!(StartupRequest, Default);
+    assert_not_impl!(StartupRequest, Send);
+    assert_not_impl!(StartupRequest, Sync);
+    assert_not_impl!(StartupRequest, serde::Serialize);
+    assert_not_impl!(StartupRequest, serde::Deserialize<'static>);
+    assert_not_impl!(StartupLease, Clone);
+    assert_not_impl!(StartupLease, Default);
+    assert_not_impl!(StartupLease, Send);
+    assert_not_impl!(StartupLease, Sync);
+    assert_not_impl!(StartupLease, serde::Serialize);
+    assert_not_impl!(StartupLease, serde::Deserialize<'static>);
     // Routing clones share the same actual value and terminal latch. They
     // cannot cross executors, serialize an original or manufacture a default.
     assert_not_impl!(Request, Default);
@@ -414,26 +681,108 @@ impl<S, T> Held<S, T> {
 }
 
 impl Lease {
+    pub(super) fn consumer_origin(&self) -> Result<ConsumerRequestOrigin> {
+        self.held.check()?;
+        let native = self
+            .held
+            .current
+            .as_ref()
+            .context("native request consumed")?
+            .consumer_origin()?;
+        Ok(ConsumerRequestOrigin {
+            native,
+            refused: self.held.refused.clone(),
+        })
+    }
+
     pub(super) fn borrow<'a>(
         &'a mut self,
         role: &'a mut EnrolledProcessRoleOwner,
     ) -> Result<EnrolledRoleStage<'a>> {
         self.held.check()?;
-        role.borrow_current_request(
-            self.held
-                .current
-                .as_mut()
-                .context("native request consumed")?,
-        )
+        let current = self
+            .held
+            .current
+            .as_mut()
+            .context("native request consumed")?;
+        match &mut current.source {
+            SavedSource::Enrolled(current) => role.borrow_current_request(current),
+            SavedSource::Restored(current) => {
+                current.refuse();
+                self.held.refused.set(true);
+                anyhow::bail!("restored request cannot borrow an initial role");
+            }
+        }
+    }
+
+    pub(super) fn begin_restored_current<'scope, 'request, 'original>(
+        &'scope mut self,
+        parent: &'scope mut RestoredAppServingOwner,
+        context: NativeConsumerContext<'request, 'original>,
+    ) -> Result<RestoredServingScope<'scope, 'request, 'original>> {
+        self.held.check()?;
+        let refused = self.held.refused.clone();
+        let current = self
+            .held
+            .current
+            .as_mut()
+            .context("native request consumed")?;
+        match &mut current.source {
+            SavedSource::Restored(current) => {
+                let result = current.begin_current(parent, context);
+                if result.is_err() {
+                    refused.set(true);
+                }
+                result
+            }
+            SavedSource::Enrolled(_) => {
+                let mut context = context;
+                context.refuse();
+                parent.refuse();
+                refused.set(true);
+                anyhow::bail!("initial request cannot enter a restored scope");
+            }
+        }
+    }
+
+    pub(super) fn finish_restored<'request, 'original>(
+        mut self,
+        parent: &mut RestoredAppServingOwner,
+        mut context: NativeRequestFinalContext<'request, 'original>,
+    ) -> Result<()> {
+        self.held.check()?;
+        let current = self
+            .held
+            .current
+            .take()
+            .context("native request consumed")?;
+        match current.source {
+            SavedSource::Restored(current) => current.finish(parent, context)?,
+            SavedSource::Enrolled(_) => {
+                context.refuse();
+                parent.refuse();
+                self.held.refused.set(true);
+                anyhow::bail!("initial request cannot settle a restored parent");
+            }
+        }
+        self.held.complete()
     }
 
     pub(super) fn finish(mut self, role: &mut EnrolledProcessRoleOwner) -> Result<()> {
         self.held.check()?;
-        self.held
+        let current = self
+            .held
             .current
             .take()
-            .context("native request consumed")?
-            .finish(role)?;
+            .context("native request consumed")?;
+        match current.source {
+            SavedSource::Enrolled(current) => current.finish(role)?,
+            SavedSource::Restored(mut current) => {
+                current.refuse();
+                self.held.refused.set(true);
+                anyhow::bail!("restored request needs final native settlement");
+            }
+        }
         self.held.complete()
     }
 }
@@ -497,6 +846,41 @@ impl ModelOriginal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actual_request_identity_stays_exact_while_its_original_is_leased() -> Result<()> {
+        let sink = super::super::Sink::new();
+        let foreign_sink = super::super::Sink::new();
+        let request = sink.request.clone();
+        let same = request.clone();
+        let foreign = foreign_sink.request.clone();
+        request.capture_model()?;
+        let actual = request.slot.try_borrow_mut()?.take()?;
+        let held = Held {
+            slot: request.slot.clone(),
+            refused: request.refused.clone(),
+            current: Some(actual),
+        };
+        assert!(matches!(*request.slot.borrow(), Slot::Leased));
+        assert!(request_identity_matches(&held.refused, &same));
+        require_request_identity(&held.refused, &same)?;
+        assert!(!request_identity_matches(&held.refused, &foreign));
+        assert!(require_request_identity(&held.refused, &foreign).is_err());
+        assert!(held.refused.get());
+        assert!(
+            !foreign.refused.get() && foreign_sink.is_open(),
+            "foreign Sink is never refused by a losing origin"
+        );
+        assert!(require_request_identity(&held.refused, &same).is_err());
+        assert!(
+            request_identity_matches(&held.refused, &same),
+            "negative identity does not imply liveness"
+        );
+        drop(held);
+        assert!(same.finish().is_err());
+        assert!(!foreign.refused.get());
+        Ok(())
+    }
     use crate::oauth::effects;
     use std::{
         cell::Cell,
@@ -728,6 +1112,97 @@ mod tests {
         assert!(slot.borrow_mut().begin().is_err());
     }
 
+    #[test]
+    fn routing_cancellation_is_seen_after_the_same_original_moves_into_its_lease() -> Result<()> {
+        // Actual routing and Held code, with a DATA-only clock original. No
+        // native stage/owner/positive request is constructed by this control.
+        let request = Request::new();
+        request.capture_model()?;
+        let actual = request.slot.try_borrow_mut()?.take()?;
+        let held = Held {
+            slot: request.slot.clone(),
+            refused: request.refused.clone(),
+            current: Some(actual),
+        };
+        held.check()?;
+        require_request_latch(&held.refused)?;
+        let canceller = request.clone();
+        canceller.refuse();
+        assert!(
+            held.current.is_some(),
+            "actual original remains inside the lease"
+        );
+        let called = Cell::new(false);
+        let later = (|| -> Result<()> {
+            require_request_latch(&held.refused)?;
+            called.set(true);
+            Ok(())
+        })();
+        assert!(later.is_err());
+        assert!(!called.get());
+        assert!(held.check().is_err());
+        assert!(request.capture_model().is_err());
+        drop(held);
+        assert!(request.finish().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn actual_consumer_negative_origin_checks_the_shared_latch_on_every_native_join() {
+        use quote::ToTokens;
+        let source = include_str!("request.rs");
+        for (name, expected) in [
+            (
+                "require_request",
+                syn::parse_quote!({
+                    let result = require_request_identity(&self.refused, request);
+                    if result.is_err() {
+                        self.native.refuse();
+                    }
+                    result
+                }),
+            ),
+            (
+                "check_current",
+                syn::parse_quote!({
+                    let selected = self.native.check_current(stage);
+                    let live = require_request_latch(&self.refused);
+                    if selected.is_err() || live.is_err() {
+                        self.refuse();
+                    }
+                    selected?;
+                    live
+                }),
+            ),
+            (
+                "require_same",
+                syn::parse_quote!({
+                    let selected = self.native.require_same(actual);
+                    let live = require_request_latch(&self.refused);
+                    if selected.is_err() || live.is_err() {
+                        self.refuse();
+                        actual.refuse();
+                    }
+                    selected?;
+                    live
+                }),
+            ),
+        ] {
+            let expected: syn::Block = expected;
+            let guarded = |body: &syn::Block| {
+                body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+            };
+            let actual = selected_body(source, Some("ConsumerRequestOrigin"), name);
+            assert!(guarded(&actual));
+            let mut ignored_latch = actual.clone();
+            ignored_latch.stmts[1] = syn::parse_quote!(let live = Ok(()););
+            assert!(!guarded(&ignored_latch));
+            let mut ignored_native = actual.clone();
+            ignored_native.stmts[0] = syn::parse_quote!(let selected = Ok(()););
+            assert!(!guarded(&ignored_native));
+        }
+    }
+
     fn selected_body(source: &str, owner: Option<&str>, name: &str) -> syn::Block {
         let file = syn::parse_file(source).unwrap();
         let mut bodies = Vec::new();
@@ -763,6 +1238,164 @@ mod tests {
         let mut calls = Calls(Vec::new());
         calls.visit_block(body);
         calls.0
+    }
+
+    fn restored_borrow_is_preserved(source: &str, name: &str, final_request: bool) -> bool {
+        use quote::ToTokens;
+        use syn::visit::Visit;
+        struct Borrow {
+            actual: usize,
+            valid: bool,
+        }
+        impl<'ast> Visit<'ast> for Borrow {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if call.method == "begin_current" || call.method == "finish" {
+                    self.actual += 1;
+                    self.valid &= call.receiver.to_token_stream().to_string() == "current"
+                        && call.args.len() == 2
+                        && call.args[0].to_token_stream().to_string() == "parent"
+                        && call.args[1].to_token_stream().to_string() == "context";
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let body = selected_body(source, Some("Lease"), name);
+        let Some(first) = body.stmts.first() else {
+            return false;
+        };
+        let required: syn::Stmt = syn::parse_quote!(self.held.check()?;);
+        if first.to_token_stream().to_string() != required.to_token_stream().to_string() {
+            return false;
+        }
+        let calls = methods(&body);
+        let allowed = if final_request {
+            &[
+                "check", "take", "context", "finish", "refuse", "set", "complete",
+            ][..]
+        } else {
+            &[
+                "check",
+                "clone",
+                "as_mut",
+                "context",
+                "begin_current",
+                "is_err",
+                "set",
+                "refuse",
+            ][..]
+        };
+        let mut borrowed = Borrow {
+            actual: 0,
+            valid: true,
+        };
+        borrowed.visit_block(&body);
+        let file = syn::parse_file(source).unwrap();
+        let actual = file.items.iter().find_map(|item| match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("Lease")) => {
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                    _ => None,
+                })
+            }
+            _ => None,
+        }).unwrap();
+        let context = actual.sig.inputs.iter().find_map(|input| match input {
+            syn::FnArg::Typed(input) if matches!(&*input.pat, syn::Pat::Ident(pat) if pat.ident == "context") => Some(&*input.ty),
+            _ => None,
+        });
+        let expected = if final_request {
+            "NativeRequestFinalContext"
+        } else {
+            "NativeConsumerContext"
+        };
+        borrowed.actual == 1
+            && borrowed.valid
+            && calls.iter().all(|call| allowed.contains(&call.as_str()))
+            && calls
+                .iter()
+                .filter(|call| call.as_str() == "complete")
+                .count()
+                == usize::from(final_request)
+            && matches!(context, Some(syn::Type::Path(path)) if path.path.segments.last().unwrap().ident == expected)
+    }
+
+    #[test]
+    fn restored_units_borrow_one_saved_request_and_cannot_use_final_request_contexts() {
+        let source = include_str!("request.rs");
+        for (name, final_request) in [("begin_restored_current", false), ("finish_restored", true)]
+        {
+            assert!(restored_borrow_is_preserved(source, name, final_request));
+            let factory = source.replacen(
+                if final_request {
+                    "current.finish(parent, context)?"
+                } else {
+                    "current.begin_current(parent, context)"
+                },
+                "parent.capture_request()",
+                1,
+            );
+            assert_ne!(factory, source);
+            assert!(!restored_borrow_is_preserved(&factory, name, final_request));
+            let wrong_original = source.replacen(
+                if final_request {
+                    "current.finish(parent, context)?"
+                } else {
+                    "current.begin_current(parent, context)"
+                },
+                if final_request {
+                    "current.finish(parent, replacement)?"
+                } else {
+                    "current.begin_current(parent, replacement)"
+                },
+                1,
+            );
+            assert!(!restored_borrow_is_preserved(
+                &wrong_original,
+                name,
+                final_request
+            ));
+            // The startup wrapper deliberately has the same context spelling.
+            // Mutate the exact Lease method, never the first textual match.
+            let mut wrong_type = syn::parse_file(source).unwrap();
+            let mut changed = 0;
+            for item in &mut wrong_type.items {
+                let syn::Item::Impl(item) = item else {
+                    continue;
+                };
+                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("Lease")) {
+                    continue;
+                }
+                for item in &mut item.items {
+                    let syn::ImplItem::Fn(item) = item else {
+                        continue;
+                    };
+                    if item.sig.ident != name {
+                        continue;
+                    }
+                    for input in &mut item.sig.inputs {
+                        let syn::FnArg::Typed(input) = input else {
+                            continue;
+                        };
+                        if !matches!(&*input.pat, syn::Pat::Ident(pat) if pat.ident == "context") {
+                            continue;
+                        }
+                        *input.ty = if final_request {
+                            syn::parse_quote!(NativeConsumerContext<'request, 'original>)
+                        } else {
+                            syn::parse_quote!(NativeRequestFinalContext<'request, 'original>)
+                        };
+                        changed += 1;
+                    }
+                }
+            }
+            assert_eq!(changed, 1, "exact production context argument");
+            let wrong_type = quote::ToTokens::to_token_stream(&wrong_type).to_string();
+            assert!(!restored_borrow_is_preserved(
+                &wrong_type,
+                name,
+                final_request
+            ));
+        }
     }
 
     fn operation_capture_is_preserved(source: &str) -> bool {

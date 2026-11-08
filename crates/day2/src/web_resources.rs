@@ -76,7 +76,7 @@ pub fn validate(catalog: &Catalog) -> Result<()> {
     Ok(())
 }
 
-fn blob_name(resource: &Resource) -> Result<String> {
+pub(crate) fn blob_name(resource: &Resource) -> Result<String> {
     let extension = match resource.media_type.as_str() {
         JS => "js",
         CSS => "css",

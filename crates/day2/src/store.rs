@@ -566,6 +566,9 @@ pub struct Runtime {
     restore_registry_selector: Option<PathBuf>,
     app: String,
     db: PathBuf,
+    // Closed selection DATA from the fixed native Runtime constructor. A
+    // pathname cannot select native execution or substitute its live owner.
+    native_database: Option<native_storage::NativeDatabaseSelection>,
     scope: String,
     /// The installation's verified edge domain, as declared when this runtime
     /// loaded. Activated `domain:` entries admit only while it still matches.
@@ -609,43 +612,54 @@ impl InitialStoreMetadata {
         artifact: &day2_capabilities::Digest,
         policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
     ) -> Result<Instance> {
-        let instance = Instance::load(&self.instance_path)?;
-        ensure!(
-            day2_capabilities::Digest::of(&instance)? == self.instance_digest,
-            crate::error::Failure::InstallationChanged
-        );
-        ensure!(
-            self.app == selected.scope.app.as_str()
-                && self.scope
-                    == format!(
-                        "{}/{}/{}",
-                        selected.scope.installation.as_str(),
-                        selected.scope.environment.as_str(),
-                        selected.scope.app.as_str()
-                    )
-                && self.artifact.id() == artifact.as_str(),
-            "native_runtime_metadata_selection_changed"
-        );
-        let control = instance
-            .control
-            .as_ref()
-            .context("native_runtime_epoch_catalog_missing")?;
-        let mut policies = control
-            .security_bootstraps
-            .values()
-            .filter(|policy| policy.scope.app.as_str() == self.app);
-        ensure!(
-            policies.next() == Some(policy) && policies.next().is_none(),
-            "native_runtime_bootstrap_selection_missing_or_changed"
-        );
-        let mut stores = control
-            .security_epochs
-            .values()
-            .filter(|store| store.scope.app.as_str() == self.app);
-        ensure!(
-            stores.next() == Some(selected) && stores.next().is_none(),
-            "native_runtime_epoch_selection_changed"
-        );
+        let requested: Result<Instance> = (|| {
+            require_current_instance_selector(&self.instance_selector, &self.instance_path)?;
+            let instance = Instance::load(&self.instance_path)?;
+            ensure!(
+                day2_capabilities::Digest::of(&instance)? == self.instance_digest,
+                crate::error::Failure::InstallationChanged
+            );
+            ensure!(
+                self.app == selected.scope.app.as_str()
+                    && self.scope
+                        == format!(
+                            "{}/{}/{}",
+                            selected.scope.installation.as_str(),
+                            selected.scope.environment.as_str(),
+                            selected.scope.app.as_str()
+                        )
+                    && self.artifact.id() == artifact.as_str(),
+                "native_runtime_metadata_selection_changed"
+            );
+            let control = instance
+                .control
+                .as_ref()
+                .context("native_runtime_epoch_catalog_missing")?;
+            let mut policies = control
+                .security_bootstraps
+                .values()
+                .filter(|policy| policy.scope.app.as_str() == self.app);
+            ensure!(
+                policies.next() == Some(policy) && policies.next().is_none(),
+                "native_runtime_bootstrap_selection_missing_or_changed"
+            );
+            let mut stores = control
+                .security_epochs
+                .values()
+                .filter(|store| store.scope.app.as_str() == self.app);
+            ensure!(
+                stores.next() == Some(selected) && stores.next().is_none(),
+                "native_runtime_epoch_selection_changed"
+            );
+            Ok(instance)
+        })();
+        // The selector can switch while the old immutable file is being read.
+        // Evaluate this post even after reload/validation failure; the primary
+        // error is retained and native callers poison their actual owner.
+        let checked =
+            require_current_instance_selector(&self.instance_selector, &self.instance_path);
+        let instance = requested?;
+        checked?;
         Ok(instance)
     }
 
@@ -723,7 +737,137 @@ impl InitialStoreMetadata {
     }
 }
 
-fn validate_artifact_binding(
+// A pinned old file is not the current desired configuration after an atomic
+// selector switch. This is filesystem DATA, never native permission; callers
+// retain their own original and permanent refusal around the entire load.
+fn require_current_instance_selector(selector: &Path, pinned: &Path) -> Result<()> {
+    ensure!(
+        selector.canonicalize()? == pinned,
+        crate::error::Failure::InstallationChanged
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod native_desired_selector_tests {
+    use super::require_current_instance_selector;
+
+    #[test]
+    fn current_selector_refuses_a_switch_while_the_pinned_old_file_still_exists()
+    -> anyhow::Result<()> {
+        use std::{fs, os::unix::fs::symlink};
+        let root = tempfile::tempdir()?;
+        let first = root.path().join("first.json");
+        let second = root.path().join("second.json");
+        let selector = root.path().join("current.json");
+        fs::write(&first, b"unchanged old configuration")?;
+        fs::write(&second, b"current replacement configuration")?;
+        symlink(&first, &selector)?;
+        let pinned = first.canonicalize()?;
+        require_current_instance_selector(&selector, &pinned)?;
+        // Model the selector move during reload: the old file stays readable
+        // with the same bytes, but it cannot pass the independent final join.
+        fs::remove_file(&selector)?;
+        symlink(&second, &selector)?;
+        assert_eq!(fs::read(&pinned)?, b"unchanged old configuration");
+        assert!(require_current_instance_selector(&selector, &pinned).is_err());
+        fs::remove_file(&selector)?;
+        assert!(require_current_instance_selector(&selector, &pinned).is_err());
+        Ok(())
+    }
+
+    fn selected_call(expression: &syn::Expr) -> bool {
+        matches!(expression,syn::Expr::Call(call)
+            if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("require_current_instance_selector"))
+                && call.args.len()==2 && call.args.iter().zip(["instance_selector","instance_path"]).all(|(argument,expected)|
+                    matches!(argument,syn::Expr::Reference(reference)
+                        if matches!(&*reference.expr,syn::Expr::Field(field)
+                            if matches!(&*field.base,syn::Expr::Path(path) if path.path.is_ident("self"))
+                                && matches!(&field.member,syn::Member::Named(name) if name==expected)))))
+    }
+
+    fn propagated(statement: &syn::Stmt, expected: &str) -> bool {
+        matches!(statement,syn::Stmt::Expr(syn::Expr::Try(tried),Some(_))
+            if matches!(&*tried.expr,syn::Expr::Path(path) if path.path.is_ident(expected)))
+    }
+
+    fn contract(method: &syn::ImplItemFn) -> bool {
+        let statements = &method.block.stmts;
+        if statements.len() != 5 {
+            return false;
+        }
+        let syn::Stmt::Local(requested) = &statements[0] else {
+            return false;
+        };
+        let Some(init) = &requested.init else {
+            return false;
+        };
+        let syn::Expr::Call(call) = &*init.expr else {
+            return false;
+        };
+        let syn::Expr::Paren(paren) = &*call.func else {
+            return false;
+        };
+        let syn::Expr::Closure(closure) = &*paren.expr else {
+            return false;
+        };
+        let syn::Expr::Block(block) = &*closure.body else {
+            return false;
+        };
+        matches!(block.block.stmts.first(),Some(syn::Stmt::Expr(syn::Expr::Try(tried),Some(_))) if selected_call(&tried.expr))
+            && matches!(&statements[1],syn::Stmt::Local(local)
+                if matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="checked")
+                    && local.init.as_ref().is_some_and(|init|selected_call(&init.expr)))
+            && matches!(&statements[2],syn::Stmt::Local(local)
+                if matches!(local.init.as_ref().map(|init|&*init.expr),Some(syn::Expr::Try(tried))
+                    if matches!(&*tried.expr,syn::Expr::Path(path) if path.path.is_ident("requested"))))
+            && propagated(&statements[3], "checked")
+    }
+
+    #[test]
+    fn actual_native_selection_checks_both_selector_joins_and_keeps_reload_error_primary() {
+        let file = syn::parse_file(include_str!("store.rs")).unwrap();
+        let actual = file
+            .items
+            .iter()
+            .find_map(|item| {
+                let syn::Item::Impl(owner) = item else {
+                    return None;
+                };
+                let syn::Type::Path(path) = &*owner.self_ty else {
+                    return None;
+                };
+                if !path.path.is_ident("InitialStoreMetadata") {
+                    return None;
+                }
+                owner.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == "require_native_selection" => {
+                        Some(method)
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap();
+        assert!(contract(actual));
+        let mut no_post = actual.clone();
+        no_post.block.stmts[1] = syn::parse_quote!(let checked:Result<()>=Ok(()););
+        assert!(!contract(&no_post));
+        let mut ignored = actual.clone();
+        ignored.block.stmts[3] = syn::parse_quote!(let _=checked;);
+        assert!(!contract(&ignored));
+        let mut early = actual.clone();
+        early.block.stmts.insert(1, syn::parse_quote!(requested?;));
+        assert!(!contract(&early));
+        let mut reversed = actual.clone();
+        reversed.block.stmts.swap(2, 3);
+        assert!(!contract(&reversed));
+        let mut wrong = actual.clone();
+        wrong.block.stmts[1] = syn::parse_quote!(let checked=require_current_instance_selector(&other.selector,&other.path););
+        assert!(!contract(&wrong));
+    }
+}
+
+pub(crate) fn validate_artifact_binding(
     instance: &Instance,
     app: &str,
     artifact: &LoadedArtifact,
@@ -916,7 +1060,7 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
 
 pub(crate) fn require_ordinary_database(path: &Path) -> Result<()> {
     ensure!(
-        !native_storage::is_native_database(path),
+        !native_storage::is_native_database_path(path)?,
         "native_runtime_sql_owner_required"
     );
     Ok(())
@@ -941,11 +1085,14 @@ pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> R
 }
 
 mod native_storage;
+pub(crate) use native_storage::admit_restored_snapshot;
 pub(crate) use native_storage::check_controller_sqlite_files;
 pub(crate) use native_storage::check_controller_sqlite_opened_files;
 pub(crate) use native_storage::refuse_raw_schema_admission;
 pub(crate) use native_storage::{ControllerAdminData, ControllerAdminSqlite};
-pub(crate) use native_storage::{NativeSqliteKeeper, require_unopened_native_sqlite};
+pub(crate) use native_storage::{
+    NativeSqliteKeeper, SqliteKeeperLayout, require_unopened_native_sqlite,
+};
 pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic};
 pub(crate) use native_storage::{check_authentication_sqlite, open_authentication_sqlite};
 
@@ -982,6 +1129,7 @@ impl Runtime {
                 .and_then(|binding| binding.runtime.as_ref())
                 .is_some_and(|profile| profile.rolling()),
             restore_registry_selector: None,
+            native_database: None,
             scope: instance.scope(&app)?,
             hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
             instance_path,
@@ -991,6 +1139,22 @@ impl Runtime {
             host: Arc::new(crate::host::System(inputs.clone())),
             inputs,
         })
+    }
+
+    /// Lower selection DATA only. This cannot construct an enrolled role,
+    /// keeper, Current or SQL owner, even when every metadata value matches.
+    #[cfg(test)]
+    pub(crate) fn from_native_metadata_for_tests(
+        instance_path: PathBuf,
+        app: String,
+        db: PathBuf,
+        artifact: LoadedArtifact,
+    ) -> Result<Self> {
+        let mut runtime = Self::from_artifact_for_tests(instance_path, app, db.clone(), artifact)?;
+        runtime.native_database = Some(native_storage::NativeDatabaseSelection::metadata_fixture(
+            db,
+        ));
+        Ok(runtime)
     }
 
     /// Install a host-owned app-call adapter. Application code cannot select an
@@ -1045,7 +1209,7 @@ impl Runtime {
     /// Classification DATA only. Current native permission still requires the
     /// actual retained participant and enrolled stage at each consumer.
     pub(crate) fn uses_native_storage(&self) -> bool {
-        native_storage::is_native_database(&self.db)
+        self.native_database.is_some()
     }
 
     /// One complete snapshot under the actual current native owner. Only owned
@@ -1143,6 +1307,7 @@ impl Runtime {
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         }
         let db = directory.join(format!("{app}.sqlite"));
+        require_ordinary_database(&db)?;
         if db.exists() {
             ensure!(
                 !fs::symlink_metadata(&db)?.file_type().is_symlink(),
@@ -1195,6 +1360,7 @@ impl Runtime {
             connections: None,
             rolling,
             restore_registry_selector: None,
+            native_database: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,

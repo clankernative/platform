@@ -90,6 +90,7 @@ impl Fixture {
             connections: None,
             rolling: false,
             restore_registry_selector: None,
+            native_database: None,
             instance_path,
             app: "app".into(),
             db: state.join("app.sqlite"),

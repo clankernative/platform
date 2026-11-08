@@ -2,8 +2,8 @@
 //! A membership proof borrows this actual loan; it cannot survive release or
 //! authenticate a claimed identity. No signing/grant authority is created here.
 use super::{
-    ActiveAppStorageContinuity, ActiveControllerStorageContinuity, Digest, EnrolledRoleStage,
-    EpochStore, InitialBootstrapPolicy, Request, check_active_snapshot, request_names,
+    ActiveAppStorageContinuity, ActiveControllerStorageContinuity, ActiveLineage,
+    ActiveObservation, Digest, EnrolledRoleStage, EpochStore, InitialBootstrapPolicy,
 };
 use crate::security_epoch::{
     CurrentControllerStoragePhase,
@@ -15,21 +15,24 @@ use anyhow::{Context, Result, ensure};
 use std::{marker::PhantomData, rc::Rc};
 
 mod reader;
-pub(crate) use reader::FencedReadUnit;
 pub(in crate::security_epoch) use reader::{
-    CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation,
-    RestoreAuthenticationAction, RestoreWriteLoan,
+    AuthenticatedRestoreExecution, CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan,
+    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
+    RestoreAuthenticationAction, RestoreFinalInstallationLoan, RestoreTargetCheck,
+    RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
+    RestoreWriterExchangeContext, RestoreWriterReleaseLoan, TargetSettlementSourceLoan,
+    WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use reader::{ControllerAdminReader, ControllerRegistryData};
+pub(crate) use reader::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
 
 pub(crate) struct ControllerAdminReadLoan<'storage, 'role> {
     physical: Option<CurrentControllerStoragePhase<'storage, 'role>>,
     reads: CounterRequest<'storage>,
-    observed: super::super::EpochObservation,
+    observed: ActiveObservation,
     policy: InitialBootstrapPolicy,
     selection: EpochStore,
-    completion: Request,
-    activation: Digest,
+    lineage: &'storage ActiveLineage,
     operation: Digest,
     identity: Rc<()>,
     continuation: &'storage mut bool,
@@ -55,20 +58,12 @@ fn validate_actor(actor: &str) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("controller_admin_actor_shape"))
 }
 
-fn binding(completion: &Request, operation: &Digest) -> Result<Digest> {
-    Digest::of(&(
-        "day2-current-admin-read-v1",
-        completion.digest()?,
-        operation,
-    ))
-}
-
 impl ActiveAppStorageContinuity {
     /// Fixed App operation; no consumer/SQL callback can enter while held.
     pub(in crate::security_epoch) fn admin_read(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-        operation: &Digest,
+        operation: &crate::security_epoch::native_enrollment::AdminReadAction,
         cohort: &mut crate::oauth::native_management::AppAuthorityStop<'_>,
     ) -> Result<()> {
         ensure!(self.valid, "active_app_storage_refused");
@@ -77,42 +72,57 @@ impl ActiveAppStorageContinuity {
             let mut reads =
                 self.counter
                     .request(stage, &self.policy, &self.store, NativeRole::AppHost)?;
-            let mut physical = self
-                .storage
-                .begin_admin_read(stage, binding(&self.completion, operation)?)?;
+            let mut physical = self.storage.begin_admin_read(
+                stage,
+                self.lineage
+                    .admin_binding(operation.admin_operation_data())?,
+                operation,
+            )?;
             match physical.await_admin_result(stage)? {
                 crate::security_epoch::native_enrollment::AdminPeerResult::Known => {
-                    let names = request_names(&self.store, &self.completion)?;
-                    let mut observed = reads.read(stage, &self.store, &names)?;
-                    check_active_snapshot(
-                        &self.store,
-                        &self.completion,
-                        &self.activation,
-                        observed.snapshot(),
-                    )?;
-                    reads.check_observation(stage, &mut observed)?;
+                    let mut observed = self.lineage.read(&self.store, &mut reads, stage)?;
+                    self.lineage
+                        .check(&self.store, &mut reads, stage, &mut observed)?;
                     physical.check(stage)?;
                     reads.finish(stage)?;
                     physical.finish_checked(stage)?;
                     Ok(true)
                 }
                 crate::security_epoch::native_enrollment::AdminPeerResult::Stop(stopped) => {
+                    let restore_operation = operation.restore_operation_data()?;
                     // This is the actual historical App owner, not a freshly
                     // empty ledger or a receipt. Seal BEFORE any acknowledgement.
                     cohort.seal()?;
-                    let names = request_names(&self.store, &self.completion)?;
-                    let mut observed = reads.read(stage, &self.store, &names)?;
-                    crate::security_epoch::kernel::advance::check_fenced_initial(
+                    let mut observed = self.lineage.read(&self.store, &mut reads, stage)?;
+                    // Drain is proved against the captured ACTIVE predecessor,
+                    // before the Controller can make its conditional fence.
+                    let before = self.lineage.initial_restore_snapshot_data(&observed)?;
+                    self.lineage.check_initial_restore_stop_data(
                         &self.store,
-                        &self.completion,
-                        observed.snapshot(),
-                        &stopped.root,
-                        &stopped.operation,
+                        restore_operation,
+                        &stopped.selection,
+                        &before,
                     )?;
-                    reads.check_observation(stage, &mut observed)?;
+                    self.lineage
+                        .check(&self.store, &mut reads, stage, &mut observed)?;
                     physical.check(stage)?;
                     cohort.check_drained()?;
                     physical.acknowledge_restore_stop(stage, &stopped)?;
+                    // The SAME peer and exclusion survive the actual CAS.
+                    // A drain ACK cannot also acknowledge its future result.
+                    let confirmation = physical.await_restore_fence(stage, &stopped)?;
+                    cohort.check_drained()?;
+                    let names = self.lineage.initial_restore_confirmation_data(
+                        &self.store,
+                        restore_operation,
+                        &stopped.selection,
+                        &before,
+                        &confirmation,
+                    )?;
+                    reads.confirm_restore_reservation(stage, &self.store, &names)?;
+                    physical.check(stage)?;
+                    cohort.check_drained()?;
+                    physical.acknowledge_restore_fence(stage, &stopped, &confirmation)?;
                     physical.await_restore_release(stage, &stopped)?;
                     cohort.check_drained()?;
                     reads.finish(stage)?;
@@ -147,29 +157,32 @@ impl ActiveControllerStorageContinuity {
             &self.policy,
             &self.store,
             &mut self.counter,
-            &binding(&self.completion, operation)?,
+            &self.lineage.admin_binding(operation)?,
         )?;
         ensure!(
             physical.app_request()?.purpose() == StoragePeerPurpose::AdminRead,
             "controller_admin_purpose_required"
         );
-        let names = request_names(&self.store, &self.completion)?;
-        let mut observed = reads.read(physical.controller_stage()?, &self.store, &names)?;
-        check_active_snapshot(
+        physical
+            .app_request()?
+            .admin_action_data()?
+            .require_admin_operation_data(operation)?;
+        let mut observed =
+            self.lineage
+                .read(&self.store, &mut reads, physical.controller_stage()?)?;
+        self.lineage.check(
             &self.store,
-            &self.completion,
-            &self.activation,
-            observed.snapshot(),
+            &mut reads,
+            physical.controller_stage()?,
+            &mut observed,
         )?;
-        reads.check_observation(physical.controller_stage()?, &mut observed)?;
         let mut loan = ControllerAdminReadLoan {
             physical: Some(physical),
             reads,
             observed,
             policy: self.policy.clone(),
             selection: self.store.clone(),
-            completion: self.completion.clone(),
-            activation: self.activation.clone(),
+            lineage: &self.lineage,
             operation: operation.clone(),
             identity: Rc::new(()),
             continuation: &mut self.valid,
@@ -183,6 +196,17 @@ impl ActiveControllerStorageContinuity {
 }
 
 impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
+    /// Historical predecessor DATA for the existing first-restore producer.
+    /// Its caller already holds this genuine checked loan; no new acquisition,
+    /// provider read or clock is made here. Restored predecessors stay closed.
+    fn initial_restore_snapshot_data(&mut self) -> Result<crate::security_epoch::kernel::Snapshot> {
+        let requested = self.lineage.initial_restore_snapshot_data(&self.observed);
+        if requested.is_err() {
+            self.refuse();
+        }
+        requested
+    }
+
     /// Bind accepting work before any SQLite activation. The operation is DATA,
     /// compared with the authenticated request held by this actual loan.
     pub(crate) fn check_action(
@@ -341,18 +365,23 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
                 .physical
                 .as_mut()
                 .context("controller_admin_loan_closed")?;
-            let names = request_names(&self.selection, &self.completion)?;
-            let mut observed =
-                self.reads
-                    .read(physical.controller_stage()?, &self.selection, &names)?;
-            check_active_snapshot(
+            self.lineage.check(
                 &self.selection,
-                &self.completion,
-                &self.activation,
-                observed.snapshot(),
+                &mut self.reads,
+                physical.controller_stage()?,
+                &mut self.observed,
             )?;
-            self.reads
-                .check_observation(physical.controller_stage()?, &mut observed)?;
+            let mut observed = self.lineage.read(
+                &self.selection,
+                &mut self.reads,
+                physical.controller_stage()?,
+            )?;
+            self.lineage.check(
+                &self.selection,
+                &mut self.reads,
+                physical.controller_stage()?,
+                &mut observed,
+            )?;
             self.observed = observed;
             self.check_local()
         })();
@@ -453,21 +482,19 @@ impl<'storage, 'role> ControllerAdminReadLoan<'storage, 'role> {
             .physical
             .as_mut()
             .context("controller_admin_loan_closed")?;
-        let names = request_names(&self.selection, &self.completion)?;
         let mut observed = physical.announce_and_read_app_consumed(
             &mut self.reads,
             &self.selection,
-            &names,
+            self.lineage,
+            &mut self.observed,
             self.trace,
         )?;
-        check_active_snapshot(
+        self.lineage.check(
             &self.selection,
-            &self.completion,
-            &self.activation,
-            observed.snapshot(),
+            &mut self.reads,
+            physical.controller_stage()?,
+            &mut observed,
         )?;
-        self.reads
-            .check_observation(physical.controller_stage()?, &mut observed)?;
         self.reads.finish(physical.controller_stage()?)?;
         self.physical
             .take()

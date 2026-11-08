@@ -28,7 +28,9 @@ pub(crate) use native_volume::AuthenticationStoreFiles;
 pub(in crate::security_epoch) use native_volume::HistoricalKeyAvailability;
 pub(crate) use native_volume::NativeApprovalSource;
 use native_volume::NativeVolumeObservation;
-pub(in crate::security_epoch) use native_volume::RestoreCreatorRoot;
+pub(in crate::security_epoch) use native_volume::{
+    RestoreCreatorRoot, restore_staging_root_path_data,
+};
 mod persistent_disk;
 pub(in crate::security_epoch) use persistent_disk::PersistentDiskSelection;
 mod preparation;

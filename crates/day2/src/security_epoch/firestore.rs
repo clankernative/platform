@@ -21,10 +21,18 @@ pub(in crate::security_epoch) use approval::{advance_approval_time, publish_rest
 mod paired;
 mod restore;
 pub(super) use paired::{ActionTransaction, begin_action, read_with_slot};
-#[cfg(test)]
-pub(super) use restore::{
-    Names as RestoreNames, Transaction as RestoreTransaction, commit_reply as restore_commit_reply,
+pub(in crate::security_epoch) use restore::RestoreWriterPeerRead;
+pub(in crate::security_epoch) use restore::{
+    ConfirmationNames as RestoreConfirmationNames, Names as RestoreNames,
+    Observed as RestoreObserved, ReservationConfirmation,
 };
+pub(in crate::security_epoch) use restore::{
+    KnownRestoreTarget, KnownRestoredWriter, RestoreTargetInput, RestoreTargetNames,
+    RestoreWriterConfirmationInput, RestoreWriterNames, RestoreWriterObserved,
+    RestoreWriterReadExpectation, RestoreWriterSendInput,
+};
+#[cfg(test)]
+pub(super) use restore::{Transaction as RestoreTransaction, commit_reply as restore_commit_reply};
 
 const MAX_BYTES: usize = 65_536;
 const ACQUISITION_BUDGET: Duration = Duration::from_secs(5);
@@ -282,6 +290,84 @@ impl Budget {
     }
 }
 
+/// Pure fixed document selectors. No bootstrap/role/read permission or raw
+/// caller URL is created here; actual native ports remain separate owners.
+#[derive(Clone, Debug)]
+struct DocumentNames {
+    database: String,
+    root: String,
+    sentinel: String,
+    create: String,
+    activate: Option<String>,
+}
+
+impl DocumentNames {
+    fn new(selection: &EpochStore, create: &Digest, activate: Option<&Digest>) -> Result<Self> {
+        selection.validate()?;
+        let EpochProvider::FirestoreNativeV1 {
+            project, database, ..
+        } = &selection.provider;
+        let database = format!(
+            "projects/{}/databases/{}",
+            project.as_str(),
+            database.as_str()
+        );
+        let authority = selection.authority_key()?;
+        let key = authority
+            .as_str()
+            .strip_prefix("sha256:")
+            .context("security_epoch_authority_key")?;
+        let root = format!("{database}/documents/day2_credential_authority_v1/{key}");
+        let sentinel = format!("{database}/documents/day2_credential_bootstrap_v1/{key}");
+        ensure!(activate != Some(create), "security_epoch_operation_reused");
+        let receipt =
+            |operation: &Digest| format!("{root}/operations/{}", &operation.as_str()[7..]);
+        Ok(Self {
+            database,
+            root: root.clone(),
+            sentinel,
+            create: receipt(create),
+            activate: activate.map(receipt),
+        })
+    }
+
+    fn endpoint(&self, operation: &str) -> String {
+        document_endpoint(&self.database, operation)
+    }
+
+    fn snapshot_names(&self) -> SnapshotNames<'_> {
+        SnapshotNames {
+            root: &self.root,
+            sentinel: &self.sentinel,
+            create: &self.create,
+            activate: self.activate.as_deref(),
+        }
+    }
+
+    fn documents(&self) -> Vec<&str> {
+        self.snapshot_names().documents()
+    }
+}
+
+fn document_endpoint(database: &str, operation: &str) -> String {
+    format!("https://firestore.googleapis.com/v1/{database}/documents:{operation}")
+}
+
+struct SnapshotNames<'names> {
+    root: &'names str,
+    sentinel: &'names str,
+    create: &'names str,
+    activate: Option<&'names str>,
+}
+
+impl<'names> SnapshotNames<'names> {
+    fn documents(&self) -> Vec<&'names str> {
+        let mut names = vec![self.root, self.sentinel, self.create];
+        names.extend(self.activate);
+        names
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Names {
     selection: EpochStore,
@@ -304,53 +390,33 @@ impl Names {
         activate: Option<&Digest>,
     ) -> Result<Self> {
         bootstrap.validate_selection(selection)?;
-        let EpochProvider::FirestoreNativeV1 {
-            project, database, ..
-        } = &selection.provider;
-        let database = format!(
-            "projects/{}/databases/{}",
-            project.as_str(),
-            database.as_str()
-        );
-        let key = bootstrap
-            .authority
-            .as_str()
-            .strip_prefix("sha256:")
-            .context("security_epoch_authority_key")?;
-        let root = format!("{database}/documents/day2_credential_authority_v1/{key}");
-        let sentinel = format!("{database}/documents/day2_credential_bootstrap_v1/{key}");
-        let receipt =
-            |operation: &Digest| format!("{root}/operations/{}", &operation.as_str()[7..]);
-        ensure!(
-            activate != Some(&bootstrap.create_operation),
-            "security_epoch_operation_reused"
-        );
+        let documents = DocumentNames::new(selection, &bootstrap.create_operation, activate)?;
         Ok(Self {
             selection: selection.clone(),
             bootstrap: bootstrap.clone(),
-            database,
-            root: root.clone(),
-            sentinel,
-            create: receipt(&bootstrap.create_operation),
-            activate: activate.map(receipt),
+            database: documents.database,
+            root: documents.root,
+            sentinel: documents.sentinel,
+            create: documents.create,
+            activate: documents.activate,
         })
     }
 
+    fn snapshot_names(&self) -> SnapshotNames<'_> {
+        SnapshotNames {
+            root: &self.root,
+            sentinel: &self.sentinel,
+            create: &self.create,
+            activate: self.activate.as_deref(),
+        }
+    }
+
     fn documents(&self) -> Vec<&str> {
-        let mut names = vec![
-            self.root.as_str(),
-            self.sentinel.as_str(),
-            self.create.as_str(),
-        ];
-        names.extend(self.activate.as_deref());
-        names
+        self.snapshot_names().documents()
     }
 
     pub(super) fn endpoint(&self, operation: &str) -> String {
-        format!(
-            "https://firestore.googleapis.com/v1/{}/documents:{operation}",
-            self.database
-        )
+        document_endpoint(&self.database, operation)
     }
 
     pub(super) fn read_body(&self) -> Result<Vec<u8>> {
@@ -448,7 +514,7 @@ impl ReadTransaction {
     }
 }
 
-fn decode_snapshot(names: &Names, entries: Vec<Entry>) -> Result<Snapshot> {
+fn decode_snapshot(names: SnapshotNames<'_>, entries: Vec<Entry>) -> Result<Snapshot> {
     let mut documents = BTreeMap::new();
     let expected = names.documents();
     let mut previous_time = None;
@@ -512,9 +578,9 @@ fn decode_snapshot(names: &Names, entries: Vec<Entry>) -> Result<Snapshot> {
             .transpose()
     }
     Ok(Snapshot {
-        root: take::<AuthorityRecord>(&mut documents, &names.root)?,
-        sentinel: take::<SentinelRecord>(&mut documents, &names.sentinel)?,
-        create: take::<Receipt>(&mut documents, &names.create)?,
+        root: take::<AuthorityRecord>(&mut documents, names.root)?,
+        sentinel: take::<SentinelRecord>(&mut documents, names.sentinel)?,
+        create: take::<Receipt>(&mut documents, names.create)?,
         activate: names
             .activate
             .as_ref()
@@ -536,6 +602,10 @@ pub(crate) struct EpochObservation {
 }
 
 impl EpochObservation {
+    pub(super) fn refuse(&mut self) {
+        self.valid = false;
+    }
+
     pub(super) fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
@@ -550,7 +620,7 @@ impl EpochObservation {
             self.budget.remaining(port)
         })();
         if result.is_err() {
-            self.valid = false;
+            self.refuse();
         }
         result
     }
@@ -565,7 +635,7 @@ impl EpochObservation {
             Ok(())
         })();
         if result.is_err() {
-            self.valid = false;
+            self.refuse();
         }
         result
     }
@@ -579,7 +649,7 @@ impl EpochObservation {
             Ok(())
         })();
         if result.is_err() {
-            self.valid = false;
+            self.refuse();
         }
         result
     }
@@ -665,7 +735,7 @@ fn read_once(port: &mut impl Port, budget: &mut Budget, names: &Names) -> Result
         if header_only {
             entries.remove(0);
         }
-        decode_snapshot(names, entries)
+        decode_snapshot(names.snapshot_names(), entries)
     };
     // Semantic decode failures also close the observed read transaction. If the
     // bounded cleanup fails, no snapshot escapes as a successful observation.

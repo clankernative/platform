@@ -8,6 +8,63 @@ use super::{
 };
 use day2_capabilities::Digest;
 
+// Count only the exact fallible short borrow of the retained native field.
+// RefCell reentry is an error on the same checked path, never a recapture or
+// a panicking borrow hidden inside a successful-looking source control.
+fn shared_native_check_receiver(expression: &syn::Expr, expected: &[&str]) -> bool {
+    use quote::ToTokens;
+    let receiver = format!(
+        "{}.try_borrow_mut().map_err(|_| anyhow::anyhow!(\"native_enrollment_resource_busy\"))?",
+        expected.join("."),
+    );
+    let expected: syn::Expr = syn::parse_str(&receiver).unwrap();
+    expression.to_token_stream().to_string() == expected.to_token_stream().to_string()
+}
+
+fn native_source_tokens(source: &str) -> String {
+    // Lexer fragments can join `?;` or `,&`, while syn emits those separators
+    // separately. Keep their exact operations equal
+    // without dropping commas, delimiters or any control tokens.
+    fn normalize(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        stream
+            .into_iter()
+            .map(|token| match token {
+                proc_macro2::TokenTree::Punct(punct) if matches!(punct.as_char(), '?' | ',') => {
+                    proc_macro2::TokenTree::Punct(proc_macro2::Punct::new(
+                        punct.as_char(),
+                        proc_macro2::Spacing::Alone,
+                    ))
+                }
+                proc_macro2::TokenTree::Group(group) => proc_macro2::TokenTree::Group(
+                    proc_macro2::Group::new(group.delimiter(), normalize(group.stream())),
+                ),
+                token => token,
+            })
+            .collect()
+    }
+    normalize(source.parse::<proc_macro2::TokenStream>().unwrap()).to_string()
+}
+
+#[test]
+fn native_source_tokens_match_actual_fallible_statements_and_preserve_tuple_commas() {
+    use quote::ToTokens;
+    let actual: syn::Stmt = syn::parse_str("attempt.owner.check()?;").unwrap();
+    assert_eq!(
+        native_source_tokens("attempt.owner.check()?;"),
+        actual.to_token_stream().to_string()
+    );
+    let call: syn::Expr =
+        syn::parse_str("make(selection,&projection,&activation,&holder)").unwrap();
+    assert_eq!(
+        native_source_tokens("make(selection,&projection,&activation,&holder)"),
+        call.to_token_stream().to_string()
+    );
+    assert_ne!(
+        native_source_tokens("(value)"),
+        native_source_tokens("(value,)")
+    );
+}
+
 fn enrolled_self_reborrow_shape(source: &str) -> bool {
     use syn::visit::Visit;
 
@@ -71,7 +128,7 @@ fn enrolled_self_reborrow_shape(source: &str) -> bool {
                 };
                 usize::from(
                     call.method == "check"
-                        && fields(&call.receiver, owner)
+                        && shared_native_check_receiver(&call.receiver, owner)
                         && call.args.len() == 1
                         && if clock.len() == 1 {
                             matches!(&call.args[0], syn::Expr::Reference(reference)
@@ -125,10 +182,13 @@ fn enrolled_self_reborrow_shape(source: &str) -> bool {
 
         fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
             self.clocks += usize::from(call.method == "into_connection_clock");
-            self.owner_checks +=
-                usize::from(call.method == "check" && fields(&call.receiver, &["self", "current"]));
+            self.owner_checks += usize::from(
+                call.method == "check"
+                    && shared_native_check_receiver(&call.receiver, &["self", "current"]),
+            );
             self.stage_checks += usize::from(
-                call.method == "check" && fields(&call.receiver, &["self", "owner", "current"]),
+                call.method == "check"
+                    && shared_native_check_receiver(&call.receiver, &["self", "owner", "current"]),
             );
             syn::visit::visit_expr_method_call(self, call);
         }
@@ -204,23 +264,27 @@ fn actual_enrolled_owner_retains_self_resources_for_request_checks() {
 
 #[test]
 fn enrolled_self_guard_rejects_recapture_or_omitted_retained_checks() {
-    let source = include_str!("owner.rs");
+    let source = native_source_tokens(include_str!("owner.rs"));
     for (before, after) in [
-        ("SelfSnapshot::acquire(", "SelfSnapshot::metadata_only("),
+        ("SelfSnapshot::acquire", "SelfSnapshot::metadata_only"),
         (
             "acquisition.into_connection_clock()?",
             "acquisition.discard_clock()?",
         ),
         (
-            "self.current.check(&mut acquisition)?",
+            "self.current.try_borrow_mut().map_err(|_| anyhow::anyhow!(\"native_enrollment_resource_busy\"))?.check(&mut acquisition)?",
             "SelfSnapshot::acquire(&mut acquisition)?",
         ),
         (
-            "self.owner.current.check(self.acquisition.as_mut())?",
+            "self.owner.current.try_borrow_mut().map_err(|_| anyhow::anyhow!(\"native_enrollment_resource_busy\"))?.check(self.acquisition.as_mut())?",
             "self.owner.current.skip(self.acquisition.as_mut())?",
         ),
     ] {
-        let mutated = source.replacen(before, after, 1);
+        let mutated = source.replacen(
+            &native_source_tokens(before),
+            &native_source_tokens(after),
+            1,
+        );
         assert_ne!(mutated, source);
         assert!(!enrolled_self_reborrow_shape(&mutated));
     }
@@ -228,10 +292,10 @@ fn enrolled_self_guard_rejects_recapture_or_omitted_retained_checks() {
 
 #[test]
 fn enrolled_self_guard_requires_unconditional_fallible_checks_of_the_actual_request() {
-    let source = include_str!("owner.rs");
+    let source = native_source_tokens(include_str!("owner.rs"));
     for call in [
-        "self.current.check(&mut acquisition)?;",
-        "self.owner.current.check(self.acquisition.as_mut())?;",
+        "self.current.try_borrow_mut().map_err(|_| anyhow::anyhow!(\"native_enrollment_resource_busy\"))?.check(&mut acquisition)?;",
+        "self.owner.current.try_borrow_mut().map_err(|_| anyhow::anyhow!(\"native_enrollment_resource_busy\"))?.check(self.acquisition.as_mut())?;",
     ] {
         for replacement in [
             format!("if false {{ {call} }}"),
@@ -243,7 +307,11 @@ fn enrolled_self_guard_requires_unconditional_fallible_checks_of_the_actual_requ
             if replacement == call {
                 continue;
             }
-            let changed = source.replacen(call, &replacement, 1);
+            let changed = source.replacen(
+                &native_source_tokens(call),
+                &native_source_tokens(&replacement),
+                1,
+            );
             assert_ne!(changed, source);
             assert!(!enrolled_self_reborrow_shape(&changed));
         }
@@ -545,7 +613,7 @@ fn actual_policy_file_wiring(birth: &str, owner: &str) -> bool {
             if let Some(body) = linux(statement) { return direct_check(body, receiver, clock); }
             usize::from(matches!(statement, syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_))
                 if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
-                    if call.method == "check" && fields(&call.receiver, receiver) && call.args.len() == 1
+                    if call.method == "check" && (if receiver == ["policy_file"] { fields(&call.receiver, receiver) } else { shared_native_check_receiver(&call.receiver, receiver) }) && call.args.len() == 1
                     && actual_clock(&call.args[0], clock))))
         }).sum()
     }
@@ -612,7 +680,7 @@ fn actual_policy_file_wiring(birth: &str, owner: &str) -> bool {
         && matches!(&call.args[0], syn::Expr::Struct(value)
             if value.path.is_ident("Self") && value.fields.iter().any(|field|
                 matches!(&field.member, syn::Member::Named(name) if name == "policy_file")
-                && fields(&field.expr, &["policy_file"]))));
+                && { use quote::ToTokens; field.expr.to_token_stream().to_string() == native_source_tokens("Rc::new(RefCell::new(policy_file))") })));
     let Some(begin) = method(&owner, "EnrolledProcessRoleOwner", "begin_stage") else {
         return false;
     };
@@ -707,10 +775,10 @@ fn actual_enrolled_checks_borrow_the_admitted_policy_file_and_original_clock() {
 #[test]
 fn policy_file_guard_rejects_conditional_checks_and_substituted_actual_handles() {
     let birth = include_str!("birth.rs");
-    let owner = include_str!("owner.rs");
+    let owner = native_source_tokens(include_str!("owner.rs"));
     for call in [
-        "self.policy_file.check(&mut acquisition)?;",
-        "self.owner.policy_file.check(self.acquisition.as_mut())?;",
+        "self.policy_file.try_borrow_mut().map_err(|_| anyhow::anyhow!(\"native_enrollment_resource_busy\"))?.check(&mut acquisition)?;",
+        "self.owner.policy_file.try_borrow_mut().map_err(|_| anyhow::anyhow!(\"native_enrollment_resource_busy\"))?.check(self.acquisition.as_mut())?;",
     ] {
         for replacement in [
             format!("if false {{ {call} }}"),
@@ -721,7 +789,11 @@ fn policy_file_guard_rejects_conditional_checks_and_substituted_actual_handles()
             if replacement == call {
                 continue;
             }
-            let changed = owner.replacen(call, &replacement, 1);
+            let changed = owner.replacen(
+                &native_source_tokens(call),
+                &native_source_tokens(&replacement),
+                1,
+            );
             assert_ne!(changed, owner);
             assert!(!actual_policy_file_wiring(birth, &changed));
         }
@@ -732,11 +804,15 @@ fn policy_file_guard_rejects_conditional_checks_and_substituted_actual_handles()
             "super::birth::metadata_only_policy(&mut acquisition)?",
         ),
         (
-            "                policy_file,",
+            "policy_file: Rc::new(RefCell::new(policy_file)),",
             "                policy_file: unrelated,",
         ),
     ] {
-        let changed = owner.replacen(before, after, 1);
+        let changed = owner.replacen(
+            &native_source_tokens(before),
+            &native_source_tokens(after),
+            1,
+        );
         assert_ne!(changed, owner);
         assert!(!actual_policy_file_wiring(birth, &changed));
     }
@@ -762,7 +838,7 @@ fn policy_file_guard_rejects_conditional_checks_and_substituted_actual_handles()
     ] {
         let changed = birth.replacen(before, after, 1);
         assert_ne!(changed, birth);
-        assert!(!actual_policy_file_wiring(&changed, owner));
+        assert!(!actual_policy_file_wiring(&changed, &owner));
     }
 }
 
@@ -1543,6 +1619,51 @@ fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
     }
 }
 
+fn enrollment_call_tokens(expression: &syn::Expr) -> String {
+    use quote::ToTokens as _;
+    fn normalize(value: &mut syn::Expr) {
+        match value {
+            syn::Expr::Call(call) => {
+                normalize(&mut call.func);
+                for argument in &mut call.args {
+                    normalize(argument);
+                }
+                call.args.pop_punct();
+            }
+            syn::Expr::MethodCall(call) => {
+                normalize(&mut call.receiver);
+                for argument in &mut call.args {
+                    normalize(argument);
+                }
+                call.args.pop_punct();
+            }
+            syn::Expr::Array(array) => {
+                for element in &mut array.elems {
+                    normalize(element);
+                }
+                array.elems.pop_punct();
+            }
+            syn::Expr::Reference(value) => normalize(&mut value.expr),
+            syn::Expr::Try(value) => normalize(&mut value.expr),
+            _ => {}
+        }
+    }
+    let mut expression = expression.clone();
+    normalize(&mut expression);
+    expression.to_token_stream().to_string()
+}
+
+fn enrollment_statement_tokens(statement: &syn::Stmt) -> String {
+    use quote::ToTokens as _;
+    let mut statement = statement.clone();
+    if let syn::Stmt::Local(local) = &mut statement
+        && let Some(init) = &mut local.init
+    {
+        *init.expr = syn::parse_str(&enrollment_call_tokens(&init.expr)).unwrap();
+    }
+    statement.to_token_stream().to_string()
+}
+
 // The Linux issuer path is inspected on every host without constructing a fake
 // native issuer. Kernel/message-origin qualification remains Linux-only.
 fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
@@ -1567,7 +1688,7 @@ fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
     }
     impl<'ast> syn::visit::Visit<'ast> for Freshness {
         fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-            self.flag_references += usize::from(path.path.is_ident("issuance_closed"));
+            self.flag_references += usize::from(path.path.is_ident("issuance"));
             syn::visit::visit_expr_path(self, path);
         }
         fn visit_pat_ident(&mut self, binding: &'ast syn::PatIdent) {
@@ -1584,7 +1705,7 @@ fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
     use syn::visit::Visit as _;
     let mut freshness = Freshness::default();
     freshness.visit_block(&methods[0].block);
-    if freshness.flag_references != 1
+    if freshness.flag_references != 2
         || freshness.current_bindings != 1
         || freshness.snapshot_acquisitions != 0
     {
@@ -1600,12 +1721,12 @@ fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
     {
         return Ok(false);
     }
-    if body.len() < 6 {
+    if body.len() < 10 {
         return Ok(false);
     }
-    let tail = body[body.len() - 5..]
+    let tail = body[body.len() - 9..]
         .iter()
-        .map(|s| s.to_token_stream().to_string())
+        .map(enrollment_statement_tokens)
         .collect::<Vec<_>>();
     let expected: syn::Block = syn::parse_str(
         r#"{
@@ -1613,25 +1734,29 @@ fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
         issuer.parent.check_identity(acquisition, &costs.hashes(Subject::ParentBefore))?;
         current.check(acquisition)?;
         acquisition.remaining()?;
-        channel.send(
+        let sent = channel.send(
             &Packet::FreezeGrant {
-                statement: Box::new(statement),
-                signature,
+                statement: Box::new(statement.clone()),
+                signature: signature.clone(),
             },
             acquisition,
-        )
+        );
+        let retained = FrozenCohort::capture(statement, signature, &issuer.certificate, peer, &mut bound, acquisition, costs);
+        sent?;
+        let cohort = retained?;
+        closing.retain_frozen(cohort)
     }"#,
     )?;
     if tail
         != expected
             .stmts
             .iter()
-            .map(|s| s.to_token_stream().to_string())
+            .map(enrollment_statement_tokens)
             .collect::<Vec<_>>()
     {
         return Ok(false);
     }
-    let closed: syn::Stmt = syn::parse_str("*issuance_closed = true;")?;
+    let closed: syn::Stmt = syn::parse_str("let closing = issuance.close()?;")?;
     let closed = closed.to_token_stream().to_string();
     let closes: Vec<_> = body
         .iter()
@@ -1648,7 +1773,7 @@ fn frozen_publication_source(source: &str) -> anyhow::Result<bool> {
     Ok(body
         .get(cutoff + 1)
         .is_some_and(|s| s.to_token_stream().to_string() == bound.to_token_stream().to_string())
-        && cutoff < body.len() - 5
+        && cutoff < body.len() - 9
         && methods[0].sig.inputs.iter().any(|arg| {
             matches!(arg, syn::FnArg::Typed(arg)
             if matches!(&*arg.pat, syn::Pat::Ident(p) if p.ident=="observations")
@@ -1671,7 +1796,7 @@ fn issuer_loop_keeps_the_same_closure(source: &str) -> anyhow::Result<bool> {
     if runs.len() != 1 {
         return Ok(false);
     }
-    let expected: syn::Stmt = syn::parse_str("let mut issuance_closed = false;")?;
+    let expected: syn::Stmt = syn::parse_str("let mut issuance = Issuance::Open;")?;
     let declarations: Vec<_> = runs[0]
         .block
         .stmts
@@ -1699,17 +1824,17 @@ fn issuer_loop_keeps_the_same_closure(source: &str) -> anyhow::Result<bool> {
     }
     impl<'a> syn::visit::Visit<'a> for Uses {
         fn visit_pat_ident(&mut self, p: &'a syn::PatIdent) {
-            self.bindings += usize::from(p.ident == "issuance_closed");
+            self.bindings += usize::from(p.ident == "issuance");
             syn::visit::visit_pat_ident(self, p);
         }
         fn visit_expr_path(&mut self, p: &'a syn::ExprPath) {
-            self.references += usize::from(p.path.is_ident("issuance_closed"));
+            self.references += usize::from(p.path.is_ident("issuance"));
             syn::visit::visit_expr_path(self, p);
         }
         fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
             if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("serve"))
                 && call.args.len() == 6
-                && matches!(&call.args[2],syn::Expr::Reference(r) if r.mutability.is_some() && matches!(&*r.expr,syn::Expr::Path(p) if p.path.is_ident("issuance_closed")))
+                && matches!(&call.args[2],syn::Expr::Reference(r) if r.mutability.is_some() && matches!(&*r.expr,syn::Expr::Path(p) if p.path.is_ident("issuance")))
             {
                 self.forwarded += 1;
             }
@@ -1742,9 +1867,9 @@ fn actual_issuer_loop_does_not_reconstruct_closure_on_each_request() -> anyhow::
         body.body.stmts.insert(
             0,
             if mutation == 0 {
-                syn::parse_str("let mut issuance_closed = false;")?
+                syn::parse_str("let mut issuance = Issuance::Open;")?
             } else {
-                syn::parse_str("issuance_closed = false;")?
+                syn::parse_str("issuance = Issuance::Open;")?
             },
         );
         assert!(!issuer_loop_keeps_the_same_closure(
@@ -1773,13 +1898,13 @@ fn issuer_freeze_keeps_same_snapshot_publication_guards_and_irreversible_cut() -
         let count = function.block.stmts.len();
         match mutation {
             0 => {
-                function.block.stmts.remove(count - 3);
+                function.block.stmts.remove(count - 7);
             }
             1 => {
-                function.block.stmts.remove(count - 5);
+                function.block.stmts.remove(count - 9);
             }
             2 | 3 => {
-                let arm: syn::Stmt = syn::parse_quote! { *issuance_closed = true; };
+                let arm: syn::Stmt = syn::parse_quote! { let closing = issuance.close()?; };
                 let matches: Vec<_> = function
                     .block
                     .stmts
@@ -1793,7 +1918,8 @@ fn issuer_freeze_keeps_same_snapshot_publication_guards_and_irreversible_cut() -
                 assert_eq!(matches.len(), 1);
                 let index = matches[0];
                 if mutation == 2 {
-                    function.block.stmts[index] = syn::parse_quote! { *issuance_closed = false; };
+                    function.block.stmts[index] =
+                        syn::parse_quote! { let closing = issuance.require_open()?; };
                 } else {
                     function.block.stmts[index + 1] = syn::parse_quote! { ensure!(enrolled.len() <= 2, "native_restore_unclosed_role_cohort"); };
                 }
@@ -1816,22 +1942,17 @@ fn issuer_freeze_keeps_same_snapshot_publication_guards_and_irreversible_cut() -
                 // Move the actual current check AFTER send, keeping valid Rust
                 // and its returned Result. Merely swapping the semicolon-free
                 // return into the middle would only test a syntax error.
-                let current = function.block.stmts.remove(count - 3);
-                let send = function.block.stmts.pop().unwrap();
-                function.block.stmts.push(syn::parse_str(&format!(
-                    "let sent = {};",
-                    send.to_token_stream()
-                ))?);
-                function.block.stmts.push(current);
-                let mut returned: syn::Block = syn::parse_str("{ sent }")?;
-                function.block.stmts.push(returned.stmts.pop().unwrap());
+                let current = function.block.stmts.remove(count - 7);
+                // Keep valid Rust: move the actual native check after the
+                // real send local and before its consuming retained tail.
+                function.block.stmts.insert(count - 5, current);
             }
             6 => function
                 .block
                 .stmts
-                .insert(count - 5, syn::parse_str("*issuance_closed = false;")?),
+                .insert(count - 9, syn::parse_str("issuance = Issuance::Open;")?),
             7 => function.block.stmts.insert(
-                count - 5,
+                count - 9,
                 syn::parse_str(
                     "let mut current = SelfSnapshot::acquire(replacement, acquisition, costs)?;",
                 )?,
@@ -1844,4 +1965,2537 @@ fn issuer_freeze_keeps_same_snapshot_publication_guards_and_irreversible_cut() -
         );
     }
     Ok(())
+}
+
+// Source-only checks on the actual Linux supplier. No native owner or received
+// process is constructed from synthetic DATA on portable hosts.
+fn retained_frozen_generation_source(source: &str) -> anyhow::Result<bool> {
+    use quote::ToTokens as _;
+    let file = syn::parse_file(source)?;
+    let method = |owner: &str, name: &str| -> anyhow::Result<syn::Block> {
+        let methods: Vec<_> = file.items.iter().filter_map(|item| match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(p)
+                if p.qself.is_none() && p.path.segments.len() == 1 && p.path.segments[0].ident == owner) => Some(item),
+            _ => None,
+        }).flat_map(|item| &item.items).filter_map(|item| match item {
+            syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method), _ => None,
+        }).collect();
+        anyhow::ensure!(methods.len() == 1, "one actual frozen-generation method");
+        Ok(methods[0].block.clone())
+    };
+    fn required_calls(block: &syn::Block) -> Vec<String> {
+        #[derive(Default)]
+        struct Calls(Vec<String>);
+        impl<'a> syn::visit::Visit<'a> for Calls {
+            fn visit_expr_try(&mut self, expression: &'a syn::ExprTry) {
+                self.0
+                    .push(enrollment_call_tokens(&syn::Expr::Try(expression.clone())));
+                syn::visit::visit_expr_try(self, expression);
+            }
+        }
+        let mut calls = Calls::default();
+        syn::visit::Visit::visit_block(&mut calls, block);
+        calls.0
+    }
+    let token = |text: &str| enrollment_call_tokens(&syn::parse_str::<syn::Expr>(text).unwrap());
+    let capture_body = method("FrozenCohort", "capture")?;
+    let capture = required_calls(&capture_body);
+    let ceiling: syn::Stmt = syn::parse_quote! {
+        let ceiling = statement.selection.current_deadline_data(acquisition.sample()?.elapsed)?;
+    };
+    if capture_body
+        .stmts
+        .iter()
+        .filter(|statement| {
+            statement.to_token_stream().to_string() == ceiling.to_token_stream().to_string()
+        })
+        .count()
+        != 1
+    {
+        return Ok(false);
+    }
+    let operations = [
+        "statement.selection.current_deadline_data(acquisition.sample()?.elapsed)?",
+        "acquisition.narrow(5, ceiling)?",
+        "peer.retain_message_anchor(&mut original, &costs.hashes(Subject::Requester))?",
+        "bound.retain_message_anchor(&mut original, &costs.hashes(Subject::Requester))?",
+        "cohort.check(costs)?",
+        "acquisition.remaining()?",
+    ]
+    .map(token);
+    let positions: Vec<_> = operations
+        .iter()
+        .filter(|op| capture.iter().filter(|call| *call == *op).count() == 1)
+        .map(|op| capture.iter().position(|call| call == op).unwrap())
+        .collect();
+    if positions.len() != operations.len() || !positions.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Ok(false);
+    }
+    let check = required_calls(&method("FrozenCohort", "check")?);
+    let signature = token(
+        r#"protocol::verify(&self.certificate.data.public_key, "restore-issuer-frozen", &self.statement, &self.signature)?"#,
+    );
+    let peers = token(
+        "MessageProcess::check_same_actor(&mut [&mut self.controller, &mut self.bound], &mut self.original, &costs.hashes(Subject::Requester))?",
+    );
+    let close = method("Issuance", "close")?.to_token_stream().to_string();
+    let finish = method("ClosingFreeze", "retain_frozen")?
+        .to_token_stream()
+        .to_string();
+    Ok(check.iter().filter(|call| **call == signature).count() == 1
+        && check.iter().filter(|call| **call == peers).count() == 1
+        && close.contains("* self = Self :: Refused")
+        && close.contains("ClosingFreeze { issuance : self }")
+        && !close.contains("Frozen (")
+        && finish.contains("* self . issuance = Issuance :: Frozen")
+        && !finish.contains("Issuance :: Open"))
+}
+
+#[test]
+fn frozen_generation_keeps_real_controller_anchors_and_original_without_data_reconstruction()
+-> anyhow::Result<()> {
+    use quote::ToTokens as _;
+    let source = include_str!("service.rs");
+    assert!(retained_frozen_generation_source(source)?);
+    for mutation in 0..6 {
+        let mut parsed = syn::parse_file(source)?;
+        let (owner, method) = match mutation {
+            0..=2 => ("FrozenCohort", "capture"),
+            3 => ("FrozenCohort", "check"),
+            4 => ("Issuance", "close"),
+            _ => ("ClosingFreeze", "retain_frozen"),
+        };
+        let methods: Vec<_> = parsed
+            .items
+            .iter_mut()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty,syn::Type::Path(p)
+                if p.path.segments.len()==1 && p.path.segments[0].ident==owner) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .flat_map(|item| &mut item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == method => Some(&mut item.block),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(methods.len(), 1);
+        let body = methods.into_iter().next().unwrap();
+        match mutation {
+            0 | 1 => {
+                let name = if mutation == 0 {
+                    "original"
+                } else {
+                    "controller"
+                };
+                let local=body.stmts.iter_mut().find_map(|statement|match statement {
+                    syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(p)if p.ident==name)=>Some(local),_=>None,
+                }).unwrap();
+                *local.init.as_mut().unwrap().expr =
+                    if mutation == 0 {
+                        syn::parse_quote!(NativeAcquisition::begin(5)?)
+                    } else {
+                        syn::parse_quote!(bound.retain_message_anchor(
+                            &mut original,
+                            &costs.hashes(Subject::Requester)
+                        )?)
+                    };
+            }
+            2 => {
+                let target=body.stmts.iter_mut().find(|statement|matches!(statement,
+                    syn::Stmt::Expr(syn::Expr::Try(value),_) if enrollment_call_tokens(&value.expr)=="cohort . check (costs)"
+                )).unwrap();
+                *target = syn::parse_quote!(let _ = cohort.check(costs););
+            }
+            3 => {
+                let syn::Stmt::Local(local) = &mut body.stmts[0] else {
+                    unreachable!()
+                };
+                let syn::Expr::Call(call) = &mut *local.init.as_mut().unwrap().expr else {
+                    unreachable!()
+                };
+                let syn::Expr::Paren(paren) = &mut *call.func else {
+                    unreachable!()
+                };
+                let syn::Expr::Closure(closure) = &mut *paren.expr else {
+                    unreachable!()
+                };
+                let syn::Expr::Block(block) = &mut *closure.body else {
+                    unreachable!()
+                };
+                let target=block.block.stmts.iter_mut().find(|statement|matches!(statement,
+                    syn::Stmt::Expr(syn::Expr::Try(value),_) if matches!(&*value.expr,syn::Expr::Call(call)
+                        if matches!(&*call.func,syn::Expr::Path(path) if path.path.segments.last().is_some_and(|name|name.ident=="verify")))
+                )).unwrap();
+                *target = syn::parse_quote!(let _unchecked_signature=(););
+            }
+            4 => body.stmts[1] = syn::parse_quote!(*self=Self::Open;),
+            _ => body.stmts[1] = syn::parse_quote!(*self.issuance=Issuance::Open;),
+        }
+        assert!(
+            !retained_frozen_generation_source(&parsed.to_token_stream().to_string())?,
+            "mutation {mutation}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn frozen_capture_refuses_cold_deadline_substitution_or_fresh_clock_replacement()
+-> anyhow::Result<()> {
+    use quote::ToTokens as _;
+    let source = include_str!("service.rs");
+    assert!(retained_frozen_generation_source(source)?);
+    let original =
+        "let ceiling = statement.selection.current_deadline_data(acquisition.sample()?.elapsed)?;";
+    for replacement in [
+        "let ceiling = std::time::Duration::from_nanos(statement.selection.controller.stage.data.deadline_ns.min(statement.selection.app.stage.data.deadline_ns));",
+        "let ceiling = std::time::Duration::MAX;",
+        "let ceiling = statement.selection.current_deadline_data(acquisition.sample()?.elapsed).unwrap_or(std::time::Duration::MAX);",
+    ] {
+        let mut parsed = syn::parse_file(source)?;
+        let mut replaced = 0;
+        for item in &mut parsed.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            if !matches!(&*item.self_ty, syn::Type::Path(p) if p.path.is_ident("FrozenCohort")) {
+                continue;
+            }
+            for method in &mut item.items {
+                let syn::ImplItem::Fn(method) = method else {
+                    continue;
+                };
+                if method.sig.ident != "capture" {
+                    continue;
+                }
+                let expected = syn::parse_str::<syn::Stmt>(original)?
+                    .to_token_stream()
+                    .to_string();
+                for statement in &mut method.block.stmts {
+                    if statement.to_token_stream().to_string() == expected {
+                        *statement = syn::parse_str(replacement)?;
+                        replaced += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(replaced, 1);
+        assert!(!retained_frozen_generation_source(
+            &parsed.to_token_stream().to_string()
+        )?);
+    }
+    Ok(())
+}
+
+fn actual_restore_role_method(source: &str, owner: &str, method: &str) -> String {
+    use quote::ToTokens;
+    let source = syn::parse_file(source).unwrap();
+    let methods = source
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Impl(item) = item else {
+                return None;
+            };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.len() == 1 && path.path.segments[0].ident == owner) {
+                return None;
+            }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == method => Some(item),
+                _ => None,
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 1);
+    methods[0].block.to_token_stream().to_string()
+}
+
+fn restore_role_factory_order(body: &str) -> bool {
+    let mut tail = body;
+    for expected in [
+        "self.pending.installation_attempted=true;",
+        "self.check()?;",
+        "receiver.original.interval_data()?",
+        "receiver.original.narrow(5,deadline)?",
+        "receiver.original.narrow(5,deadline)?.into_connection_clock()?",
+        "Rc::clone(&receiver.key)",
+        "Rc::clone(&receiver.policy_file)",
+        "Rc::clone(&receiver.current)",
+        "Rc::clone(&process.grant_peer)",
+        "Rc::clone(&process.nonce_peer)",
+        "Rc::clone(&process.channel)",
+        "let checked=self.check();",
+        "requested.is_err() || checked.is_err()",
+        "self.pending.refuse();",
+        "requested?;",
+        "checked?;",
+        "history:self",
+        "PendingRestoredEnrollment::from_restore(port)",
+    ] {
+        let expected = native_source_tokens(expected);
+        let Some(at) = tail.find(&expected) else {
+            return false;
+        };
+        tail = &tail[at + expected.len()..];
+    }
+    ![
+        "NativeAcquisition::begin",
+        "KeyOwner::generate",
+        "enroll_current_thread",
+        "store::open",
+        "begin_current_request",
+        "begin_current_stage",
+    ]
+    .iter()
+    .any(|forbidden| body.contains(&native_source_tokens(forbidden)))
+}
+
+#[test]
+fn actual_pending_restore_spends_before_shared_resources_and_preserves_native_posts() {
+    let source = include_str!("restored/activation.rs");
+    let body = actual_restore_role_method(source, "AcceptedRestoredApp", "prepare_ordinary_role");
+    assert!(restore_role_factory_order(&body));
+    for (from, to) in [
+        ("self.pending.installation_attempted=true;", ""),
+        ("Rc::clone(&receiver.key)", "Rc::clone(&other.key)"),
+        (
+            "let original=receiver.original.narrow(5,deadline)?;",
+            "let original=NativeAcquisition::begin(5)?;",
+        ),
+        (
+            "let checked=self.check();",
+            "let checked=Ok::<(),anyhow::Error>(());",
+        ),
+        ("history:self", "history:other"),
+    ] {
+        let from = native_source_tokens(from);
+        assert_eq!(body.matches(&from).count(), 1);
+        let changed = body.replacen(&from, &native_source_tokens(to), 1);
+        assert!(!restore_role_factory_order(&changed));
+    }
+}
+
+#[test]
+fn actual_pending_restore_checks_borrow_old_original_and_always_check_old_history() {
+    let source = include_str!("owner.rs");
+    let body = actual_restore_role_method(source, "PendingRestoredEnrollment", "check");
+    let expected = [
+        "self.history.check()?;",
+        "self.original.interval_data()?",
+        "StageAcquisition::borrowed(&mut self.original)",
+        "stage.check()",
+        "let checked=self.history.check();",
+        "requested.is_err() || checked.is_err()",
+        "self.original.refuse();",
+        "self.owner.refused=true;",
+        "self.history.refuse();",
+        "requested?;checked",
+    ];
+    let ordered = |body: &str| {
+        let mut rest = body;
+        for part in &expected {
+            let part = native_source_tokens(part);
+            let Some(at) = rest.find(&part) else {
+                return false;
+            };
+            rest = &rest[at + part.len()..];
+        }
+        true
+    };
+    assert!(ordered(&body));
+    for part in &expected {
+        let target = native_source_tokens(part);
+        assert_eq!(body.matches(&target).count(), 1);
+        assert!(!ordered(&body.replacen(&target, "", 1)));
+    }
+    for forbidden in [
+        "begin_current",
+        "NativeAcquisition::begin",
+        "KeyOwner::generate",
+        "into_owner",
+        "finish_known",
+        "Runtime::",
+        "store::open",
+    ] {
+        assert!(!body.contains(&native_source_tokens(forbidden)));
+    }
+    let factory = actual_restore_role_method(source, "PendingRestoredEnrollment", "from_restore");
+    for flag in [
+        "initial_holder_attempted:true",
+        "initial_handshake_attempted:true",
+        "serving_attempted:true",
+    ] {
+        assert!(factory.contains(&native_source_tokens(flag)));
+    }
+}
+
+#[test]
+fn pending_restore_drop_poisons_actual_original_without_borrowing_shared_resources() {
+    let body = actual_restore_role_method(
+        include_str!("owner.rs"),
+        "PendingRestoredEnrollment",
+        "drop",
+    );
+    assert!(body.contains(&native_source_tokens("self.original.refuse();")));
+    assert!(body.contains(&native_source_tokens("self.owner.refused=true;")));
+    assert!(body.contains(&native_source_tokens("self.history.refuse();")));
+    for forbidden in [
+        "borrow",
+        "try_borrow",
+        "catch_unwind",
+        "if self.complete",
+        "Ok(",
+    ] {
+        assert!(!body.contains(forbidden));
+    }
+}
+
+#[test]
+fn actual_restored_runtime_build_never_reopens_or_initializes_the_first_keeper() {
+    fn factory_closed(body: &str) -> bool {
+        let required = [
+            "birth.check()?;",
+            "birth.runtime_inputs_data()?",
+            "InitialStoreMetadata::admit",
+            "native_database:Some(NativeDatabaseSelection {path:db})",
+            "let checked=birth.reobserve();",
+            "requested.is_err() || checked.is_err()",
+            "birth.refuse();",
+            "let runtime=requested?;",
+            "checked?;",
+            "Ok(runtime)",
+        ];
+        let mut tail = body;
+        for part in required {
+            let part = native_source_tokens(part);
+            let Some(at) = tail.find(&part) else {
+                return false;
+            };
+            tail = &tail[at + part.len()..];
+        }
+        ![
+            "open_existing",
+            "Connection::open",
+            "SQLITE_OPEN_CREATE",
+            "DATABASE",
+            "initialize",
+            "finish_known",
+            "finish_scope",
+            "NativeAcquisition::begin",
+        ]
+        .iter()
+        .any(|term| body.contains(&native_source_tokens(term)))
+    }
+    let body = actual_restore_role_method(
+        include_str!("../../store/native_storage.rs"),
+        "Runtime",
+        "load_restored_storage",
+    );
+    assert!(factory_closed(&body));
+    for (from, to) in [
+        ("birth.runtime_inputs_data()?", "supplied_metadata"),
+        (
+            "native_database:Some(NativeDatabaseSelection {path:db})",
+            "native_database:None",
+        ),
+        (
+            "let checked=birth.reobserve();",
+            "let checked=Ok::<(),anyhow::Error>(());",
+        ),
+        ("checked?;", ""),
+        (
+            "Ok(runtime)",
+            "{let _=open_existing(&runtime.db)?;Ok(runtime)}",
+        ),
+    ] {
+        let from = native_source_tokens(from);
+        assert_eq!(body.matches(&from).count(), 1);
+        assert!(!factory_closed(&body.replacen(
+            &from,
+            &native_source_tokens(to),
+            1
+        )));
+    }
+}
+
+#[test]
+fn restored_runtime_is_prepared_only_inside_the_consumed_pending_factory() {
+    use syn::visit::Visit;
+    let source = include_str!("restored/activation.rs");
+    let body = actual_restore_role_method(source, "AcceptedRestoredApp", "prepare_ordinary_role");
+    let runtime = native_source_tokens("let runtime=self.prepare_runtime()?;");
+    let port = native_source_tokens("let port=super::super::RestoredRoleInstallPort");
+    assert!(body.find(&runtime).unwrap() < body.find(&port).unwrap());
+    let prepared = actual_restore_role_method(source, "AcceptedRestoredApp", "prepare_runtime");
+    assert!(prepared.contains(&native_source_tokens("keeper: &mut input.received.keeper")));
+    assert!(prepared.contains(&native_source_tokens("let checked=birth.check();")));
+    assert!(prepared.contains(&native_source_tokens("birth.completed=true;")));
+    struct Origins {
+        current: Option<String>,
+        owners: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for Origins {
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            let prior = self.current.replace(item.sig.ident.to_string());
+            syn::visit::visit_impl_item_fn(self, item);
+            self.current = prior;
+        }
+        fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+            if item
+                .path
+                .segments
+                .last()
+                .is_some_and(|name| name.ident == "RestoredRuntimeBirth")
+            {
+                self.owners.push(self.current.clone().unwrap_or_default());
+            }
+            syn::visit::visit_expr_struct(self, item);
+        }
+    }
+    let mut origins = Origins {
+        current: None,
+        owners: Vec::new(),
+    };
+    origins.visit_file(&syn::parse_file(source).unwrap());
+    assert_eq!(origins.owners, ["prepare_runtime"]);
+    let pending = actual_restore_role_method(
+        include_str!("owner.rs"),
+        "PendingRestoredEnrollment",
+        "from_restore",
+    );
+    let stable_runtime = |body: &str| {
+        body.matches(&native_source_tokens(
+            "runtime:std::sync::Arc::new(port.runtime)",
+        ))
+        .count()
+            == 1
+            && !["port.runtime.clone()", "Arc::make_mut", "Arc::try_unwrap"]
+                .iter()
+                .any(|term| body.contains(&native_source_tokens(term)))
+    };
+    assert!(stable_runtime(&pending));
+    for replacement in [
+        "runtime:port.runtime",
+        "runtime:std::sync::Arc::new(port.runtime.clone())",
+        "runtime:std::sync::Arc::new(other.runtime)",
+    ] {
+        assert!(!stable_runtime(&pending.replacen(
+            &native_source_tokens("runtime:std::sync::Arc::new(port.runtime)"),
+            &native_source_tokens(replacement),
+            1,
+        )));
+    }
+    use quote::ToTokens;
+    let owner = syn::parse_file(include_str!("owner.rs")).unwrap();
+    let runtime = owner
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PendingRestoredEnrollment" => item
+                .fields
+                .iter()
+                .find(|field| field.ident.as_ref().is_some_and(|name| name == "runtime")),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(runtime.vis, syn::Visibility::Inherited));
+    let expected: syn::Type = syn::parse_quote!(std::sync::Arc<crate::store::Runtime>);
+    assert_eq!(
+        runtime.ty.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
+    );
+}
+
+#[test]
+fn actual_pending_reader_spans_error_and_unwind_without_exporting_an_observation() {
+    fn ordered(body: &str) -> bool {
+        let mut tail = body;
+        for part in [
+            "let mut attempt=PendingReaderAttempt {owner:self,completed:false,};",
+            "attempt.owner.check()?;",
+            "attempt.owner.history.restored_reader_data(selection)",
+            "let checked=attempt.owner.check();",
+            "requested.is_err() || checked.is_err()",
+            "attempt.owner.refuse();",
+            "let reader=requested?;",
+            "checked?;",
+            "attempt.completed=true;",
+            "Ok(reader)",
+        ] {
+            let part = native_source_tokens(part);
+            let Some(at) = tail.find(&part) else {
+                eprintln!("missing required body fragment: {part}");
+                return false;
+            };
+            tail = &tail[at + part.len()..];
+        }
+        true
+    }
+    let body = actual_restore_role_method(
+        include_str!("owner.rs"),
+        "PendingRestoredEnrollment",
+        "checked_restored_reader_data",
+    );
+    assert!(ordered(&body));
+    for (part, replacement) in [
+        ("owner:self,completed:false", "owner:self,completed:true"),
+        (
+            "let checked=attempt.owner.check();",
+            "let checked=Ok::<(),anyhow::Error>(());",
+        ),
+        ("checked?;", ""),
+        ("attempt.owner.refuse();", ""),
+    ] {
+        let part = native_source_tokens(part);
+        assert_eq!(body.matches(&part).count(), 1);
+        assert!(!ordered(&body.replacen(
+            &part,
+            &native_source_tokens(replacement),
+            1
+        )));
+    }
+    for forbidden in [
+        "NativeAcquisition::begin",
+        "Budget::from",
+        "RestoredEpochObservation",
+        "begin_current_request",
+        "CounterRequest",
+        "finish_known",
+    ] {
+        assert!(!body.contains(&native_source_tokens(forbidden)));
+    }
+    let drop = actual_restore_role_method(include_str!("owner.rs"), "PendingReaderAttempt", "drop");
+    assert!(drop.contains(&native_source_tokens(
+        "if !self.completed {self.owner.refuse();}"
+    )));
+    assert!(!drop.contains("borrow"));
+    let data = actual_restore_role_method(
+        include_str!("restored/activation.rs"),
+        "AcceptedRestoredApp",
+        "restored_reader_data",
+    );
+    for part in [
+        "&peer.process.receiver.policy.store==selection",
+        "peer.local.holder_data()?",
+        "selection,&peer.projection,&actual.activation,&holder",
+    ] {
+        let part = native_source_tokens(part);
+        assert_eq!(data.matches(&part).count(), 1, "{part}");
+    }
+}
+
+#[test]
+fn actual_pending_counter_pairs_before_admission_and_reads_only_under_old_original() {
+    fn ordered(body: &str) -> bool {
+        let mut tail = body;
+        for part in [
+            "PendingReaderAttempt",
+            "attempt.owner.check()?;",
+            "attempt.owner.history.restored_reader_data(&selected)?",
+            "lineage.require_restored_reader_data(&expected)?",
+            "attempt.owner.original.interval_data()?",
+            "StageAcquisition::borrowed(&mut attempt.owner.original)",
+            "attempt.owner.counter.admit",
+            "attempt.owner.counter.request",
+            "lineage.read(&selected,&mut reads,&mut stage)?",
+            "lineage.check(&selected,&mut reads,&mut stage,&mut observed)?",
+            "reads.finish(&mut stage)?",
+            "let checked=attempt.owner.check();",
+            "requested.is_err() || checked.is_err()",
+            "attempt.owner.refuse();",
+            "let observed=requested?;",
+            "checked?;",
+            "attempt.completed=true;",
+            "Ok(observed)",
+        ] {
+            let part = native_source_tokens(part);
+            let Some(at) = tail.find(&part) else {
+                return false;
+            };
+            tail = &tail[at + part.len()..];
+        }
+        true
+    }
+    let body = actual_restore_role_method(
+        include_str!("owner.rs"),
+        "PendingRestoredEnrollment",
+        "admit_current",
+    );
+    assert!(ordered(&body));
+    for (from, to) in [
+        ("lineage.require_restored_reader_data(&expected)?;", ""),
+        (
+            "StageAcquisition::borrowed(&mut attempt.owner.original)",
+            "StageAcquisition::owned(NativeAcquisition::begin(5)?)",
+        ),
+        (
+            "lineage.read(&selected,&mut reads,&mut stage)?",
+            "cached_observation",
+        ),
+        ("reads.finish(&mut stage)?;", ""),
+        (
+            "let checked=attempt.owner.check();",
+            "let checked=Ok::<(),anyhow::Error>(());",
+        ),
+    ] {
+        let from = native_source_tokens(from);
+        assert_eq!(body.matches(&from).count(), 1);
+        assert!(!ordered(&body.replacen(
+            &from,
+            &native_source_tokens(to),
+            1
+        )));
+    }
+    for forbidden in [
+        "NativeAcquisition::begin",
+        "begin_current_request",
+        "RestoredEpochObservation",
+        "into_connection_clock",
+        "store::open",
+        "Runtime::",
+        "finish_known",
+    ] {
+        assert!(!body.contains(&native_source_tokens(forbidden)));
+    }
+}
+
+// These controls inspect actual production bodies, not an alternate native
+// owner. Linux keeper/peer conformance remains a separate qualification gate.
+fn restored_history_method(source: &str, owner: &str, name: &str) -> String {
+    use quote::ToTokens;
+    let file = syn::parse_file(source).unwrap();
+    let mut methods = file.items.into_iter().filter_map(|item| {
+        let syn::Item::Impl(item) = item else {
+            return None;
+        };
+        let syn::Type::Path(path) = &*item.self_ty else {
+            return None;
+        };
+        if !path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == owner)
+        {
+            return None;
+        }
+        item.items.into_iter().find_map(|item| match item {
+            syn::ImplItem::Fn(item) if item.sig.ident == name => {
+                use syn::visit::Visit;
+                // Normalize only optional terminal separators on actual call
+                // arguments and named struct fields. Tuple commas remain real.
+                struct OptionalSeparators {
+                    replacements: Vec<(String, String)>,
+                }
+                impl<'ast> Visit<'ast> for OptionalSeparators {
+                    fn visit_expr_call(&mut self, item: &'ast syn::ExprCall) {
+                        if item.args.trailing_punct() {
+                            let mut normalized = item.clone();
+                            normalized.args.pop_punct();
+                            self.replacements.push((
+                                native_source_tokens(&item.to_token_stream().to_string()),
+                                native_source_tokens(&normalized.to_token_stream().to_string()),
+                            ));
+                        }
+                        syn::visit::visit_expr_call(self, item);
+                    }
+                    fn visit_expr_method_call(&mut self, item: &'ast syn::ExprMethodCall) {
+                        if item.args.trailing_punct() {
+                            let mut normalized = item.clone();
+                            normalized.args.pop_punct();
+                            self.replacements.push((
+                                native_source_tokens(&item.to_token_stream().to_string()),
+                                native_source_tokens(&normalized.to_token_stream().to_string()),
+                            ));
+                        }
+                        syn::visit::visit_expr_method_call(self, item);
+                    }
+                    fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+                        if item.rest.is_none() && item.fields.trailing_punct() {
+                            let mut normalized = item.clone();
+                            normalized.fields.pop_punct();
+                            self.replacements.push((
+                                native_source_tokens(&item.to_token_stream().to_string()),
+                                native_source_tokens(&normalized.to_token_stream().to_string()),
+                            ));
+                        }
+                        syn::visit::visit_expr_struct(self, item);
+                    }
+                }
+                let mut separators = OptionalSeparators {
+                    replacements: Vec::new(),
+                };
+                separators.visit_block(&item.block);
+                let mut body = native_source_tokens(&item.block.into_token_stream().to_string());
+                for (before, after) in separators.replacements {
+                    body = body.replace(&before, &after);
+                }
+                Some(body)
+            }
+            _ => None,
+        })
+    });
+    let method = methods.next().unwrap();
+    assert!(methods.next().is_none());
+    method
+}
+
+#[test]
+fn restored_history_source_controls_preserve_tuple_shape_and_normalize_only_optional_separators() {
+    let source = "impl Controls {fn a(){call(1,);let x=Input {v:1,};take((x,));}fn b(){call(1);let x=Input {v:1};take((x,));}fn c(){call(1);let x=Input {v:1};take((x));}}";
+    assert_eq!(
+        restored_history_method(source, "Controls", "a"),
+        restored_history_method(source, "Controls", "b")
+    );
+    assert_ne!(
+        restored_history_method(source, "Controls", "b"),
+        restored_history_method(source, "Controls", "c")
+    );
+    let update = "impl Controls {fn update(){let x=Input {v:1,..base};}fn range(){let x=Input {v:1..base};}}";
+    assert_ne!(
+        restored_history_method(update, "Controls", "update"),
+        restored_history_method(update, "Controls", "range")
+    );
+}
+
+fn restored_history_order(body: &str, expected: &[&str]) -> bool {
+    let mut tail = body;
+    for part in expected {
+        let part = native_source_tokens(part);
+        let Some(at) = tail.find(&part) else {
+            return false;
+        };
+        tail = &tail[at + part.len()..];
+    }
+    true
+}
+
+#[test]
+fn actual_history_slot_owns_whole_keeper_before_wait_and_restores_before_positive_result() {
+    let source = include_str!("restored/activation.rs");
+    let take = restored_history_method(source, "RestoredHistoryLoan", "take");
+    let take_order = [
+        "!root.refused.get()",
+        "!root.channel_refusal.get()",
+        "root.retained.take()",
+        "history:Some(history)",
+        "if requested.is_err() {root.refuse();}",
+    ];
+    let take_flow = |body: &str| {
+        if !restored_history_order(body, &take_order) {
+            return false;
+        }
+        let Ok(block) = syn::parse_str::<syn::Block>(body) else {
+            return false;
+        };
+        matches!(block.stmts.last(),Some(syn::Stmt::Expr(syn::Expr::Path(path),None)) if path.path.is_ident("requested"))
+    };
+    assert!(take_flow(&take));
+    let mut wrong_return = syn::parse_str::<syn::Block>(&take).unwrap();
+    *wrong_return.stmts.last_mut().unwrap() = syn::Stmt::Expr(syn::parse_quote!(unchecked), None);
+    use quote::ToTokens;
+    assert!(!take_flow(&native_source_tokens(
+        &wrong_return.to_token_stream().to_string()
+    )));
+    let check = restored_history_method(source, "RestoredAppHistory", "check");
+    let check_order = [
+        "RestoredHistoryLoan::take(self)?",
+        "let requested=loan.history.as_mut()",
+        ".check();",
+        "if requested.is_err() {self.refuse();}",
+        "let checked=loan.finish();",
+        "requested?;checked",
+    ];
+    assert!(restored_history_order(&check, &check_order));
+    for part in take_order {
+        let part = native_source_tokens(part);
+        assert_eq!(take.matches(&part).count(), 1);
+        assert!(!take_flow(&take.replacen(&part, "", 1)));
+    }
+    for part in check_order {
+        let part = native_source_tokens(part);
+        assert_eq!(check.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &check.replacen(&part, "", 1),
+            &check_order
+        ));
+    }
+    let finish = restored_history_method(source, "RestoredHistoryLoan", "finish");
+    let finish_order = [
+        "self.history.take()",
+        "self.root.retained.replace(Some(history))",
+        "self.root.refuse();",
+        "restore_history_slot_changed",
+        "!self.root.refused.get()",
+        "self.completed=true;",
+        "Ok(())",
+    ];
+    assert!(restored_history_order(&finish, &finish_order));
+    for part in finish_order {
+        let part = native_source_tokens(part);
+        assert_eq!(finish.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &finish.replacen(&part, "", 1),
+            &finish_order
+        ));
+    }
+    for body in [&take, &check, &finish] {
+        for forbidden in [
+            "borrow_mut",
+            "try_borrow",
+            "callback",
+            "NativeAcquisition::begin",
+            "finish_known",
+        ] {
+            assert!(!body.contains(&native_source_tokens(forbidden)));
+        }
+    }
+}
+
+#[test]
+fn actual_shared_history_negative_teardown_never_borrows_or_checks_expired_originals() {
+    let source = include_str!("restored/activation.rs");
+    let refuse = restored_history_method(source, "RestoredAppHistory", "refuse");
+    for part in [
+        "self.refused.set(true);",
+        "self.receiver_refusal.refuse();",
+        "self.reader_refusal.refuse();",
+        "self.channel_refusal.set(true);",
+    ] {
+        assert_eq!(refuse.matches(&native_source_tokens(part)).count(), 1);
+    }
+    for forbidden in [
+        "retained",
+        "borrow",
+        "remaining",
+        "check",
+        "sample",
+        "catch_unwind",
+        "wait",
+    ] {
+        assert!(!refuse.contains(forbidden));
+    }
+    let drop = restored_history_method(include_str!("restored.rs"), "RestoredHistoryLoan", "drop");
+    assert!(restored_history_order(
+        &drop,
+        &[
+            "if !self.completed {self.root.refuse();}",
+            "self.history.take()",
+            "self.root.retained.replace(Some(history))",
+            "self.root.refuse();",
+            "drop(unexpected);"
+        ]
+    ));
+    let factory = restored_history_method(source, "AcceptedRestoredApp", "retain_history");
+    let expected = [
+        "self.check()?;",
+        "actual.captured.peer.process.receiver.original.retained_refusal()",
+        "actual.original.retained_refusal()",
+        "std::rc::Rc::clone(&actual.captured.peer.channel.refused)",
+        "let checked=self.check();",
+        "requested.is_err() || checked.is_err()",
+        "self.refuse();",
+        "requested?;",
+        "checked?;",
+        "Cell::new(Some(self))",
+    ];
+    assert!(restored_history_order(&factory, &expected));
+    for part in expected {
+        let part = native_source_tokens(part);
+        assert_eq!(factory.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &factory.replacen(&part, "", 1),
+            &expected
+        ));
+    }
+}
+
+#[test]
+fn actual_restored_file_continuity_uses_current_stage_and_same_first_keeper_only() {
+    let source = include_str!("restored/activation.rs");
+    let wrapper = restored_history_method(source, "RestoredAppHistory", "check_current_resources");
+    let wrapper_expected = [
+        "RestoredHistoryLoan::take(self)?",
+        "loan.history.as_mut()",
+        ".and_then(|accepted|accepted.check_current_keeper(stage))",
+        "let checked=stage.check();",
+        "requested.is_err() || checked.is_err()",
+        "self.refuse();",
+        "let restored=loan.finish();",
+        "requested?;checked?;restored",
+    ];
+    assert!(restored_history_order(&wrapper, &wrapper_expected));
+    for part in wrapper_expected {
+        let target = native_source_tokens(part);
+        assert_eq!(wrapper.matches(&target).count(), 1);
+        assert!(!restored_history_order(
+            &wrapper.replacen(&target, "", 1),
+            &wrapper_expected
+        ));
+    }
+    let actual = restored_history_method(source, "AcceptedRestoredApp", "check_current_keeper");
+    let expected = [
+        "let keeper = &mut input.received.keeper;",
+        "stage.require_current_role()?;",
+        "stage.check_selection(&policy.bootstrap,&policy.store,super::super::NativeRole::AppHost)?;",
+        "keeper.input.owner.captured.check_anchors()?;",
+        "keeper.keeper.check(&keeper.input.owner.captured.directory,&keeper.input.owner.captured.file)",
+    ];
+    assert!(restored_history_order(&actual, &expected));
+    for part in expected {
+        let part = native_source_tokens(part);
+        assert_eq!(actual.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &actual.replacen(&part, "", 1),
+            &expected
+        ));
+    }
+    let forbidden = [
+        "receiver.original",
+        "remaining",
+        "reobserve",
+        "transcript",
+        "receiver.check",
+        "history.check",
+        "self.check()",
+        "NativeAcquisition::begin",
+        "try_clone",
+        "Connection::open",
+        "receive_restore",
+        "send_restore",
+    ];
+    let safe = |body: &str| {
+        forbidden
+            .iter()
+            .all(|part| !body.contains(&native_source_tokens(part)))
+    };
+    assert!(safe(&wrapper));
+    assert!(safe(&actual));
+    for injection in [
+        "let _renewed=NativeAcquisition::begin(5)?;",
+        "keeper.input.owner.captured.peer.process.receiver.original.remaining()?;",
+    ] {
+        let mut changed = syn::parse_str::<syn::Block>(&actual).unwrap();
+        let syn::Stmt::Expr(syn::Expr::Block(linux), _) = changed.stmts.last_mut().unwrap() else {
+            panic!("actual native helper body");
+        };
+        linux
+            .block
+            .stmts
+            .insert(0, syn::parse_str(injection).unwrap());
+        let changed = restored_history_method(
+            &format!(
+                "impl Injected {{fn check() {}}}",
+                quote::ToTokens::to_token_stream(&changed)
+            ),
+            "Injected",
+            "check",
+        );
+        assert!(!safe(&changed), "{injection}");
+    }
+    let current = restored_history_method(
+        include_str!("owner.rs"),
+        "RestoredAppFileContinuity",
+        "check_current",
+    );
+    assert!(restored_history_order(
+        &current,
+        &[
+            "stage.require_current_role()?;",
+            "self.same.check(stage)?;",
+            "self.history.check_current_resources(stage)",
+            "let checked=self.same.check(stage);",
+            "self.history.refuse();",
+            "requested?;checked"
+        ]
+    ));
+}
+
+#[test]
+fn actual_restored_file_factory_spends_before_check_and_retains_both_old_posts() {
+    let actual = restored_history_method(
+        include_str!("owner.rs"),
+        "PendingRestoredEnrollment",
+        "prepare_file_continuity",
+    );
+    let expected = [
+        "PendingReaderAttempt {owner:self,completed:false}",
+        "!attempt.owner.file_continuity_attempted",
+        "attempt.owner.file_continuity_attempted=true;",
+        "attempt.owner.check()?;",
+        "attempt.owner.original.interval_data()?",
+        "StageAcquisition::borrowed(&mut attempt.owner.original)",
+        "stage.capture_same_owner()?",
+        "Rc::clone(&attempt.owner.history)",
+        "file.check_current(&mut stage)?;",
+        "let checked=attempt.owner.check();",
+        "requested.is_err() || checked.is_err()",
+        "attempt.owner.refuse();",
+        "let file=requested?;",
+        "checked?;",
+        "attempt.completed=true;",
+    ];
+    let factory_flow = |body: &str| {
+        if !restored_history_order(body, &expected) {
+            return false;
+        }
+        let Ok(block) = syn::parse_str::<syn::Block>(body) else {
+            return false;
+        };
+        use quote::ToTokens;
+        matches!(block.stmts.last(),Some(syn::Stmt::Expr(expression,None)) if native_source_tokens(&expression.to_token_stream().to_string()) == native_source_tokens("Ok(file)"))
+    };
+    assert!(factory_flow(&actual));
+    use quote::ToTokens;
+    let mut wrong_return = syn::parse_str::<syn::Block>(&actual).unwrap();
+    *wrong_return.stmts.last_mut().unwrap() =
+        syn::Stmt::Expr(syn::parse_quote!(Ok(other_file)), None);
+    assert!(!factory_flow(&native_source_tokens(
+        &wrong_return.to_token_stream().to_string()
+    )));
+    for part in expected {
+        let part = native_source_tokens(part);
+        assert_eq!(actual.matches(&part).count(), 1);
+        assert!(!factory_flow(&actual.replacen(&part, "", 1)));
+    }
+    for forbidden in [
+        "NativeAcquisition::begin",
+        "begin_current",
+        "store::open",
+        "finish_known",
+        "Runtime::",
+    ] {
+        assert!(!actual.contains(&native_source_tokens(forbidden)));
+    }
+}
+
+#[test]
+fn actual_restored_file_continuity_can_only_be_built_by_its_genuine_pending_owner() {
+    use quote::ToTokens;
+    use syn::visit::Visit;
+    fn closed(sources: &[&str]) -> bool {
+        struct Origins {
+            owner: Option<String>,
+            method: Option<String>,
+            constructed: usize,
+            closed: bool,
+        }
+        impl<'ast> Visit<'ast> for Origins {
+            fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+                if item.attrs.iter().any(|attr|matches!(&attr.meta,syn::Meta::List(meta) if meta.path.is_ident("cfg") && meta.tokens.to_string()=="test")) {return;}
+                syn::visit::visit_item_mod(self, item);
+            }
+            fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+                let old = self.owner.take();
+                self.owner = match &*item.self_ty {
+                    syn::Type::Path(path) => {
+                        path.path.segments.last().map(|part| part.ident.to_string())
+                    }
+                    _ => None,
+                };
+                syn::visit::visit_item_impl(self, item);
+                self.owner = old;
+            }
+            fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+                let old = self.method.replace(item.sig.ident.to_string());
+                syn::visit::visit_impl_item_fn(self, item);
+                self.method = old;
+            }
+            fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+                let name = item.path.segments.last().map(|part| part.ident.to_string());
+                if name.as_deref() == Some("RestoredAppFileContinuity")
+                    || (name.as_deref() == Some("Self")
+                        && self.owner.as_deref() == Some("RestoredAppFileContinuity"))
+                {
+                    self.constructed += 1;
+                    self.closed &= self.owner.as_deref()==Some("PendingRestoredEnrollment")
+                        && self.method.as_deref()==Some("prepare_file_continuity") && item.rest.is_none() && item.fields.len()==2
+                        && item.fields.iter().all(|field|match &field.member {
+                            syn::Member::Named(name) if name=="history"=>native_source_tokens(&field.expr.to_token_stream().to_string())==native_source_tokens("Rc::clone(&attempt.owner.history)"),
+                            syn::Member::Named(name) if name=="same"=>matches!(&field.expr,syn::Expr::Path(path) if path.path.is_ident("same")),
+                            _=>false,
+                        });
+                }
+                syn::visit::visit_expr_struct(self, item);
+            }
+        }
+        let mut origins = Origins {
+            owner: None,
+            method: None,
+            constructed: 0,
+            closed: true,
+        };
+        for source in sources {
+            let Ok(file) = syn::parse_file(source) else {
+                return false;
+            };
+            origins.visit_file(&file);
+        }
+        origins.closed && origins.constructed == 1
+    }
+    let source = include_str!("owner.rs");
+    let children = [
+        include_str!("owner/restore.rs"),
+        include_str!("owner/restore_receiver.rs"),
+        include_str!("owner/serving.rs"),
+        include_str!("owner/storage.rs"),
+    ];
+    let all = |root: &str| closed(&[root, children[0], children[1], children[2], children[3]]);
+    assert!(all(source));
+    let fake = "impl RestoredAppFileContinuity {fn adopt(history:Rc<RestoredAppHistory>,same:SameEnrolledOwner)->Self {Self {history,same}}}";
+    assert!(!all(&(source.to_owned() + fake)));
+    // The peer-continuity constructor legitimately clones this same history
+    // too. Mutate only the actual file factory, never a whole-file occurrence.
+    let mut changed = syn::parse_file(source).unwrap();
+    let mut selected = 0;
+    for item in &mut changed.items {
+        if let syn::Item::Impl(item) = item
+            && matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("PendingRestoredEnrollment"))
+        {
+            for item in &mut item.items {
+                if let syn::ImplItem::Fn(item) = item
+                    && item.sig.ident == "prepare_file_continuity"
+                {
+                    let body = item.block.to_token_stream().to_string();
+                    let target = native_source_tokens("history: Rc::clone(&attempt.owner.history)");
+                    assert_eq!(body.matches(&target).count(), 1);
+                    item.block = syn::parse_str(&body.replacen(
+                        &target,
+                        &native_source_tokens("history: Rc::clone(&other.history)"),
+                        1,
+                    ))
+                    .unwrap();
+                    selected += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(selected, 1);
+    assert!(!all(&changed.to_token_stream().to_string()));
+    assert!(!include_str!("restored/activation.rs").contains("fn from_pending("));
+}
+
+#[test]
+fn actual_restored_current_peer_checks_retain_whole_history_and_independent_fresh_post() {
+    use quote::ToTokens;
+    let actual = restored_history_method(
+        include_str!("restored/activation.rs"),
+        "RestoredAppHistory",
+        "check_current_peer_anchors",
+    );
+    let closed = |body: &str| {
+        let Ok(block) = syn::parse_str::<syn::Block>(body) else {
+            return false;
+        };
+        let expected: syn::Block = syn::parse_quote!({
+            let mut loan = RestoredHistoryLoan::take(self)?;
+            let requested: Result<()> = (|| {})();
+            let checked = stage
+                .storage()
+                .and_then(|mut storage| storage.check_storage_acquisition(acquisition));
+            if requested.is_err() || checked.is_err() {
+                self.refuse();
+            }
+            let restored = loan.finish();
+            requested?;
+            checked?;
+            restored
+        });
+        block.stmts.len() == expected.stmts.len()
+            && block.stmts[0].to_token_stream().to_string()
+                == expected.stmts[0].to_token_stream().to_string()
+            && block.stmts[2..]
+                .iter()
+                .map(|item| item.to_token_stream().to_string())
+                .collect::<Vec<_>>()
+                == expected.stmts[2..]
+                    .iter()
+                    .map(|item| item.to_token_stream().to_string())
+                    .collect::<Vec<_>>()
+    };
+    assert!(closed(&actual));
+    let wrapper_expected = [
+        "loan.history.as_mut()",
+        ".and_then(|accepted|accepted.check_current_peer_anchors(stage,acquisition))",
+    ];
+    assert!(restored_history_order(&actual, &wrapper_expected));
+    for part in wrapper_expected {
+        let target = native_source_tokens(part);
+        assert_eq!(actual.matches(&target).count(), 1);
+        assert!(!restored_history_order(
+            &actual.replacen(&target, "", 1),
+            &wrapper_expected
+        ));
+    }
+    let helper = restored_history_method(
+        include_str!("restored/activation.rs"),
+        "AcceptedRestoredApp",
+        "check_current_peer_anchors",
+    );
+    let expected = [
+        "let peer = &mut input.received.keeper.input.owner.captured.peer;",
+        "stage.require_current_role()?;",
+        "stage.check_selection(&peer.process.receiver.policy.bootstrap, &peer.process.receiver.policy.store, super::super::NativeRole::AppHost)?;",
+        "!peer.refused && (2..=5).contains(&peer.receipts.len())",
+        "for receipt in &mut peer.receipts",
+        "receipt.check_current_anchor(&peer.controller, stage, acquisition)?;",
+        "peer.channel.check_current_anchor(stage, acquisition)",
+    ];
+    assert!(restored_history_order(&helper, &expected));
+    for part in expected {
+        let part = native_source_tokens(part);
+        assert_eq!(helper.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &helper.replacen(&part, "", 1),
+            &expected
+        ));
+    }
+    let mut conditional = syn::parse_str::<syn::Block>(&actual).unwrap();
+    conditional.stmts[2] = syn::parse_quote!(let checked = Ok::<(),anyhow::Error>(()););
+    assert!(!closed(&native_source_tokens(
+        &conditional.to_token_stream().to_string()
+    )));
+    let mut wrong_return = syn::parse_str::<syn::Block>(&actual).unwrap();
+    *wrong_return.stmts.last_mut().unwrap() = syn::Stmt::Expr(syn::parse_quote!(Ok(())), None);
+    assert!(!closed(&native_source_tokens(
+        &wrong_return.to_token_stream().to_string()
+    )));
+    let forbidden = [
+        "receiver.original",
+        "accepted.check()",
+        "history.check",
+        "transcript",
+        "begin_current",
+        "send_restore",
+        "receive_restore",
+        "try_clone",
+        "NativeAcquisition::begin",
+    ];
+    let safe = |body: &str| {
+        forbidden
+            .iter()
+            .all(|part| !body.contains(&native_source_tokens(part)))
+    };
+    assert!(safe(&actual));
+    assert!(safe(&helper));
+    for injection in [
+        "let _renewed=NativeAcquisition::begin(5)?;",
+        "peer.process.receiver.original.remaining()?;",
+    ] {
+        let mut changed = syn::parse_str::<syn::Block>(&helper).unwrap();
+        let syn::Stmt::Expr(syn::Expr::Block(linux), _) = changed.stmts.last_mut().unwrap() else {
+            panic!("actual native helper body");
+        };
+        linux
+            .block
+            .stmts
+            .insert(0, syn::parse_str(injection).unwrap());
+        let changed = restored_history_method(
+            &format!(
+                "impl Injected {{fn check() {}}}",
+                quote::ToTokens::to_token_stream(&changed)
+            ),
+            "Injected",
+            "check",
+        );
+        assert!(!safe(&changed), "{injection}");
+    }
+}
+
+#[test]
+fn actual_restored_current_peer_anchor_checks_use_actual_pidfds_socket_and_fresh_acquisition() {
+    use quote::ToTokens;
+    let source = include_str!("restored/transport.rs");
+    for owner in ["RestoredControllerReceipt", "RestoreTransport"] {
+        let actual = restored_history_method(source, owner, "check_current_anchor");
+        let block = syn::parse_str::<syn::Block>(&actual).unwrap();
+        let expected: syn::Block = if owner == "RestoredControllerReceipt" {
+            syn::parse_quote!({
+                let requested: Result<()> = (|| {})();
+                let checked = stage
+                    .storage()
+                    .and_then(|mut storage| storage.check_storage_acquisition(acquisition));
+                if requested.is_err() || checked.is_err() {
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.refused = true;
+                    }
+                    acquisition.refuse();
+                }
+                requested?;
+                checked
+            })
+        } else {
+            syn::parse_quote!({
+                let requested: Result<()> = (|| {})();
+                let checked = stage
+                    .storage()
+                    .and_then(|mut storage| storage.check_storage_acquisition(acquisition));
+                if requested.is_err() || checked.is_err() {
+                    self.refuse();
+                    acquisition.refuse();
+                }
+                requested?;
+                checked
+            })
+        };
+        let outer = |block: &syn::Block| {
+            block.stmts.len() == expected.stmts.len()
+                && block.stmts[1..]
+                    .iter()
+                    .map(|item| item.to_token_stream().to_string())
+                    .collect::<Vec<_>>()
+                    == expected.stmts[1..]
+                        .iter()
+                        .map(|item| item.to_token_stream().to_string())
+                        .collect::<Vec<_>>()
+        };
+        assert!(outer(&block));
+        let mut missing_post = block.clone();
+        missing_post.stmts[1] = syn::parse_quote!(let checked = Ok::<(),anyhow::Error>(()););
+        assert!(!outer(&missing_post));
+        let parts: &[&str] = if owner == "RestoredControllerReceipt" {
+            &[
+                "!self.refused",
+                "self.process == std::process::id()",
+                "self.thread == std::thread::current().id()",
+                "stage.storage()?.check_storage_acquisition(acquisition)?;",
+                "stage.storage()?.storage_statement()?",
+                "self.statement.as_ref() == Some(&statement.digest()?)",
+                "statement.certificate == local.certificate",
+                "statement.stage.data.policy == local.stage.data.policy",
+                "statement.stage.data.role == NativeRole::EpochController",
+                "local.stage.data.role == NativeRole::AppHost",
+                "statement.stage.data.process.process == self.sender",
+                "process::live(&self.pidfd, acquisition)",
+            ]
+        } else {
+            &[
+                "!self.refused.get()",
+                "stage.storage()?.check_storage_acquisition(acquisition)?;",
+                "super::super::channel::require_connected(&self.socket, acquisition)",
+            ]
+        };
+        assert!(restored_history_order(&actual, parts));
+        for part in parts {
+            let part = native_source_tokens(part);
+            assert_eq!(actual.matches(&part).count(), 1);
+            assert!(!restored_history_order(
+                &actual.replacen(&part, "", 1),
+                parts
+            ));
+        }
+        for forbidden in [
+            "receiver.original",
+            "app.check",
+            "begin_current",
+            "transcript",
+            "try_clone",
+            "File::from",
+            "NativeAcquisition::begin",
+        ] {
+            assert!(!actual.contains(&native_source_tokens(forbidden)));
+        }
+    }
+}
+
+#[test]
+fn actual_restored_peer_factory_spends_before_checks_and_preserves_outer_old_posts() {
+    use quote::ToTokens;
+    let actual = restored_history_method(
+        include_str!("owner.rs"),
+        "PendingRestoredEnrollment",
+        "prepare_peer_continuity",
+    );
+    let outer = |body: &str| {
+        let Ok(block) = syn::parse_str::<syn::Block>(body) else {
+            return false;
+        };
+        let expected: syn::Block = syn::parse_quote!({
+            let mut attempt = PendingReaderAttempt {
+                owner: self,
+                completed: false,
+            };
+            let requested: Result<_> = (|| {})();
+            let checked = attempt.owner.check();
+            if requested.is_err() || checked.is_err() {
+                attempt.owner.refuse();
+            }
+            let peer = requested?;
+            checked?;
+            attempt.completed = true;
+            Ok(peer)
+        });
+        let expected = restored_history_method(
+            &format!("impl Expected {{fn body() {}}}", expected.to_token_stream()),
+            "Expected",
+            "body",
+        );
+        let expected = syn::parse_str::<syn::Block>(&expected).unwrap();
+        block.stmts.len() == expected.stmts.len()
+            && block.stmts[0].to_token_stream().to_string()
+                == expected.stmts[0].to_token_stream().to_string()
+            && block.stmts[2..]
+                .iter()
+                .map(|item| item.to_token_stream().to_string())
+                .collect::<Vec<_>>()
+                == expected.stmts[2..]
+                    .iter()
+                    .map(|item| item.to_token_stream().to_string())
+                    .collect::<Vec<_>>()
+    };
+    assert!(outer(&actual));
+    let expected = [
+        "!attempt.owner.peer_continuity_attempted",
+        "attempt.owner.peer_continuity_attempted=true;",
+        "attempt.owner.check()?;",
+        "attempt.owner.original.interval_data()?",
+        "StageAcquisition::borrowed(&mut attempt.owner.original)",
+        "let same = stage.capture_same_owner()?;",
+        "RestoredAppPeerContinuity {history:Rc::clone(&attempt.owner.history),same}",
+        "let mut acquisition = stage.narrow_io_acquisition(5)?;",
+        "peer.check_anchors(&mut stage,&mut acquisition)?;",
+    ];
+    assert!(restored_history_order(&actual, &expected));
+    for part in expected {
+        let part = native_source_tokens(part);
+        assert_eq!(actual.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &actual.replacen(&part, "", 1),
+            &expected
+        ));
+    }
+    let mut no_post = syn::parse_str::<syn::Block>(&actual).unwrap();
+    no_post.stmts[2] = syn::parse_quote!(let checked=Ok::<(),anyhow::Error>(()););
+    assert!(!outer(&native_source_tokens(
+        &no_post.to_token_stream().to_string()
+    )));
+    let wrong_root = native_source_tokens("Rc::clone(&attempt.owner.history)");
+    assert_eq!(actual.matches(&wrong_root).count(), 1);
+    assert!(!restored_history_order(
+        &actual.replacen(
+            &wrong_root,
+            &native_source_tokens("Rc::clone(&other.history)"),
+            1
+        ),
+        &expected
+    ));
+    for forbidden in [
+        "NativeAcquisition::begin",
+        "begin_current",
+        "Transcript",
+        "Channel::",
+        "try_clone",
+        "finish_known",
+        "Runtime::",
+        "store::open",
+    ] {
+        assert!(!actual.contains(&native_source_tokens(forbidden)));
+    }
+}
+
+#[test]
+fn actual_restored_peer_continuity_checks_same_owner_before_native_anchors_and_after_errors() {
+    use quote::ToTokens;
+    let actual = restored_history_method(
+        include_str!("owner.rs"),
+        "RestoredAppPeerContinuity",
+        "check_anchors",
+    );
+    let expected = [
+        "RestoredPeerAnchorAttempt {history: &self.history,acquisition,completed:false}",
+        "stage.require_current_role()?;",
+        "self.same.check(stage)?;",
+        "self.history.check_current_peer_anchors(stage,attempt.acquisition)",
+        "let checked = self.same.check(stage);",
+        "self.history.refuse();",
+        "attempt.acquisition.refuse();",
+        "requested?;checked?;attempt.completed=true;Ok(())",
+    ];
+    assert!(restored_history_order(&actual, &expected));
+    for part in expected {
+        let part = native_source_tokens(part);
+        assert_eq!(actual.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &actual.replacen(&part, "", 1),
+            &expected
+        ));
+    }
+    let block = syn::parse_str::<syn::Block>(&actual).unwrap();
+    let post: syn::Stmt = syn::parse_quote!(let checked=self.same.check(stage););
+    assert_eq!(
+        block.stmts[2].to_token_stream().to_string(),
+        post.to_token_stream().to_string()
+    );
+    for forbidden in [
+        "begin_current",
+        "receiver.original",
+        "history.check()",
+        "send",
+        "receive",
+        "callback",
+        "try_clone",
+    ] {
+        assert!(!actual.contains(&native_source_tokens(forbidden)));
+    }
+}
+
+#[test]
+fn actual_restored_peer_abandonment_refuses_without_borrow_or_clock_and_fields_stay_private() {
+    use quote::ToTokens;
+    let source = include_str!("owner.rs");
+    for (owner, expected) in [
+        (
+            "RestoredAppPeerContinuity",
+            syn::parse_quote!({
+                self.history.refuse();
+            }),
+        ),
+        (
+            "RestoredPeerAnchorAttempt",
+            syn::parse_quote!({
+                if !self.completed {
+                    self.history.refuse();
+                    self.acquisition.refuse();
+                }
+            }),
+        ),
+    ] {
+        let actual =
+            syn::parse_str::<syn::Block>(&restored_history_method(source, owner, "drop")).unwrap();
+        let expected: syn::Block = expected;
+        assert_eq!(
+            actual.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+    let file = syn::parse_file(source).unwrap();
+    fn docs_only(attributes: &[syn::Attribute]) -> bool {
+        attributes.iter().all(|attribute| matches!(&attribute.meta,
+            syn::Meta::NameValue(value) if value.path.is_ident("doc")
+                && matches!(&value.value,syn::Expr::Lit(value) if matches!(&value.lit,syn::Lit::Str(_)))))
+    }
+    for name in ["RestoredAppPeerContinuity", "RestoredPeerAnchorAttempt"] {
+        let entries = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == name => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0]
+                .fields
+                .iter()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        );
+        assert!(docs_only(&entries[0].attrs));
+        for forbidden in [
+            syn::parse_quote!(#[derive(Clone)]),
+            syn::parse_quote!(#[cfg(test)]),
+            syn::parse_quote!(#[allow(dead_code)]),
+        ] {
+            let mut changed = entries[0].attrs.clone();
+            changed.push(forbidden);
+            assert!(!docs_only(&changed));
+        }
+    }
+}
+
+#[test]
+fn actual_controller_native_retirement_consumes_stage_and_moves_same_owner_only_after_retirement() {
+    use quote::ToTokens;
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(source, "EnrolledRoleStage", "retire_controller_native");
+    let expected = [
+        "ControllerNativeRetirement {stage:Some(self),completed:false}",
+        "attempt.stage.as_mut()",
+        "stage.require_current_role()?;",
+        "stage.owner.role == NativeRole::EpochController",
+        "stage.acquisition.retire_owned(&mut stage.owner.clock)",
+        "let refusal = requested?;",
+        "attempt.stage.take()",
+        "RetainedControllerNative {owner:stage.owner,refusal}",
+        "attempt.completed=true;",
+        "Ok(retained)",
+    ];
+    assert!(restored_history_order(&actual, &expected));
+    fn requested_body(block: &syn::Block) -> Option<&syn::Block> {
+        let syn::Stmt::Local(local) = block.stmts.get(1)? else {
+            return None;
+        };
+        let init = local.init.as_ref()?;
+        let syn::Expr::Call(call) = &*init.expr else {
+            return None;
+        };
+        if !call.args.is_empty() {
+            return None;
+        }
+        let mut function = &*call.func;
+        while let syn::Expr::Paren(paren) = function {
+            function = &paren.expr;
+        }
+        let syn::Expr::Closure(closure) = function else {
+            return None;
+        };
+        if !closure.inputs.is_empty() || closure.asyncness.is_some() {
+            return None;
+        }
+        let syn::Expr::Block(body) = &*closure.body else {
+            return None;
+        };
+        Some(&body.block)
+    }
+    fn live_guards(block: &syn::Block) -> bool {
+        use syn::parse::Parser;
+        let Some(body) = requested_body(block) else {
+            return false;
+        };
+        if body.stmts.len() < 3 {
+            return false;
+        }
+        let binding: syn::Stmt = syn::parse_quote!(let stage=attempt.stage.as_mut().ok_or_else(||anyhow::anyhow!("native_controller_retirement_stage_missing"))?;);
+        let purpose: syn::Stmt = syn::parse_quote!(stage.require_current_role()?;);
+        if body.stmts[0].to_token_stream().to_string() != binding.to_token_stream().to_string()
+            || body.stmts[1].to_token_stream().to_string() != purpose.to_token_stream().to_string()
+        {
+            return false;
+        }
+        let syn::Stmt::Macro(guard) = &body.stmts[2] else {
+            return false;
+        };
+        if !guard.attrs.is_empty()
+            || !guard.mac.path.is_ident("ensure")
+            || guard.semi_token.is_none()
+        {
+            return false;
+        }
+        let Ok(args) = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+            .parse2(guard.mac.tokens.clone())
+        else {
+            return false;
+        };
+        let required: syn::Expr =
+            syn::parse_quote!(stage.owner.role == NativeRole::EpochController);
+        args.len() == 2
+            && args[0].to_token_stream().to_string() == required.to_token_stream().to_string()
+            && matches!(&args[1],syn::Expr::Lit(value) if matches!(&value.lit,syn::Lit::Str(value) if value.value()=="native_controller_retirement_role_changed"))
+    }
+    let block = syn::parse_str::<syn::Block>(&actual).unwrap();
+    assert!(live_guards(&block));
+    // Each counterexample preserves the old ordered/count witnesses while
+    // removing a real unconditional purpose or Controller-role guard.
+    for mutation in 0..4 {
+        let mut changed = block.clone();
+        let mut inner = requested_body(&changed).unwrap().clone();
+        let index = if mutation == 0 { 1 } else { 2 };
+        let old = inner.stmts[index].clone();
+        inner.stmts[index] = if mutation == 3 {
+            let syn::Stmt::Macro(mut guard) = old else {
+                unreachable!();
+            };
+            guard.attrs.push(syn::parse_quote!(#[cfg(any())]));
+            syn::Stmt::Macro(guard)
+        } else if mutation == 2 {
+            syn::parse_quote!(let _=stage.owner.role==NativeRole::EpochController;)
+        } else {
+            syn::parse_quote!(if false {#old})
+        };
+        let syn::Stmt::Local(local) = &mut changed.stmts[1] else {
+            unreachable!();
+        };
+        *local.init.as_mut().unwrap().expr = syn::parse_quote!((|| #inner)());
+        let text = native_source_tokens(&changed.to_token_stream().to_string());
+        assert!(restored_history_order(&text, &expected));
+        for guard in [
+            "stage.require_current_role()",
+            "stage.owner.role == NativeRole::EpochController",
+        ] {
+            let guard = native_source_tokens(guard);
+            assert_eq!(text.matches(&guard).count(), actual.matches(&guard).count());
+        }
+        assert!(!live_guards(&changed));
+    }
+    for part in expected {
+        let part = native_source_tokens(part);
+        assert_eq!(actual.matches(&part).count(), 1);
+        assert!(!restored_history_order(
+            &actual.replacen(&part, "", 1),
+            &expected
+        ));
+    }
+    for forbidden in [
+        "NativeAcquisition::begin",
+        "into_connection_clock",
+        "begin_current",
+        "StageAcquisition::owned",
+        "capture_same_owner",
+        "callback",
+        "try_clone",
+        "finish_known",
+    ] {
+        assert!(!actual.contains(&native_source_tokens(forbidden)));
+    }
+    let file = syn::parse_file(source).unwrap();
+    let mut methods=file.items.iter().filter_map(|item| {
+        let syn::Item::Impl(item)=item else{return None;};
+        if !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|s|s.ident=="EnrolledRoleStage")) {return None;}
+        item.items.iter().find_map(|item|match item {syn::ImplItem::Fn(item) if item.sig.ident=="retire_controller_native"=>Some(item),_=>None})
+    });
+    let method = methods.next().unwrap();
+    assert!(methods.next().is_none());
+    assert_eq!(method.sig.inputs.len(), 1);
+    assert!(
+        matches!(method.sig.inputs.first(),Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_none() && receiver.colon_token.is_none())
+    );
+    let syn::ReturnType::Type(_, output) = &method.sig.output else {
+        panic!("fixed output missing");
+    };
+    let syn::Type::Path(result) = &**output else {
+        panic!("fixed Result missing");
+    };
+    let args = &result.path.segments.last().unwrap().arguments;
+    let syn::PathArguments::AngleBracketed(args) = args else {
+        panic!("fixed output argument missing");
+    };
+    assert_eq!(args.args.len(), 1);
+    let Some(syn::GenericArgument::Type(syn::Type::Path(retained))) = args.args.first() else {
+        panic!("fixed retained output missing");
+    };
+    let retained = retained.path.segments.last().unwrap();
+    assert_eq!(retained.ident, "RetainedControllerNative");
+    let syn::PathArguments::AngleBracketed(args) = &retained.arguments else {
+        panic!("real role lifetime missing");
+    };
+    assert_eq!(args.args.len(), 1);
+    assert!(
+        matches!(args.args.first(),Some(syn::GenericArgument::Lifetime(lifetime)) if lifetime.ident=="role")
+    );
+    let fresh = restored_history_method(source, "RetainedControllerNative", "begin_current_stage");
+    let expected: syn::Block = syn::parse_quote!({ self.owner.begin_current_stage() });
+    assert_eq!(
+        fresh,
+        native_source_tokens(&expected.to_token_stream().to_string())
+    );
+}
+
+#[test]
+fn actual_retained_controller_native_and_attempt_drop_are_only_negative_and_fields_remain_private()
+{
+    use quote::ToTokens;
+    let source = include_str!("owner.rs");
+    for (owner, expected) in [
+        (
+            "RetainedControllerNative",
+            syn::parse_quote!({
+                self.owner.refused = true;
+                self.refusal.refuse();
+            }),
+        ),
+        (
+            "ControllerNativeRetirement",
+            syn::parse_quote!({
+                if !self.completed
+                    && let Some(stage) = &mut self.stage
+                {
+                    stage.owner.refused = true;
+                    stage.acquisition.as_mut().refuse();
+                }
+            }),
+        ),
+    ] {
+        let expected: syn::Block = expected;
+        let actual =
+            syn::parse_str::<syn::Block>(&restored_history_method(source, owner, "drop")).unwrap();
+        assert_eq!(
+            actual.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+    let file = syn::parse_file(source).unwrap();
+    for name in ["RetainedControllerNative", "ControllerNativeRetirement"] {
+        let entries = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == name => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0]
+                .fields
+                .iter()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        );
+        assert!(entries[0].attrs.iter().all(|a|matches!(&a.meta,syn::Meta::NameValue(value) if value.path.is_ident("doc") && matches!(&value.value,syn::Expr::Lit(value) if matches!(&value.lit,syn::Lit::Str(_))))));
+    }
+}
+
+#[test]
+fn actual_app_native_preparation_retains_whole_pending_and_original_for_genuine_ack() {
+    use quote::ToTokens;
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(
+        source,
+        "PendingRestoredEnrollment",
+        "prepare_current_native",
+    );
+    let actual: syn::Block = syn::parse_str(&actual).unwrap();
+    let linux = |body: &syn::Block| -> Option<syn::Block> {
+        let syn::Stmt::Expr(syn::Expr::Block(linux), None) = body.stmts.last()? else {
+            return None;
+        };
+        if linux.attrs.len() != 1
+            || !matches!(&linux.attrs[0].meta,syn::Meta::List(meta) if meta.path.is_ident("cfg") && meta.tokens.to_string()=="target_os = \"linux\"")
+        {
+            return None;
+        }
+        Some(linux.block.clone())
+    };
+    let expected: syn::Block = syn::parse_quote!({
+        let _ = self.admit_current(&lineage)?;
+        let file = self.prepare_file_continuity()?;
+        let peer = self.prepare_peer_continuity()?;
+        self.check()?;
+        Ok(PreparedRestoredAppNative {
+            pending: self,
+            file,
+            peer,
+            lineage,
+        })
+    });
+    let normalized = |body: &syn::Block| {
+        restored_history_method(
+            &format!(
+                "impl AppPreparationShape {{fn capture() {}}}",
+                body.to_token_stream()
+            ),
+            "AppPreparationShape",
+            "capture",
+        )
+    };
+    let guarded = |body: &syn::Block| {
+        linux(body).is_some_and(|body| normalized(&body) == normalized(&expected))
+    };
+    assert!(guarded(&actual));
+    assert!(
+        !actual
+            .to_token_stream()
+            .to_string()
+            .contains("retire_checked")
+    );
+    assert!(
+        !actual
+            .to_token_stream()
+            .to_string()
+            .contains("into_connection_clock")
+    );
+    for index in 0..expected.stmts.len() {
+        let mut changed = actual.clone();
+        let syn::Stmt::Expr(syn::Expr::Block(body), None) = changed.stmts.last_mut().unwrap()
+        else {
+            unreachable!();
+        };
+        body.block.stmts.remove(index);
+        assert!(!guarded(&changed));
+    }
+    let mut late = actual.clone();
+    let syn::Stmt::Expr(syn::Expr::Block(body), None) = late.stmts.last_mut().unwrap() else {
+        unreachable!();
+    };
+    body.block.stmts.swap(2, 3);
+    assert!(!guarded(&late));
+    let mut premature = actual.clone();
+    let syn::Stmt::Expr(syn::Expr::Block(body), None) = premature.stmts.last_mut().unwrap() else {
+        unreachable!();
+    };
+    body.block.stmts.insert(
+        4,
+        syn::parse_quote!(self.owner.clock.retire_checked(&mut self.original)?;),
+    );
+    assert!(!guarded(&premature));
+    let mut copied = actual.clone();
+    let syn::Stmt::Expr(syn::Expr::Block(body), None) = copied.stmts.last_mut().unwrap() else {
+        unreachable!();
+    };
+    body.block.stmts[4] = syn::Stmt::Expr(
+        syn::parse_quote!(Ok(PreparedRestoredAppNative {
+            pending: other,
+            file,
+            peer,
+            lineage
+        })),
+        None,
+    );
+    assert!(!guarded(&copied));
+    let negative = restored_history_method(source, "PreparedRestoredAppNative", "drop");
+    let expected: syn::Block = syn::parse_quote!({
+        self.pending.refuse();
+    });
+    assert_eq!(
+        negative,
+        native_source_tokens(&expected.to_token_stream().to_string())
+    );
+    let file = syn::parse_file(source).unwrap();
+    let owner = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PreparedRestoredAppNative" => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    let expected_fields = [
+        ("pending", syn::parse_quote!(PendingRestoredEnrollment)),
+        ("file", syn::parse_quote!(RestoredAppFileContinuity)),
+        ("peer", syn::parse_quote!(RestoredAppPeerContinuity)),
+        (
+            "lineage",
+            syn::parse_quote!(crate::security_epoch::bootstrap::ActiveLineage),
+        ),
+    ];
+    let whole_fields = |owner: &syn::ItemStruct| {
+        owner.fields.len() == expected_fields.len()
+            && owner
+                .fields
+                .iter()
+                .zip(&expected_fields)
+                .all(|(field, (name, ty))| {
+                    let ty: &syn::Type = ty;
+                    matches!(field.vis, syn::Visibility::Inherited)
+                        && field.attrs.is_empty()
+                        && field.ident.as_ref().is_some_and(|id| id == name)
+                        && field.ty.to_token_stream().to_string()
+                            == ty.to_token_stream().to_string()
+                })
+    };
+    assert!(whole_fields(owner));
+    for index in 0..expected_fields.len() {
+        let mut changed = owner.clone();
+        changed.fields.iter_mut().nth(index).unwrap().ty = syn::parse_quote!(UntrustedData);
+        assert!(!whole_fields(&changed));
+    }
+    for item in &file.items {
+        if let syn::Item::Impl(item) = item
+            && matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("PreparedRestoredAppNative"))
+        {
+            if let Some((_, path, _)) = &item.trait_ {
+                assert!(path.is_ident("Drop"));
+            } else {
+                let names = item
+                    .items
+                    .iter()
+                    .filter_map(|i| match i {
+                        syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(names, ["confirm_installed"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn app_installed_owner_retains_whole_prepared_input_and_all_independent_posts() {
+    use quote::ToTokens;
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(source, "PreparedRestoredAppNative", "confirm_installed");
+    let expected: syn::Block = syn::parse_quote!({
+        let requested: Result<()> = (|| {
+            self.pending.check()?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                anyhow::bail!("native_restore_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let (_, deadline) = self.pending.original.interval_data()?;
+                let mut stage = EnrolledRoleStage {
+                    owner: &mut self.pending.owner,
+                    purpose: StagePurpose::CurrentRole,
+                    acquisition: StageAcquisition::borrowed(&mut self.pending.original),
+                    deadline,
+                };
+                self.file.check_current(&mut stage)?;
+                let mut acquisition = stage.narrow_io_acquisition(5)?;
+                self.peer.check_anchors(&mut stage, &mut acquisition)?;
+                let requested = self.pending.history.confirm_installation(&mut stage);
+                let peer_post = self.peer.check_anchors(&mut stage, &mut acquisition);
+                let file_post = self.file.check_current(&mut stage);
+                let native_post = stage.check();
+                requested?;
+                peer_post?;
+                file_post?;
+                native_post
+            }
+        })();
+        let checked = self.pending.check();
+        if requested.is_err() || checked.is_err() {
+            self.pending.refuse();
+        }
+        requested?;
+        checked?;
+        Ok(InstalledRestoredAppNative { prepared: self })
+    });
+    let normalize = |block: &syn::Block| {
+        restored_history_method(
+            &format!(
+                "impl InstalledShape {{fn check() {}}}",
+                block.to_token_stream()
+            ),
+            "InstalledShape",
+            "check",
+        )
+    };
+    assert_eq!(actual, normalize(&expected));
+    for index in 0..expected.stmts.len() {
+        let mut changed = expected.clone();
+        changed.stmts.remove(index);
+        assert_ne!(actual, normalize(&changed));
+    }
+    let mut copied = expected.clone();
+    *copied.stmts.last_mut().unwrap() = syn::Stmt::Expr(
+        syn::parse_quote!(Ok(InstalledRestoredAppNative { prepared: other })),
+        None,
+    );
+    assert_ne!(actual, normalize(&copied));
+    for forbidden in [
+        "NativeAcquisition :: begin",
+        "retire_checked",
+        "into_connection_clock",
+        "Runtime ::",
+    ] {
+        assert!(!actual.contains(forbidden));
+    }
+    let file = syn::parse_file(source).unwrap();
+    let owner = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            syn::Item::Struct(i) if i.ident == "InstalledRestoredAppNative" => Some(i),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(owner.fields.len(), 1);
+    let field = owner.fields.iter().next().unwrap();
+    assert!(matches!(field.vis, syn::Visibility::Inherited));
+    assert_eq!(field.ident.as_ref().unwrap(), "prepared");
+    let ty: syn::Type = syn::parse_quote!(PreparedRestoredAppNative);
+    assert_eq!(
+        field.ty.to_token_stream().to_string(),
+        ty.to_token_stream().to_string()
+    );
+    assert!(
+        restored_history_method(source, "InstalledRestoredAppNative", "drop").contains("refuse")
+    );
+}
+
+#[test]
+fn restored_request_capture_holds_the_real_parent_before_native_work_and_keeps_negative_drop() {
+    use quote::ToTokens;
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(source, "RetiredRestoredAppNative", "capture_request");
+    let expected: syn::Block = syn::parse_quote!({
+        let mut captured = CapturedRestoredAppRequest {
+            refusal: RestoredCaptureRefusal::new(&self.request_state),
+            history: Rc::clone(&self.installed.prepared.pending.history),
+            request: None,
+            scope_settled: false,
+        };
+        captured.refusal.gate.capture()?;
+        let pending = &mut self.installed.prepared.pending;
+        captured.request = Some(pending.owner.begin_current_request()?);
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("native_restore_platform_unsupported");
+        #[cfg(target_os = "linux")]
+        {
+            let fresh = captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_current_capture_missing"))?;
+            pending
+                .original
+                .require_retired_predecessor(&mut fresh.acquisition)?;
+            pending.owner.borrow_current_request(fresh)?.check()?;
+            Ok(captured)
+        }
+    });
+    let normalize = |body: &syn::Block| {
+        restored_history_method(
+            &format!(
+                "impl CaptureShape {{fn capture() {}}}",
+                body.to_token_stream()
+            ),
+            "CaptureShape",
+            "capture",
+        )
+    };
+    assert_eq!(actual, normalize(&expected));
+    let mut premature = expected.clone();
+    let syn::Stmt::Local(local) = &mut premature.stmts[0] else {
+        panic!("actual capture initializer");
+    };
+    let syn::Expr::Struct(value) = local.init.as_mut().unwrap().expr.as_mut() else {
+        panic!("actual captured native request");
+    };
+    let fields = value
+        .fields
+        .iter_mut()
+        .filter(|field| matches!(&field.member,syn::Member::Named(name) if name=="scope_settled"))
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 1);
+    fields.into_iter().next().unwrap().expr = syn::parse_quote!(true);
+    assert_ne!(actual, normalize(&premature));
+    let mut missing = expected.clone();
+    let syn::Stmt::Local(local) = &mut missing.stmts[0] else {
+        unreachable!();
+    };
+    let syn::Expr::Struct(value) = local.init.as_mut().unwrap().expr.as_mut() else {
+        unreachable!();
+    };
+    let before = value.fields.len();
+    value.fields = value
+        .fields
+        .clone()
+        .into_iter()
+        .filter(|field| !matches!(&field.member,syn::Member::Named(name) if name=="scope_settled"))
+        .collect();
+    assert_eq!(value.fields.len() + 1, before);
+    assert_ne!(actual, normalize(&missing));
+    for cut in 0..expected.stmts.len() {
+        let mut changed = expected.clone();
+        changed.stmts.remove(cut);
+        assert_ne!(actual, normalize(&changed), "outer cut{cut}");
+    }
+    let mut late = expected.clone();
+    late.stmts.swap(1, 3);
+    assert_ne!(actual, normalize(&late));
+    let syn::Stmt::Expr(syn::Expr::Block(linux), None) = expected.stmts.last().unwrap() else {
+        panic!("Linux");
+    };
+    for cut in 0..linux.block.stmts.len() {
+        let mut changed = expected.clone();
+        let syn::Stmt::Expr(syn::Expr::Block(linux), None) = changed.stmts.last_mut().unwrap()
+        else {
+            unreachable!();
+        };
+        linux.block.stmts.remove(cut);
+        assert_ne!(actual, normalize(&changed), "native cut{cut}");
+    }
+    let drop = restored_history_method(source, "CapturedRestoredAppRequest", "drop");
+    for required in [
+        "self.refusal.refuse()",
+        "self.history.refuse()",
+        "request.refuse()",
+    ] {
+        let target: syn::Block = syn::parse_str(&format!("{{{required};}}")).unwrap();
+        let normalized = normalize(&target);
+        // Compare the actual call's tokens, excluding only the enclosing braces.
+        let required = normalized
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .trim();
+        assert!(drop.contains(required));
+    }
+}
+
+#[test]
+fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_guards() {
+    use quote::ToTokens;
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(
+        source,
+        "InstalledRestoredAppNative",
+        "retire_current_native",
+    );
+    let expected: syn::Block = syn::parse_quote!({
+        let requested = self.prepared.pending.history.check_installed();
+        let checked = self.prepared.pending.check();
+        if requested.is_err() || checked.is_err() {
+            self.prepared.pending.refuse();
+        }
+        requested?;
+        checked?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("native_restore_platform_unsupported");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let requested: Result<()> = (|| {
+                let (_, deadline) = self.prepared.pending.original.interval_data()?;
+                let mut stage = EnrolledRoleStage {
+                    owner: &mut self.prepared.pending.owner,
+                    purpose: StagePurpose::CurrentRole,
+                    acquisition: StageAcquisition::borrowed(&mut self.prepared.pending.original),
+                    deadline,
+                };
+                let mut acquisition = stage.narrow_io_acquisition(5)?;
+                let file = self.prepared.file.check_current(&mut stage);
+                let peer = self
+                    .prepared
+                    .peer
+                    .check_anchors(&mut stage, &mut acquisition);
+                let native = stage.check();
+                finish_restored_app_posts(file, peer, native)
+            })();
+            let checked = self.prepared.pending.check();
+            if requested.is_err() || checked.is_err() {
+                self.prepared.pending.refuse();
+            }
+            requested?;
+            checked?;
+            self.prepared
+                .pending
+                .owner
+                .clock
+                .retire_checked(&mut self.prepared.pending.original)?;
+            Ok(RetiredRestoredAppNative {
+                installed: self,
+                request_state: Rc::new(RestoredRequestGate::new()),
+                current_peer: None,
+            })
+        }
+    });
+    let normalize = |block: &syn::Block| {
+        restored_history_method(
+            &format!(
+                "impl HandoffShape {{fn check() {}}}",
+                block.to_token_stream()
+            ),
+            "HandoffShape",
+            "check",
+        )
+    };
+    assert_eq!(actual, normalize(&expected));
+    let syn::Stmt::Expr(syn::Expr::Block(linux), None) = expected.stmts.last().unwrap() else {
+        panic!("Linux body");
+    };
+    for index in 0..linux.block.stmts.len() {
+        let mut changed = expected.clone();
+        let syn::Stmt::Expr(syn::Expr::Block(linux), None) = changed.stmts.last_mut().unwrap()
+        else {
+            unreachable!();
+        };
+        linux.block.stmts.remove(index);
+        assert_ne!(actual, normalize(&changed));
+    }
+    fn posts(block: &mut syn::Block) -> &mut syn::Block {
+        let syn::Stmt::Expr(syn::Expr::Block(linux), None) = block.stmts.last_mut().unwrap() else {
+            panic!("Linux body");
+        };
+        let syn::Stmt::Local(local) = linux.block.stmts.first_mut().unwrap() else {
+            panic!("request local");
+        };
+        let syn::Expr::Call(call) = &mut *local.init.as_mut().unwrap().expr else {
+            panic!("closed call");
+        };
+        let syn::Expr::Paren(paren) = &mut *call.func else {
+            panic!("closed parentheses");
+        };
+        let syn::Expr::Closure(closure) = &mut *paren.expr else {
+            panic!("closed body");
+        };
+        let syn::Expr::Block(body) = &mut *closure.body else {
+            panic!("closed block");
+        };
+        &mut body.block
+    }
+    fn one_local(block: &syn::Block, name: &str) -> usize {
+        let positions=block.stmts.iter().enumerate().filter_map(|(index,stmt)|
+            matches!(stmt,syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident==name)).then_some(index)
+        ).collect::<Vec<_>>();
+        assert_eq!(positions.len(), 1, "{name}");
+        positions[0]
+    }
+    let mut short = expected.clone();
+    let body = posts(&mut short);
+    let file = one_local(body, "file");
+    body.stmts.insert(file + 1, syn::parse_quote!(file?;));
+    assert_ne!(actual, normalize(&short));
+    let mut masked = expected.clone();
+    let body = posts(&mut masked);
+    let file = one_local(body, "file");
+    let acquisition = one_local(body, "acquisition");
+    assert!(acquisition < file);
+    body.stmts.swap(file, acquisition);
+    assert_ne!(actual, normalize(&masked));
+    let mut late = expected.clone();
+    let syn::Stmt::Expr(syn::Expr::Block(linux), None) = late.stmts.last_mut().unwrap() else {
+        unreachable!();
+    };
+    linux.block.stmts.insert(
+        linux.block.stmts.len() - 1,
+        syn::parse_quote!(self.prepared.pending.check()?;),
+    );
+    assert_ne!(actual, normalize(&late));
+    let mut copied = expected.clone();
+    let syn::Stmt::Expr(syn::Expr::Block(linux), None) = copied.stmts.last_mut().unwrap() else {
+        unreachable!();
+    };
+    *linux.block.stmts.last_mut().unwrap() = syn::Stmt::Expr(
+        syn::parse_quote!(Ok(RetiredRestoredAppNative {
+            installed: other,
+            request_state: RestoredRequestState::Vacant
+        })),
+        None,
+    );
+    assert_ne!(actual, normalize(&copied));
+    let file = syn::parse_file(source).unwrap();
+    let owner = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            syn::Item::Struct(i) if i.ident == "RetiredRestoredAppNative" => Some(i),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(owner.fields.len(), 3);
+    for (field, (name, expected)) in owner.fields.iter().zip([
+        ("installed", syn::parse_quote!(InstalledRestoredAppNative)),
+        ("request_state", syn::parse_quote!(Rc<RestoredRequestGate>)),
+        (
+            "current_peer",
+            syn::parse_quote!(Option<super::RestoredPeerConnection<'static>>),
+        ),
+    ]) {
+        assert!(matches!(field.vis, syn::Visibility::Inherited));
+        assert_eq!(field.ident.as_ref().unwrap(), name);
+        let expected: syn::Type = expected;
+        assert_eq!(
+            field.ty.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+    fn retired_methods_admitted(file: &syn::File) -> bool {
+        let mut methods = std::collections::BTreeSet::new();
+        let mut inherent = 0;
+        let mut drops = 0;
+        for item in &file.items {
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("RetiredRestoredAppNative"))
+            {
+                if let Some((_, path, _)) = &item.trait_ {
+                    if !path.is_ident("Drop") {
+                        return false;
+                    }
+                    drops += 1;
+                } else {
+                    inherent += 1;
+                    for item in &item.items {
+                        let syn::ImplItem::Fn(method) = item else {
+                            return false;
+                        };
+                        if !methods.insert(method.sig.ident.to_string()) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        inherent == 1
+            && drops == 1
+            && methods
+                == ["capture_request", "install_host", "prepare_host_native"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<std::collections::BTreeSet<_>>()
+    }
+    assert!(retired_methods_admitted(&file));
+    let actual_impl = file.items.iter().position(|item| {
+        matches!(item, syn::Item::Impl(item) if item.trait_.is_none()
+            && matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("RetiredRestoredAppNative")))
+    }).unwrap();
+    let mut getter = file.clone();
+    let syn::Item::Impl(item) = &mut getter.items[actual_impl] else {
+        unreachable!();
+    };
+    item.items.push(syn::parse_quote!(
+        fn runtime(&self) -> &crate::store::Runtime {
+            self.installed.prepared.pending.runtime.as_ref()
+        }
+    ));
+    assert!(!retired_methods_admitted(&getter));
+    let mut missing_setup = file.clone();
+    let syn::Item::Impl(item) = &mut missing_setup.items[actual_impl] else {
+        unreachable!();
+    };
+    let before = item.items.len();
+    item.items.retain(|item| {
+        !matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "prepare_host_native")
+    });
+    assert_eq!(item.items.len() + 1, before);
+    assert!(!retired_methods_admitted(&missing_setup));
+    let mut duplicate_capture = file.clone();
+    let syn::Item::Impl(item) = &mut duplicate_capture.items[actual_impl] else {
+        unreachable!();
+    };
+    let capture = item.items.iter().find(|item| {
+        matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "capture_request")
+    }).unwrap().clone();
+    item.items.push(capture);
+    assert!(!retired_methods_admitted(&duplicate_capture));
+    assert!(restored_history_method(source, "RetiredRestoredAppNative", "drop").contains("refuse"));
+    for forbidden in [
+        "NativeAcquisition :: begin",
+        "into_connection_clock",
+        "finished = true",
+        "Runtime ::",
+    ] {
+        assert!(!actual.contains(forbidden));
+    }
+}
+
+#[test]
+fn actual_app_post_selector_preserves_primary_identity_with_simultaneous_refusals() {
+    use std::sync::Arc;
+    #[derive(Debug)]
+    struct Failure {
+        identity: Arc<()>,
+        index: usize,
+    }
+    impl std::fmt::Display for Failure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("closed_app_post_fixture")
+        }
+    }
+    impl std::error::Error for Failure {}
+    for faults in 0..8u8 {
+        let identities = [Arc::new(()), Arc::new(()), Arc::new(())];
+        let calls = std::cell::RefCell::new(Vec::new());
+        let post = |index: usize| -> anyhow::Result<()> {
+            calls.borrow_mut().push(index);
+            if faults & (1 << index) == 0 {
+                Ok(())
+            } else {
+                Err(Failure {
+                    identity: Arc::clone(&identities[index]),
+                    index,
+                }
+                .into())
+            }
+        };
+        let result = super::owner::finish_restored_app_posts(post(0), post(1), post(2));
+        assert_eq!(*calls.borrow(), [0, 1, 2]);
+        let expected = (0..3usize).find(|index| faults & (1 << index) != 0);
+        match expected {
+            None => assert!(result.is_ok()),
+            Some(index) => {
+                let error = result.unwrap_err();
+                let marker = error.downcast_ref::<Failure>().unwrap();
+                assert_eq!(marker.index, index);
+                assert!(Arc::ptr_eq(&marker.identity, &identities[index]));
+            }
+        }
+    }
 }

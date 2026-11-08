@@ -69,6 +69,201 @@ fn native_accept_caller_has_only_the_post_verification_full_observation() {
 }
 
 #[test]
+fn captured_admin_restore_action_distinguishes_intent_from_execution_before_freeze()
+-> anyhow::Result<()> {
+    let (_, app, key) = fixture(NativeRole::AppHost);
+    let intent = Digest::new(b"captured-approval-intent");
+    let operation = Digest::new(b"captured-restore-execution");
+    let actions = [
+        AdminReadAction::Inspect {
+            operation: intent.clone(),
+        },
+        AdminReadAction::Restore {
+            intent: intent.clone(),
+            operation: operation.clone(),
+        },
+        AdminReadAction::Restore {
+            intent: operation.clone(),
+            operation: intent.clone(),
+        },
+        AdminReadAction::Restore {
+            intent: intent.clone(),
+            operation: Digest::new(b"foreign-operation"),
+        },
+        AdminReadAction::Restore {
+            intent: Digest::new(b"foreign-intent"),
+            operation: operation.clone(),
+        },
+    ];
+    for (index, action) in actions.into_iter().enumerate() {
+        let request = StoragePeerRequest::AdminRead {
+            binding: Digest::new(b"actual-initial-and-admin-binding"),
+            cohort: SqliteCohort::from_identities((9, 10), (9, 11), (9, 12))?,
+            action,
+        };
+        let message = signed(
+            &app,
+            &key,
+            Body::CurrentHello {
+                app: Box::new(app.clone()),
+                initial: Digest::new(b"same-initial"),
+                sequence: 1,
+                request,
+                nonce: Digest::new(b"app-nonce"),
+                controller_nonce: Digest::new(b"controller-nonce"),
+            },
+        );
+        let value = serde_json::to_value(&message)?;
+        let decoded = decode(&serde_json::to_vec(&value)?)?;
+        decoded.verify(&app)?; // A valid signature cannot fix swapped purposes.
+        let Body::CurrentHello { request, .. } = &decoded.body else {
+            unreachable!()
+        };
+        let selected = request.admin_action_data()?;
+        let admitted = selected.require_admin_operation_data(&intent).is_ok()
+            && selected.require_restore_operation_data(&operation).is_ok();
+        assert_eq!(admitted, index == 1, "action={index}");
+        if index == 1 {
+            for bad in [
+                serde_json::json!([]),
+                serde_json::json!({"kind":"unknown"}),
+                serde_json::json!({"kind":"restore","intent":intent,"operation":operation,"extra":true}),
+            ] {
+                let mut changed = value.clone();
+                changed["body"]["request"]["action"] = bad;
+                assert!(decode(&serde_json::to_vec(&changed)?).is_err());
+            }
+            let raw = serde_json::to_string(&value)?;
+            let field = format!("\"intent\":{}", serde_json::to_string(&intent)?);
+            assert_eq!(raw.matches(&field).count(), 1);
+            assert!(
+                decode(
+                    raw.replacen(&field, &format!("{field},{field}"), 1)
+                        .as_bytes()
+                )
+                .is_err()
+            );
+            // Replacing either captured field, even preserving the binding,
+            // invalidates the actual App-signed request/exchange input.
+            for name in ["intent", "operation"] {
+                let mut changed = value.clone();
+                changed["body"]["request"]["action"][name] =
+                    serde_json::json!(Digest::new(b"replacement"));
+                assert!(
+                    decode(&serde_json::to_vec(&changed)?)?
+                        .verify(&app)
+                        .is_err()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn known_fence_packets_bind_exact_confirmation_and_cannot_be_ordinary_completion()
+-> anyhow::Result<()> {
+    let (_, controller, controller_key) = fixture(NativeRole::EpochController);
+    let (_, app, app_key) = fixture(NativeRole::AppHost);
+    let confirmation = crate::security_epoch::firestore::ReservationConfirmation {
+        grant_id: Digest::new(b"actual-grant"),
+        committed_at: "2026-11-04T00:00:00.000004Z".to_owned().try_into()?,
+        written_versions: std::array::from_fn(|_| {
+            "2026-11-04T00:00:00.000003Z".to_owned().try_into().unwrap()
+        }),
+        records: Digest::new(b"complete-eight-record-values-and-versions"),
+    };
+    let exchange = Digest::new(b"same-admin-exchange");
+    let stopped = Digest::new(b"same-issuer-app-stop");
+    let message = signed(
+        &controller,
+        &controller_key,
+        Body::CurrentFence {
+            exchange: exchange.clone(),
+            stopped: stopped.clone(),
+            confirmation: Box::new(confirmation.clone()),
+        },
+    );
+    let value = serde_json::to_value(&message)?;
+    let accepted = decode(&serde_json::to_vec(&value)?)?;
+    accepted.verify(&controller)?;
+    assert_eq!(
+        accepted.body.frame().step,
+        super::super::handshake::Step::Fenced
+    );
+    for field in ["grant_id", "committed_at", "written_versions", "records"] {
+        let mut changed = value.clone();
+        let record = &mut changed["body"]["confirmation"];
+        match field {
+            "committed_at" => record[field] = serde_json::json!("2026-11-04T00:00:00.000005Z"),
+            "written_versions" => {
+                record[field][0] = serde_json::json!("2026-11-04T00:00:00.000004Z")
+            }
+            _ => record[field] = serde_json::json!(Digest::new(b"foreign-confirmation")),
+        }
+        assert!(
+            decode(&serde_json::to_vec(&changed)?)?
+                .verify(&controller)
+                .is_err(),
+            "{field}"
+        );
+    }
+    let mut sequence = value.clone();
+    sequence["body"]["confirmation"] = serde_json::json!([
+        confirmation.grant_id,
+        confirmation.committed_at,
+        confirmation.written_versions,
+        confirmation.records,
+    ]);
+    assert!(serde_json::from_value::<Message>(sequence.clone()).is_ok());
+    assert!(decode(&serde_json::to_vec(&sequence)?).is_err());
+    let raw = serde_json::to_string(&value)?;
+    let field = format!(
+        "\"grant_id\":{}",
+        serde_json::to_string(&confirmation.grant_id)?
+    );
+    assert_eq!(raw.matches(&field).count(), 1);
+    assert!(
+        decode(
+            raw.replacen(&field, &format!("{field},{field}"), 1)
+                .as_bytes()
+        )
+        .is_err()
+    );
+    let ack = signed(
+        &app,
+        &app_key,
+        Body::CurrentFenceConfirmed {
+            exchange: exchange.clone(),
+            stopped,
+            confirmation: confirmation.digest_data()?,
+        },
+    );
+    let ack = decode(&serde_json::to_vec(&ack)?)?;
+    ack.verify(&app)?;
+    assert_eq!(
+        ack.body.frame().step,
+        super::super::handshake::Step::FenceConfirmed
+    );
+    for kind in [
+        CompletionKind::Result,
+        CompletionKind::Consumed,
+        CompletionKind::Released,
+    ] {
+        assert!(!accepted.body.matches_completion(&exchange, kind));
+        assert!(!ack.body.matches_completion(&exchange, kind));
+    }
+    for body in [&accepted.body, &ack.body] {
+        body.require_stage_purpose(StagePurpose::CurrentRole)?;
+        assert!(
+            body.require_stage_purpose(StagePurpose::StorageBootstrap)
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn native_accept_caller_guard_rejects_restoring_the_pre_verification_check() {
     let source = include_str!("../storage_peer_native.rs");
     let repeated = source.replacen(
@@ -297,7 +492,9 @@ pub(in crate::security_epoch::native_enrollment) fn fixture(
     (policy, statement, key)
 }
 
-fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner, KeyOwner) {
+pub(in crate::security_epoch::native_enrollment) fn fixture_with_issuer(
+    role: NativeRole,
+) -> (EnrollmentPolicy, StageStatement, KeyOwner, KeyOwner) {
     let root = KeyOwner::generate().unwrap();
     let issuer = KeyOwner::generate().unwrap();
     let key = KeyOwner::generate().unwrap();
@@ -2550,7 +2747,11 @@ mod activation_histories {
                 } else {
                     &input.app
                 };
-                json!({"protocol":Protocol::InitialStorage,"purpose":StagePurpose::InitialFirstHolder,"actor":if index==0{Actor::Controller}else{Actor::App},"sequence":0,"position":self.position,"busy":false,"waiting":false,"refused":self.refused,"clock":self.last.map(|at|json!({"domain":stage.original.domain,"origin":time(100_000_000_000),"deadline":time(105_000_000_000),"now":time(at)}))})
+                json!({"protocol":Protocol::InitialStorage,"purpose":StagePurpose::InitialFirstHolder,"actor":if index==0{Actor::Controller}else{Actor::App},"sequence":0,"position":self.position,"busy":false,"waiting":false,"refused":self.refused,"clock":self.last.map(|at|json!({"domain":stage.original.domain,"origin":time(100_000_000_000),"deadline":time(105_000_000_000),"now":time(at)})),"storage_tail":"ordinary",
+                // This independent InitialStorage event language cannot invoke
+                // the issuer-only App-confirmation clock meet. Its own state
+                // therefore remains unspent, without consulting production.
+                "confirmation_bound_spent":false})
             };
             Ok(State {
                 at: self.at,
@@ -3481,6 +3682,9 @@ fn admin_read_is_signed_distinct_and_exact_with_a_mandatory_cohort() {
     let request = StoragePeerRequest::AdminRead {
         binding: operation.clone(),
         cohort,
+        action: AdminReadAction::Inspect {
+            operation: operation.clone(),
+        },
     };
     let hello = signed(
         &app,
@@ -3630,12 +3834,15 @@ fn authentication_cohort_comparison_rejects_every_app_alias_and_candidate_alias(
 // than an arbitrary JSON-map ordering which would already be malformed.
 fn freeze_sequence_control(record: &serde_json::Value, path: &str) -> serde_json::Value {
     let fields: &[&str] = if path.ends_with("/selection") {
+        &["admin_binding", "stop", "app", "controller"]
+    } else if path.ends_with("/stop") {
         &[
-            "admin_binding",
-            "operation",
+            "restore_operation",
+            "intent",
+            "advance_operation",
+            "before",
             "fenced_root",
-            "app",
-            "controller",
+            "fenced_sentinel",
         ]
     } else if path.ends_with("/frozen") || path.ends_with("/statement") {
         &[
@@ -3675,8 +3882,14 @@ fn freeze_records_are_map_only_through_both_actual_wire_decoders() -> anyhow::Re
     controller.stage.data.role = NativeRole::EpochController;
     let selection = FreezeSelection {
         admin_binding: Digest::new(b"admin"),
-        operation: Digest::new(b"advance"),
-        fenced_root: Digest::new(b"fenced-root"),
+        stop: crate::security_epoch::kernel::restore::StopSelection {
+            restore_operation: Digest::new(b"restore"),
+            intent: Digest::new(b"intent"),
+            advance_operation: Digest::new(b"advance"),
+            before: Digest::new(b"before"),
+            fenced_root: Digest::new(b"fenced-root"),
+            fenced_sentinel: Digest::new(b"fenced-sentinel"),
+        },
         app: app.clone(),
         controller,
     };
@@ -3689,6 +3902,35 @@ fn freeze_records_are_map_only_through_both_actual_wire_decoders() -> anyhow::Re
         challenge: Digest::new(b"nonce"),
     };
     let freeze_signature = issuer.sign("restore-issuer-frozen", &frozen)?;
+    protocol::verify(
+        &app.certificate.data.public_key,
+        "restore-issuer-frozen",
+        &frozen,
+        &freeze_signature,
+    )?;
+    for field in [
+        "restore_operation",
+        "intent",
+        "advance_operation",
+        "before",
+        "fenced_root",
+        "fenced_sentinel",
+    ] {
+        let mut changed = serde_json::to_value(&frozen)?;
+        changed["selection"]["stop"][field] =
+            serde_json::json!(Digest::new(b"changed stop selection"));
+        let changed: FrozenIssuance = serde_json::from_value(changed)?;
+        assert!(
+            protocol::verify(
+                &app.certificate.data.public_key,
+                "restore-issuer-frozen",
+                &changed,
+                &freeze_signature
+            )
+            .is_err(),
+            "{field}"
+        );
+    }
     let message = signed(
         &app,
         &key,
@@ -3703,6 +3945,7 @@ fn freeze_records_are_map_only_through_both_actual_wire_decoders() -> anyhow::Re
     for path in [
         "/body/frozen",
         "/body/frozen/selection",
+        "/body/frozen/selection/stop",
         "/body/frozen/selection/app",
         "/body/frozen/selection/app/stage",
         "/body/frozen/selection/controller/certificate/data/process",
@@ -3745,6 +3988,7 @@ fn freeze_records_are_map_only_through_both_actual_wire_decoders() -> anyhow::Re
         };
         for path in [
             prefix.to_owned(),
+            format!("{prefix}/stop"),
             format!("{prefix}/app"),
             format!("{prefix}/app/stage"),
             format!("{prefix}/controller/certificate/data/process"),
@@ -3832,5 +4076,70 @@ fn issuer_freeze_preserves_historical_admission_and_fresh_current_request() -> a
             .validate_issued_request_data(&policy, &app.certificate, NativeRole::AppHost, now)
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn freeze_capture_ceiling_uses_both_fresh_requests_after_cold_grants_expire() -> anyhow::Result<()>
+{
+    use super::super::protocol::FreezeSelection;
+    let (policy, mut app, _, issuer) = fixture_with_issuer(NativeRole::AppHost);
+    app.stage.data.purpose = StagePurpose::StorageBootstrap;
+    app.stage.data.deadline_ns = 160_000_000_000;
+    app.stage.signature = issuer.sign("role-stage", &app.stage.data)?;
+    app.original.origin_ns = 200_000_000_000;
+    app.original.deadline_ns = 205_000_000_000;
+    let mut controller = app.clone();
+    controller.stage.data.role = NativeRole::EpochController;
+    controller.stage.data.purpose = StagePurpose::CurrentRole;
+    controller.stage.data.process.code = policy.code(NativeRole::EpochController).clone();
+    controller.stage.data.deadline_ns = 105_000_000_000;
+    controller.stage.signature = issuer.sign("role-stage", &controller.stage.data)?;
+    controller.original.origin_ns = 201_000_000_000;
+    controller.original.deadline_ns = 204_000_000_000;
+    let now = Duration::from_secs(202);
+    for (statement, role) in [
+        (&app, NativeRole::AppHost),
+        (&controller, NativeRole::EpochController),
+    ] {
+        assert!(Duration::from_nanos(statement.stage.data.deadline_ns) < now);
+        statement.validate_issued_request_data(&policy, &app.certificate, role, now)?;
+    }
+    let selection = FreezeSelection {
+        admin_binding: Digest::new(b"admin"),
+        stop: crate::security_epoch::kernel::restore::StopSelection {
+            restore_operation: Digest::new(b"restore"),
+            intent: Digest::new(b"intent"),
+            advance_operation: Digest::new(b"advance"),
+            before: Digest::new(b"before"),
+            fenced_root: Digest::new(b"root"),
+            fenced_sentinel: Digest::new(b"sentinel"),
+        },
+        app,
+        controller,
+    };
+    assert_eq!(
+        selection.current_deadline_data(now)?,
+        Duration::from_secs(204)
+    );
+    assert!(
+        selection
+            .current_deadline_data(Duration::from_secs(200))
+            .is_err()
+    );
+    assert!(
+        selection
+            .current_deadline_data(Duration::from_secs(204))
+            .is_err()
+    );
+    let mut app_expired = selection.clone();
+    app_expired.app.original.deadline_ns = 202_000_000_000;
+    assert!(app_expired.current_deadline_data(now).is_err());
+    let mut wider = selection.clone();
+    wider.controller.original.deadline_ns = 207_000_000_000;
+    assert!(wider.current_deadline_data(now).is_err());
+    let mut wrong_purpose = selection;
+    wrong_purpose.app.original.purpose = StagePurpose::StorageBootstrap;
+    assert!(wrong_purpose.current_deadline_data(now).is_err());
     Ok(())
 }

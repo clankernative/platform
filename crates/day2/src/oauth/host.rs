@@ -49,7 +49,7 @@ impl Providers {
 }
 
 struct Registrations {
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     authority: Arc<admission::ArtifactApprovalAuthority>,
     readiness: Arc<super::registration::ProviderReadiness>,
 }
@@ -102,17 +102,20 @@ pub(crate) fn require_providers(
 }
 
 pub(crate) fn app_receiver(
-    mut runtime: Runtime,
+    runtime: &mut Arc<Runtime>,
     providers: &Providers,
-) -> Result<(Runtime, Arc<shell_transport::AppApprovalReceiver>)> {
-    let selected = admission::QualifiedConnections::from_runtime(&runtime, &providers.catalog)?;
+) -> Result<Arc<shell_transport::AppApprovalReceiver>> {
+    // Configure the actual stable Runtime before sharing it with any retained
+    // consumer. An unexpected alias refuses rather than cloning/replacing it.
+    let current = Arc::get_mut(runtime).context("OAuth Runtime escaped before configuration")?;
+    let selected = admission::QualifiedConnections::from_runtime(current, &providers.catalog)?;
     let instance = selected.instance().clone();
     let tokens = match &instance.oauth_runtime {
         Some(config) => approval_keys::GkeMetadataAccessTokens::selected(
             &config
                 .apps
                 .iter()
-                .find(|(name, _)| name.as_str() == runtime.app())
+                .find(|(name, _)| name.as_str() == current.app())
                 .context("OAuth runtime app missing")?
                 .1
                 .service_account,
@@ -127,21 +130,86 @@ pub(crate) fn app_receiver(
     // Serving admitted the store, including this app's private OAuth schema,
     // in `deployment::admit_store` before it builds the receiver.
     let backend = Arc::new(approval_registry::UnavailableAppApprovals::new(
-        runtime.app().into(),
+        current.app().into(),
     )?);
+    current.connections = Some(authority.clone());
     let receiver = shell_transport::AppApprovalReceiver::from_instance(&instance, backend)?;
     let receiver = match &providers.registrations {
         Some(readiness) => receiver.with_registrations(Arc::new(Registrations {
-            runtime: runtime.clone(),
+            runtime: Arc::clone(runtime),
             authority: authority.clone(),
             readiness: readiness.clone(),
         })),
         None => Ok(receiver),
     }?;
     let receiver = receiver.with_management(Arc::new(super::management::app::Manager::new(
-        runtime.clone(),
-        authority.clone(),
+        Arc::clone(runtime),
+        authority,
     )))?;
-    runtime.connections = Some(authority);
-    Ok((runtime, receiver))
+    Ok(receiver)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnusedReadiness;
+
+    impl admission::OutboundReadiness for UnusedReadiness {
+        fn current(
+            &self,
+            _: &day2_capabilities::oauth::OutboundConnectionBinding,
+            _: &day2_capabilities::oauth::ConnectionSlotKey,
+            _: i64,
+            _: &mut admission::SubjectReader<'_, '_, '_, '_>,
+        ) -> Result<Option<super::super::profiles::OutboundInstanceEvidence>> {
+            anyhow::bail!("test readiness must not be used during configuration")
+        }
+    }
+
+    #[test]
+    fn app_receiver_refuses_runtime_aliases_before_loading_configuration() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (runtime, _, _) = admission::tests::management_fixture(directory.path())?;
+        let original = runtime.instance_path().to_path_buf();
+        let unavailable = directory.path().join("unavailable-instance.json");
+        std::fs::rename(&original, &unavailable)?;
+        let mut runtime = Arc::new(runtime);
+        let pointer = Arc::as_ptr(&runtime);
+        let providers = Providers {
+            catalog: admission::ReviewedCatalog::new(Vec::new())?,
+            readiness: Arc::new(UnusedReadiness),
+            registrations: None,
+        };
+        let alias = Arc::clone(&runtime);
+        let error = app_receiver(&mut runtime, &providers).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "OAuth Runtime escaped before configuration"
+        );
+        assert_eq!(Arc::as_ptr(&runtime), pointer);
+        assert!(Arc::ptr_eq(&runtime, &alias));
+        assert!(runtime.connections.is_none());
+        drop(alias);
+        let weak = Arc::downgrade(&runtime);
+        let error = app_receiver(&mut runtime, &providers).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "OAuth Runtime escaped before configuration"
+        );
+        assert_eq!(Arc::as_ptr(&runtime), pointer);
+        assert!(runtime.connections.is_none());
+        drop(weak);
+        // Without aliases the same production function reaches the actual
+        // missing file. A cloning/make_mut fallback would have done so above.
+        let error = app_receiver(&mut runtime, &providers).err().unwrap();
+        assert_ne!(
+            error.to_string(),
+            "OAuth Runtime escaped before configuration"
+        );
+        assert_eq!(Arc::as_ptr(&runtime), pointer);
+        assert!(runtime.connections.is_none());
+        std::fs::rename(unavailable, original)?;
+        Ok(())
+    }
 }

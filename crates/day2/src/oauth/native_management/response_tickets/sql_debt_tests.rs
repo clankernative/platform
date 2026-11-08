@@ -280,7 +280,7 @@ mod tests {
         }
         Ok(run.len() == 1 && send.len() == 1
             && run[0].starts_with(&statements("self.check()?; if let RuntimeSource::Native { current, stage } = &mut self.source { current.arm(stage)?; }")?)
-            && send[0].first() == statements("let result = (|| { self.check()?; if let RuntimeSource::Native { .. } = &self.source { let runtime = self.runtime.context(\"native_authority_runtime_missing\")?; record_unfenced_runtime(runtime)?; } let value = operation()?; self.check()?; Ok(value) })();")?.first()
+            && send[0].first() == statements("let result = (|| { self.check()?; if let RuntimeSource::Native { .. } = &self.source { let runtime = self.runtime.context(\"native_authority_runtime_missing\")?; record_unfenced_runtime(runtime)?; } if let RuntimeSource::Restored(current) = &mut self.source { let runtime = self.runtime.context(\"native_authority_runtime_missing\")?; let purpose = runtime_provider_use(self.phase)?; current.prepare_provider(runtime, purpose)?; record_unfenced_runtime(runtime)?; } let value = operation()?; self.check()?; Ok(value) })();")?.first()
             && callback.count == 1 && callback.valid)
     }
 
