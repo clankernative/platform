@@ -34,9 +34,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - run: gh release download v8.30.1 --repo gitleaks/gitleaks --pattern gitleaks_8.30.1_linux_x64.tar.gz --dir /tmp/scanners
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned gitleaks_8.30.1_linux_x64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: gitleaks/gitleaks
+          tag: v8.30.1
+          asset: gitleaks_8.30.1_linux_x64.tar.gz
+          sha256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          path: /tmp/scanners/gitleaks_8.30.1_linux_x64.tar.gz
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/gitleaks.sha256"
         working-directory: /tmp/scanners
       - run: tar -xzf /tmp/scanners/gitleaks_8.30.1_linux_x64.tar.gz -C /tmp/scanners
@@ -50,9 +56,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: gh release download cargo-audit/v0.22.2 --repo RustSec/rustsec --pattern cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz --dir /tmp/scanners
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: RustSec/rustsec
+          tag: cargo-audit/v0.22.2
+          asset: cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
+          sha256: ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
+          path: /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/cargo-audit.sha256"
         working-directory: /tmp/scanners
       - run: tar -xzf /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -C /tmp/scanners
@@ -91,11 +103,14 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        timeout-minutes: 4
-        run: >-
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
-          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: bazelbuild/bazel
+          tag: 9.3.0
+          asset: bazel-9.3.0-linux-x86_64
+          sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          path: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -140,6 +155,42 @@ jobs:
           path: ~/.cache/bazel-disk
           key: ${{ steps.bazel_actions.outputs.cache-primary-key }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/nightlies
+          tag: nightly-2026-10-13-b17d287
+          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/basic-cli
+          tag: 0.26.0-rc2
+          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+      - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/http
+          tag: 1.0.0
+          asset: 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+          sha256: e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+          path: .cache/day2-release/e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+      - name: Download pinned clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/clanker-ui
+          tag: v0.2.2
+          asset: clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+          sha256: 023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
+          path: .cache/day2-release/023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
       - run: build-out/bin/xtask bootstrap
       - id: find
         run: build-out/bin/xtask verify-queue-find
@@ -219,11 +270,14 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        timeout-minutes: 4
-        run: >-
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
-          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: bazelbuild/bazel
+          tag: 9.3.0
+          asset: bazel-9.3.0-linux-x86_64
+          sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          path: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -282,17 +336,31 @@ jobs:
           compression-level: 0
           retention-days: 3
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_linux_amd64.zip
+          sha256: 901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
           echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu
           echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned temporal_cli_1.6.1_linux_amd64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: temporalio/cli
+          tag: v1.6.1
+          asset: temporal_cli_1.6.1_linux_amd64.tar.gz
+          sha256: 85cfd2134eff7408e9e363f71a50f6d91f5df5f72eafa9eb87102d3793904faf
+          path: /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
@@ -350,10 +418,52 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
+      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/nightlies
+          tag: nightly-2026-10-13-b17d287
+          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/basic-cli
+          tag: 0.26.0-rc2
+          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+      - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/http
+          tag: 1.0.0
+          asset: 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+          sha256: e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+          path: .cache/day2-release/e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+      - name: Download pinned clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/clanker-ui
+          tag: v0.2.2
+          asset: clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+          sha256: 023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
+          path: .cache/day2-release/023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
       - run: build-out/bin/xtask bootstrap
-      - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned roc-fmt-day2-x86_64-unknown-linux-gnu
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/platform
+          tag: roc-formatter-linux-2026-09-12
+          asset: roc-fmt-day2-x86_64-unknown-linux-gnu
+          sha256: 4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825
+          path: /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - name: Save pinned native compiler and formatter inputs
         if: ${{ matrix.part != 'tests' && steps.native_tools.outputs.cache-hit != 'true' }}
@@ -616,11 +726,14 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        timeout-minutes: 4
-        run: >-
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
-          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: bazelbuild/bazel
+          tag: 9.3.0
+          asset: bazel-9.3.0-linux-x86_64
+          sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          path: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -802,14 +915,59 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
+      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/nightlies
+          tag: nightly-2026-10-13-b17d287
+          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/basic-cli
+          tag: 0.26.0-rc2
+          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+      - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/http
+          tag: 1.0.0
+          asset: 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+          sha256: e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+          path: .cache/day2-release/e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+      - name: Download pinned clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/clanker-ui
+          tag: v0.2.2
+          asset: clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+          sha256: 023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
+          path: .cache/day2-release/023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
       - name: Download pinned compiler inputs on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         run: build-out/bin/xtask bootstrap
-      - name: Download pinned formatter input on cache miss
+      - name: Download pinned roc-fmt-day2-x86_64-unknown-linux-gnu
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
-        run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/platform
+          tag: roc-formatter-linux-2026-09-12
+          asset: roc-fmt-day2-x86_64-unknown-linux-gnu
+          sha256: 4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825
+          path: /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - name: Admit pinned formatter input on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
@@ -907,11 +1065,14 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        timeout-minutes: 4
-        run: >-
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
-          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: bazelbuild/bazel
+          tag: 9.3.0
+          asset: bazel-9.3.0-linux-x86_64
+          sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          path: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -946,17 +1107,31 @@ jobs:
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_linux_amd64.zip
+          sha256: 901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
           echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu
           echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned temporal_cli_1.6.1_linux_amd64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: temporalio/cli
+          tag: v1.6.1
+          asset: temporal_cli_1.6.1_linux_amd64.tar.gz
+          sha256: 85cfd2134eff7408e9e363f71a50f6d91f5df5f72eafa9eb87102d3793904faf
+          path: /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
@@ -1102,14 +1277,59 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
+      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/nightlies
+          tag: nightly-2026-10-13-b17d287
+          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/basic-cli
+          tag: 0.26.0-rc2
+          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+      - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/http
+          tag: 1.0.0
+          asset: 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+          sha256: e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+          path: .cache/day2-release/e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+      - name: Download pinned clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/clanker-ui
+          tag: v0.2.2
+          asset: clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+          sha256: 023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
+          path: .cache/day2-release/023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
       - name: Download pinned compiler inputs on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         run: build-out/bin/xtask bootstrap
-      - name: Download pinned formatter input on cache miss
+      - name: Download pinned roc-fmt-day2-x86_64-unknown-linux-gnu
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
-        run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/platform
+          tag: roc-formatter-linux-2026-09-12
+          asset: roc-fmt-day2-x86_64-unknown-linux-gnu
+          sha256: 4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825
+          path: /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - name: Admit pinned formatter input on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
@@ -1322,11 +1542,14 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        timeout-minutes: 4
-        run: >-
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
-          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: bazelbuild/bazel
+          tag: 9.3.0
+          asset: bazel-9.3.0-linux-x86_64
+          sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          path: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -1524,14 +1747,59 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
+      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/nightlies
+          tag: nightly-2026-10-13-b17d287
+          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/basic-cli
+          tag: 0.26.0-rc2
+          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+      - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/http
+          tag: 1.0.0
+          asset: 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+          sha256: e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+          path: .cache/day2-release/e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+      - name: Download pinned clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/clanker-ui
+          tag: v0.2.2
+          asset: clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+          sha256: 023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
+          path: .cache/day2-release/023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
       - name: Download pinned compiler inputs on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         run: build-out/bin/xtask bootstrap
-      - name: Download pinned formatter input on cache miss
+      - name: Download pinned roc-fmt-day2-x86_64-unknown-linux-gnu
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && steps.native_tools.outputs.cache-hit != 'true' }}
-        run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/platform
+          tag: roc-formatter-linux-2026-09-12
+          asset: roc-fmt-day2-x86_64-unknown-linux-gnu
+          sha256: 4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825
+          path: /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - name: Admit pinned formatter input on cache miss
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && steps.native_tools.outputs.cache-hit != 'true' }}
         run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
@@ -1663,11 +1931,14 @@ jobs:
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
-        timeout-minutes: 4
-        run: >-
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
-          --output /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-linux-x86_64
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: bazelbuild/bazel
+          tag: 9.3.0
+          asset: bazel-9.3.0-linux-x86_64
+          sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          path: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
       - name: Verify the pinned Linux Bazel bytes
         if: ${{ runner.os == 'Linux' }}
         run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
@@ -1704,27 +1975,83 @@ jobs:
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_linux_amd64.zip
+          sha256: 901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
           echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu
           echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned temporal_cli_1.6.1_linux_amd64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: temporalio/cli
+          tag: v1.6.1
+          asset: temporal_cli_1.6.1_linux_amd64.tar.gz
+          sha256: 85cfd2134eff7408e9e363f71a50f6d91f5df5f72eafa9eb87102d3793904faf
+          path: /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
       - run: build-out/bin/xtask source-check
       - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
+      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/nightlies
+          tag: nightly-2026-10-13-b17d287
+          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
+      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/basic-cli
+          tag: 0.26.0-rc2
+          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+      - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/http
+          tag: 1.0.0
+          asset: 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+          sha256: e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+          path: .cache/day2-release/e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+      - name: Download pinned clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/clanker-ui
+          tag: v0.2.2
+          asset: clanker-ui-native-0.2.2-linux-x86_64.tar.gz
+          sha256: 023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
+          path: .cache/day2-release/023482d8cb809621149ee9a67990bc999323082130d368fc49e8810909d9229e
       - run: build-out/bin/xtask bootstrap
-      - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned roc-fmt-day2-x86_64-unknown-linux-gnu
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/platform
+          tag: roc-formatter-linux-2026-09-12
+          asset: roc-fmt-day2-x86_64-unknown-linux-gnu
+          sha256: 4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825
+          path: /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask fmt
@@ -1763,10 +2090,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_linux_amd64.zip
+          sha256: 901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
           echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu
@@ -1796,10 +2131,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_linux_amd64.zip
+          sha256: 901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
           echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu
@@ -1832,10 +2175,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_linux_amd64.zip
+          sha256: 901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
           echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu
@@ -1865,10 +2216,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_linux_amd64.zip
+          sha256: 901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_linux_amd64.zip
           echo '901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13  /tmp/day2-opentofu/tofu.zip' | sha256sum --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu

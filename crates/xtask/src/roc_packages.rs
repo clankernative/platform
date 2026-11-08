@@ -312,37 +312,41 @@ pub(crate) fn prepare(root: &Path, roc: &Path) -> Result<()> {
         }
         let stage = tempfile::tempdir_in(&base)?;
         let archive = stage.path().join(&p.archive);
-        execute(
-            root,
-            Command::new("/usr/bin/curl")
-                .args([
-                    "--fail",
-                    "--silent",
-                    "--show-error",
-                    "--location",
-                    "--proto",
-                    "=https",
-                    "--proto-redir",
-                    "=https",
-                    "--retry",
-                    "4",
-                    "--retry-delay",
-                    "5",
-                    "--retry-max-time",
-                    "120",
-                    "--connect-timeout",
-                    "15",
-                    "--max-time",
-                    "60",
-                    "--max-filesize",
-                    "33554432",
-                    "--output",
-                ])
-                .arg(&archive)
-                .arg(p.url()),
-            180,
-            "download",
-        )?;
+        if let Some(bytes) = crate::release_inputs::cached(root, &p.sha256, p.bytes)? {
+            fs::write(&archive, bytes)?;
+        } else {
+            execute(
+                root,
+                Command::new("/usr/bin/curl")
+                    .args([
+                        "--fail",
+                        "--silent",
+                        "--show-error",
+                        "--location",
+                        "--proto",
+                        "=https",
+                        "--proto-redir",
+                        "=https",
+                        "--retry",
+                        "4",
+                        "--retry-delay",
+                        "5",
+                        "--retry-max-time",
+                        "120",
+                        "--connect-timeout",
+                        "15",
+                        "--max-time",
+                        "60",
+                        "--max-filesize",
+                        "33554432",
+                        "--output",
+                    ])
+                    .arg(&archive)
+                    .arg(p.url()),
+                180,
+                "download",
+            )?;
+        }
         let (hash, bytes) = file_hash(&archive, p.bytes)?;
         ensure!(
             hash == p.sha256 && bytes == p.bytes,

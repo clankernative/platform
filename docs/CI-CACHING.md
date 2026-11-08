@@ -315,3 +315,27 @@ executable inventory equality and complete joined DST observations. A main queue
 reuse receipt without the additional part and its completed case evidence refuses.
 The binary group is shared transport data; it does not let either part stand in
 for the other's fresh runtime outcomes.
+
+## Pinned release archives
+
+Before downloading a GitHub release input, CI restores the exact SHA-256 key
+`day2-release-v1-<OS>-<architecture>-<digest>`. A miss uses authenticated
+`gh release download` with the job's read-only contents token. Acquisition allows
+four retries, five seconds between attempts and at most sixty seconds per attempt;
+the complete acquisition step has a two-minute ceiling, including cache I/O.
+There is no cross-version restore prefix. Every restored or downloaded file must
+pass its current SHA-256 check before use. Only a verified input from a main push
+may be published to the shared cache, matching the main-only publication boundary
+for compiled actions. PR and merge-group runs only read this cache.
+
+This covers Bazel, OpenTofu, scanners, Temporal, the formatter, and the pinned Roc
+and managed UI archives. The original checksum files, archive-size checks,
+extraction limits and executable/bundle admission remain mandatory. Roc and UI
+capabilities receive fixed digest-named files in `.cache/day2-release`; they
+recheck the existing pins and never treat an archive cache as an installed or
+verified runtime outcome. Ordinary local callers retain their existing bounded
+source-pinned acquisition when no CI input was supplied. Cache absence loses
+acceleration; corruption refuses instead of being accepted or silently repaired.
+
+The acquisition action is explicitly included in verification source identity.
+Its token is available only to the download step, not to compilers or tests.

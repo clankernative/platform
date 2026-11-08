@@ -120,15 +120,22 @@ impl Session {
             .https_only(true)
             .timeout(Duration::from_secs(30))
             .build()?;
-        let response = client.get(url).send()?.error_for_status()?;
-        if let Some(length) = response.content_length() {
-            ensure!(
-                length == pin.bytes,
-                "managed dependency archive size mismatch"
-            );
-        }
-        let mut bytes = Vec::with_capacity(pin.bytes as usize);
-        response.take(MAX_ARCHIVE + 1).read_to_end(&mut bytes)?;
+        let bytes = if let Some(bytes) =
+            crate::release_inputs::cached(&self.root, &pin.sha256, MAX_ARCHIVE)?
+        {
+            bytes
+        } else {
+            let response = client.get(url).send()?.error_for_status()?;
+            if let Some(length) = response.content_length() {
+                ensure!(
+                    length == pin.bytes,
+                    "managed dependency archive size mismatch"
+                );
+            }
+            let mut bytes = Vec::with_capacity(pin.bytes as usize);
+            response.take(MAX_ARCHIVE + 1).read_to_end(&mut bytes)?;
+            bytes
+        };
         ensure!(
             bytes.len() as u64 == pin.bytes,
             "managed dependency archive size mismatch"
@@ -384,6 +391,33 @@ mod tests {
                 .unwrap()
                 .exists()
         );
+    }
+
+    #[test]
+    fn restored_archive_must_still_match_current_size_and_digest_before_extraction() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let pin = build_dependencies::download_pin()?;
+        let directory = root.path().join(".cache/day2-release");
+        fs::create_dir_all(&directory)?;
+        for (bytes, message) in [
+            (
+                b"corrupt".to_vec(),
+                "managed dependency archive size mismatch",
+            ),
+            (
+                vec![0; pin.bytes as usize],
+                "managed dependency archive digest mismatch",
+            ),
+        ] {
+            fs::write(directory.join(&pin.sha256), bytes)?;
+            let mut session = Session::new(root.path())?;
+            session.inspect()?;
+            assert_eq!(session.fetch().unwrap_err().to_string(), message);
+            assert_eq!(session.phase, Phase::Inspected);
+            assert!(session.archive.is_none() && session.staging.is_none());
+            assert!(!build_dependencies::installation_path(root.path())?.exists());
+        }
+        Ok(())
     }
 
     #[test]
