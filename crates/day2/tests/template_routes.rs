@@ -36,7 +36,7 @@ impl Templates {
         })
     }
 
-    fn admit(&self) -> Result<()> {
+    fn admit(&self) -> Result<bool> {
         web_templates::validate_routed_page(
             &self.artifact,
             &self.catalog,

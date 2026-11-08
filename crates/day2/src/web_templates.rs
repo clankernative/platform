@@ -2698,7 +2698,10 @@ mod tests {
             (shell, "<p>{{ private }}</p>"),
             (shell, "{% if ready %}<p>Private branch</p>{% endif %}"),
             (shell, "<form><input name=secret></form>"),
-            (shell, "<template><form><input name=secret></form></template>"),
+            (
+                shell,
+                "<template><form><input name=secret></form></template>",
+            ),
             (shell, "<section id=live data-live>Live</section>"),
             (
                 r#"<p data-ui-startup-cache="{{ private }}">Dynamic marker</p>"#,
