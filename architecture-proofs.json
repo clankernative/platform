@@ -16,7 +16,7 @@
     {
       "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
       "scope": "const",
-      "fingerprint": "sha256:f25d8487eaa3149173adb4ed2d4698ef6435823224dd3985bf430ba3bbbf97cd"
+      "fingerprint": "sha256:0a8d246049d127f9e842a56c42aae9fc2398e49875ae0c29f6324fea63f80dbb"
     },
     {
       "source": "crates/day2/src/oauth/restore.rs",
@@ -1180,6 +1180,34 @@
     },
     {
       "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+      "type_name": "AppAuthorityStop",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check_drained (& self) -> Result < () >",
+        "pub (crate) fn seal (& mut self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "ResponseRights",
+          "signature": "pub (super) fn borrow_stop (& mut self , scope : & AuthorityScope) -> Result < AppAuthorityStop < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppAuthorityStop < '_ >",
+          "signature": "pub (crate) fn check_drained (& self) -> Result < () >"
+        },
+        {
+          "owner": "AppAuthorityStop < '_ >",
+          "signature": "pub (crate) fn seal (& mut self) -> Result < () >"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
       "type_name": "ResponseRights",
       "kind": "private_material",
       "consuming_methods": [],
@@ -1188,7 +1216,10 @@
         "pub (super) fn new () -> Self",
         "pub (super) fn seal_issuance (& mut self) -> Result < () >",
         "pub (super) fn require_drained (& self) -> Result < () >",
-        "fn register (& self , response : & ResponseIdentity) -> Result < Ticket >"
+        "fn register (& self , response : & ResponseIdentity) -> Result < Ticket >",
+        "pub (super) fn borrow_stop (& mut self , scope : & AuthorityScope) -> Result < AppAuthorityStop < '_ > >",
+        "pub (super) fn install_issuance (& self , scope : & AuthorityScope) -> Result < () >",
+        "pub (super) fn mark_unfenced (& self) -> Result < () >"
       ],
       "factories": [
         {
@@ -1212,6 +1243,18 @@
         {
           "owner": "ResponseRights",
           "signature": "pub (super) fn require_drained (& self) -> Result < () >"
+        },
+        {
+          "owner": "ResponseRights",
+          "signature": "pub (super) fn borrow_stop (& mut self , scope : & AuthorityScope) -> Result < AppAuthorityStop < '_ > >"
+        },
+        {
+          "owner": "ResponseRights",
+          "signature": "pub (super) fn install_issuance (& self , scope : & AuthorityScope) -> Result < () >"
+        },
+        {
+          "owner": "ResponseRights",
+          "signature": "pub (super) fn mark_unfenced (& self) -> Result < () >"
         }
       ],
       "proof_uses": [],

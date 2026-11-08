@@ -242,6 +242,11 @@ pub(crate) fn authorized(
     if runtime.uses_native_storage() {
         require_native_bearer_fence(resource_action)?;
     }
+    // Imported-contract authorization may sign and insert local grants before
+    // a later validation returns Err. Record BEFORE entering that whole unit;
+    // neither Err, rollback guesses nor known usage proves zero issuance.
+    // Conservative refusal debt is never retired by response completion.
+    crate::oauth::native_management::record_unfenced_runtime(runtime)?;
     let mut resource =
         crate::resources::authorize(connection, runtime, request, instruction, resource_action)?;
     let mut quote = crate::resources::ProviderQuote {
@@ -1397,9 +1402,22 @@ mod tests {
         };
         let mut guarded = None;
         let mut resolved = None;
+        let mut debt = None;
         let mut resource = None;
         for (index, statement) in function.block.stmts.iter().enumerate() {
             if guard(statement) && guarded.replace(index).is_some() {
+                return false;
+            }
+            if let syn::Stmt::Expr(syn::Expr::Try(checked), Some(_)) = statement
+                && let syn::Expr::Call(call) = checked.expr.as_ref()
+                && path(
+                    &call.func,
+                    "crate::oauth::native_management::record_unfenced_runtime",
+                )
+                && call.args.len() == 1
+                && path(&call.args[0], "runtime")
+                && debt.replace(index).is_some()
+            {
                 return false;
             }
             if let syn::Stmt::Local(local) = statement {
@@ -1442,7 +1460,9 @@ mod tests {
                 }
             }
         }
-        let (Some(resolved), Some(guarded), Some(resource)) = (resolved, guarded, resource) else {
+        let (Some(resolved), Some(guarded), Some(debt), Some(resource)) =
+            (resolved, guarded, debt, resource)
+        else {
             return false;
         };
         let mut calls = Calls::default();
@@ -1457,7 +1477,8 @@ mod tests {
             return false;
         };
         resolved + 1 == guarded
-            && guarded + 1 == resource
+            && guarded + 1 == debt
+            && debt + 1 == resource
             && authorize < prepare
             && authorize < mounts
             && mounts < sign
@@ -1492,9 +1513,47 @@ mod tests {
                 "require_native_bearer_fence(resource_action)?;",
                 "require_native_bearer_fence(day2_capabilities::resources::Action::ObjectStoreHead)?;",
             ),
+            (
+                "crate::oauth::native_management::record_unfenced_runtime(runtime)?;",
+                "",
+            ),
+            (
+                "crate::oauth::native_management::record_unfenced_runtime(runtime)?;",
+                "let _ignored = crate::oauth::native_management::record_unfenced_runtime(runtime);",
+            ),
+            (
+                "crate::oauth::native_management::record_unfenced_runtime(runtime)?;",
+                "crate::oauth::native_management::record_unfenced_runtime(other_runtime)?;",
+            ),
+            (
+                "crate::oauth::native_management::record_unfenced_runtime(runtime)?;",
+                "crate::oauth::native_management::record_unfenced_runtime(runtime)?; crate::oauth::native_management::record_unfenced_runtime(runtime)?;",
+            ),
+            (
+                "crate::oauth::native_management::record_unfenced_runtime(runtime)?;",
+                "std::thread::yield_now(); crate::oauth::native_management::record_unfenced_runtime(runtime)?;",
+            ),
         ] {
             let mutant = source.replacen(old, new, 1);
             assert_ne!(source, mutant);
+            assert!(!native_bearer_guard_precedes_resource_and_signing(&mutant));
+        }
+        let debt = "crate::oauth::native_management::record_unfenced_runtime(runtime)?;";
+        let without_debt = source.replacen(debt, "", 1);
+        for (anchor, replacement) in [
+            (
+                "if runtime.uses_native_storage() {",
+                format!("{debt}\n    if runtime.uses_native_storage() {{"),
+            ),
+            (
+                "crate::resources::authorize(connection, runtime, request, instruction, resource_action)?;",
+                format!(
+                    "crate::resources::authorize(connection, runtime, request, instruction, resource_action)?;\n    {debt}"
+                ),
+            ),
+        ] {
+            let mutant = without_debt.replacen(anchor, &replacement, 1);
+            assert_ne!(without_debt, mutant);
             assert!(!native_bearer_guard_precedes_resource_and_signing(&mutant));
         }
     }

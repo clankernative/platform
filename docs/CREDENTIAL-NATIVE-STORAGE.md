@@ -624,3 +624,20 @@ restored writer. The accepting join remains closed until it retains those actual
 owners and genuinely proves every required exact historical key is available;
 copying an archive key list or accepting caller-provided availability is not that
 proof. No live or kernel qualification is claimed by the portable DATA controls.
+
+### Unsupported escaped-authority accounting
+
+The installed native response owner now keeps a nonowning, scope-bound denial
+index while its actual owner is borrowed. Before an unsupported capability,
+human original or non-SQL consumer can issue detached authority, the fixed
+caller records permanent refusal debt on that same owner. Resource authorization
+can sign and insert a local handle before returning an error, so its mark is
+before the entire unit. An error, known provider response, rollback assumption,
+completed HTTP response or elapsed time never clears the debt.
+
+The local App cohort borrow must match the actual installed ledger. A new empty
+sealed ledger, missing owner, foreign executor or dead/replaced scope cannot
+substitute for its history. This is conservative refusal accounting only; it
+neither admits a native stop nor claims remote revocation, a RootFenced commit,
+exact historical-key availability or a restored writer. The fixed App admin
+peer and accepting join remain separate work.
