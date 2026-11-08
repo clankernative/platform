@@ -25,6 +25,7 @@ pub(crate) use initial::{
     InitialStorageOutcome,
 };
 pub(crate) use native_volume::AuthenticationStoreFiles;
+pub(in crate::security_epoch) use native_volume::HistoricalKeyAvailability;
 pub(crate) use native_volume::NativeApprovalSource;
 use native_volume::NativeVolumeObservation;
 pub(in crate::security_epoch) use native_volume::RestoreCreatorRoot;

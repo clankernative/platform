@@ -73,7 +73,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
       "scope": "const",
-      "fingerprint": "sha256:73409d372b5937d6c3e937bc1b87edfcefcefeb149859b241d7070eee7e0886c",
+      "fingerprint": "sha256:7a03412aa56977fa4ece0ee9380af1694897b46ab60c0828e7331f54a0f1de79",
       "registration": null
     },
     {
@@ -171,7 +171,7 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval.rs",
       "scope": "const",
-      "fingerprint": "sha256:444aac8a8d2b4b309375ade342f003876c70ff7484481a0e5e0a67652629ea03",
+      "fingerprint": "sha256:1a70081f74da0e1d2884201da14b711c7f8b4f059e51e5309398ba4b06305870",
       "registration": null
     },
     {
@@ -3090,7 +3090,10 @@
       "methods": [
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < RestoreObservation >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+        "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >",
+        "pub (super) fn check_source (& mut self) -> Result < RestoreObservation >",
+        "pub (in crate :: security_epoch) fn require_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >",
+        "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >"
       ],
       "factories": [
         {
@@ -3110,6 +3113,18 @@
         {
           "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
+          "signature": "pub (super) fn check_source (& mut self) -> Result < RestoreObservation >"
         }
       ],
       "proof_uses": []
@@ -3148,6 +3163,48 @@
         {
           "owner": "PendingRestoreExecution",
           "signature": "pub (in crate :: security_epoch) fn challenge_data (& self) -> Result < String >"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "ExecutionSourceLoan",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& mut self , source : & mut crate :: security_epoch :: storage_authority :: NativeApprovalSource) -> Result < RestoreObservation >",
+        "pub (in crate :: security_epoch) fn historical_key_data (& mut self , selected : & day2_capabilities :: security_epoch :: EpochStore , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , intent : & kernel :: restore :: Intent) -> Result < Vec < crate :: artifact :: SecurityKeySelection > >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn request_commitment_data (& self) -> Result < Digest >"
+      ],
+      "factories": [
+        {
+          "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
+          "signature": "pub (super) fn check_source (& mut self) -> Result < RestoreObservation >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ExecutionSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , source : & mut crate :: security_epoch :: storage_authority :: NativeApprovalSource) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "ExecutionSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn historical_key_data (& mut self , selected : & day2_capabilities :: security_epoch :: EpochStore , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , intent : & kernel :: restore :: Intent) -> Result < Vec < crate :: artifact :: SecurityKeySelection > >"
+        },
+        {
+          "owner": "ExecutionSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ExecutionSourceLoan < '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn request_commitment_data (& self) -> Result < Digest >"
         }
       ],
       "proof_uses": []
@@ -3601,6 +3658,7 @@
         "pub (super) fn metadata_source (acquisition : & mut NativeAcquisition) -> Result < Self >",
         "fn mint_body (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition , body : & [u8]) -> Result < Self >",
         "fn mint_reply (bytes : & [u8]) -> Result < Self >",
+        "pub (super) fn mint_restore_key_reader (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "pub (super) fn mint_restore_signer (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "pub (super) fn mint_target (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "fn projection (path : & str , acquisition : & mut NativeAcquisition) -> Result < Self >",
@@ -3638,6 +3696,10 @@
         },
         {
           "owner": "CredentialMaterial",
+          "signature": "pub (super) fn mint_restore_key_reader (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
           "signature": "pub (super) fn mint_restore_signer (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
         },
         {
@@ -3661,6 +3723,10 @@
         {
           "owner": "CredentialMaterial",
           "signature": "pub (super) fn authorization (& self) -> Result < HeaderValue >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn mint_restore_key_reader (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
         },
         {
           "owner": "CredentialMaterial",
@@ -7767,18 +7833,65 @@
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval.rs",
+      "type_name": "HistoricalKeyAvailability",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check_retained (& mut self , record : & SignedApprovalRecord , operation : & Digest) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require (& mut self , intent : & Intent , record : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeApprovalSource",
+          "signature": "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , owner : & mut ExecutionSourceLoan < '_ , '_ , '_ , '_ > , intent : & Intent) -> Result < HistoricalKeyAvailability >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "HistoricalKeyAvailability",
+          "signature": "pub (in crate :: security_epoch) fn check_retained (& mut self , record : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "HistoricalKeyAvailability",
+          "signature": "pub (in crate :: security_epoch) fn require (& mut self , intent : & Intent , record : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:e17cacc928bb150ce1a8f15e0873832f06fd2847767a5a92a9d9cfe0c42e4abb"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval.rs",
+      "type_name": "KeyBirth",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "NativeApprovalSource",
+          "signature": "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , owner : & mut ExecutionSourceLoan < '_ , '_ , '_ , '_ > , intent : & Intent) -> Result < HistoricalKeyAvailability >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "destructor": "sha256:e134594cd5811b59ed0bb68ff94fdfcd568c3e53aa0473e64f833486513fd95a"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval.rs",
       "type_name": "NativeApprovalSource",
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn check_phase (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn current_fenced_time (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >",
         "pub (in crate :: security_epoch) fn current_time (& mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ >) -> Result < HostTimeData >",
         "pub (in crate :: security_epoch) fn finish_checked (mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn publish_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ > , record : & SignedApprovalRecord) -> Result < () >",
         "pub (in crate :: security_epoch) fn qualify_time (& mut self , action : & mut RestoreAuthenticationAction < '_ , '_ , '_ > , operation : Digest) -> Result < HostTimeData >",
         "fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn require_qualified (& mut self , operation : & Digest) -> Result < () >",
-        "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >",
-        "pub (in crate :: security_epoch) fn current_fenced_time (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >"
+        "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , owner : & mut ExecutionSourceLoan < '_ , '_ , '_ , '_ > , intent : & Intent) -> Result < HistoricalKeyAvailability >",
+        "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >"
       ],
       "factories": [
         {
@@ -7794,6 +7907,10 @@
         {
           "owner": "NativeApprovalSource",
           "signature": "pub (in crate :: security_epoch) fn check_phase (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "NativeApprovalSource",
+          "signature": "pub (in crate :: security_epoch) fn current_fenced_time (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >"
         },
         {
           "owner": "NativeApprovalSource",
@@ -7817,15 +7934,15 @@
         },
         {
           "owner": "NativeApprovalSource",
+          "signature": "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , owner : & mut ExecutionSourceLoan < '_ , '_ , '_ , '_ > , intent : & Intent) -> Result < HistoricalKeyAvailability >"
+        },
+        {
+          "owner": "NativeApprovalSource",
           "signature": "pub (in crate :: security_epoch) fn sign_completed (& mut self , owner : & mut CompletedCeremony < '_ , '_ , '_ >) -> Result < SignedApprovalRecord >"
         },
         {
           "owner": "PortOwner < '_ , '_ , '_ , '_ >",
           "signature": "fn check (& mut self , source : & mut NativeApprovalSource) -> Result < () >"
-        },
-        {
-          "owner": "NativeApprovalSource",
-          "signature": "pub (in crate :: security_epoch) fn current_fenced_time (& mut self , phase : & mut CurrentControllerStoragePhase < '_ , '_ >) -> Result < HostTimeData >"
         }
       ],
       "proof_uses": [],
