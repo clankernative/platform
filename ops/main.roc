@@ -19,6 +19,7 @@ package
 		SecretRetirement,
 		AppSecrets,
 		UiDependency,
+		Tooling,
 	]
 	{
 		infra: "../infra/main.roc",

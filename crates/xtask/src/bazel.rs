@@ -699,6 +699,9 @@ pub(crate) fn worker_archive(
     isolated_job: Option<&Path>,
     budget: Duration,
 ) -> Result<PathBuf> {
+    if let Some(archive) = crate::tooling_distribution::precompiled_worker(root)? {
+        return Ok(archive);
+    }
     let selected = targets(root)?
         .into_iter()
         .filter(|target| {

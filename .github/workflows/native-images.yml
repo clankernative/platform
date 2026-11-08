@@ -71,6 +71,7 @@ jobs:
             artifacts/native-images/*.json
             artifacts/native-images/*.log
             artifacts/native-images/*.id
+            artifacts/native-images/operator.tar.gz
           if-no-files-found: warn
       - name: Persist compiled tools without caching native outcomes
         if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' }}

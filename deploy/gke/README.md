@@ -610,7 +610,26 @@ day2 platform maintain rollout release-request.json
 ```
 
 Use the request above with a fresh `request_id`, the current live instance
-ConfigMap and image, and add a probe to `target`, for example:
+ConfigMap and image. Capture the live Deployment/PVC UIDs and incumbent node
+before selecting the release, and add these top-level fields:
+
+```json
+"placement": {
+  "controller_uid": "<Deployment UID>", "pvc_uid": "<PVC UID>", "node": "<incumbent node>"
+},
+"offsite_backup": {
+  "cronjob": "day2-example-backup", "bucket": "example-backups", "service_account": "backup"
+}
+```
+
+The rolling recipe runs the namespace's reviewed backup template on the
+incumbent node using the exact source image, instance and PVC. Its create-only
+offsite upload must return a verified `COMPLETE` receipt before release
+preparation. A changed backup selection or failed upload refuses the release
+while the incumbent continues serving. Retries after preparation resume the
+same durable release; they do not take a new stopped backup.
+
+Add a probe to `target`, for example:
 
 ```json
 "probe": {

@@ -152,6 +152,7 @@ pub(super) fn preflight(runner: &Path) -> Result<()> {
 #[serde(deny_unknown_fields)]
 struct Receipt {
     format: u32,
+    source_revision: Option<String>,
     status: &'static str,
     scope: &'static str,
     platform: String,
@@ -165,6 +166,7 @@ struct Receipt {
     applications: BTreeMap<String, Value>,
     tooling_image: String,
     runtime_image: String,
+    tooling_distribution: Value,
     runtime_supervisor: String,
     runtime_sandbox: String,
     environment: Value,
@@ -178,6 +180,7 @@ struct Session {
     root: PathBuf,
     output: PathBuf,
     inputs: Option<PlatformInputs>,
+    source_revision: Option<String>,
     source: Option<PinnedTree>,
     owned_source: Option<PinnedTree>,
     owned: Option<Value>,
@@ -202,6 +205,49 @@ fn read_json(path: &Path) -> Result<Value> {
         "bounded qualification JSON required"
     );
     Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+/// A dirty source experiment may still collect scoped evidence, but cannot
+/// claim the commit identity a published immutable platform release requires.
+fn source_revision(root: &Path) -> Result<Option<String>> {
+    if !root.join(".git").exists() {
+        return Ok(None);
+    }
+    let revision_output = |arguments: &[&str]| -> Result<String> {
+        let result = Command::new("git")
+            .arg("--no-replace-objects")
+            .arg("-C")
+            .arg(root)
+            .args(arguments)
+            .output()?;
+        ensure!(
+            result.status.success() && result.stdout.len() <= 1_048_576,
+            "bounded source revision read required"
+        );
+        Ok(String::from_utf8(result.stdout)?.trim().to_owned())
+    };
+    if !revision_output(&[
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        "HEAD",
+        "--",
+    ])?
+    .is_empty()
+        || !revision_output(&["ls-files", "--others", "--exclude-standard"])?.is_empty()
+    {
+        return Ok(None);
+    }
+    let revision = revision_output(&["rev-parse", "HEAD"])?;
+    ensure!(
+        revision.len() == 40
+            && revision
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "exact source revision required"
+    );
+    Ok(Some(revision))
 }
 
 fn image_id(path: &Path) -> Result<String> {
@@ -293,6 +339,7 @@ impl Session {
             root: root.canonicalize()?,
             output,
             inputs: None,
+            source_revision: None,
             source: None,
             owned_source: None,
             owned: None,
@@ -378,6 +425,7 @@ impl Session {
                 ensure!(self.inputs.is_none(), "one Linux source capture required");
                 let inputs =
                     PlatformInputs::capture(&self.root, &self.root.join("../.toolchains"))?;
+                self.source_revision = source_revision(&self.root)?;
                 let source = PinnedTree::capture(&self.root.join("examples/reports"))?;
                 let owned =
                     PinnedTree::capture(&self.root.join("fixtures/row-authority-web-conformance"))?;
@@ -477,7 +525,44 @@ impl Session {
                     ]),
                     remaining,
                 )?;
-                json!({"container":self.container,"memory_bytes":6_u64*1024*1024*1024,"cpu_millis":4000,"pids":512,"artifact_tmpfs_bytes":1024_u64*1024*1024,"abi_tmpfs_bytes":64_u64*1024*1024,"reviewed_abi_seed_staged":true})
+                for (source, destination) in [
+                    ("distribution.json", "tooling-distribution.json"),
+                    ("operator.tar.gz", "operator.tar.gz"),
+                ] {
+                    logged(
+                        &self.output,
+                        &format!("export-{source}"),
+                        Command::new("docker")
+                            .arg("cp")
+                            .arg(format!(
+                                "{}:/workspace/platform/build-out/tooling/{source}",
+                                self.container
+                            ))
+                            .arg(self.output.join(destination)),
+                        120,
+                    )?;
+                }
+                let distribution_bytes = day2_assets::read_regular(
+                    &self.output.join("tooling-distribution.json"),
+                    65_536,
+                )?;
+                let distribution: Value = day2::json::decode(&distribution_bytes)?;
+                let operator =
+                    day2_assets::read_regular(&self.output.join("operator.tar.gz"), 256 << 20)?;
+                ensure!(
+                    distribution["format"] == 1
+                        && distribution["target"]
+                            == format!("linux-{}", native_platform()?.architecture)
+                        && distribution["workflow_sources"] == day2::automation::source_digest()
+                        && distribution["toolchain"]
+                            == digest(&fs::read(self.root.join(native_platform()?.pin))?)
+                        && distribution["operator"]["digest"] == digest(&operator)
+                        && distribution["operator"]["bytes"] == operator.len() as u64,
+                    "exported tooling distribution identity mismatch"
+                );
+                json!({"container":self.container,"memory_bytes":6_u64*1024*1024*1024,"cpu_millis":4000,"pids":512,"artifact_tmpfs_bytes":1024_u64*1024*1024,"abi_tmpfs_bytes":64_u64*1024*1024,"reviewed_abi_seed_staged":true,
+                    "distribution":digest(&distribution_bytes),
+                    "operator":distribution["operator"],"worker":distribution["worker"]})
             }
             "linux-build-check" => {
                 ensure!(self.tooling_started, "start tooling first");
@@ -929,6 +1014,10 @@ impl Session {
         );
         day2::security_admission::require_linux_checks(&self.checks)?;
         let inputs = self.inputs.as_ref().context("captured platform")?;
+        ensure!(
+            source_revision(&self.root)? == self.source_revision,
+            "source revision changed during Linux qualification"
+        );
         let source = self.source.as_ref().context("captured application")?;
         ensure!(
             PlatformInputs::capture(&self.root, &self.root.join("../.toolchains"))?.digest()
@@ -978,6 +1067,7 @@ impl Session {
         }
         let receipt = Receipt {
             format: 1,
+            source_revision: self.source_revision.clone(),
             status: "passed",
             scope: "linux_sqlite_single_v1",
             platform: inputs.digest().as_str().to_owned(),
@@ -1007,6 +1097,7 @@ impl Session {
                 .collect(),
             tooling_image: self.tooling_image.clone().context("tooling image")?,
             runtime_image: self.runtime_image.clone().context("runtime image")?,
+            tooling_distribution: self.results["linux-start-tooling"].clone(),
             runtime_supervisor: self.results["linux-runtime-start"]["runtime_supervisor"]
                 .as_str()
                 .context("qualified runtime supervisor digest")?
@@ -1138,6 +1229,50 @@ pub fn execute(root: &Path, output: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_revision_requires_clean_committed_inputs() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        assert!(source_revision(root)?.is_none());
+        let git = |args: &[&str]| -> Result<()> {
+            ensure!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(args)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()?
+                    .success(),
+                "fixture git failed"
+            );
+            Ok(())
+        };
+        git(&["init", "-q"])?;
+        fs::write(root.join("input"), b"reviewed bytes")?;
+        git(&["add", "input"])?;
+        git(&[
+            "-c",
+            "user.name=Qualification",
+            "-c",
+            "user.email=qualification@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
+        ])?;
+        assert!(source_revision(root)?.is_some());
+        fs::write(root.join("untracked"), b"extra source")?;
+        assert!(source_revision(root)?.is_none());
+        fs::remove_file(root.join("untracked"))?;
+        fs::write(root.join("input"), b"changed source")?;
+        assert!(source_revision(root)?.is_none());
+        git(&["add", "input"])?;
+        assert!(source_revision(root)?.is_none());
+        Ok(())
+    }
 
     #[test]
     fn actual_linux_recipe_satisfies_receipt_and_security_admission() -> Result<()> {

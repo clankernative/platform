@@ -130,9 +130,13 @@ struct FakeCluster {
     release: Rc<RefCell<Value>>,
     running_image: String,
     instance: String,
+    released_instance: Option<String>,
     other_sessions: String,
     rollout_claim: String,
     helper_service: bool,
+    backup_template: Option<Value>,
+    backup_receipt: Option<Value>,
+    backup_failed: bool,
     fail_on: Option<String>,
     drop_on_copy_out: Option<String>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
@@ -151,6 +155,30 @@ struct FakeCluster {
 const OLD_CREDENTIAL_STORE: &[u8] = b"day2_credential_schema_version=1";
 
 impl FakeCluster {
+    fn template_annotations(&self) -> Value {
+        self.released_instance.as_ref().map_or_else(|| json!({}), |raw| {
+            let instance: Value = serde_json::from_str(raw).unwrap();
+            let artifact = instance["apps"]["example_app"]["artifact"].as_str().unwrap();
+            json!({"day2.dev/artifact":artifact.replacen("artifacts/", "sha256:", 1),
+                "day2.dev/instance-sha256":day2::digest(raw.as_bytes()).trim_start_matches("sha256:")})
+        })
+    }
+
+    fn backup_template(&self) -> Value {
+        self.backup_template.clone().unwrap_or_else(|| json!({
+            "metadata":{"labels":{"app.kubernetes.io/name":"day2-example-backup"}},
+            "spec":{"serviceAccountName":"backup","automountServiceAccountToken":false,"restartPolicy":"Never",
+                "containers":[{"name":"backup","image":self.running_image,
+                    "command":["/usr/local/bin/day2-backup"],
+                    "args":["/srv/day2/instance.json","example_app","/backup/snapshot","--upload-gcs",
+                        "example-backups","--object-prefix","example_app"],
+                    "securityContext":{"allowPrivilegeEscalation":false,"privileged":false,
+                        "readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}}],
+                "volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"data"}},
+                    {"name":"instance","configMap":{"name":"day2-example-instance"}},
+                    {"name":"tmp","emptyDir":{}},{"name":"backup","emptyDir":{}}]}}))
+    }
+
     fn pod_path(&self, remote: &str) -> PathBuf {
         self.pod_root.join(remote.trim_start_matches('/'))
     }
@@ -253,7 +281,7 @@ impl Cluster for FakeCluster {
     ) -> Result<String> {
         self.calls.borrow_mut().push(args.to_vec());
         assert_eq!(&args[..2], ["-n", NAMESPACE]);
-        if args[2] == "apply" {
+        if args[2] == "apply" || args[2] == "create" {
             let manifest = String::from_utf8(stdin.unwrap_or_default().to_vec())?;
             self.applied.borrow_mut().push(manifest);
         }
@@ -267,7 +295,8 @@ impl Cluster for FakeCluster {
         Ok(match args.as_slice() {
             ["get", "statefulset" | "deployment", STATEFULSET, "-o", "json"] => json!({
                 "metadata": {"uid":"controller-uid","resourceVersion":"1","annotations": *self.annotations.borrow()},
-                "spec": {"replicas": self.replicas,"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}}, "template": {"spec": {"containers": [{"name":"day2","image": self.running_image}],"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"data"}}]}}}
+                "spec": {"replicas": self.replicas,"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}}, "template": {"metadata":{"annotations":self.template_annotations()},"spec": {"containers": [{"name":"day2","image": self.running_image}],"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"data"}},
+                    {"name":"instance","configMap":{"name":if self.released_instance.is_some() {"released-instance"} else {"day2-example-instance"}}}]}}}
             })
             .to_string(),
             ["annotate", "--overwrite", "statefulset" | "deployment", STATEFULSET, annotation] => {
@@ -282,17 +311,46 @@ impl Cluster for FakeCluster {
             ["get", "services", "-o", "json"] => json!({"items":[{"spec":{"selector":{"app.kubernetes.io/name":if self.helper_service {"day2-maintenance"} else {STATEFULSET}}}}]}).to_string(),
             ["get", "replicasets", "-o", "json"] => json!({"items":[{"metadata":{"uid":"replicaset-uid","ownerReferences":[{"uid":"controller-uid","controller":true}]}}]}).to_string(),
             ["get", "pvc", "data", "-o", "json"] => json!({"metadata":{"uid":"pvc-uid"},"spec":{"accessModes":["ReadWriteOnce"]},"status":{"phase":"Bound"}}).to_string(),
+            ["get", "job", _, "-o", "json"] => json!({"metadata":{"uid":"backup-job-uid"},
+                "status":{"conditions":[{"type":if self.backup_failed {"Failed"} else {"Complete"},"status":"True"}]}}).to_string(),
+            ["get", "pods", "-l", selector, "-o", "json"] if selector.starts_with("batch.kubernetes.io/job-name=") => {
+                let job: Value = self.applied.borrow().iter().rev()
+                    .find_map(|raw| serde_json::from_str::<Value>(raw).ok().filter(|v| v["kind"] == "Job"))
+                    .context("backup Job was not created")?;
+                json!({"items":[{"metadata":{"name":"backup-pod",
+                    "annotations":job["spec"]["template"]["metadata"]["annotations"],
+                    "ownerReferences":[{"uid":"backup-job-uid","kind":"Job","controller":true}]},
+                    "spec":{"nodeName":"node-a","containers":[{"image":self.running_image}]},
+                    "status":{"phase":"Succeeded","containerStatuses":[{"name":"backup","imageID":self.running_image,
+                        "state":{"terminated":{"exitCode":0}}}]}}]}).to_string()
+            }
+            ["get", "cronjob", "day2-example-backup", "-o", "json"] =>
+                json!({"spec":{"jobTemplate":{"spec":{"template":self.backup_template()}}}}).to_string(),
+            ["logs", _, "-c", "backup", "--tail=1"] => {
+                let job: Value = self.applied.borrow().iter().rev()
+                    .find_map(|raw| serde_json::from_str::<Value>(raw).ok().filter(|v| v["kind"] == "Job"))
+                    .context("backup job was not created")?;
+                let prefix = format!("{}/20261107T120000Z",
+                    job["spec"]["template"]["spec"]["containers"][0]["args"][6].as_str().unwrap());
+                let source: Value = serde_json::from_str(&self.instance)?;
+                let artifact = source["apps"]["example_app"]["artifact"].as_str().unwrap().trim_start_matches("artifacts/");
+                self.backup_receipt.clone().unwrap_or_else(|| json!({"verified":true,"app":"example_app",
+                    "artifact":format!("sha256:{artifact}"),
+                    "upload":{"bucket":"example-backups","prefix":prefix,"objects":4,"bytes":4096,
+                        "complete":format!("gs://example-backups/{prefix}/COMPLETE")}})).to_string()
+            }
             ["get", "pods", "-l", _, "-o", "json"] => json!({"items":[{"metadata":{"name":"incumbent","ownerReferences":[{"uid":"replicaset-uid","controller":true}]},"spec":{"nodeName":"node-a","containers":[{"name":"day2","image":self.running_image}],"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":self.rollout_claim}}]}}]}).to_string(),
             ["scale", "statefulset" | "deployment", STATEFULSET, replicas] => {
                 self.replicas = replicas.trim_start_matches("--replicas=").parse()?;
                 String::new()
             }
-            ["get", "configmap", _, "-o", "json"] => json!({"data": {"instance.json": self.instance}}).to_string(),
+            ["get", "configmap", name, "-o", "json"] => json!({"data": {"instance.json":
+                if *name == "released-instance" {self.released_instance.as_ref().unwrap()} else {&self.instance}}}).to_string(),
             ["get", "pod", _, "--ignore-not-found", "-o", "name"] => String::new(),
             ["get", "pod", _, "-o", "json"] => json!({"status": {"conditions": [{"type": "PodScheduled", "status": "False",
                 "message": "0/3 nodes are available: 3 Insufficient ephemeral-storage."}]}})
             .to_string(),
-            ["scale" | "apply" | "wait" | "delete" | "rollout", ..] => String::new(),
+            ["scale" | "apply" | "create" | "wait" | "delete" | "rollout", ..] => String::new(),
             ["cp", "--retries=5", from, to] => {
                 if let Some((_, remote)) = to.split_once(':') {
                     Self::copy(Path::new(from), &self.pod_path(remote))?;
@@ -413,6 +471,10 @@ impl Harness {
             request["target"] = json!({"instance": target_file, "app_image": self.target.reference,
                 "artifact_id": self.target.artifact_id});
             if operation == Operation::Rollout {
+                request["placement"] =
+                    json!({"controller_uid":"controller-uid","pvc_uid":"pvc-uid","node":"node-a"});
+                request["offsite_backup"] = json!({"cronjob":"day2-example-backup",
+                    "bucket":"example-backups","service_account":"backup"});
                 request["target"]["probe"] = json!({"actor":"alice","command":"create","input":{},"query":"read","query_input":{},"expected":{}});
             }
         }
@@ -432,6 +494,10 @@ impl Harness {
             instance: Self::instance(&self.running.artifact_id),
             other_sessions: String::new(),
             rollout_claim: "data".into(),
+            backup_template: None,
+            backup_receipt: None,
+            backup_failed: false,
+            released_instance: None,
             helper_service: false,
             fail_on: None,
             drop_on_copy_out: None,
@@ -1564,6 +1630,161 @@ fn offline_deployment_maintenance_stops_and_restores_the_selected_controller() -
 }
 
 #[test]
+fn rolling_offsite_backup_binds_source_identity_and_never_stops_service() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    let receipt = session.offsite_backup()?;
+    assert_eq!(receipt["source_image"], harness.running.reference);
+    assert_eq!(
+        receipt["source_artifact"],
+        format!("sha256:{}", harness.running.artifact_id)
+    );
+    assert!(
+        receipt["upload"]["complete"]
+            .as_str()
+            .unwrap()
+            .ends_with("/COMPLETE")
+    );
+    let job: Value = harness
+        .applied
+        .borrow()
+        .iter()
+        .find_map(|raw| {
+            serde_json::from_str::<Value>(raw)
+                .ok()
+                .filter(|v| v["kind"] == "Job")
+        })
+        .context("backup Job")?;
+    assert_eq!(job["spec"]["template"]["spec"]["nodeName"], "node-a");
+    assert_eq!(job["spec"]["backoffLimit"], 0);
+    assert_eq!(
+        job["spec"]["template"]["spec"]["serviceAccountName"],
+        "backup"
+    );
+    session.close()?;
+    assert!(
+        !harness
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "scale"))
+    );
+    assert!(
+        harness
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.windows(2).any(|v| v == ["delete", "job"]))
+    );
+    Ok(())
+}
+
+#[test]
+fn rolling_backup_template_changes_and_missing_completion_fail_before_preparation() -> Result<()> {
+    for pointer in [
+        "/spec/serviceAccountName",
+        "/spec/containers/0/image",
+        "/spec/containers/0/command/0",
+        "/spec/containers/0/args/4",
+        "/spec/volumes/0/persistentVolumeClaim/claimName",
+        "/spec/volumes/1/configMap/name",
+        "/spec/containers/0/securityContext/readOnlyRootFilesystem",
+    ] {
+        let harness = Harness::new();
+        let mut session = harness.open(
+            Operation::Rollout,
+            |cluster| {
+                let mut template = cluster.backup_template();
+                *template.pointer_mut(pointer).unwrap() = json!("another-value");
+                cluster.backup_template = Some(template);
+            },
+            true,
+        )?;
+        prepare(&mut session)?;
+        session.workflow("backup")?;
+        session.copy_backup()?;
+        assert!(session.offsite_backup().is_err(), "{pointer}");
+        session.close()?;
+        assert!(!harness.calls.borrow().iter().any(|call| {
+            call.iter()
+                .any(|arg| matches!(arg.as_str(), "scale" | "rollout-prepare" | "create"))
+        }));
+    }
+    for receipt in [json!({"verified":true}), json!({"verified":false})] {
+        let harness = Harness::new();
+        let mut session = harness.open(
+            Operation::Rollout,
+            |cluster| {
+                cluster.backup_receipt = Some(receipt);
+            },
+            true,
+        )?;
+        prepare(&mut session)?;
+        session.workflow("backup")?;
+        session.copy_backup()?;
+        assert!(session.offsite_backup().is_err());
+        assert!(session.state.offsite_backup.is_none());
+        session.close()?;
+        assert!(!harness.calls.borrow().iter().any(|call| {
+            call.iter()
+                .any(|arg| matches!(arg.as_str(), "scale" | "rollout-prepare"))
+        }));
+    }
+    Ok(())
+}
+
+#[test]
+fn rolling_prepare_cannot_bypass_the_offsite_gate_and_backup_failure_keeps_incumbent() -> Result<()>
+{
+    for fail in [false, true] {
+        let harness = Harness::new();
+        let mut session = harness.open(
+            Operation::Rollout,
+            |cluster| {
+                if fail {
+                    cluster.backup_failed = true;
+                }
+            },
+            true,
+        )?;
+        prepare(&mut session)?;
+        session.workflow("backup")?;
+        session.copy_backup()?;
+        session.migration("plan")?;
+        session.admission()?;
+        session.confirm()?;
+        assert!(
+            session
+                .rollout("prepare")
+                .unwrap_err()
+                .to_string()
+                .contains("offsite_backup_completion_required")
+        );
+        if fail {
+            assert!(
+                session
+                    .offsite_backup()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("offsite_backup_job_failed")
+            );
+        }
+        assert!(session.state.offsite_backup.is_none());
+        session.close()?;
+        assert!(!harness.calls.borrow().iter().any(|call| {
+            call.iter().any(|arg| arg == "scale")
+                || call
+                    .windows(2)
+                    .any(|args| args == ["rollout-prepare", CURRENT])
+        }));
+    }
+    Ok(())
+}
+
+#[test]
 fn rolling_preflight_refuses_another_claim_and_a_serving_helper() -> Result<()> {
     for helper_service in [false, true] {
         let harness = Harness::new();
@@ -1591,6 +1812,30 @@ fn rolling_preflight_refuses_another_claim_and_a_serving_helper() -> Result<()> 
         assert!(!harness.calls.borrow().iter().any(|call| {
             call.iter()
                 .any(|arg| matches!(arg.as_str(), "scale" | "patch" | "apply"))
+        }));
+    }
+    Ok(())
+}
+
+#[test]
+fn rolling_request_refuses_replacement_controller_claim_or_node_before_mutation() -> Result<()> {
+    for field in ["controller_uid", "pvc_uid", "node"] {
+        let harness = Harness::new();
+        let path = harness.request(Operation::Rollout);
+        let mut request: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        request["placement"][field] = json!("replacement");
+        fs::write(&path, serde_json::to_vec(&request)?)?;
+        let error = match Session::open("rollout", &path, harness.tools(|_| {}, true)) {
+            Ok(_) => bail!("changed placement admitted"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("rollout_captured_placement_changed"),
+            "{field}: {error}"
+        );
+        assert!(!harness.calls.borrow().iter().any(|call| {
+            call.iter()
+                .any(|arg| matches!(arg.as_str(), "scale" | "apply" | "create" | "patch"))
         }));
     }
     Ok(())
@@ -1632,6 +1877,68 @@ fn resumed_release_requires_exact_target_instance_bytes_before_any_step() -> Res
             format!("{:#}", session.rollout(step).unwrap_err())
                 .contains("rollout_target_instance_changed")
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn completed_rollout_resumes_using_its_exact_live_instance_after_bootstrap_reconciliation()
+-> Result<()> {
+    for changed in [false, true] {
+        let harness = Harness::new();
+        let path = harness.request(Operation::Rollout);
+        let request = fs::read(&path)?;
+        let target = fs::read_to_string(harness.directory.path().join("target-instance.json"))?;
+        *harness.release.borrow_mut() = json!({"id":"release-1", "source_image":harness.running.reference,
+            "target_image":harness.target.reference,"target":format!("sha256:{}",harness.target.artifact_id),
+            "target_instance_digest":day2::digest(target.as_bytes()),"phase":"complete",
+            "placement":{"controller_uid":"controller-uid","pvc_uid":"pvc-uid","node":"node-a",
+                "request_digest":day2::digest(&request)}});
+        harness
+            .annotations
+            .borrow_mut()
+            .insert("day2.dev/rollout".into(), "release-1".into());
+        let mut session = Session::open(
+            "rollout",
+            &path,
+            harness.tools(
+                |cluster| {
+                    cluster.running_image = harness.target.reference.clone();
+                    cluster.instance = "overwritten bootstrap metadata must never be read".into();
+                    cluster.released_instance = Some(if changed {
+                        target.clone() + " "
+                    } else {
+                        target.clone()
+                    });
+                },
+                true,
+            ),
+        )?;
+        if changed {
+            assert!(
+                session
+                    .artifacts()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("rollout_current_instance_changed")
+            );
+        } else {
+            prepare(&mut session)?;
+            assert_eq!(session.rollout_resume()?["resuming"], true);
+            for step in [
+                "prepare", "bind", "admit", "deploy", "observe", "probe", "promote", "wait",
+                "complete",
+            ] {
+                session.rollout(step)?;
+            }
+        }
+        session.close()?;
+        assert!(!harness.calls.borrow().iter().any(|call| {
+            call.iter().any(|arg| arg == "scale")
+                || call
+                    .windows(3)
+                    .any(|args| args == ["get", "configmap", "day2-example-instance"])
+        }));
     }
     Ok(())
 }

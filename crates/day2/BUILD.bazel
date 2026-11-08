@@ -61,6 +61,7 @@ COMPILE_INPUTS = [
     "//:ops/SecretRetirement.roc",
     "//:ops/AppSecrets.roc",
     "//:ops/Simulation.roc",
+    "//:ops/Tooling.roc",
     "//:ops/UiDependency.roc",
     "//:ops/Verify.roc",
     "//:ops/Workflow.roc",

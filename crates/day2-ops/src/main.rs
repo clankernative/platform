@@ -644,6 +644,7 @@ impl Operations {
             "maintenance-admission" => self.maintenance()?.admission(),
             "maintenance-store-admission" => self.maintenance()?.store_admission(),
             "maintenance-rollout-resume" => self.maintenance()?.rollout_resume(),
+            "maintenance-offsite-backup" => self.maintenance()?.offsite_backup(),
             "maintenance-rollout" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

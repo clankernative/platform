@@ -60,6 +60,7 @@ Maintain :: [].{
 		previous = Json.parse(raw).map_err(|_| "invalid rollout resume observation")?
 		if !previous.resuming {
 			_ = backup!(host!)?
+			_ = Capability.call!("maintenance-offsite-backup", "{}", host!)?
 			_ = Capability.call!("maintenance-migration", Json.to_str({ step: "plan" }), host!)?
 			_ = Capability.call!("maintenance-admission", "{}", host!)?
 			_ = Capability.call!("maintenance-confirm", "{}", host!)?
