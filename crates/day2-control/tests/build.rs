@@ -88,6 +88,8 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         "Cargo.lock",
         ".github/workflows/ci.yml",
         ".github/workflows/mac-compatibility.yml",
+        ".github/workflows/native-images.yml",
+        ".github/actions/pinned-release/action.yml",
         ".bazelrc",
         ".bazelversion",
         "BUILD.bazel",
@@ -221,6 +223,8 @@ fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> 
         "architecture/clippy.toml",
         ".github/workflows/ci.yml",
         ".github/workflows/mac-compatibility.yml",
+        ".github/workflows/native-images.yml",
+        ".github/actions/pinned-release/action.yml",
     ] {
         let directory = tempfile::tempdir()?;
         let approved = platform(directory.path())?;

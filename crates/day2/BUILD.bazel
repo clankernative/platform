@@ -11,6 +11,8 @@ COMPILE_INPUTS = [
     ":font_fixture_bytes",
     "//:.github/workflows/ci.yml",
     "//:.github/workflows/mac-compatibility.yml",
+    "//:.github/workflows/native-images.yml",
+    "//:.github/actions/pinned-release/action.yml",
     "//crates/worker:src/first_request.rs",
     "//:Cargo.lock",
     "//:Cargo.toml",

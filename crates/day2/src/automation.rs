@@ -112,6 +112,14 @@ pub const SOURCES: &[(&str, &[u8])] = &[
         ".github/workflows/mac-compatibility.yml",
         include_bytes!("../../../.github/workflows/mac-compatibility.yml"),
     ),
+    (
+        ".github/workflows/native-images.yml",
+        include_bytes!("../../../.github/workflows/native-images.yml"),
+    ),
+    (
+        ".github/actions/pinned-release/action.yml",
+        include_bytes!("../../../.github/actions/pinned-release/action.yml"),
+    ),
     ("infra/main.roc", include_bytes!("../../../infra/main.roc")),
     (
         "infra/Stack.roc",
