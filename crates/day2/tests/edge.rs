@@ -158,8 +158,13 @@ impl Server {
                 .block_on(async move {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                     let address = listener.local_addr()?;
-                    let server =
-                        LocalServer::bind_edge_listener(served, listener, &edge, verifier, 4)?;
+                    let server = LocalServer::bind_edge_listener(
+                        std::sync::Arc::new(served),
+                        listener,
+                        &edge,
+                        verifier,
+                        4,
+                    )?;
                     send.send(format!("http://{address}"))?;
                     server
                         .serve(async {
@@ -276,7 +281,13 @@ fn cli_bootstrap_requires_instance_edge_metadata_only_when_selected() -> Result<
         let verifier = Verifier::new(AUDIENCE, "exampleco.test", Box::new(Keys(signer.keys())))?;
         let result = executor.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            LocalServer::bind_edge_listener(runtime, listener, &edge, verifier, 1)
+            LocalServer::bind_edge_listener(
+                std::sync::Arc::new(runtime),
+                listener,
+                &edge,
+                verifier,
+                1,
+            )
         });
         assert_eq!(
             result.is_err(),

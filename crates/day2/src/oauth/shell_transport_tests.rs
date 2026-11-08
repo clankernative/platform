@@ -355,7 +355,8 @@ fn authenticated_credential_fresh_route_refuses_before_instance_or_sql_open() ->
         crate::oauth::approval_registry::UnavailableAppApprovals::new(runtime.app().into())?,
     )))
     .with_management(Arc::new(crate::oauth::management::app::Manager::new(
-        runtime, authority,
+        Arc::new(runtime),
+        authority,
     )))?;
     for purpose in [
         "credential_issue_intent",
@@ -1196,7 +1197,7 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     let database = runtime.db().to_path_buf();
     let instance = Instance::load(runtime.instance_path())?;
     let route = route_prefix(&instance.installation, &instance.environment, runtime.app())?;
-    let manager = Arc::new(Manager::new(runtime, authority));
+    let manager = Arc::new(Manager::new(Arc::new(runtime), authority));
     let assertions = Assertions::new();
     let identity = iap::Verified {
         email: "alice@example.com".into(),
@@ -1832,7 +1833,11 @@ fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission(
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                 let origin = format!("http://{}", listener.local_addr()?);
                 let mut server = crate::web::LocalServer::bind_edge_listener(
-                    runtime, listener, &edge, verifier, 1,
+                    std::sync::Arc::new(runtime),
+                    listener,
+                    &edge,
+                    verifier,
+                    1,
                 )?;
                 server.mount_oauth(receiver)?;
                 origin_tx.send((origin, server.admission())).unwrap();
@@ -2701,7 +2706,7 @@ mod owned_google {
         let instance = Instance::load(&setup.instance)?;
         let runtime = setup.runtime(0)?;
         let database = runtime.db().to_path_buf();
-        let manager = Arc::new(Manager::new(runtime, setup.authority.clone()));
+        let manager = Arc::new(Manager::new(Arc::new(runtime), setup.authority.clone()));
         let mut receiver = setup.assertions.receiver(Arc::new(
             crate::oauth::approval_registry::UnavailableAppApprovals::new("workspace".into())?,
         ));
@@ -3240,7 +3245,7 @@ mod owned_google {
         let instance = Instance::load(&setup.instance)?;
         let runtime = setup.runtime(ordinal)?;
         let database = runtime.db().to_path_buf();
-        let manager = Arc::new(Manager::new(runtime, setup.authority.clone()));
+        let manager = Arc::new(Manager::new(Arc::new(runtime), setup.authority.clone()));
         let mut receiver = setup.assertions.receiver(Arc::new(
             crate::oauth::approval_registry::UnavailableAppApprovals::new("workspace".into())?,
         ));

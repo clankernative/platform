@@ -8,6 +8,121 @@ use std::collections::BTreeMap;
 
 mod history;
 
+#[test]
+fn may_snapshot_is_one_exact_predecessor_or_one_atomic_planned_pair() -> Result<()> {
+    let f = fixture(901, true)?;
+    let plan = f
+        .request
+        .prepare(&f.selected, &f.authority, 1002, &f.before, None)?;
+    let before = &f.before.settled.snapshot;
+    plan.require_may_snapshot_data(before)?;
+    let mut after = before.clone();
+    after.root = Some(Versioned {
+        value: plan.root.clone(),
+        version: version(5),
+    });
+    after.sentinel = Some(Versioned {
+        value: plan.sentinel.clone(),
+        version: version(5),
+    });
+    plan.require_may_snapshot_data(&after)?;
+
+    let mut cuts = Vec::new();
+    let mut changed = after.clone();
+    changed.root = before.root.clone();
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.sentinel = before.sentinel.clone();
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.root = None;
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.sentinel = None;
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.root.as_mut().unwrap().version = version(6);
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.root.as_mut().unwrap().version = version(3);
+    changed.sentinel.as_mut().unwrap().version = version(3);
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.root.as_mut().unwrap().version = version(2);
+    changed.sentinel.as_mut().unwrap().version = version(2);
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.root.as_mut().unwrap().version =
+        "2026-11-04T00:00:00.0000030Z".to_owned().try_into()?;
+    changed.sentinel.as_mut().unwrap().version = changed.root.as_ref().unwrap().version.clone();
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.create.as_mut().unwrap().version = version(6);
+    cuts.push(changed);
+    let mut changed = after.clone();
+    changed.activate.as_mut().unwrap().version = version(6);
+    cuts.push(changed);
+    let foreign = fixture(902, true)?;
+    let foreign_plan = foreign.request.prepare(
+        &foreign.selected,
+        &foreign.authority,
+        1002,
+        &foreign.before,
+        None,
+    )?;
+    let mut changed = after.clone();
+    changed.root.as_mut().unwrap().value = foreign_plan.root;
+    cuts.push(changed);
+    let mut changed = after;
+    changed.sentinel.as_mut().unwrap().value = foreign_plan.sentinel;
+    cuts.push(changed);
+    for (index, changed) in cuts.iter().enumerate() {
+        assert!(
+            plan.require_may_snapshot_data(changed).is_err(),
+            "coherent snapshot cut {index}"
+        );
+    }
+    // This equality predicate does not turn a possible send into its strict
+    // acknowledged result: without the actual receipt, reconciliation is not
+    // Applied even when the planned root/sentinel already appear.
+    let mut observed = f.before.clone();
+    observed.settled.snapshot = after_for_test(&plan);
+    assert_eq!(
+        reconcile(&f.selected, &f.request, &plan, &observed, None)?,
+        Outcome::Conflict
+    );
+    for version in [
+        version(2),
+        "2026-11-04T00:00:00.0000030Z".to_owned().try_into()?,
+    ] {
+        observed.settled.snapshot.root.as_mut().unwrap().version = version.clone();
+        observed.settled.snapshot.sentinel.as_mut().unwrap().version = version.clone();
+        let receipt = Versioned {
+            value: plan.receipt.clone(),
+            version,
+        };
+        assert_eq!(
+            reconcile(&f.selected, &f.request, &plan, &observed, Some(&receipt))?,
+            Outcome::Conflict
+        );
+    }
+
+    Ok(())
+}
+
+fn after_for_test(plan: &Plan) -> crate::security_epoch::kernel::Snapshot {
+    let mut snapshot = plan.before.settled.snapshot.clone();
+    snapshot.root = Some(Versioned {
+        value: plan.root.clone(),
+        version: version(5),
+    });
+    snapshot.sentinel = Some(Versioned {
+        value: plan.sentinel.clone(),
+        version: version(5),
+    });
+    snapshot
+}
+
 #[cfg(unix)]
 mod process;
 

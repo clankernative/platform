@@ -1,7 +1,7 @@
 //! Exact restore provider messages and one consuming guarded reservation send.
 //! Results remain DATA, not an approval verifier, native dispatch permit or
 //! consumed owner. The native caller must retain its real owners and original.
-use super::{Entry, Names as InitialNames, decode_snapshot, encode_fields};
+use super::{DocumentNames, Entry, decode_snapshot, encode_fields};
 use crate::security_epoch::{
     journal::snapshot_digest,
     kernel::{
@@ -19,18 +19,34 @@ use std::{collections::BTreeSet, marker::PhantomData, rc::Rc};
 
 const MAX_RECORD_BYTES: usize = 32_768;
 
+mod completion;
 mod writer;
+pub(in crate::security_epoch) use completion::{
+    Input as RestoreTargetInput, KnownSettlement as KnownRestoreTarget, Names as RestoreTargetNames,
+};
+pub(in crate::security_epoch) use writer::RestoreWriterPeerRead;
+pub(in crate::security_epoch) use writer::{
+    ConfirmationInput as RestoreWriterConfirmationInput, KnownWriter as KnownRestoredWriter,
+    Names as RestoreWriterNames, Observed as RestoreWriterObserved, RestoreWriterReadExpectation,
+    SendInput as RestoreWriterSendInput,
+};
 
 /// Names and full original-plan commitment, never caller-selected paths.
 pub(in crate::security_epoch) struct Names {
+    read: ReadSet,
+    plan: Digest,
+    expected_publication: Publication,
+}
+
+/// One complete read set and decoder for sending and peer confirmation.
+struct ReadSet {
     selection: EpochStore,
-    initial: InitialNames,
+    initial: DocumentNames,
     advance: String,
     reservation: String,
     grant: String,
-    plan: Digest,
     publication: String,
-    expected_publication: Publication,
+    grant_id: Digest,
 }
 
 fn plan_digest(plan: &approval_use::Plan) -> Result<Digest> {
@@ -50,19 +66,176 @@ impl Names {
     ) -> Result<Self> {
         plan.require_publication_data(selection, publication)?;
         let selectors = plan.selectors(selection)?;
-        let initial =
-            InitialNames::new(selection, &selectors.bootstrap, Some(&selectors.activation))?;
+        Ok(Self {
+            read: ReadSet::new(selection, &selectors, publication.grant_id_data())?,
+            plan: plan_digest(plan)?,
+            expected_publication: publication.clone(),
+        })
+    }
+
+    fn documents(&self) -> Vec<&str> {
+        self.read.documents()
+    }
+
+    /// Starts one transaction over all eight names. The complete captured read
+    /// set is validated with the five writes at the same atomic commit.
+    pub(in crate::security_epoch) fn begin_body(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(
+            &json!({"documents":self.documents(),"newTransaction":{"readWrite":{}}}),
+        )?)
+    }
+
+    pub(in crate::security_epoch) fn strong_body(&self) -> Result<Vec<u8>> {
+        self.read.strong_body()
+    }
+
+    pub(in crate::security_epoch) fn endpoint(&self, operation: &'static str) -> Result<String> {
+        ensure!(
+            ["batchGet", "commit", "rollback"].contains(&operation),
+            "restore_provider_operation"
+        );
+        Ok(self.read.initial.endpoint(operation))
+    }
+
+    /// Retain a canonical header through semantic refusal for bounded cleanup.
+    pub(in crate::security_epoch) fn transaction(self, bytes: &[u8]) -> Result<Transaction> {
+        let (token, entries) = transaction_header(bytes, Stream::Reservation)?;
+        Ok(Transaction {
+            names: self,
+            token,
+            entries,
+            local: PhantomData,
+        })
+    }
+
+    pub(in crate::security_epoch) fn strong(&self, bytes: &[u8]) -> Result<Observed> {
+        self.decode(entries(bytes, Stream::Reservation)?)
+    }
+
+    fn decode(&self, entries: Vec<Value>) -> Result<Observed> {
+        let observed = self.read.decode(entries)?;
+        ensure!(
+            observed.publication.value == self.expected_publication,
+            "restore_provider_publication_changed"
+        );
+        Ok(observed)
+    }
+}
+
+/// Read-only peer selectors from the actual retained initial completion,
+/// independently captured original operation and Active before-observation.
+/// No caller document paths, transaction tokens or send operation are exposed.
+pub(in crate::security_epoch) struct ConfirmationNames {
+    read: ReadSet,
+    stop: restore::StopSelection,
+    initial: crate::security_epoch::kernel::Request,
+    operation: Digest,
+    before: Snapshot,
+    confirmation: ReservationConfirmation,
+}
+
+impl ConfirmationNames {
+    pub(in crate::security_epoch) fn new(
+        selected: &EpochStore,
+        initial: &crate::security_epoch::kernel::Request,
+        operation: &Digest,
+        stop: &restore::StopSelection,
+        before: &Snapshot,
+        confirmation: &ReservationConfirmation,
+    ) -> Result<Self> {
+        stop.check_active_data(selected, operation, initial, before)?;
+        let selectors = approval_use::Selectors {
+            bootstrap: initial.bootstrap().clone(),
+            activation: initial.operation().clone(),
+            advance: stop.advance_operation.clone(),
+            operation: operation.clone(),
+            grant: approval_use::use_key_data(selected, &confirmation.grant_id)?,
+        };
+        Ok(Self {
+            read: ReadSet::new(selected, &selectors, &confirmation.grant_id)?,
+            stop: stop.clone(),
+            initial: initial.clone(),
+            operation: operation.clone(),
+            before: before.clone(),
+            confirmation: confirmation.clone(),
+        })
+    }
+
+    pub(in crate::security_epoch) fn matches_selection(&self, selection: &EpochStore) -> bool {
+        self.read.selection == *selection
+    }
+
+    pub(in crate::security_epoch) fn endpoint(&self) -> String {
+        self.read.initial.endpoint("batchGet")
+    }
+
+    pub(in crate::security_epoch) fn body(&self) -> Result<Vec<u8>> {
+        self.read.strong_body()
+    }
+
+    /// This DATA result requires its own real guarded provider read. A prior
+    /// parsed observation or the Controller's projection cannot satisfy it.
+    pub(in crate::security_epoch) fn confirm(&self, bytes: &[u8]) -> Result<Observed> {
+        let observed = self.read.decode(entries(bytes, Stream::Reservation)?)?;
+        self.stop.check_fenced_data(
+            &self.read.selection,
+            &self.operation,
+            &self.initial,
+            &self.before,
+            &observed.snapshot,
+        )?;
+        ensure!(
+            observed.first_read
+                >= timestamp(&String::from(self.confirmation.committed_at.clone()))?,
+            "restore_peer_read_before_commit"
+        );
+        let written = [
+            observed.snapshot.root.as_ref().map(|row| &row.version),
+            observed.snapshot.sentinel.as_ref().map(|row| &row.version),
+            observed.advance.as_ref().map(|row| &row.version),
+            observed.reservation.as_ref().map(|row| &row.version),
+            observed.grant.as_ref().map(|row| &row.version),
+        ];
+        ensure!(
+            written
+                .iter()
+                .zip(&self.confirmation.written_versions)
+                .all(|(actual, acknowledged)| *actual == Some(acknowledged))
+                && observed
+                    .grant
+                    .as_ref()
+                    .is_some_and(|row| row.value.grant_id_data() == &self.confirmation.grant_id)
+                && observed.commitment_data()? == self.confirmation.records,
+            "restore_peer_known_readset_changed"
+        );
+        Ok(observed)
+    }
+}
+
+impl ReadSet {
+    fn new(
+        selection: &EpochStore,
+        selectors: &approval_use::Selectors,
+        grant_id: &Digest,
+    ) -> Result<Self> {
+        ensure!(
+            selectors.grant == approval_use::use_key_data(selection, grant_id)?,
+            "restore_provider_grant_selector_changed"
+        );
+        selectors.bootstrap.validate_selection(selection)?;
+        let initial = DocumentNames::new(
+            selection,
+            &selectors.bootstrap.create_operation,
+            Some(&selectors.activation),
+        )?;
         let key = |value: &Digest| value.as_str()[7..].to_owned();
         let names = Self {
             publication: format!(
                 "{}/documents/day2_restore_approval_publications_v1/{}",
                 initial.database,
-                key(&publication::key(
-                    selection,
-                    plan.approval_use.grant_id_data()
-                )?),
+                key(&publication::key(selection, grant_id)?),
             ),
-            expected_publication: publication.clone(),
+            grant_id: grant_id.clone(),
             selection: selection.clone(),
             advance: format!("{}/operations/{}", initial.root, key(&selectors.advance)),
             reservation: format!(
@@ -72,11 +245,58 @@ impl Names {
             ),
             grant: format!("{}/restore_grants/{}", initial.root, key(&selectors.grant)),
             initial,
-            plan: plan_digest(plan)?,
         };
         ensure!(
             names.documents().into_iter().collect::<BTreeSet<_>>().len() == 8,
             "restore_provider_document_alias"
+        );
+        Ok(names)
+    }
+
+    fn from_peer_data(
+        selection: &EpochStore,
+        projection: &crate::security_epoch::native_enrollment::RestoreFileProjectionData,
+    ) -> Result<Self> {
+        projection.validate(&projection.selection)?;
+        ensure!(
+            projection.selection.target.scope == selection.scope
+                && projection.selection.target.authority == selection.authority_key()?
+                && projection.selection.target.selection == Digest::of(selection)?
+                && projection.selection.target.security_epoch == 2,
+            "restore_peer_provider_selection_changed"
+        );
+        let initial = DocumentNames::new(
+            selection,
+            &projection.ledger.initial_create,
+            Some(&projection.ledger.initial_activation),
+        )?;
+        let grant_id = projection.ledger.grant.clone();
+        let grant = approval_use::use_key_data(selection, &grant_id)?;
+        let key = |digest: &Digest| digest.as_str()[7..].to_owned();
+        let names = Self {
+            publication: format!(
+                "{}/documents/day2_restore_approval_publications_v1/{}",
+                initial.database,
+                key(&publication::key(selection, &grant_id)?)
+            ),
+            grant_id,
+            selection: selection.clone(),
+            advance: format!(
+                "{}/operations/{}",
+                initial.root,
+                key(&projection.ledger.advance)
+            ),
+            reservation: format!(
+                "{}/restore_reservations/{}",
+                initial.root,
+                key(&projection.selection.operation)
+            ),
+            grant: format!("{}/restore_grants/{}", initial.root, key(&grant)),
+            initial,
+        };
+        ensure!(
+            names.documents().into_iter().collect::<BTreeSet<_>>().len() == 8,
+            "restore_peer_provider_document_alias"
         );
         Ok(names)
     }
@@ -92,44 +312,10 @@ impl Names {
         names
     }
 
-    /// Starts one read-write transaction and reads ALL four original records
-    /// and three create-only names plus the exact signed publication. The
-    /// provider validates this complete read set at the same atomic commit.
-    /// No field mask, extra ledger, no-op write or retryTransaction is used.
-    pub(in crate::security_epoch) fn begin_body(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(
-            &json!({"documents":self.documents(),"newTransaction":{"readWrite":{}}}),
-        )?)
-    }
-
     /// The post-send read has the existing default strong consistency, never
     /// the pre-send transaction's old snapshot or a caller-supplied readTime.
-    pub(in crate::security_epoch) fn strong_body(&self) -> Result<Vec<u8>> {
+    fn strong_body(&self) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(&json!({"documents":self.documents()}))?)
-    }
-
-    pub(in crate::security_epoch) fn endpoint(&self, operation: &'static str) -> Result<String> {
-        ensure!(
-            ["batchGet", "commit", "rollback"].contains(&operation),
-            "restore_provider_operation"
-        );
-        Ok(self.initial.endpoint(operation))
-    }
-
-    /// Once a canonical header is known, retain this object through semantic
-    /// decoding so a rejected document can still be rolled back by its sender.
-    pub(in crate::security_epoch) fn transaction(self, bytes: &[u8]) -> Result<Transaction> {
-        let (token, entries) = transaction_header(bytes, Stream::Reservation)?;
-        Ok(Transaction {
-            names: self,
-            token,
-            entries,
-            local: PhantomData,
-        })
-    }
-
-    pub(in crate::security_epoch) fn strong(&self, bytes: &[u8]) -> Result<Observed> {
-        self.decode(entries(bytes, Stream::Reservation)?)
     }
 
     fn decode(&self, entries: Vec<Value>) -> Result<Observed> {
@@ -208,7 +394,7 @@ impl Names {
                         .found
                         .context("restore_provider_publication_missing")?,
                     &self.selection,
-                    &self.expected_publication,
+                    &self.grant_id,
                 )?);
             }
         }
@@ -217,7 +403,7 @@ impl Names {
             "restore_provider_incomplete_snapshot"
         );
         Ok(Observed {
-            snapshot: decode_snapshot(&self.initial, initial)
+            snapshot: decode_snapshot(self.initial.snapshot_names(), initial)
                 .map_err(|_| anyhow::anyhow!("restore_provider_initial_snapshot"))?,
             advance,
             reservation,
@@ -239,6 +425,7 @@ struct RawEntry {
 
 enum Stream {
     Reservation,
+    Settlement,
     Writer,
 }
 
@@ -275,6 +462,7 @@ fn entries(bytes: &[u8], stream: Stream) -> Result<Vec<Value>> {
         .map_err(|_| anyhow::anyhow!("restore_provider_reply_encoding"))?;
     let limit = match stream {
         Stream::Reservation => 9,
+        Stream::Settlement => 10,
         Stream::Writer => 11,
     };
     ensure!(
@@ -406,17 +594,16 @@ struct PublicationFields {
 fn publication_record(
     found: Value,
     selected: &EpochStore,
-    expected: &Publication,
+    grant_id: &Digest,
 ) -> Result<Versioned<Publication>> {
     let document: PublicationDocument = serde_json::from_value(found)
         .map_err(|_| anyhow::anyhow!("restore_provider_publication_shape"))?;
     // The complete stream already checked exact name and ordered timestamps.
     let _ = (document.name, document.create_time);
     let payload = document.fields.payload.string_value;
-    let value = Publication::decode(payload.as_bytes(), selected, expected.grant_id_data())?;
+    let value = Publication::decode(payload.as_bytes(), selected, grant_id)?;
     ensure!(
-        &value == expected
-            && value.encode(selected)? == payload.as_bytes()
+        value.encode(selected)? == payload.as_bytes()
             && document.fields.commitment.string_value
                 == Digest::of(&("day2-restore-approval-publication-document-v1", &value))?.as_str(),
         "restore_provider_publication_changed"
@@ -438,6 +625,22 @@ pub(in crate::security_epoch) struct Observed {
 }
 
 impl Observed {
+    /// Commitment to every value AND provider version in the complete read.
+    /// This is DATA for same-peer confirmation, never freshness or authority.
+    pub(in crate::security_epoch) fn commitment_data(&self) -> Result<Digest> {
+        fn versioned<T: Serialize>(value: &Option<Versioned<T>>) -> Option<(&T, &UpdateTime)> {
+            value.as_ref().map(|row| (&row.value, &row.version))
+        }
+        Digest::of(&(
+            "day2-restore-reservation-observation-v1",
+            snapshot_digest(&self.snapshot)?,
+            versioned(&self.advance),
+            versioned(&self.reservation),
+            versioned(&self.grant),
+            (&self.publication.value, &self.publication.version),
+        ))
+    }
+
     /// Provider-time ordering only, not a local clock, freshness original or
     /// permission. The real sender must also keep its native postchecks.
     fn after_commit(
@@ -461,7 +664,61 @@ impl Observed {
 /// approval: actual native postchecks and complete current readback remain owed.
 pub(in crate::security_epoch) struct CommitRecord {
     committed: time::OffsetDateTime,
+    committed_at: UpdateTime,
     versions: [UpdateTime; 5],
+}
+
+/// Publicly encodable confirmation DATA. The actual owner must retain its
+/// genuine known send, original and peer; this projection cannot adopt a send
+/// after uncertainty or construct any consumed approval/fenced continuation.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::security_epoch) struct ReservationConfirmation {
+    pub grant_id: Digest,
+    pub committed_at: UpdateTime,
+    pub written_versions: [UpdateTime; 5],
+    pub records: Digest,
+}
+
+impl ReservationConfirmation {
+    pub(in crate::security_epoch) fn digest_data(&self) -> Result<Digest> {
+        Digest::of(&("day2-known-restore-reservation-v1", self))
+    }
+}
+
+/// Both the actual parsed ACK and complete checked readback survive the one
+/// consuming send. Private fields close accidental projection reconstruction;
+/// even this whole object remains provider DATA, not a genuine native owner.
+pub(in crate::security_epoch) struct KnownReservation {
+    observed: Observed,
+    acknowledged: CommitRecord,
+}
+
+impl KnownReservation {
+    pub(in crate::security_epoch) fn confirmation_data(&self) -> Result<ReservationConfirmation> {
+        Ok(ReservationConfirmation {
+            grant_id: self
+                .observed
+                .grant
+                .as_ref()
+                .context("restore_known_grant_missing")?
+                .value
+                .grant_id_data()
+                .clone(),
+            committed_at: self.acknowledged.committed_at.clone(),
+            written_versions: self.acknowledged.versions.clone(),
+            records: self.observed.commitment_data()?,
+        })
+    }
+
+    /// DATA move only. The native producer must still retain and check its
+    /// actual owner before and after the peer exchange and every real effect.
+    pub(in crate::security_epoch) fn into_data(
+        self,
+    ) -> Result<(Observed, ReservationConfirmation)> {
+        let confirmation = self.confirmation_data()?;
+        Ok((self.observed, confirmation))
+    }
 }
 
 pub(in crate::security_epoch) fn commit_reply(bytes: &[u8]) -> Result<CommitRecord> {
@@ -492,7 +749,7 @@ pub(in crate::security_epoch) fn commit_reply(bytes: &[u8]) -> Result<CommitReco
     );
     let reply: Reply = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("restore_provider_commit_encoding"))?;
-    let committed = timestamp(&String::from(reply.commit_time))?;
+    let committed = timestamp(&String::from(reply.commit_time.clone()))?;
     let versions = reply.write_results.map(|write| write.update_time);
     for version in &versions {
         ensure!(
@@ -502,6 +759,7 @@ pub(in crate::security_epoch) fn commit_reply(bytes: &[u8]) -> Result<CommitReco
     }
     Ok(CommitRecord {
         committed,
+        committed_at: reply.commit_time,
         versions,
     })
 }
@@ -529,7 +787,7 @@ impl Transaction {
         plan: &approval_use::Plan,
         current: &restore::Current,
         at: i64,
-    ) -> Result<Observed> {
+    ) -> Result<KnownReservation> {
         let body = match self.commit_body(selection, plan, current, at) {
             Ok(body) => body,
             Err(primary) => {
@@ -589,7 +847,10 @@ impl Transaction {
                 "restore_provider_reservation_not_applied"
             );
             budget.remaining_decoding(port)?;
-            Ok(after)
+            Ok(KnownReservation {
+                observed: after,
+                acknowledged: committed,
+            })
         })();
         if requested.is_err() {
             port.refuse();
@@ -630,7 +891,7 @@ impl Transaction {
         at: i64,
     ) -> Result<Vec<u8>> {
         ensure!(
-            self.names.selection == *selection && self.names.plan == plan_digest(plan)?,
+            self.names.read.selection == *selection && self.names.plan == plan_digest(plan)?,
             "restore_provider_plan_changed"
         );
         let observed = self.observed()?;
@@ -665,11 +926,11 @@ impl Transaction {
             .version;
         let advance = &plan.reservation.advance;
         let bytes = serde_json::to_vec(&json!({"transaction":self.token,"writes":[
-            initial_write(&self.names.initial.root, serde_json::to_value(&advance.root)?, json!({"updateTime":root_version}))?,
-            initial_write(&self.names.initial.sentinel, serde_json::to_value(&advance.sentinel)?, json!({"updateTime":sentinel_version}))?,
-            receipt_write(&self.names.advance, &advance.receipt, "day2-restore-advance-document-v1")?,
-            receipt_write(&self.names.reservation, &plan.reservation.receipt, "day2-restore-reservation-document-v1")?,
-            receipt_write(&self.names.grant, &plan.approval_use, "day2-restore-grant-document-v1")?,
+            initial_write(&self.names.read.initial.root, serde_json::to_value(&advance.root)?, json!({"updateTime":root_version}))?,
+            initial_write(&self.names.read.initial.sentinel, serde_json::to_value(&advance.sentinel)?, json!({"updateTime":sentinel_version}))?,
+            receipt_write(&self.names.read.advance, &advance.receipt, "day2-restore-advance-document-v1")?,
+            receipt_write(&self.names.read.reservation, &plan.reservation.receipt, "day2-restore-reservation-document-v1")?,
+            receipt_write(&self.names.read.grant, &plan.approval_use, "day2-restore-grant-document-v1")?,
         ]}))?;
         ensure!(
             bytes.len() <= super::MAX_BYTES,

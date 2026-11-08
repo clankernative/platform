@@ -742,14 +742,63 @@ fn native_input_retains_published_selector_before_canonicalization_and_actual_ru
     ensure!(fields.len() == 1, "actual selector field mutation target");
     fields.into_iter().next().unwrap().expr = syn::parse_quote!(instance_path.clone());
     assert!(validates_constructor(&changed).is_err());
+    fn native_selectors(file: &syn::File) -> Result<()> {
+        let mut all = Fields(Vec::new());
+        all.visit_file(file);
+        ensure!(
+            all.0.len() == 2,
+            "only the two genuine native Runtime factories store selectors"
+        );
+        for name in ["load_native_storage", "load_restored_storage"] {
+            let methods=file.items.iter().filter_map(|item|match item {
+                syn::Item::Impl(item) if matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("Runtime"))=>Some(item),_=>None,
+            }).flat_map(|item|&item.items).filter_map(|item|match item {
+                syn::ImplItem::Fn(item) if item.sig.ident==name=>Some(item),_=>None,
+            }).collect::<Vec<_>>();
+            ensure!(methods.len() == 1, "one actual native Runtime factory");
+            let mut fields = Fields(Vec::new());
+            fields.visit_block(&methods[0].block);
+            ensure!(
+                fields.0.len() == 1
+                    && matches!(&fields.0[0],syn::Expr::Call(call) if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("Some")) && call.args.len()==1 && matches!(&call.args[0],syn::Expr::Field(field) if matches!(&*field.base,syn::Expr::Path(path) if path.path.is_ident("metadata")) && matches!(&field.member,syn::Member::Named(name) if name=="instance_selector"))),
+                "native runtime retains actual selector DATA"
+            );
+        }
+        Ok(())
+    }
     let native = syn::parse_file(include_str!("../../../store/native_storage.rs"))?;
-    let mut fields = Fields(Vec::new());
-    fields.visit_file(&native);
-    ensure!(
-        fields.0.len() == 1
-            && matches!(&fields.0[0],syn::Expr::Call(call) if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("Some")) && call.args.len()==1 && matches!(&call.args[0],syn::Expr::Field(field) if matches!(&*field.base,syn::Expr::Path(path) if path.path.is_ident("metadata")) && matches!(&field.member,syn::Member::Named(name) if name=="instance_selector"))),
-        "native runtime retains actual selector DATA"
-    );
+    native_selectors(&native)?;
+    use quote::ToTokens;
+    for name in ["load_native_storage", "load_restored_storage"] {
+        for replacement in ["None", "Some(metadata.instance_path)"] {
+            let mut changed = native.clone();
+            let mut selected = 0;
+            for item in &mut changed.items {
+                if let syn::Item::Impl(item) = item
+                    && matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("Runtime"))
+                {
+                    for item in &mut item.items {
+                        if let syn::ImplItem::Fn(item) = item
+                            && item.sig.ident == name
+                        {
+                            let body = item.block.to_token_stream().to_string();
+                            let target: syn::Expr =
+                                syn::parse_quote!(Some(metadata.instance_selector));
+                            let target = target.to_token_stream().to_string();
+                            ensure!(
+                                body.matches(&target).count() == 1,
+                                "actual native selector mutation target"
+                            );
+                            item.block = syn::parse_str(&body.replacen(&target, replacement, 1))?;
+                            selected += 1;
+                        }
+                    }
+                }
+            }
+            ensure!(selected == 1, "actual native Runtime mutation owner");
+            assert!(native_selectors(&changed).is_err());
+        }
+    }
     Ok(())
 }
 

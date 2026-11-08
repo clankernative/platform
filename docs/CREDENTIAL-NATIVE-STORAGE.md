@@ -693,12 +693,13 @@ Its retained writer loan has fixed `require_staging_input`,
 directory descriptors, their identities and the unchanged original. There is
 no root constructor, resource getter, caller-selected phase or clock renewal.
 
-These interfaces currently refuse and permanently refuse the actual owner;
-they do not perform reservation, stopping, root admission or writer transitions.
-They exist so the consuming composition can bind to concrete signatures while
-the genuine suppliers are implemented. Files, target reports and holder records
-are inputs, never authority. Successful implementations and their proof-policy,
-test and native qualification evidence remain pending.
+The stop entry now retains the actual executor through the durable grant-attempt
+marker, issuer freeze, App drain, known reservation and separate peer
+confirmation. Its Fenced continuation keeps the same original, files and fixed
+readiness interval. The four target/root/writer operations above remain refusing
+interfaces in this composition; their genuine suppliers are separate work.
+Files, target reports and holder records are inputs, never authority. Native
+qualification and the complete accepting writer remain pending.
 
 ### Historical restore-key availability supplier
 
@@ -732,3 +733,18 @@ handoff; that accepting composition and native qualification remain separate.
 The resolver and loopback tests are controlled evidence only. Neither model
 `Current.available_keys` equality nor a fixture reply constructs native key
 availability.
+
+### Retained restore writer composition
+
+The actual authenticated executor is consumed into the same retained Fenced
+continuation only after its durable grant marker, issuer/App drain, known
+reservation readback and separate peer confirmation. The private staging entry
+retains this owner outside its single exclusive writer borrow; no receipt or
+fresh original reconstructs it. Exact saved intent/namespace checks and physical
+root admission retain the same pre/post guards and permanent refusal.
+
+The complete native archive/State supplier, target settlement, new-writer
+activation and authenticated receiving-keeper handoff remain separate accepting
+work. The fixed settlement and activation methods still refuse; neither a staged
+image report nor holder DATA supplies their authority. Local composition and
+fixture checks do not qualify a native restore.

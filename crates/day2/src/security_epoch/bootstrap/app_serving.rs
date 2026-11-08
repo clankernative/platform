@@ -1,7 +1,6 @@
 //! Same active App owner through the fixed serving acquisition and consumer.
 use super::{
-    ActiveAppStorageContinuity, CurrentAppServingPhase, ServingDisposition, check_active_snapshot,
-    request_names,
+    ActiveAppStorageContinuity, AppRuntimeImage, CurrentAppServingPhase, ServingDisposition,
 };
 use crate::security_epoch::{
     native_enrollment::{EnrolledRoleStage, StoragePeerRequest},
@@ -34,13 +33,14 @@ impl ActiveAppStorageContinuity {
     ) -> Result<CurrentAppServingPhase<'storage>> {
         ensure!(self.valid, "active_app_storage_refused");
         self.valid = false;
-        let seed = self.storage.bootstrap_core()?;
+        let image = match purpose {
+            crate::security_epoch::serving::ScopePurpose::Runtime(
+                crate::security_epoch::serving::RuntimeServingUse::InitialStorage,
+            ) => AppRuntimeImage::Initial(Box::new(self.storage.bootstrap_core()?)),
+            _ => AppRuntimeImage::Existing,
+        };
         let request = StoragePeerRequest::CurrentServing {
-            binding: Digest::of(&(
-                "day2-current-active-app-storage-v1",
-                self.completion.digest()?,
-                binding,
-            ))?,
+            binding: self.lineage.serving_binding(&binding)?,
         };
         let evidence = crate::security_epoch::serving::ConsumerScopeEvidence::app(
             Digest::of(&(
@@ -62,23 +62,15 @@ impl ActiveAppStorageContinuity {
         )?;
         let mut physical = self.storage.begin_current(stage, request)?;
         physical.await_known(stage)?;
-        let names = request_names(&self.store, &self.completion)?;
-        let observed = reads.read(stage, &self.store, &names)?;
-        check_active_snapshot(
-            &self.store,
-            &self.completion,
-            &self.activation,
-            observed.snapshot(),
-        )?;
+        let observed = self.lineage.read(&self.store, &mut reads, stage)?;
         physical.check(stage)?;
         Ok(CurrentAppServingPhase {
             physical,
             reads,
             observed,
             selection: self.store.clone(),
-            completion: self.completion.clone(),
-            activation: self.activation.clone(),
-            seed,
+            lineage: &self.lineage,
+            image,
             policy: self.policy.clone(),
             continuation: &mut self.valid,
             disposition: ServingDisposition::Unarmed,
@@ -176,14 +168,7 @@ impl<'storage> CurrentAppServingPhase<'storage> {
             // Check the old observation BEFORE replacing DATA: an expired
             // read/authentication origin cannot be renewed by a fresh reply.
             self.check(stage)?;
-            let names = request_names(&self.selection, &self.completion)?;
-            let observed = self.reads.read(stage, &self.selection, &names)?;
-            check_active_snapshot(
-                &self.selection,
-                &self.completion,
-                &self.activation,
-                observed.snapshot(),
-            )?;
+            let observed = self.lineage.read(&self.selection, &mut self.reads, stage)?;
             self.observed = observed;
             self.check(stage)
         })();
@@ -203,13 +188,8 @@ impl<'storage> CurrentAppServingPhase<'storage> {
                 "native_serving_scope_refused"
             );
             self.physical.check(stage)?;
-            self.reads.check_observation(stage, &mut self.observed)?;
-            super::check_active_snapshot(
-                &self.selection,
-                &self.completion,
-                &self.activation,
-                self.observed.snapshot(),
-            )?;
+            self.lineage
+                .check(&self.selection, &mut self.reads, stage, &mut self.observed)?;
             self.physical.check(stage)
         })();
         if result.is_err() {
@@ -237,12 +217,15 @@ impl<'storage> CurrentAppServingPhase<'storage> {
             );
             metadata.require_native_selection(
                 &self.selection,
-                &self.completion.bootstrap().manifest.artifact,
+                self.lineage.initial_runtime_artifact_data()?,
                 &self.policy,
             )?;
+            let AppRuntimeImage::Initial(seed) = &self.image else {
+                anyhow::bail!("native_runtime_initial_image_required");
+            };
             crate::security_epoch::preparation_image::require_existing_selection(
                 db,
-                &self.seed,
+                seed,
                 &self.selection,
             )?;
             self.check(stage)
@@ -271,7 +254,7 @@ impl<'storage> CurrentAppServingPhase<'storage> {
             );
             metadata.require_native_selection(
                 &self.selection,
-                &self.completion.bootstrap().manifest.artifact,
+                self.lineage.initial_runtime_artifact_data()?,
                 &self.policy,
             )?;
             self.check(stage)
@@ -346,22 +329,13 @@ impl<'storage> CurrentAppServingPhase<'storage> {
             ),
             "native_serving_unknown_result"
         );
-        let names = super::request_names(&self.selection, &self.completion)?;
-        let observed = self.reads.read(stage, &self.selection, &names)?;
-        super::check_active_snapshot(
-            &self.selection,
-            &self.completion,
-            &self.activation,
-            observed.snapshot(),
-        )?;
+        let observed = self.lineage.read(&self.selection, &mut self.reads, stage)?;
         self.observed = observed;
         self.check(stage)?;
         // The exact final coherent provider observation is historical DATA.
         // No completion is exported until the actual peer ACK and postcheck.
         self.evidence
-            .snapshot(crate::security_epoch::journal::snapshot_digest(
-                self.observed.snapshot(),
-            )?);
+            .snapshot(self.lineage.snapshot_data(&self.observed)?);
         let known = self.disposition == ServingDisposition::Known;
         self.physical.finish_checked(stage)?;
         stage.check()?;
@@ -462,5 +436,188 @@ impl<'storage> CurrentAppServingPhase<'storage> {
                 std::panic::resume_unwind(payload)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lineage_source_tests {
+    use quote::ToTokens;
+    use syn::visit::Visit;
+
+    fn actual(owner: &str, name: &str) -> syn::ImplItemFn {
+        syn::parse_file(include_str!("app_serving.rs")).unwrap().items.into_iter().find_map(|item| {
+            let syn::Item::Impl(item)=item else {return None;};
+            if !matches!(&*item.self_ty,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident==owner)) { return None; }
+            item.items.into_iter().find_map(|item|match item { syn::ImplItem::Fn(item) if item.sig.ident==name=>Some(item), _=>None })
+        }).unwrap()
+    }
+
+    fn flow(method: &syn::ImplItemFn) -> Vec<String> {
+        fn is_self_field(expr: &syn::Expr, name: &str) -> bool {
+            matches!(expr,syn::Expr::Field(field) if matches!(&*field.base,syn::Expr::Path(p) if p.path.is_ident("self"))
+                && matches!(&field.member,syn::Member::Named(id) if id==name))
+        }
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                let name = call.method.to_string();
+                if is_self_field(&call.receiver, "lineage") {
+                    self.0.push(format!("lineage_{name}"));
+                } else if name == "check"
+                    && matches!(&*call.receiver,syn::Expr::Path(p) if p.path.is_ident("self"))
+                {
+                    self.0.push("local_check".into());
+                } else if is_self_field(&call.receiver, "physical")
+                    && (name == "check" || name == "finish_checked")
+                {
+                    self.0.push(format!("physical_{name}"));
+                } else if is_self_field(&call.receiver, "reads")
+                    && (name == "finish" || name == "read")
+                {
+                    self.0.push(format!("reads_{name}"));
+                } else if name == "check"
+                    && matches!(&*call.receiver,syn::Expr::Path(p) if p.path.is_ident("stage"))
+                {
+                    self.0.push("role_check".into());
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let mut calls = Calls(Vec::new());
+        calls.visit_block(&method.block);
+        calls.0
+    }
+
+    #[test]
+    fn actual_app_reobserve_check_and_finish_retain_the_same_typed_lineage() {
+        for (name, expected) in [
+            (
+                "reobserve",
+                vec!["local_check", "lineage_read", "local_check"],
+            ),
+            (
+                "check",
+                vec!["physical_check", "lineage_check", "physical_check"],
+            ),
+            (
+                "finish_scope",
+                vec![
+                    "local_check",
+                    "lineage_read",
+                    "local_check",
+                    "lineage_snapshot_data",
+                    "physical_finish_checked",
+                    "role_check",
+                    "reads_finish",
+                ],
+            ),
+        ] {
+            let method = actual("CurrentAppServingPhase", name);
+            assert_eq!(flow(&method), expected, "{name}");
+            let text = method.to_token_stream().to_string();
+            let selected = if name == "check" {
+                "self . lineage . check"
+            } else {
+                "self . lineage . read"
+            };
+            assert_eq!(text.matches(selected).count(), 1, "{name}");
+            let changed = text.replacen(selected, "self . lineage . unchecked", 1);
+            let changed = syn::parse_str::<syn::ImplItemFn>(&changed).unwrap();
+            assert_ne!(flow(&changed), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn actual_app_scope_borrows_its_original_lineage_without_rebuilding_metadata() {
+        fn borrowed(method: &syn::ImplItemFn) -> bool {
+            struct Fields(Vec<bool>);
+            impl<'ast> Visit<'ast> for Fields {
+                fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+                    if item
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|s| s.ident == "CurrentAppServingPhase")
+                    {
+                        for field in &item.fields {
+                            if matches!(&field.member,syn::Member::Named(id) if id=="lineage") {
+                                self.0.push(matches!(&field.expr,syn::Expr::Reference(r) if r.mutability.is_none()
+                                    && matches!(&*r.expr,syn::Expr::Field(f) if matches!(&f.member,syn::Member::Named(id) if id=="lineage")
+                                        && matches!(&*f.base,syn::Expr::Path(p) if p.path.is_ident("self")))));
+                            }
+                        }
+                    }
+                    syn::visit::visit_expr_struct(self, item);
+                }
+            }
+            let mut fields = Fields(Vec::new());
+            fields.visit_block(&method.block);
+            fields.0 == [true]
+        }
+        let method = actual("ActiveAppStorageContinuity", "begin_serving");
+        assert!(borrowed(&method));
+        let text = method.to_token_stream().to_string();
+        let target = "lineage : & self . lineage";
+        assert_eq!(text.matches(target).count(), 1);
+        let changed = text.replacen(target, "lineage : & another_lineage", 1);
+        assert!(!borrowed(
+            &syn::parse_str::<syn::ImplItemFn>(&changed).unwrap()
+        ));
+    }
+
+    #[test]
+    fn actual_current_carries_an_initial_seed_only_for_initial_runtime_birth() {
+        fn initial_only(method: &syn::ImplItemFn) -> bool {
+            let mut found = None;
+            for statement in &method.block.stmts {
+                let syn::Stmt::Local(local) = statement else {
+                    continue;
+                };
+                if !matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="image") {
+                    continue;
+                }
+                let Some(initializer) = &local.init else {
+                    return false;
+                };
+                let syn::Expr::Match(selected) = &*initializer.expr else {
+                    return false;
+                };
+                let [initial, existing] = selected.arms.as_slice() else {
+                    return false;
+                };
+                found = Some(
+                    selected.expr.to_token_stream().to_string() == "purpose"
+                        && initial.pat.to_token_stream().to_string().replace(" ,", "")
+                            == "crate :: security_epoch :: serving :: ScopePurpose :: Runtime (crate :: security_epoch :: serving :: RuntimeServingUse :: InitialStorage)"
+                        && initial.body.to_token_stream().to_string()
+                            == "AppRuntimeImage :: Initial (Box :: new (self . storage . bootstrap_core () ?))"
+                        && matches!(&existing.pat, syn::Pat::Wild(_))
+                        && existing.body.to_token_stream().to_string()
+                            == "AppRuntimeImage :: Existing",
+                );
+            }
+            found == Some(true)
+        }
+        let method = actual("ActiveAppStorageContinuity", "begin_serving");
+        assert!(initial_only(&method));
+        let text = method.to_token_stream().to_string();
+        for (from, to) in [
+            (
+                "RuntimeServingUse :: InitialStorage",
+                "RuntimeServingUse :: SqlRead",
+            ),
+            (
+                "AppRuntimeImage :: Existing",
+                "AppRuntimeImage :: Initial (Box :: new (self.storage.bootstrap_core()?))",
+            ),
+        ] {
+            assert_eq!(text.matches(from).count(), 1);
+            let mutant = syn::parse_str::<syn::ImplItemFn>(&text.replacen(from, to, 1)).unwrap();
+            assert!(!initial_only(&mutant));
+        }
+        let admission = actual("CurrentAppServingPhase", "admit_runtime_database");
+        let text = admission.to_token_stream().to_string();
+        assert!(text.contains("let AppRuntimeImage :: Initial (seed) = & self . image else"));
+        assert!(!text.contains("self . seed"));
     }
 }

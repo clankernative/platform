@@ -1,26 +1,55 @@
-//! Mechanical unpublished staging leaf. No accepting constructor, native
-//! factory, public command, adoption or publication path exists here.
+//! Mechanical unpublished staging leaf. A private native entry retains actual
+//! fenced rights. The closed archive supplier consumes that genuine executor;
+//! no operational command or completed accepting restore is supplied here.
 //! The future genuine owner must PRECEDE creation and keep this same State and
 //! actual creator FD through reset, SQL close, sync and final target admission.
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{Digest, credentials::Namespace};
 use ring::digest::{Context as Hash, SHA256};
 use rusqlite::{Connection, MAIN_DB, Transaction, TransactionBehavior};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::{
     cell::Cell,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
     rc::Rc,
 };
 use writer::StagingContext;
+pub(in crate::security_epoch) use writer::{
+    Disposition as RestoreDisposition, Flight as RestoreFlight, NativeStagedTarget,
+    RestoreControllerCohort,
+};
 use zeroize::Zeroizing;
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
 mod application;
+mod archive;
+pub(crate) use archive::RestoreArtifactAdmission;
+
+/// Complete admitted archive ownership before any staging creator effect. Only
+/// the fixed writer child may borrow the private prepared input; no descriptor,
+/// state, authority, callback or borrowed native frame is exposed to a caller.
+pub(in crate::security_epoch) struct PreparedNativeRestoreArchive<'metadata, 'storage, 'role> {
+    prepared: archive::ArchivePrepared<'metadata, 'storage, 'role>,
+}
+
+impl<'metadata, 'storage, 'role> PreparedNativeRestoreArchive<'metadata, 'storage, 'role> {
+    pub(in crate::security_epoch) fn capture(
+        executor: crate::security_epoch::bootstrap::AuthenticatedRestoreExecution<
+            'metadata,
+            'storage,
+            'role,
+        >,
+        directory: &std::path::Path,
+        intent: &crate::security_epoch::kernel::restore::Intent,
+    ) -> Result<Self> {
+        let prepared = archive::NativeArchive::capture(executor, directory, intent)?.prepare()?;
+        Ok(Self { prepared })
+    }
+}
 
 /// Continuous ownership of the one configured scratch connection. Only the
 /// fixed image builder constructs this in production, before deserialize or
@@ -115,6 +144,50 @@ const _: () = {
             let _ = <$owner as Ambiguous<_>>::check;
         }};
     }
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        Clone
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        Copy
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        Default
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        Sync
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        std::ops::Deref
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        AsRef<Connection>
+    );
+    assert_not_impl!(
+        PreparedNativeRestoreArchive<'static, 'static, 'static>,
+        std::borrow::Borrow<Connection>
+    );
     assert_not_impl!(MemoryAdmission<'static>, Clone);
     assert_not_impl!(MemoryAdmission<'static>, Copy);
     assert_not_impl!(MemoryAdmission<'static>, Default);
@@ -145,7 +218,8 @@ mod sealed {
 /// Closed portable check source with no production implementation. Actual
 /// native staging uses the concrete StagingContext branch instead of a manual
 /// trait implementation on an opaque material owner. No accepting Parent
-/// constructor exists; fixtures alone construct staging owners today.
+/// constructor can run without its real loan/root/input checks. Production
+/// archive-State construction is still absent; fixtures alone create State.
 trait Checks: sealed::Sealed {
     fn state(&mut self) -> &mut State;
     fn current(&mut self) -> Result<()>;
@@ -160,7 +234,7 @@ trait Checks: sealed::Sealed {
 }
 
 struct Input {
-    source: PathBuf,
+    source: File,
     operation: Digest,
     namespace: Namespace,
     source_epoch: u64,
@@ -200,7 +274,48 @@ struct Projection {
     reset: application::Summary,
 }
 
+impl Input {
+    // Historical binding DATA only. Native admission separately checks the
+    // actual retained owner's record/selection before any source or file IO.
+    fn require_intent(&self, intent: &super::kernel::restore::Intent) -> Result<()> {
+        self.namespace.validate()?;
+        ensure!(
+            self.namespace.installation == intent.archive.scope.installation
+                && self.namespace.environment == intent.archive.scope.environment
+                && self.namespace.app == intent.archive.scope.app
+                && self.operation == intent.operation
+                && self.source_epoch == intent.archive.security_epoch
+                && self.database == intent.archive.image
+                && self.target_incarnation == intent.target_incarnation,
+            "native_restore_staging_intent_changed"
+        );
+        Ok(())
+    }
+}
+
 impl State {
+    fn require_unstarted(&self) -> Result<()> {
+        ensure!(
+            Rc::ptr_eq(&self.scope, &self.expected_scope)
+                && !self.attempted
+                && !self.refused
+                && !self.directory_may_exist
+                && self.directory.is_none()
+                && self.creator.is_none()
+                && self.creator_identity.is_none()
+                && self.frozen_image.is_none()
+                && self.birth_original.is_none()
+                && self.source.is_none()
+                && self.sql.is_none()
+                && self.consumed == 0
+                && self.written == 0
+                && !self.complete
+                && !self.writer_attempted,
+            "native_restore_staging_already_started"
+        );
+        Ok(())
+    }
+
     fn target_dir(&self) -> Result<PathBuf> {
         Ok(self.root_path.join(self.target_component()?))
     }
@@ -436,19 +551,6 @@ fn memory_shape(db: &Connection, expected: Option<usize>) -> Result<usize> {
     );
     Ok(bytes)
 }
-fn require_single_image(source: &std::path::Path) -> Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let mut name = source.as_os_str().to_os_string();
-        name.push(suffix);
-        match std::fs::symlink_metadata(PathBuf::from(name)) {
-            Ok(_) => anyhow::bail!("restore_staging_source_sidecar"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
 /// Fixed fresh-memory DATA builder. It accepts no raw connection or callback;
 /// the entire function is reviewed/pinned for its sole serialize operation.
 fn prepare_image(
@@ -547,26 +649,16 @@ fn execute_context(owner: &mut StagingContext<'_, '_, '_, '_, '_, '_>) -> Result
     ensure!(!owner.state().attempted, "restore_staging_attempt_spent");
     owner.state().attempted = true;
     boundary(owner, |s| {
+        let metadata = s.input.source.metadata()?;
         ensure!(
-            s.input.source.is_absolute() && s.input.source.canonicalize()? == s.input.source,
-            "restore_staging_source_alias"
-        );
-        require_single_image(&s.input.source)?;
-        let named = std::fs::symlink_metadata(&s.input.source)?;
-        ensure!(
-            named.is_file() && named.len() <= MAX_BYTES,
+            metadata.is_file() && metadata.len() <= MAX_BYTES,
             "restore_staging_source_bound"
         );
-        let fd = OpenOptions::new()
-            .read(true)
-            .custom_flags(i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())?)
-            .open(&s.input.source)?;
-        let held = fd.metadata()?;
-        ensure!(
-            held.dev() == named.dev() && held.ino() == named.ino(),
-            "restore_staging_source_changed"
-        );
-        s.source = Some(fd);
+        // The sole native factory moved its actual sealed capture FD here.
+        // There is no pathname reopen, adopt or second archive reader.
+        let mut file = s.input.source.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        s.source = Some(file);
         Ok(())
     })?;
     let mut image = Zeroizing::new(Vec::new());
@@ -600,9 +692,8 @@ fn execute_context(owner: &mut StagingContext<'_, '_, '_, '_, '_, '_>) -> Result
         );
         image.extend_from_slice(&buffer[..n]);
     }
-    boundary(owner, |s| require_single_image(&s.input.source))?;
-    // Absence is a refusal gate, not committed-snapshot authority. A genuine
-    // supplier must bind this exact cold archive; no implementation exists yet.
+    // A held file alone is not archive provenance. Only the native factory
+    // binds its exact whole approved capture and sealed image before entry.
     image_shape(&image)?;
     ensure!(
         Digest::new(&image) == owner.state().input.database,

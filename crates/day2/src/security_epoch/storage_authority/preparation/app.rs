@@ -329,7 +329,10 @@ impl AppFileContinuity {
                 "app_sqlite_birth_already_attempted"
             );
             self.sqlite_started = true;
-            crate::store::require_unopened_native_sqlite(&self.directory)?;
+            crate::store::require_unopened_native_sqlite(
+                &self.directory,
+                crate::store::SqliteKeeperLayout::Initial,
+            )?;
             self.check_current(stage)
         })();
         if result.is_err() {
@@ -349,7 +352,7 @@ impl AppFileContinuity {
                 self.sqlite_started && self.sqlite.is_none(),
                 "app_sqlite_birth_not_current"
             );
-            crate::store::NativeSqliteKeeper::require_initial_main(db, &self.file)?;
+            crate::store::NativeSqliteKeeper::require_creator_main(db, &self.file)?;
             self.check_current(stage)
         })();
         if result.is_err() {

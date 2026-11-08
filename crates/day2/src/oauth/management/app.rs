@@ -74,7 +74,7 @@ pub(in crate::oauth) fn install(db: &Connection) -> Result<()> {
 }
 
 pub(crate) struct Manager {
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     authority: Arc<admission::ArtifactApprovalAuthority>,
 }
 
@@ -124,7 +124,7 @@ impl Manager {
     }
 
     pub(in crate::oauth) fn new(
-        runtime: Runtime,
+        runtime: Arc<Runtime>,
         authority: Arc<admission::ArtifactApprovalAuthority>,
     ) -> Self {
         Self { runtime, authority }
@@ -1326,6 +1326,22 @@ mod tests {
         time::Duration,
     };
 
+    #[test]
+    fn manager_keeps_the_exact_shared_runtime_allocation() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (runtime, authority, _) = admission::tests::management_fixture(directory.path())?;
+        let runtime = Arc::new(runtime);
+        let same = Arc::clone(&runtime);
+        let manager = Manager::new(same, authority);
+        assert!(Arc::ptr_eq(&runtime, &manager.runtime));
+        let foreign = Arc::new((*runtime).clone());
+        assert!(!Arc::ptr_eq(&foreign, &manager.runtime));
+        assert_eq!(foreign.scope(), manager.runtime.scope());
+        assert_eq!(foreign.db(), manager.runtime.db());
+        assert_eq!(foreign.artifact().id(), manager.runtime.artifact().id());
+        Ok(())
+    }
+
     struct Port {
         now: AtomicI64,
         entropy: AtomicU64,
@@ -1464,7 +1480,7 @@ mod tests {
             });
             Ok(Self {
                 _directory: directory,
-                manager: Manager::new(runtime, authority),
+                manager: Manager::new(Arc::new(runtime), authority),
                 signer,
                 identity: iap::Verified {
                     email: "alice@example.com".into(),

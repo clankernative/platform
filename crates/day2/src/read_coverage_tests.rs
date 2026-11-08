@@ -92,6 +92,7 @@ impl Fixture {
             restore_registry_selector: None,
             executor_generation: Arc::new(std::sync::OnceLock::new()),
             instance_digest: crate::digest(b"nonrolling test instance"),
+            native_database: None,
             instance_path,
             app: "app".into(),
             db: state.join("app.sqlite"),

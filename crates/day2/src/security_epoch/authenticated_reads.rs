@@ -25,7 +25,9 @@ use zeroize::Zeroizing;
 
 mod connection;
 mod retained;
-pub(in crate::security_epoch) use connection::{CounterConnectionSlot, CounterRequest};
+pub(in crate::security_epoch) use connection::{
+    CounterConnectionSlot, CounterRequest, RestoredEpochObservation,
+};
 pub(in crate::security_epoch) use retained::ControllerBorrow;
 pub(in crate::security_epoch) use retained::RefusalGuard;
 pub(in crate::security_epoch) use retained::StorageMetadataRead;
