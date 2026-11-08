@@ -4,7 +4,7 @@
 #[cfg(target_os = "linux")]
 use super::{birth, channel, issuer_peer, policy, protocol};
 #[cfg(target_os = "linux")]
-use crate::security_epoch::native_clock::NativeOriginalRefusal;
+use crate::security_epoch::native_clock::{NativeAcquisition, NativeOriginalRefusal};
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::process::SelfSnapshot;
 #[cfg(target_os = "linux")]
