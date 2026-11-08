@@ -500,7 +500,7 @@ impl RestoredRuntimeBirth<'_> {
         crate::artifact::Instance,
     )> {
         self.check()?;
-        let requested = (|| {
+        let requested: Result<_> = (|| {
             #[cfg(not(target_os = "linux"))]
             {
                 anyhow::bail!("native_restore_platform_unsupported");
