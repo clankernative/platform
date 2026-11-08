@@ -139,6 +139,7 @@ pub(crate) struct CurrentStoragePeerPhase<'peer> {
     exchange: CurrentExchange,
     remote_request: super::super::storage_peer_wire::OriginalInterval,
     completion: Completion,
+    stopped: Option<super::super::AuthorityStopData>,
     #[cfg(target_os = "linux")]
     peer: Peer,
 }
@@ -508,6 +509,7 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
             );
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
+                stopped: None,
                 remote_request: peer.statement().original.clone(),
                 owner: self.owner,
                 acquisition,
@@ -744,6 +746,7 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
                 .send_storage(&ready, stage, &mut acquisition)?;
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
+                stopped: None,
                 remote_request: peer.statement().original.clone(),
                 owner: self.owner,
                 acquisition,
@@ -766,10 +769,330 @@ enum Completion {
     ControllerAcknowledged,
     AppReleased,
     ControllerReleased,
+    ControllerStopAnnounced,
+    AppStopObserved,
+    AppStopAcknowledged,
+    ControllerStopped,
+    AppStoppedTerminal,
+    ControllerStoppedTerminal,
     Refused,
 }
 
 impl CurrentStoragePeerPhase<'_> {
+    pub(in crate::security_epoch) fn freeze_restore_issuer(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        operation: &Digest,
+        fenced_root: &Digest,
+    ) -> Result<super::super::FrozenRoleIssuer> {
+        let requested = (|| {
+            self.check(stage)?;
+            ensure!(
+                matches!(
+                    self.exchange.request,
+                    super::super::storage_peer_wire::StoragePeerRequest::AdminRead { .. }
+                ) && self.completion == Completion::Waiting
+                    && self.local.stage.data.role == NativeRole::EpochController,
+                "native_restore_same_admin_peer_required"
+            );
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (operation, fenced_root);
+                anyhow::bail!("native_restore_peer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // The statement comes ONLY from this actual authenticated,
+                // retained App peer, not from an operator/caller projection.
+                let app = self.peer.statement().clone();
+                super::super::FrozenRoleIssuer::capture_restore(
+                    &mut stage.storage()?,
+                    &app,
+                    self.exchange.request.binding(),
+                    operation,
+                    fenced_root,
+                )
+            }
+        })();
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let frozen = requested?;
+        checked?;
+        Ok(frozen)
+    }
+
+    pub(in crate::security_epoch) fn announce_restore_stop(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        issuer: &mut super::super::FrozenRoleIssuer,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.completion == Completion::Waiting
+                    && self.exchange.request.purpose() == StoragePeerPurpose::AdminRead,
+                "native_restore_stop_peer_order"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = issuer;
+                anyhow::bail!("native_restore_peer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let body = issuer.stop_message(&mut stage.storage()?, &self.exchange)?;
+                let Body::CurrentStop {
+                    frozen, signature, ..
+                } = &body
+                else {
+                    anyhow::bail!("native_restore_stop_message_required");
+                };
+                let data = stop_data(&self.exchange, frozen, signature)?;
+                let message = stage.storage()?.sign_storage_message(body)?;
+                self.owner
+                    .channel
+                    .send_storage(&message, stage, &mut self.acquisition)?;
+                self.check(stage)?;
+                issuer.check(&mut stage.storage()?)?;
+                self.stopped = Some(data);
+                self.completion = Completion::ControllerStopAnnounced;
+                Ok(())
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn await_admin_result(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<super::super::AdminPeerResult> {
+        let result = (|| {
+            ensure!(
+                self.completion == Completion::Waiting
+                    && self.local.stage.data.role == NativeRole::AppHost
+                    && self.exchange.request.purpose() == StoragePeerPurpose::AdminRead,
+                "native_restore_admin_peer_required"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native_restore_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let (message, process) = self
+                    .owner
+                    .channel
+                    .receive_storage(stage, &mut self.acquisition)?;
+                self.peer
+                    .accept_message(&message, process, stage, &mut self.acquisition)?;
+                self.check(stage)?;
+                let digest = self.exchange.digest()?;
+                match message.body {
+                    Body::CurrentResult { exchange } if exchange == digest => {
+                        self.completion = Completion::AppObserved;
+                        Ok(super::super::AdminPeerResult::Known)
+                    }
+                    Body::CurrentStop {
+                        exchange,
+                        frozen,
+                        signature,
+                    } if exchange == digest => {
+                        ensure!(
+                            frozen.selection.app == self.local
+                                && &frozen.selection.controller == self.peer.statement()
+                                && frozen.policy == self.local.stage.data.policy
+                                && frozen.issuer == self.local.certificate.digest()?
+                                && frozen.cohort == frozen.selection.history_digest()?,
+                            "native_restore_stop_actor_changed"
+                        );
+                        super::super::protocol::verify(
+                            &self.local.certificate.data.public_key,
+                            "restore-issuer-frozen",
+                            &*frozen,
+                            &signature,
+                        )?;
+                        let data = stop_data(&self.exchange, &frozen, &signature)?;
+                        self.stopped = Some(data.clone());
+                        self.completion = Completion::AppStopObserved;
+                        Ok(super::super::AdminPeerResult::Stop(data))
+                    }
+                    _ => anyhow::bail!("native_restore_admin_result_changed"),
+                }
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    // All stop packets use the existing SAME-original current transcript but
+    // distinct signed bodies/states. Ordinary known/ACK/release cannot settle it.
+    fn stop_packet(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+        expected: Completion,
+        next: Completion,
+        send: bool,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.completion == expected && self.stopped.as_ref() == Some(data),
+                "native_restore_stop_changed_or_spent"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (next, send);
+                anyhow::bail!("native_restore_peer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let exchange = self.exchange.digest()?;
+                if send {
+                    let body = if next == Completion::ControllerStoppedTerminal {
+                        Body::CurrentStopReleased {
+                            exchange,
+                            stopped: data.stopped.clone(),
+                        }
+                    } else {
+                        Body::CurrentStopped {
+                            exchange,
+                            stopped: data.stopped.clone(),
+                        }
+                    };
+                    let message = stage.storage()?.sign_storage_message(body)?;
+                    self.owner
+                        .channel
+                        .send_storage(&message, stage, &mut self.acquisition)?;
+                } else {
+                    let (message, process) = self
+                        .owner
+                        .channel
+                        .receive_storage(stage, &mut self.acquisition)?;
+                    self.peer
+                        .accept_message(&message, process, stage, &mut self.acquisition)?;
+                    ensure!(
+                        match message.body {
+                            Body::CurrentStopped {
+                                exchange: actual,
+                                stopped,
+                            } if next == Completion::ControllerStopped =>
+                                actual == exchange && stopped == data.stopped,
+                            Body::CurrentStopReleased {
+                                exchange: actual,
+                                stopped,
+                            } if next == Completion::AppStoppedTerminal =>
+                                actual == exchange && stopped == data.stopped,
+                            _ => false,
+                        },
+                        "native_restore_stop_packet_changed"
+                    );
+                }
+                self.check(stage)?;
+                self.completion = next;
+                Ok(())
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn acknowledge_restore_stop(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+    ) -> Result<()> {
+        self.stop_packet(
+            stage,
+            data,
+            Completion::AppStopObserved,
+            Completion::AppStopAcknowledged,
+            true,
+        )
+    }
+    pub(in crate::security_epoch) fn await_restore_stopped(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<super::super::AuthorityStopData> {
+        let data = self
+            .stopped
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("native_restore_stop_missing"))?;
+        self.stop_packet(
+            stage,
+            &data,
+            Completion::ControllerStopAnnounced,
+            Completion::ControllerStopped,
+            false,
+        )?;
+        Ok(data)
+    }
+    pub(in crate::security_epoch) fn require_restore_stopped(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+    ) -> Result<()> {
+        self.check(stage)?;
+        ensure!(
+            self.completion == Completion::ControllerStopped && self.stopped.as_ref() == Some(data),
+            "native_restore_stop_not_retained"
+        );
+        Ok(())
+    }
+    pub(in crate::security_epoch) fn release_restore_stop(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+    ) -> Result<()> {
+        self.stop_packet(
+            stage,
+            data,
+            Completion::ControllerStopped,
+            Completion::ControllerStoppedTerminal,
+            true,
+        )
+    }
+    pub(in crate::security_epoch) fn await_restore_release(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        data: &super::super::AuthorityStopData,
+    ) -> Result<()> {
+        self.stop_packet(
+            stage,
+            data,
+            Completion::AppStopAcknowledged,
+            Completion::AppStoppedTerminal,
+            false,
+        )
+    }
+    pub(in crate::security_epoch) fn finish_restore_stopped(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        ensure!(
+            matches!(
+                self.completion,
+                Completion::AppStoppedTerminal | Completion::ControllerStoppedTerminal
+            ),
+            "native_restore_stop_not_terminal"
+        );
+        // Closing old authority never makes this old first-holder reusable.
+        self.owner.disposition.refuse();
+        Ok(())
+    }
+
     /// Close before the actual packet operation. An uncertain send/receive
     /// cannot be repeated or converted into a completion by time or DATA.
     fn completion_packet(
@@ -953,6 +1276,31 @@ impl CurrentStoragePeerPhase<'_> {
         self.owner.disposition.refuse();
         self.acquisition.refuse();
     }
+}
+
+#[cfg(target_os = "linux")]
+fn stop_data(
+    exchange: &super::super::storage_peer_wire::CurrentExchange,
+    frozen: &super::super::protocol::FrozenIssuance,
+    signature: &str,
+) -> Result<super::super::AuthorityStopData> {
+    ensure!(
+        frozen.selection.admin_binding == *exchange.request.binding()
+            && frozen.selection.app.digest()? == exchange.app_stage
+            && frozen.selection.controller.digest()? == exchange.controller_stage,
+        "native_restore_stop_exchange_changed"
+    );
+    Ok(super::super::AuthorityStopData {
+        admin_binding: frozen.selection.admin_binding.clone(),
+        operation: frozen.selection.operation.clone(),
+        root: frozen.selection.fenced_root.clone(),
+        stopped: Digest::of(&(
+            "day2-native-stopped-peer-v1",
+            exchange.digest()?,
+            frozen,
+            signature,
+        ))?,
+    })
 }
 
 #[cfg(test)]

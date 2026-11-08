@@ -30,6 +30,66 @@ pub(in crate::security_epoch) struct Request {
     before: Versions,
 }
 
+/// The real stopped App independently checks the fixed initial authority's
+/// fenced successor. This projection is never a stop or writer permission.
+pub(in crate::security_epoch) fn check_fenced_initial(
+    selection: &EpochStore,
+    initial: &InitialRequest,
+    observed: &Snapshot,
+    root_digest: &Digest,
+    operation: &Digest,
+) -> Result<()> {
+    selection.validate()?;
+    initial.validate(selection)?;
+    ensure!(
+        matches!(
+            initial,
+            InitialRequest::CompleteInitialFirstActivation { .. }
+        ),
+        "native_restore_initial_activation_required"
+    );
+    let (mut expected_root, mut expected_sentinel) = initial.records()?;
+    let root = &observed
+        .root
+        .as_ref()
+        .context("native_restore_fenced_root_missing")?
+        .value;
+    let sentinel = &observed
+        .sentinel
+        .as_ref()
+        .context("native_restore_fenced_sentinel_missing")?
+        .value;
+    let Phase::Fenced { fence } = &root.phase else {
+        anyhow::bail!("native_restore_root_not_fenced");
+    };
+    ensure!(
+        fence.operation == *operation
+            && fence.previous_root == Digest::of(&expected_root)?
+            && fence.previous_sentinel == Digest::of(&expected_sentinel)?
+            && fence.previous_epoch == expected_root.epoch
+            && fence.activation_receipt == initial.receipt()?.digest()?,
+        "native_restore_fence_predecessor_changed"
+    );
+    expected_root.epoch = expected_root.epoch.successor()?;
+    expected_root.phase = root.phase.clone();
+    expected_sentinel.phase = root.phase.clone();
+    ensure!(
+        root == &expected_root
+            && sentinel == &expected_sentinel
+            && Digest::of(root)? == *root_digest
+            && observed.activate.as_ref().map(|r| &r.value) == Some(&initial.receipt()?)
+            && observed.create.as_ref().map(|r| &r.value)
+                == Some(
+                    &InitialRequest::CreateInitialAuthority {
+                        bootstrap: initial.bootstrap().clone()
+                    }
+                    .receipt()?
+                ),
+        "native_restore_fence_target_changed"
+    );
+    Ok(())
+}
+
 impl Request {
     /// Select the exact active initial state. This does not authorize its write.
     pub(in crate::security_epoch) fn new(
