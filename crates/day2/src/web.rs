@@ -1039,6 +1039,10 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             response
                 .headers_mut()
                 .append(header::SET_COOKIE, host.session_cookie(&token).parse()?);
+            // Never retain credential-bearing response headers with a shell.
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, "no-store".parse()?);
         }
         host.runtime.web_event(
             at,
@@ -1945,6 +1949,7 @@ impl Host {
         content: Markup,
     ) -> Result<Response> {
         let title = &self.runtime.artifact().page(name)?.title;
+        let startup = self.runtime.artifact().is_startup_shell(name);
         if self.runtime.artifact().contract().format < 5 {
             return Ok(html_response(
                 status,
@@ -1986,35 +1991,54 @@ impl Host {
             crate::web_templates::remote_image_origins(&content.clone().into_string())?;
         let live = self.live_initializer(name, input, &image_origins)?;
         let image_sources = image_origins.join(" ");
+        let head = html! {
+            meta charset="utf-8";
+            meta name="viewport" content="width=device-width, initial-scale=1";
+            title { (title) " | " (self.appearance.name()) }
+            @if startup {
+                // Async: cache validation cannot hold DOMContentLoaded or paint.
+                script type="module" async src="/assets/platform/startup.js" {}
+            }
+            @if let Some(theme) = theme { link rel="stylesheet" href=(theme); }
+            @if let Some(stylesheet) = stylesheet { link rel="stylesheet" href=(stylesheet); }
+            @for module in self.appearance.module_preload_urls() { link rel="modulepreload" href=(module); }
+            script type="module" src=(crate::web_assets::platform_url("/assets/platform/datastar-1.0.1.js")?) {}
+            script type="module" src=(crate::web_assets::platform_url("/assets/platform/forms.js")?) {}
+            script type="module" src=(crate::web_assets::platform_url("/assets/platform/reactive-queries.js")?) {}
+            @if let Some(script) = script { script type="module" src=(script) {} }
+            @if let Some(script) = component_script { script type="module" src=(script) {} }
+        };
+        let body = html! { body { (live) (content) } };
+        // Fingerprint the complete anonymous document, including branding and
+        // platform module versions. No query/actor/form values can reach it.
+        let startup_version =
+            startup.then(|| crate::digest(html! { (head) (body) }.into_string().as_bytes()));
         let mut response = html_response(
             status,
             html! {
                 (maud::DOCTYPE) html lang="en" {
                     head {
-                        meta charset="utf-8";
-                        meta name="viewport" content="width=device-width, initial-scale=1";
-                        title { (title) " | " (self.appearance.name()) }
-                        @if let Some(theme) = theme { link rel="stylesheet" href=(theme); }
-                        @if let Some(stylesheet) = stylesheet { link rel="stylesheet" href=(stylesheet); }
-                        @for module in self.appearance.module_preload_urls() { link rel="modulepreload" href=(module); }
-                        script type="module" src=(crate::web_assets::platform_url("/assets/platform/datastar-1.0.1.js")?) {}
-                        script type="module" src=(crate::web_assets::platform_url("/assets/platform/forms.js")?) {}
-                        script type="module" src=(crate::web_assets::platform_url("/assets/platform/reactive-queries.js")?) {}
-                        @if let Some(script) = script { script type="module" src=(script) {} }
-                        // Component behavior has a separate admitted entrypoint.
-                        @if let Some(script) = component_script { script type="module" src=(script) {} }
+                        @if let Some(version) = &startup_version {
+                            meta name="day2-startup-version" content=(version);
+                        }
+                        (head)
                     }
-                    body { (live) (content) }
+                    (body)
                 }
             },
         );
+        if let Some(version) = startup_version {
+            response
+                .headers_mut()
+                .insert("x-day2-startup-version", version.parse()?);
+        }
         // App modules have ordinary browser authority. This policy governs loaded
         // resources, not the behavior of admitted JavaScript or Datastar expressions.
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}/assets/platform/reactive-queries.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}/assets/platform/reactive-queries.js {}/assets/platform/startup.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)
@@ -2101,7 +2125,12 @@ impl Host {
                 !proof.is_empty(),
                 || {
                     let content = self.page(name, input, session, at, None, None)?;
-                    self.app_response(StatusCode::OK, name, input, session, content)
+                    let mut response =
+                        self.app_response(StatusCode::OK, name, input, session, content)?;
+                    if proof.is_empty() && self.runtime.artifact().is_startup_shell(name) {
+                        cache_startup_shell(&mut response)?;
+                    }
+                    Ok(response)
                 },
             );
         }
@@ -3043,6 +3072,56 @@ fn fresh_page_query(
         }
     }
     unreachable!("bounded page query attempts")
+}
+
+fn cache_startup_shell(response: &mut Response) -> Result<()> {
+    if response.status() == StatusCode::OK && !response.headers().contains_key(header::SET_COOKIE) {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, "private, max-age=86400".parse()?);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod startup_shell_response_tests {
+    use super::*;
+
+    #[test]
+    fn startup_shell_cache_does_not_make_errors_or_cookie_responses_cacheable() -> Result<()> {
+        let mut shell = html_response(StatusCode::OK, html! { p { "Anonymous" } });
+        cache_startup_shell(&mut shell)?;
+        assert_eq!(
+            secure(shell).headers()[header::CACHE_CONTROL],
+            "private, max-age=86400"
+        );
+        for status in [
+            StatusCode::FORBIDDEN,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::FOUND,
+        ] {
+            let mut response = html_response(status, html! { p { "Failure" } });
+            cache_startup_shell(&mut response)?;
+            let response = secure(response);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key("x-day2-startup-version"));
+        }
+        let mut cookie = html_response(StatusCode::OK, html! { p { "Anonymous" } });
+        cookie
+            .headers_mut()
+            .insert(header::SET_COOKIE, "session=fixture; HttpOnly".parse()?);
+        cache_startup_shell(&mut cookie)?;
+        assert_eq!(secure(cookie).headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            secure(html_response(
+                StatusCode::OK,
+                html! { p { "Ordinary page" } }
+            ))
+            .headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+        Ok(())
+    }
 }
 
 fn secure(mut response: Response) -> Response {

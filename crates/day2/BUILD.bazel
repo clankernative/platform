@@ -27,6 +27,7 @@ COMPILE_INPUTS = [
     "//:assets/icons/shield-check.svg",
     "//:assets/navigation.js",
     "//:assets/reactive-queries.js",
+    "//:assets/startup.js",
     "//:assets/restore-passkey-export.js",
     "//:assets/web.css",
     "//:build-dependencies/clanker-ui.json",

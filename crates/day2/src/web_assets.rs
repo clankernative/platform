@@ -449,6 +449,10 @@ fn platform_data(path: &str) -> Option<(&'static str, &'static [u8])> {
             "text/javascript",
             include_bytes!("../../../assets/forms.js"),
         ),
+        "/assets/platform/startup.js" => (
+            "text/javascript",
+            include_bytes!("../../../assets/startup.js"),
+        ),
         "/assets/platform/reactive-queries.js" => (
             "text/javascript",
             include_bytes!("../../../assets/reactive-queries.js"),
