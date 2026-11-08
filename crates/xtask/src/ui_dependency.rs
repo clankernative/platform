@@ -400,7 +400,10 @@ mod tests {
         let directory = root.path().join(".cache/day2-release");
         fs::create_dir_all(&directory)?;
         for (bytes, message) in [
-            (b"corrupt".to_vec(), "managed dependency archive size mismatch"),
+            (
+                b"corrupt".to_vec(),
+                "managed dependency archive size mismatch",
+            ),
             (
                 vec![0; pin.bytes as usize],
                 "managed dependency archive digest mismatch",

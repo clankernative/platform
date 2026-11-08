@@ -21,8 +21,11 @@ pub(crate) fn cached(root: &Path, digest: &str, limit: u64) -> Result<Option<Vec
         "regular bounded release archive required"
     );
     let mut bytes = Vec::new();
-    let mut input = fs::File::open(&path)?
-        .take(limit.checked_add(1).context("release byte limit overflow")?);
+    let mut input = fs::File::open(&path)?.take(
+        limit
+            .checked_add(1)
+            .context("release byte limit overflow")?,
+    );
     input.read_to_end(&mut bytes)?;
     ensure!(bytes.len() as u64 <= limit, "release archive byte limit");
     Ok(Some(bytes))
