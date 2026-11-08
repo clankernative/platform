@@ -1380,3 +1380,96 @@ fn exact_file_replay_reports_a_real_recorder_cut_without_exporting_control_evide
     assert!(replay_history_file(&altered).is_err());
     Ok(())
 }
+
+#[test]
+fn native_input_data_binds_scope_generation_intent_and_selected_artifact_without_authority()
+-> Result<()> {
+    let fixture = Fixture::new()?;
+    let encoded: serde_json::Value = crate::json::decode(fixture.cut.encoded()?.as_bytes())?;
+    let intent: crate::security_epoch::kernel::restore::Intent =
+        crate::json::decode(&serde_json::to_vec(&encoded["intent"])?)?;
+    let make = || super::super::Input {
+        source: tempfile::tempfile().expect("unqualified binding fixture descriptor"),
+        operation: intent.operation.clone(),
+        namespace: fixture.namespace.clone(),
+        source_epoch: intent.archive.security_epoch,
+        database: intent.archive.image.clone(),
+        target_incarnation: intent.target_incarnation.clone(),
+    };
+    fixture.selection().require_native_input(&make(), &intent)?;
+    for change in 0..6 {
+        let mut input = make();
+        match change {
+            0 => input.namespace.binding_generation += 1,
+            1 => input.namespace.app = "other-app".to_owned().try_into()?,
+            2 => input.operation = Digest::new(b"other-operation"),
+            3 => input.source_epoch += 1,
+            4 => input.database = Digest::new(b"other-source-image"),
+            _ => input.target_incarnation = Digest::new(b"other-target"),
+        }
+        assert!(
+            fixture
+                .selection()
+                .require_native_input(&input, &intent)
+                .is_err()
+        );
+    }
+    // No actual native owner, file or key availability was constructed here.
+    Ok(())
+}
+
+#[test]
+fn native_report_uses_actual_complete_sql_reset_and_frozen_image_as_data_only() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let encoded: serde_json::Value = crate::json::decode(fixture.cut.encoded()?.as_bytes())?;
+    let intent: crate::security_epoch::kernel::restore::Intent =
+        crate::json::decode(&serde_json::to_vec(&encoded["intent"])?)?;
+    let reset = fixture.reset()?;
+    let frozen = fixture.db.serialize(MAIN_DB)?;
+    let projection = super::super::Projection {
+        image: Digest::new(&frozen),
+        bytes: frozen.len() as u64,
+        target_incarnation: intent.target_incarnation.clone(),
+        reset,
+    };
+    drop(frozen);
+    let input = super::super::Input {
+        source: tempfile::tempfile().expect("unqualified binding fixture descriptor"),
+        operation: intent.operation.clone(),
+        namespace: fixture.namespace.clone(),
+        source_epoch: intent.archive.security_epoch,
+        database: intent.archive.image.clone(),
+        target_incarnation: intent.target_incarnation.clone(),
+    };
+    let report = fixture
+        .selection()
+        .native_report(&input, &intent, &projection)?;
+    assert_eq!(report.archive, intent.archive.image);
+    assert_ne!(report.archive, intent.archive.full_archive_digest);
+    assert_eq!(report.image, projection.image);
+    assert_eq!(
+        report.schema.as_str(),
+        fixture.artifact.contract().schema_digest
+    );
+    assert_eq!(report.artifact.as_str(), fixture.artifact.id());
+    assert_eq!(report.target_epoch, 2);
+    let mut changed = projection.clone();
+    changed.target_incarnation = Digest::new(b"other-target");
+    assert!(
+        fixture
+            .selection()
+            .native_report(&input, &intent, &changed)
+            .is_err()
+    );
+    let mut changed = projection.clone();
+    changed.reset.closed_oauth_originals += 1;
+    assert_ne!(
+        fixture
+            .selection()
+            .native_report(&input, &intent, &changed)?
+            .reset_observation,
+        report.reset_observation
+    );
+    // Report/counters/bytes are observations. They grant no native role or writer.
+    Ok(())
+}

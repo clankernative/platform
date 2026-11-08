@@ -919,7 +919,11 @@ impl QueryServer {
                         Box::new(FixtureKeys(iap.keys.clone())),
                     )?;
                     let server = day2::web::LocalServer::bind_edge_listener(
-                        runtime, listener, &edge, verifier, 1,
+                        std::sync::Arc::new(runtime),
+                        listener,
+                        &edge,
+                        verifier,
+                        1,
                     )?;
                     server
                         .serve(async {

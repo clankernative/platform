@@ -118,6 +118,17 @@ impl TryFrom<String> for UpdateTime {
     }
 }
 
+impl UpdateTime {
+    /// Provider-version ordering DATA only, never a native/approval clock.
+    /// Compare parsed instants: different fractional spellings must not turn
+    /// the same old version into a newly committed successor.
+    pub(in crate::security_epoch) fn is_strictly_after_data(&self, before: &Self) -> Result<bool> {
+        let format = &time::format_description::well_known::Rfc3339;
+        Ok(time::OffsetDateTime::parse(&self.0, format)?
+            > time::OffsetDateTime::parse(&before.0, format)?)
+    }
+}
+
 impl From<UpdateTime> for String {
     fn from(value: UpdateTime) -> Self {
         value.0

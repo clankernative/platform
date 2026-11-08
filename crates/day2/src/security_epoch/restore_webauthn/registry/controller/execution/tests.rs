@@ -583,11 +583,11 @@ fn wiring(source: &str) -> bool {
             "check_sqlite",
         ],
     ) && ordered(
-        "check_fenced",
+        "check_transition",
         &[
             "eq",
             "observe",
-            "Fenced",
+            "authentication",
             "AuthenticationBorrow",
             "TrustedKey",
             "verified_completion_snapshot",
@@ -596,10 +596,18 @@ fn wiring(source: &str) -> bool {
             "observe",
             "refuse",
         ],
-    ) && ordered(
-        "check_current",
-        &["eq", "completion_snapshot", "set", "refuse"],
-    ) && source.contains("let Some (facts) = result ? else")
+    ) && methods
+        .get("authentication")
+        .is_some_and(|calls| calls == &["Fenced", "Writing", "WriterMay", "Reserving"])
+        && ordered("check_fenced", &["Fenced", "check_transition"])
+        && ordered("check_writer", &["Writing", "check_transition"])
+        && ordered("check_writer_may", &["WriterMay", "check_transition"])
+        && ordered("check_reservation", &["Reserving", "check_transition"])
+        && ordered(
+            "check_current",
+            &["eq", "completion_snapshot", "set", "refuse"],
+        )
+        && source.contains("let Some (facts) = result ? else")
         && source.contains("current . 0 == self . version && current . 1 == self . snapshot")
         && complete == ["db | & key | id | & self . ceremony . request | at | assertion"]
 }
@@ -622,12 +630,28 @@ fn actual_execution_units_keep_opaque_native_loan_commit_postchecks_and_purpose(
             "unreachable!()",
         ),
         (
-            "AuthenticationReader :: Fenced (& mut * reader)",
-            "AuthenticationReader :: Active (& mut * reader)",
+            "AuthenticationReader :: Fenced (reader)",
+            "AuthenticationReader :: Active (reader)",
         ),
         (
             "let native = reader . check_local () ;",
             "let native = Ok (()) ;",
+        ),
+        (
+            "TransitionReader :: Writing (reader)",
+            "TransitionReader :: Fenced (reader)",
+        ),
+        (
+            "TransitionReader :: WriterMay (reader)",
+            "TransitionReader :: Writing (reader)",
+        ),
+        (
+            "AuthenticationReader :: Writing (reader)",
+            "AuthenticationReader :: Fenced (reader)",
+        ),
+        (
+            "AuthenticationReader :: WriterMay (reader)",
+            "AuthenticationReader :: Writing (reader)",
         ),
         ("key . check_sqlite (& tx) ? ;", ""),
         (

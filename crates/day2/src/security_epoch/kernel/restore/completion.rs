@@ -81,6 +81,9 @@ enum Format {
 
 /// A single original request, never renewed after expiry, replacement or an
 /// uncertain send. Reconciliation below classifies history, not permission.
+// Copying preserves exact historical DATA; actual native owners and their
+// one-shot dispatch/original/postchecks remain separate and non-cloneable.
+#[derive(Clone)]
 pub(in crate::security_epoch) struct Request {
     original: super::Request,
     source: Snapshot,
@@ -223,6 +226,9 @@ impl Request {
 
 /// Create-only terminal record under the ORIGINAL restore operation. Complete
 /// and refuse compete for that one key; neither changes any authority record.
+// Copying preserves exact historical DATA; actual native owners and their
+// one-shot dispatch/original/postchecks remain separate and non-cloneable.
+#[derive(Clone)]
 pub(in crate::security_epoch) struct Plan {
     pub before: State,
     pub receipt: Receipt,

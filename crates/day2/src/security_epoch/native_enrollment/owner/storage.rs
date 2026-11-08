@@ -13,6 +13,16 @@ use crate::security_epoch::native_enrollment::{runtime, storage_peer_wire::Origi
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 
+// Ordinary storage signing cannot fabricate a restore continuation from
+// public comparison DATA. Restore messages require the retained rendezvous.
+fn require_ordinary_storage_body(body: &Body) -> Result<()> {
+    ensure!(
+        !matches!(body, Body::Restore { .. }),
+        "restore_peer_requires_owning_supplier"
+    );
+    Ok(())
+}
+
 impl EnrolledStorageStage<'_, '_> {
     pub(in crate::security_epoch::native_enrollment) fn begin_initial_holder_attempt(
         &mut self,
@@ -90,6 +100,7 @@ impl EnrolledStorageStage<'_, '_> {
     ) -> Result<Message> {
         let result = (|| {
             self.require_storage_peer_purpose()?;
+            require_ordinary_storage_body(&body)?;
             body.require_stage_purpose(self.stage.purpose)?;
             ensure!(
                 body.sender_role() == self.stage.owner.role,
@@ -314,5 +325,106 @@ impl EnrolledStorageStage<'_, '_> {
             self.stage.acquisition.as_mut().refuse();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod restore_signer_exclusion_tests {
+    use super::*;
+    use crate::security_epoch::native_enrollment::restore_peer_wire::RestoreBody;
+    use quote::ToTokens;
+
+    #[test]
+    fn generic_signer_refuses_restore_acceptance_data_and_preserves_ordinary_storage() {
+        let digest = Digest::new(b"public-restore-comparison");
+        let restore = Body::Restore {
+            payload: RestoreBody::PreparedAccepted {
+                exchange: digest.clone(),
+                confirmation: digest.clone(),
+                cohort: digest.clone(),
+                effective_deadline_ns: 100,
+            },
+        };
+        assert!(require_ordinary_storage_body(&restore).is_err());
+        for body in [
+            Body::Complete {
+                exchange: digest.clone(),
+            },
+            Body::CurrentReady {
+                exchange: digest.clone(),
+            },
+            Body::Accepted { exchange: digest },
+        ] {
+            require_ordinary_storage_body(&body).unwrap();
+        }
+    }
+
+    fn guarded_before_key(source: &str) -> bool {
+        let file = syn::parse_file(source).unwrap();
+        let signer = file
+            .items
+            .iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == "sign_storage_message" => {
+                        Some(method)
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap();
+        let tokens = signer.block.to_token_stream().to_string();
+        let Some(guard) = tokens.find("require_ordinary_storage_body (& body) ?") else {
+            return false;
+        };
+        let Some(statement) = tokens.find("self . storage_statement_data () ?") else {
+            return false;
+        };
+        let Some(sign) = tokens.find(". sign (") else {
+            return false;
+        };
+        guard < statement
+            && statement < sign
+            && tokens.contains("self . stage . owner . refused = true")
+            && tokens.contains("self . stage . acquisition . as_mut () . refuse ()")
+    }
+
+    #[test]
+    fn actual_generic_signer_cannot_bypass_the_closed_restore_supplier() {
+        let source = include_str!("storage.rs");
+        assert!(guarded_before_key(source));
+        let file = syn::parse_file(source).unwrap();
+        let actual = file
+            .items
+            .iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == "sign_storage_message" => {
+                        Some(method.to_token_stream().to_string())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap();
+        let wrap = |body: &str| format!("impl EnrolledStorageStage<'_, '_> {{ {body} }}");
+        let target = "require_ordinary_storage_body (& body) ? ;";
+        assert_eq!(actual.matches(target).count(), 1);
+        assert!(guarded_before_key(&wrap(&actual)));
+        let removed = actual.replacen(target, "", 1);
+        assert!(!guarded_before_key(&wrap(&removed)));
+        let start = removed.find("let sender =").unwrap();
+        let after_statement = start + removed[start..].find(';').unwrap() + 1;
+        assert!(removed[start..after_statement].contains("self . storage_statement_data () ?"));
+        let mut moved = removed;
+        moved.insert_str(after_statement, &format!(" {target}"));
+        assert!(!guarded_before_key(&wrap(&moved)));
+        // Actual production classifier and call-site controls only; no stage,
+        // private key, native owner or restore permission is manufactured.
     }
 }

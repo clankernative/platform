@@ -1,18 +1,44 @@
 //! Mechanical custody of the first SQLite connection. This resource supplies
 //! no admission, immutable contents, writer exclusion or Controller read loan.
-use super::{NativeSqliteKeeper, opened_files};
+use super::{NativeSqliteKeeper, SqliteKeeperLayout, opened_files};
 use anyhow::{Result, ensure};
 use rusqlite::Connection;
 use std::{fs::File, os::unix::fs::MetadataExt};
 
-const WAL: &str = "day2-initial.sqlite-wal";
-const SHM: &str = "day2-initial.sqlite-shm";
-const JOURNAL: &str = "day2-initial.sqlite-journal";
+struct Names {
+    #[cfg(test)]
+    main: &'static str,
+    wal: &'static str,
+    shm: &'static str,
+    journal: &'static str,
+}
+
+impl SqliteKeeperLayout {
+    fn names(self) -> Names {
+        match self {
+            Self::Initial => Names {
+                #[cfg(test)]
+                main: "day2-initial.sqlite",
+                wal: "day2-initial.sqlite-wal",
+                shm: "day2-initial.sqlite-shm",
+                journal: "day2-initial.sqlite-journal",
+            },
+            Self::Restored => Names {
+                #[cfg(test)]
+                main: "app.sqlite",
+                wal: "app.sqlite-wal",
+                shm: "app.sqlite-shm",
+                journal: "app.sqlite-journal",
+            },
+        }
+    }
+}
 
 // Only the actual App file owner calls this before the first SQLite open. A
 // pre-existing sidecar is never adopted, recovered or relabelled as our birth.
-pub(crate) fn require_unopened(directory: &File) -> Result<()> {
-    for name in [WAL, SHM, JOURNAL] {
+pub(crate) fn require_unopened(directory: &File, layout: SqliteKeeperLayout) -> Result<()> {
+    let names = layout.names();
+    for name in [names.wal, names.shm, names.journal] {
         match rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
             Err(rustix::io::Errno::NOENT) => {}
             _ => anyhow::bail!("native_sqlite_sidecar_before_birth"),
@@ -59,10 +85,16 @@ fn require_sidecar(
 }
 
 impl NativeSqliteKeeper {
+    /// Mechanical MAIN comparison for the actual birth loan after SQLite
+    /// legitimately created sidecars. No owner or writer is returned here.
+    pub(crate) fn require_original_main(db: &Connection, original: &File) -> Result<()> {
+        require_main(&opened_files::held(db)?, original)
+    }
+
     /// Inspect the first opened MAIN before configuration/schema/WAL work.
     /// The caller still supplies its actual admitted App file/phase; this is
     /// a comparison of existing resources, never a scalar-to-owner factory.
-    pub(crate) fn require_initial_main(db: &Connection, original: &File) -> Result<()> {
+    pub(crate) fn require_creator_main(db: &Connection, original: &File) -> Result<()> {
         let files = opened_files::held(db)?;
         require_main(&files, original)?;
         ensure!(
@@ -113,9 +145,10 @@ impl NativeSqliteKeeper {
             ensure!(actual == *retained, "native_sqlite_keeper_handles_changed");
             require_main(&actual, original)?;
             let uid = original.metadata()?.uid();
+            let names = self.layout.names();
             require_sidecar(
                 directory,
-                WAL,
+                names.wal,
                 actual
                     .journal
                     .ok_or_else(|| anyhow::anyhow!("native_sqlite_keeper_wal_missing"))?,
@@ -123,13 +156,17 @@ impl NativeSqliteKeeper {
             )?;
             require_sidecar(
                 directory,
-                SHM,
+                names.shm,
                 actual
                     .shm
                     .ok_or_else(|| anyhow::anyhow!("native_sqlite_keeper_shm_missing"))?,
                 uid,
             )?;
-            match rustix::fs::statat(directory, JOURNAL, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            match rustix::fs::statat(
+                directory,
+                names.journal,
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+            ) {
                 Err(rustix::io::Errno::NOENT) => {}
                 _ => anyhow::bail!("native_sqlite_unexpected_rollback_journal"),
             }
@@ -189,7 +226,7 @@ mod tests {
     use std::{fs, os::unix::fs::OpenOptionsExt, path::Path};
 
     // Actual SQLite resources only, with no native role/file grant fixture.
-    fn opened(path: &Path) -> Result<(File, NativeSqliteKeeper)> {
+    fn opened(path: &Path, layout: SqliteKeeperLayout) -> Result<(File, NativeSqliteKeeper)> {
         let original = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -198,6 +235,7 @@ mod tests {
             .open(path)?;
         let keeper = NativeSqliteKeeper {
             connection: super::super::open_existing(path)?,
+            layout,
             files: None,
             refused: false,
             local: std::marker::PhantomData,
@@ -215,14 +253,40 @@ mod tests {
     }
 
     #[test]
+    fn active_main_comparison_uses_actual_first_sqlite_handle_and_refuses_a_foreign_inode()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().canonicalize()?;
+        let (original, mut keeper) =
+            opened(&path.join("app.sqlite"), SqliteKeeperLayout::Restored)?;
+        NativeSqliteKeeper::require_creator_main(&keeper.connection, &original)?;
+        activate(&mut keeper)?;
+        NativeSqliteKeeper::require_original_main(&keeper.connection, &original)?;
+        let foreign = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path.join("other.sqlite"))?;
+        assert!(NativeSqliteKeeper::require_original_main(&keeper.connection, &foreign).is_err());
+        // A separate connection really opened on the foreign MAIN also cannot
+        // impersonate the retained original. This is resource DATA only.
+        let other = super::super::open_existing(&path.join("other.sqlite"))?;
+        assert!(NativeSqliteKeeper::require_original_main(&other, &original).is_err());
+        assert!(keeper.connection.is_autocommit());
+        keeper.check(&File::open(&path)?, &original)?;
+        Ok(())
+    }
+
+    #[test]
     fn first_connection_keeps_actual_sidecars_alive_without_a_business_transaction() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let fixture_root = directory.path().canonicalize()?;
         let anchor = File::open(fixture_root.as_path())?;
-        require_unopened(&anchor)?;
+        require_unopened(&anchor, SqliteKeeperLayout::Initial)?;
         let path = fixture_root.as_path().join("day2-initial.sqlite");
-        let (original, mut keeper) = opened(&path)?;
-        NativeSqliteKeeper::require_initial_main(&keeper.connection, &original)?;
+        let (original, mut keeper) = opened(&path, SqliteKeeperLayout::Initial)?;
+        NativeSqliteKeeper::require_creator_main(&keeper.connection, &original)?;
         activate(&mut keeper)?;
         assert!(keeper.connection.is_autocommit());
         keeper.check(&anchor, &original)?;
@@ -263,20 +327,88 @@ mod tests {
     }
 
     #[test]
+    fn both_fixed_layouts_keep_the_same_creator_and_auxiliary_handles_without_adoption()
+    -> Result<()> {
+        for layout in [SqliteKeeperLayout::Initial, SqliteKeeperLayout::Restored] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().canonicalize()?;
+            let anchor = File::open(&path)?;
+            let names = layout.names();
+            require_unopened(&anchor, layout)?;
+            let (original, mut keeper) = opened(&path.join(names.main), layout)?;
+            NativeSqliteKeeper::require_creator_main(&keeper.connection, &original)?;
+            activate(&mut keeper)?;
+            keeper.check(&anchor, &original)?;
+            let before = keeper.cohort_data()?;
+            // A later complete unit can share the actual retained cohort.
+            // This is a mechanical test, never native writer authorization.
+            let mut other = super::super::open_existing(&path.join(names.main))?;
+            let tx = other.transaction()?;
+            assert_eq!(
+                tx.query_row("SELECT count(*) FROM current_admin", [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
+            let observed = opened_files::cohort(&opened_files::snapshot(&tx)?)?;
+            assert!(observed == before);
+            tx.rollback()?;
+            other.close().map_err(|(_, error)| error)?;
+            keeper.check(&anchor, &original)?;
+            assert!(require_unopened(&anchor, layout).is_err());
+            // Merely selecting another filename set cannot adopt the same
+            // SQLite connection/cohort, nor can restoring the enum repair it.
+            keeper.layout = match layout {
+                SqliteKeeperLayout::Initial => SqliteKeeperLayout::Restored,
+                SqliteKeeperLayout::Restored => SqliteKeeperLayout::Initial,
+            };
+            assert!(keeper.check(&anchor, &original).is_err());
+            keeper.layout = layout;
+            assert!(keeper.check(&anchor, &original).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn either_layout_refuses_preexisting_sidecars_before_the_first_sqlite_open() -> Result<()> {
+        for layout in [SqliteKeeperLayout::Initial, SqliteKeeperLayout::Restored] {
+            let directory = tempfile::tempdir()?;
+            let anchor = File::open(directory.path())?;
+            let names = layout.names();
+            for name in [names.wal, names.shm, names.journal] {
+                let path = directory.path().join(name);
+                fs::write(&path, b"already-owned")?;
+                assert!(require_unopened(&anchor, layout).is_err());
+                assert_eq!(fs::read(&path)?, b"already-owned");
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn existing_sidecar_or_another_main_cannot_supply_the_first_cohort() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let fixture_root = directory.path().canonicalize()?;
         let anchor = File::open(fixture_root.as_path())?;
-        for name in [WAL, SHM, JOURNAL] {
+        for name in {
+            let names = SqliteKeeperLayout::Initial.names();
+            [names.wal, names.shm, names.journal]
+        } {
             fs::write(fixture_root.as_path().join(name), b"foreign")?;
-            assert!(require_unopened(&anchor).is_err());
+            assert!(require_unopened(&anchor, SqliteKeeperLayout::Initial).is_err());
             fs::remove_file(fixture_root.as_path().join(name))?;
         }
-        let (original, keeper) = opened(&fixture_root.as_path().join("day2-initial.sqlite"))?;
-        let (foreign, other) = opened(&fixture_root.as_path().join("foreign.sqlite"))?;
-        NativeSqliteKeeper::require_initial_main(&keeper.connection, &original)?;
-        assert!(NativeSqliteKeeper::require_initial_main(&other.connection, &original).is_err());
-        assert!(NativeSqliteKeeper::require_initial_main(&keeper.connection, &foreign).is_err());
+        let (original, keeper) = opened(
+            &fixture_root.as_path().join("day2-initial.sqlite"),
+            SqliteKeeperLayout::Initial,
+        )?;
+        let (foreign, other) = opened(
+            &fixture_root.as_path().join("foreign.sqlite"),
+            SqliteKeeperLayout::Initial,
+        )?;
+        NativeSqliteKeeper::require_creator_main(&keeper.connection, &original)?;
+        assert!(NativeSqliteKeeper::require_creator_main(&other.connection, &original).is_err());
+        assert!(NativeSqliteKeeper::require_creator_main(&keeper.connection, &foreign).is_err());
         Ok(())
     }
 
@@ -285,10 +417,15 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let fixture_root = directory.path().canonicalize()?;
         let anchor = File::open(fixture_root.as_path())?;
-        let (original, mut keeper) = opened(&fixture_root.as_path().join("day2-initial.sqlite"))?;
+        let (original, mut keeper) = opened(
+            &fixture_root.as_path().join("day2-initial.sqlite"),
+            SqliteKeeperLayout::Initial,
+        )?;
         activate(&mut keeper)?;
         keeper.check(&anchor, &original)?;
-        let shm = fixture_root.as_path().join(SHM);
+        let shm = fixture_root
+            .as_path()
+            .join(SqliteKeeperLayout::Initial.names().shm);
         let retained = fixture_root.as_path().join("held-shm");
         fs::rename(&shm, &retained)?;
         fs::copy(&retained, &shm)?;
@@ -306,7 +443,7 @@ mod tests {
         let fixture_root = directory.path().canonicalize()?;
         let anchor = File::open(fixture_root.as_path())?;
         let path = fixture_root.as_path().join("day2-initial.sqlite");
-        let (original, mut keeper) = opened(&path)?;
+        let (original, mut keeper) = opened(&path, SqliteKeeperLayout::Initial)?;
         activate(&mut keeper)?;
         let mut reader = super::super::open_existing(&path)?;
         let snapshot = reader.transaction()?;

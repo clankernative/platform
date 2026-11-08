@@ -9,14 +9,14 @@ use crate::oauth::fresh_auth::FreshIntent;
 use crate::oauth::native_http::response_io::{Operation, Transport};
 use crate::security_epoch::{
     native_enrollment::{EnrolledRoleStage, NativeRole},
-    serving::{CurrentServingPhase, ResponseIdentity},
+    serving::{CurrentServingPhase, ResponseIdentity, RestoredResponseCurrent},
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
 use std::{
     cell::{Cell, RefCell, RefMut},
     collections::BTreeMap,
-    rc::Rc,
+    rc::{Rc, Weak},
 };
 
 /// A shared routing handle to one actual value, not a clone of that value.
@@ -207,10 +207,103 @@ struct Lease<T: LeaseMaterial> {
     key: String,
     identity: ResponseIdentity,
     refused: Rc<Cell<bool>>,
+    live: Rc<Cell<bool>>,
     owners: Option<T>,
     attempt: Option<String>,
     known: bool,
 }
+
+/// Negative identity of one actual retained response lease. Sharing it grants
+/// nothing: it only joins the same Sink and observes the actual abort latch.
+pub(super) struct ConsumerLeaseOrigin {
+    identity: ResponseIdentity,
+    refused: Rc<Cell<bool>>,
+    live: Weak<Cell<bool>>,
+    consumer: LeaseConsumer,
+}
+
+enum LeaseConsumer {
+    Human(day2_capabilities::Digest),
+    Runtime,
+}
+
+impl ConsumerLeaseOrigin {
+    pub(super) fn require_human(&self, sink: &Sink, intent: &FreshIntent) -> Result<()> {
+        let result = (|| {
+            self.check(sink)?;
+            let expected = intent.commitment()?;
+            ensure!(
+                matches!(&self.consumer, LeaseConsumer::Human(actual) if actual == &expected),
+                "native response lease human original changed"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse_sink(sink);
+        }
+        result
+    }
+
+    pub(super) fn require_runtime(&self, sink: &Sink) -> Result<()> {
+        self.check(sink)?;
+        if !matches!(&self.consumer, LeaseConsumer::Runtime) {
+            self.refuse_sink(sink);
+            anyhow::bail!("native human response cannot become Runtime");
+        }
+        Ok(())
+    }
+
+    pub(super) fn check(&self, sink: &Sink) -> Result<()> {
+        if !self.identity.same(&sink.identity) || self.live.upgrade().is_none_or(|live| !live.get())
+        {
+            // An old/foreign negative projection has no right to burn the
+            // other Sink or a replacement lease on that same routing identity.
+            self.refuse();
+            anyhow::bail!("native response lease origin changed or refused");
+        }
+        if self.refused.get() || !sink.is_open() {
+            self.refuse_sink(sink);
+            anyhow::bail!("native response lease origin changed or refused");
+        }
+        Ok(())
+    }
+
+    pub(super) fn refuse(&self) {
+        self.refused.set(true);
+    }
+
+    pub(super) fn refuse_sink(&self, sink: &Sink) {
+        let same_live = self.identity.same(&sink.identity)
+            && self.live.upgrade().is_some_and(|live| live.get());
+        self.refuse();
+        if same_live {
+            sink.state.set(SinkState::Refused);
+            sink.request.refuse();
+            sink.response_tickets.refuse();
+        }
+    }
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <ConsumerLeaseOrigin as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
 
 pub(super) fn is_empty() -> bool {
     OWNERS.with(|owners| owners.borrow().reserved.is_empty())
@@ -280,6 +373,7 @@ impl<T: LeaseMaterial> Lease<T> {
             key: key.into(),
             identity: identity.clone(),
             refused: Rc::new(Cell::new(false)),
+            live: Rc::new(Cell::new(true)),
             owners: None,
             attempt: attempt.map(str::to_owned),
             known: false,
@@ -308,6 +402,36 @@ impl<T: LeaseMaterial> Lease<T> {
 }
 
 impl Lease<Owners> {
+    fn consumer_origin(&self) -> Result<ConsumerLeaseOrigin> {
+        ensure!(
+            self.owners.is_some() && !self.known && !self.refused.get() && self.live.get(),
+            "native response lease unavailable"
+        );
+        let owners = self
+            .owners
+            .as_ref()
+            .context("native response lease owner missing")?;
+        let consumer = match &self.attempt {
+            Some(attempt) => {
+                let original = owners
+                    .originals
+                    .get(attempt)
+                    .context("native response lease original missing")?;
+                original
+                    .response
+                    .require_bound(&original.response.intent, &self.identity)?;
+                LeaseConsumer::Human(original.response.intent.commitment()?)
+            }
+            None => LeaseConsumer::Runtime,
+        };
+        Ok(ConsumerLeaseOrigin {
+            identity: self.identity.clone(),
+            refused: self.refused.clone(),
+            live: Rc::downgrade(&self.live),
+            consumer,
+        })
+    }
+
     fn take(
         sink: &Sink,
         app: &str,
@@ -369,6 +493,9 @@ impl Lease<Owners> {
 
 impl<T: LeaseMaterial> Drop for Lease<T> {
     fn drop(&mut self) {
+        // Every disposition, including known return and a missing owner,
+        // retires this exact lease incarnation before any early return.
+        self.live.set(false);
         let Some(mut owners) = self.owners.take() else {
             return;
         };
@@ -398,43 +525,134 @@ impl<T: LeaseMaterial> Drop for Lease<T> {
 }
 
 struct ResponseBorrow<'scope, 'role, 'original> {
-    stage: &'scope mut EnrolledRoleStage<'role>,
-    current: &'scope mut dyn CurrentServingPhase,
-    original: Option<&'scope mut OriginalPhase<'original>>,
-    policy: &'scope day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
-    store: &'scope day2_capabilities::security_epoch::EpochStore,
+    source: ResponseSource<'scope, 'role, 'original>,
     refused: Rc<Cell<bool>>,
     known: bool,
 }
 
+enum ResponseSource<'scope, 'role, 'original> {
+    Initial {
+        stage: &'scope mut EnrolledRoleStage<'role>,
+        current: &'scope mut dyn CurrentServingPhase,
+        original: Option<&'scope mut OriginalPhase<'original>>,
+        policy: &'scope day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &'scope day2_capabilities::security_epoch::EpochStore,
+    },
+    Restored(&'scope mut dyn RestoredResponseCurrent),
+}
+
+impl<'scope, 'role, 'original> ResponseBorrow<'scope, 'role, 'original> {
+    // The actual fixed driver supplies the SAME native scope and its actual
+    // lease latch. Arc/Runtime/identity DATA cannot construct the sealed view.
+    // The scope additionally checks its own saved request-routing latch.
+    fn from_restored<'parent, 'request, 'saved>(
+        current: &'scope mut crate::security_epoch::serving::RestoredServingScope<
+            'parent,
+            'request,
+            'saved,
+        >,
+        runtime: &crate::store::Runtime,
+        refused: Rc<Cell<bool>>,
+    ) -> Result<Self> {
+        let current = current.borrow_response(runtime)?;
+        if refused.get() {
+            current.refuse();
+            anyhow::bail!("native response aborted");
+        }
+        Ok(Self {
+            source: ResponseSource::Restored(current),
+            refused,
+            known: false,
+        })
+    }
+}
+
 impl ResponseBorrow<'_, '_, '_> {
+    async fn drive<T: hyper::rt::Write + Unpin>(
+        &mut self,
+        transport: &mut Transport<T>,
+        mut request: (u64, Operation),
+    ) -> Result<u64> {
+        ensure!(
+            request.1 != Operation::Complete,
+            "native response completed before first I/O"
+        );
+        self.check()?;
+        self.arm()?;
+        loop {
+            if request.1 == Operation::Complete {
+                self.complete()?;
+                break Ok(request.0);
+            }
+            transport
+                .execute(request.0, request.1, || self.check())
+                .await?;
+            request = transport.next().await?;
+        }
+    }
+
     fn check(&mut self) -> Result<()> {
         ensure!(!self.refused.get(), "native response aborted");
-        self.stage
-            .check_selection(self.policy, self.store, NativeRole::AppHost)?;
-        // A real counter read on the SAME authentication, not a cached
-        // observation.remaining check or a new role/read acquisition.
-        self.current.reobserve(self.stage)?;
-        if let Some(original) = &mut self.original {
-            // This remains the last consuming check before the actual I/O,
-            // including a human original shorter than the role interval.
-            original.check_with_native(self.stage, original.wall)?;
+        match &mut self.source {
+            ResponseSource::Initial {
+                stage,
+                current,
+                original,
+                policy,
+                store,
+            } => {
+                stage.check_selection(policy, store, NativeRole::AppHost)?;
+                // A real counter read on the SAME authentication, not a cached
+                // observation.remaining check or a new role/read acquisition.
+                current.reobserve(stage)?;
+                if let Some(original) = original {
+                    // Last consuming original check before actual I/O.
+                    original.check_with_native(stage, original.wall)?;
+                }
+            }
+            ResponseSource::Restored(current) => {
+                // The concrete scope owns the saved native stage and mandatory
+                // human original. Its reobserve checks the old observation and
+                // performs all independent posts, ending at that same original.
+                current.reobserve()?;
+            }
         }
         ensure!(!self.refused.get(), "native response aborted");
         Ok(())
     }
 
+    fn arm(&mut self) -> Result<()> {
+        match &mut self.source {
+            ResponseSource::Initial { current, stage, .. } => current.arm(stage),
+            ResponseSource::Restored(current) => current.arm(),
+        }
+    }
+
     fn complete(&mut self) -> Result<()> {
         self.check()?;
-        if let Some(original) = &mut self.original {
-            original.phase = Phase::ResponseComplete;
-            original.check_with_native(self.stage, original.wall)?;
-        }
-        self.stage
-            .check_selection(self.policy, self.store, NativeRole::AppHost)?;
-        self.current.finish_known(self.stage)?;
-        if let Some(original) = &mut self.original {
-            original.check_with_native(self.stage, original.wall)?;
+        match &mut self.source {
+            ResponseSource::Initial {
+                stage,
+                current,
+                original,
+                policy,
+                store,
+            } => {
+                if let Some(original) = original.as_mut() {
+                    original.phase = Phase::ResponseComplete;
+                    original.check_with_native(stage, original.wall)?;
+                }
+                stage.check_selection(policy, store, NativeRole::AppHost)?;
+                current.finish_known(stage)?;
+                if let Some(original) = original.as_mut() {
+                    original.check_with_native(stage, original.wall)?;
+                }
+            }
+            ResponseSource::Restored(current) => {
+                current.response_complete()?;
+                current.finish_known()?;
+                current.check()?;
+            }
         }
         ensure!(!self.refused.get(), "native response aborted");
         self.known = true;
@@ -445,9 +663,16 @@ impl ResponseBorrow<'_, '_, '_> {
 impl Drop for ResponseBorrow<'_, '_, '_> {
     fn drop(&mut self) {
         if !self.known {
-            self.current.refuse();
-            if let Some(original) = &mut self.original {
-                original.refuse();
+            match &mut self.source {
+                ResponseSource::Initial {
+                    current, original, ..
+                } => {
+                    current.refuse();
+                    if let Some(original) = original {
+                        original.refuse();
+                    }
+                }
+                ResponseSource::Restored(current) => current.refuse(),
             }
             self.refused.set(true);
         }
@@ -538,27 +763,17 @@ impl Sink {
                     async |current, same| {
                         transport.scope_entered();
                         let mut guard = ResponseBorrow {
-                            stage: same,
-                            current,
-                            original: original.as_mut(),
-                            policy: &policy,
-                            store: &store,
+                            source: ResponseSource::Initial {
+                                stage: same,
+                                current,
+                                original: original.as_mut(),
+                                policy: &policy,
+                                store: &store,
+                            },
                             refused,
                             known: false,
                         };
-                        guard.check()?;
-                        guard.current.arm(guard.stage)?;
-                        let mut request = first;
-                        loop {
-                            if request.1 == Operation::Complete {
-                                guard.complete()?;
-                                break Ok(request.0);
-                            }
-                            transport
-                                .execute(request.0, request.1, || guard.check())
-                                .await?;
-                            request = transport.next().await?;
-                        }
+                        guard.drive(&mut transport, first).await
                     },
                 )
                 .await?;
@@ -601,6 +816,269 @@ impl Sink {
         self.state.set(SinkState::Complete);
         terminal.complete();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod restored_response_source_tests {
+    use super::*;
+    use quote::ToTokens;
+
+    #[test]
+    fn actual_lease_projection_derives_human_binding_only_from_its_retained_owner() {
+        let file = syn::parse_file(include_str!("response.rs")).unwrap();
+        let actual = file
+            .items
+            .iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if item.self_ty.to_token_stream().to_string() != "Lease < Owners >" {
+                    return None;
+                }
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == "consumer_origin" => Some(item),
+                    _ => None,
+                })
+            })
+            .unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            ensure!(
+                self.owners.is_some() && !self.known && !self.refused.get() && self.live.get(),
+                "native response lease unavailable"
+            );
+            let owners = self
+                .owners
+                .as_ref()
+                .context("native response lease owner missing")?;
+            let consumer = match &self.attempt {
+                Some(attempt) => {
+                    let original = owners
+                        .originals
+                        .get(attempt)
+                        .context("native response lease original missing")?;
+                    original
+                        .response
+                        .require_bound(&original.response.intent, &self.identity)?;
+                    LeaseConsumer::Human(original.response.intent.commitment()?)
+                }
+                None => LeaseConsumer::Runtime,
+            };
+            Ok(ConsumerLeaseOrigin {
+                identity: self.identity.clone(),
+                refused: self.refused.clone(),
+                live: Rc::downgrade(&self.live),
+                consumer,
+            })
+        });
+        fn normalize(stream: proc_macro2::TokenStream) -> String {
+            let mut tokens = stream.into_iter().collect::<Vec<_>>();
+            if matches!(tokens.last(), Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == ',')
+            {
+                tokens.pop();
+            }
+            tokens
+                .into_iter()
+                .map(|token| match token {
+                    proc_macro2::TokenTree::Group(group) => {
+                        format!("{:?}[{}]", group.delimiter(), normalize(group.stream()))
+                    }
+                    token => token.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        let guarded = |block: &syn::Block| {
+            normalize(block.to_token_stream()) == normalize(expected.to_token_stream())
+        };
+        assert!(guarded(&actual.block));
+        for cut in 0..actual.block.stmts.len() {
+            let mut changed = actual.block.clone();
+            changed.stmts.remove(cut);
+            assert!(!guarded(&changed));
+        }
+        let mut dropped = actual.block.clone();
+        let syn::Stmt::Local(selected) = &mut dropped.stmts[2] else {
+            panic!("actual kind");
+        };
+        let syn::Expr::Match(selected) = selected.init.as_mut().unwrap().expr.as_mut() else {
+            panic!("actual retained attempt");
+        };
+        let syn::Expr::Block(human) = selected.arms[0].body.as_mut() else {
+            panic!("actual human owner");
+        };
+        human.block.stmts.remove(1);
+        assert!(!guarded(&dropped));
+        let mut runtime = actual.block.clone();
+        runtime.stmts[2] = syn::parse_quote!(let consumer = LeaseConsumer::Runtime;);
+        assert!(!guarded(&runtime));
+    }
+
+    #[test]
+    fn response_lease_origin_is_negative_only_and_cannot_ignore_an_actual_abort_or_other_sink() {
+        // Only negative identity/latch DATA; no Owners, native role, Current,
+        // context or response permission is supplied by this fixture.
+        for foreign in [false, true] {
+            let sink = Sink::new();
+            let live = Rc::new(Cell::new(true));
+            let actual = ConsumerLeaseOrigin {
+                identity: sink.identity.clone(),
+                refused: Rc::new(Cell::new(false)),
+                live: Rc::downgrade(&live),
+                consumer: LeaseConsumer::Runtime,
+            };
+            actual.check(&sink).unwrap();
+            if foreign {
+                let other = Sink::new();
+                assert!(actual.check(&other).is_err());
+                assert!(
+                    other.is_open(),
+                    "foreign negative view cannot burn another Sink"
+                );
+            } else {
+                actual.refused.set(true);
+            }
+            assert!(actual.check(&sink).is_err());
+            assert!(!sink.is_open());
+            assert!(sink.request.finish().is_err());
+        }
+    }
+
+    fn method(name: &str) -> syn::ImplItemFn {
+        let file = syn::parse_file(include_str!("response.rs")).unwrap();
+        let methods = file
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty, syn::Type::Path(path)
+                if path.path.segments.len() == 1 && path.path.segments[0].ident == "ResponseBorrow") =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .flat_map(|item| item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(methods.len(), 1);
+        methods.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn actual_restored_response_borrow_requires_the_http_context_and_actual_lease_latch() {
+        let actual = method("from_restored");
+        let expected: syn::Block = syn::parse_quote!({
+            let current = current.borrow_response(runtime)?;
+            if refused.get() {
+                current.refuse();
+                anyhow::bail!("native response aborted");
+            }
+            Ok(Self {
+                source: ResponseSource::Restored(current),
+                refused,
+                known: false,
+            })
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let syn::FnArg::Typed(current) = &actual.sig.inputs[0] else {
+            panic!("actual concrete scope");
+        };
+        assert!(matches!(&*current.ty, syn::Type::Reference(reference)
+            if matches!(&*reference.elem, syn::Type::Path(path)
+                if path.path.segments.last().unwrap().ident == "RestoredServingScope")));
+        for index in 0..2 {
+            let mut bypass = actual.block.clone();
+            bypass.stmts.remove(index);
+            assert!(!guarded(&bypass));
+        }
+        assert!(matches!(actual.vis, syn::Visibility::Inherited));
+    }
+
+    #[test]
+    fn one_actual_transport_loop_requires_first_io_and_guarded_completion_for_both_sources() {
+        let actual = method("drive");
+        let expected: syn::Block = syn::parse_quote!({
+            ensure!(
+                request.1 != Operation::Complete,
+                "native response completed before first I/O"
+            );
+            self.check()?;
+            self.arm()?;
+            loop {
+                if request.1 == Operation::Complete {
+                    self.complete()?;
+                    break Ok(request.0);
+                }
+                transport
+                    .execute(request.0, request.1, || self.check())
+                    .await?;
+                request = transport.next().await?;
+            }
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for index in 0..3 {
+            let mut bypass = actual.block.clone();
+            bypass.stmts.remove(index);
+            assert!(!guarded(&bypass));
+        }
+        let mut no_completion = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::Loop(actual_loop), _) = &mut no_completion.stmts[3] else {
+            panic!("loop");
+        };
+        let syn::Stmt::Expr(syn::Expr::If(completed), _) = &mut actual_loop.body.stmts[0] else {
+            panic!("completion");
+        };
+        completed.then_branch.stmts.remove(0);
+        assert!(!guarded(&no_completion));
+    }
+
+    #[test]
+    fn actual_restored_completion_checks_the_original_and_known_result_without_releasing_ownership()
+    {
+        let actual = method("complete");
+        let expected_branch: syn::Expr = syn::parse_quote!({
+            current.response_complete()?;
+            current.finish_known()?;
+            current.check()?;
+        });
+        let branch = |body: &syn::Block| {
+            body.stmts.iter().find_map(|statement| {
+                let syn::Stmt::Expr(syn::Expr::Match(selected), _) = statement else {
+                    return None;
+                };
+                selected.arms.iter().find_map(|arm| {
+                    let expected_pat: syn::Pat =
+                        syn::parse_quote!(ResponseSource::Restored(current));
+                    (arm.pat.to_token_stream().to_string()
+                        == expected_pat.to_token_stream().to_string())
+                    .then(|| arm.body.to_token_stream().to_string())
+                })
+            })
+        };
+        let expected = expected_branch.to_token_stream().to_string();
+        assert!(branch(&actual.block).is_some_and(|actual| actual == expected));
+        let mut early_finish = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::Match(selected), _) = &mut early_finish.stmts[1] else {
+            panic!("source");
+        };
+        let arm = selected.arms.last_mut().unwrap();
+        *arm.body = syn::parse_quote!({
+            current.finish()?;
+        });
+        assert!(branch(&early_finish).is_some_and(|actual| actual != expected));
+        // Native scope and HTTP request completion remain distinct consuming
+        // operations owned outside this nonescaping transport borrow.
     }
 }
 
@@ -651,6 +1129,150 @@ mod lease_tests {
             refused,
             dropped,
         }
+    }
+
+    #[test]
+    fn actual_live_lease_binding_refuses_runtime_human_and_foreign_intent_swaps() -> Result<()> {
+        let intent = FreshIntent::fixture_oauth(
+            &crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "alice".into(),
+            },
+            "same-actual-original",
+            &day2_capabilities::Digest::new(b"lease intent"),
+            "https://security.example.com",
+            5,
+            50,
+        )?;
+        let foreign = FreshIntent::fixture_oauth(
+            &crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "alice".into(),
+            },
+            "other-actual-original",
+            &day2_capabilities::Digest::new(b"lease intent"),
+            "https://security.example.com",
+            5,
+            50,
+        )?;
+        // Actual generic lease/liveness machinery with DATA-only material;
+        // this supplies no native owner, Current or positive permission.
+        for human in [false, true] {
+            let Fixture { registry, .. } = fixture();
+            let sink = Sink::new();
+            let lease = Lease::acquire(registry, "calendar", &sink.identity, None)?;
+            let origin = ConsumerLeaseOrigin {
+                identity: lease.identity.clone(),
+                refused: lease.refused.clone(),
+                live: Rc::downgrade(&lease.live),
+                consumer: if human {
+                    LeaseConsumer::Human(intent.commitment()?)
+                } else {
+                    LeaseConsumer::Runtime
+                },
+            };
+            if human {
+                origin.require_human(&sink, &intent)?;
+                assert!(origin.require_runtime(&sink).is_err());
+            } else {
+                origin.require_runtime(&sink)?;
+                assert!(origin.require_human(&sink, &intent).is_err());
+            }
+            assert!(origin.refused.get() && !sink.is_open());
+            assert!(origin.require_human(&sink, &intent).is_err());
+            drop(lease);
+        }
+        let Fixture { registry, .. } = fixture();
+        let sink = Sink::new();
+        let lease = Lease::acquire(registry, "calendar", &sink.identity, None)?;
+        let origin = ConsumerLeaseOrigin {
+            identity: lease.identity.clone(),
+            refused: lease.refused.clone(),
+            live: Rc::downgrade(&lease.live),
+            consumer: LeaseConsumer::Human(intent.commitment()?),
+        };
+        origin.require_human(&sink, &intent)?;
+        assert!(origin.require_human(&sink, &foreign).is_err());
+        assert!(origin.require_human(&sink, &intent).is_err());
+        assert!(!sink.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn response_origin_observes_registry_clear_while_a_sql_unit_is_open() -> Result<()> {
+        // The actual generic reservation/Drop machinery with DATA material,
+        // plus real SQLite. This is a negative-latch control, not native SQL.
+        let Fixture { registry, .. } = fixture();
+        let sink = Sink::new();
+        let lease = Lease::acquire(registry.clone(), "calendar", &sink.identity, None)?;
+        let origin = ConsumerLeaseOrigin {
+            identity: lease.identity.clone(),
+            refused: lease.refused.clone(),
+            live: Rc::downgrade(&lease.live),
+            consumer: LeaseConsumer::Runtime,
+        };
+        origin.check(&sink)?;
+        let mut db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE unchanged(value INTEGER)")?;
+        let tx = db.transaction()?;
+        registry.borrow_mut().clear();
+        let called = Cell::new(false);
+        let later = (|| -> Result<()> {
+            origin.check(&sink)?;
+            called.set(true);
+            tx.execute("INSERT INTO unchanged VALUES(1)", [])?;
+            Ok(())
+        })();
+        assert!(later.is_err());
+        assert!(!called.get());
+        tx.rollback()?;
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM unchanged", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        drop(lease);
+        Ok(())
+    }
+
+    #[test]
+    fn returned_or_lost_response_lease_origin_cannot_validate_or_refuse_a_replacement() -> Result<()>
+    {
+        for known in [false, true] {
+            let Fixture { registry, .. } = fixture();
+            let sink = Sink::new();
+            let mut lease = Lease::acquire(registry.clone(), "calendar", &sink.identity, None)?;
+            let old = ConsumerLeaseOrigin {
+                identity: lease.identity.clone(),
+                refused: lease.refused.clone(),
+                live: Rc::downgrade(&lease.live),
+                consumer: LeaseConsumer::Runtime,
+            };
+            old.check(&sink)?;
+            lease.known = known;
+            drop(lease);
+            assert!(old.live.upgrade().is_none());
+            assert!(old.check(&sink).is_err());
+            assert!(
+                sink.is_open(),
+                "stale view cannot poison a replacement Sink"
+            );
+            if known {
+                let next = Lease::acquire(registry.clone(), "calendar", &sink.identity, None)?;
+                let current = ConsumerLeaseOrigin {
+                    identity: next.identity.clone(),
+                    refused: next.refused.clone(),
+                    live: Rc::downgrade(&next.live),
+                    consumer: LeaseConsumer::Runtime,
+                };
+                current.check(&sink)?;
+                assert!(old.check(&sink).is_err());
+                assert!(!next.refused.get());
+                current.check(&sink)?;
+                drop(next);
+            }
+        }
+        Ok(())
     }
 
     #[test]

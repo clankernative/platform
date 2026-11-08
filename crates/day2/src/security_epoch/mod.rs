@@ -37,6 +37,7 @@ mod restore_staging;
 #[cfg(test)]
 pub(crate) use restore_staging::MemoryAdmission;
 pub(crate) use restore_staging::MemoryHook;
+pub(crate) use restore_staging::RestoreArtifactAdmission;
 mod restore_webauthn;
 mod runtime_profile;
 mod seed_core;
@@ -59,7 +60,7 @@ pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort, Retaine
 pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
     ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData, CurrentAppServingPhase,
-    FencedReadUnit,
+    FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit,
 };
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;

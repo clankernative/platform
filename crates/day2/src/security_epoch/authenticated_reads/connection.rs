@@ -48,6 +48,74 @@ pub(in crate::security_epoch) struct CounterRequest<'connection> {
     request: CounterUseGuard,
 }
 
+/// A restored ten-record observation retains the actual request's BEFORE-IO
+/// budget. Its commitment is comparison DATA; neither parsed bytes nor that
+/// digest can construct a Current, native role, physical owner or new clock.
+pub(in crate::security_epoch) struct RestoredEpochObservation {
+    selection: Digest,
+    reader: Digest,
+    snapshot: Digest,
+    budget: Budget,
+    valid: bool,
+    local: std::marker::PhantomData<Rc<()>>,
+}
+
+impl RestoredEpochObservation {
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.valid = false;
+    }
+
+    pub(in crate::security_epoch) fn snapshot_data(&self) -> &Digest {
+        &self.snapshot
+    }
+
+    fn remaining(
+        &mut self,
+        selection: &EpochStore,
+        names: &firestore::RestoreWriterPeerRead,
+        port: &mut impl Port,
+    ) -> Result<()> {
+        let result =
+            (|| self.remaining_bound(&Digest::of(selection)?, &names.binding_data()?, port))();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    fn remaining_bound(
+        &mut self,
+        selection: &Digest,
+        reader: &Digest,
+        port: &mut impl Port,
+    ) -> Result<()> {
+        let result = (|| {
+            self.require_binding(selection, reader)?;
+            self.budget.remaining(port)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    fn require_binding(&mut self, selection: &Digest, reader: &Digest) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "restored_epoch_observation_refused");
+            ensure!(
+                self.selection == *selection && self.reader == *reader,
+                "restored_epoch_observation_binding_changed"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+}
+
 // Own the actual request acquisition independently of the lexical connection
 // borrow. Unfinished Drop refuses both its real original and connection gate.
 struct CounterUseGuard {
@@ -291,6 +359,115 @@ impl CounterRequest<'_> {
         result
     }
 
+    /// Read the complete restored-writer lineage on this actual admitted
+    /// connection and original. No initial bootstrap request or observation is
+    /// manufactured. The independent post runs even on transport/codec error.
+    pub(in crate::security_epoch) fn read_restored(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        selection: &EpochStore,
+        names: &firestore::RestoreWriterPeerRead,
+    ) -> Result<RestoredEpochObservation> {
+        let requested: Result<RestoredEpochObservation> = (|| {
+            ensure!(
+                self.connection.store == *selection && names.matches_selection_data(selection),
+                "epoch_counter_restored_selection_changed"
+            );
+            self.check(stage)?;
+            let mut budget = self.request.acquisition.budget()?;
+            let mut port = CounterReadPort {
+                request: self,
+                stage,
+            };
+            let bytes = budget.call(
+                &mut port,
+                &names.endpoint_data(),
+                &names.strong_body_data()?,
+            )?;
+            let snapshot = names.response_commitment_data(&bytes)?;
+            budget.remaining_decoding(&mut port)?;
+            Ok(RestoredEpochObservation {
+                selection: Digest::of(selection)?,
+                reader: names.binding_data()?,
+                snapshot,
+                budget,
+                valid: true,
+                local: std::marker::PhantomData,
+            })
+        })();
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let observed = requested?;
+        checked?;
+        Ok(observed)
+    }
+
+    /// The caller checks its OLD observation before replacing it with a fresh
+    /// read. A fresh response can never repair this original or refusal latch.
+    pub(in crate::security_epoch) fn check_restored_observation(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        names: &firestore::RestoreWriterPeerRead,
+        observation: &mut RestoredEpochObservation,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check(stage)?;
+            let selection = self.connection.store.clone();
+            observation.remaining(
+                &selection,
+                names,
+                &mut CounterReadPort {
+                    request: self,
+                    stage,
+                },
+            )
+        })();
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            observation.refuse();
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    /// One fixed read-only confirmation on THIS retained request and original.
+    /// It supplies no write port or owner reconstructed from reservation DATA.
+    pub(in crate::security_epoch) fn confirm_restore_reservation(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        selection: &EpochStore,
+        names: &firestore::RestoreConfirmationNames,
+    ) -> Result<crate::security_epoch::kernel::Snapshot> {
+        let requested = (|| {
+            ensure!(
+                self.connection.store == *selection && names.matches_selection(selection),
+                "epoch_counter_restore_selection_changed"
+            );
+            self.check(stage)?;
+            let mut budget = self.request.acquisition.budget()?;
+            let mut port = CounterReadPort {
+                request: self,
+                stage,
+            };
+            let bytes = budget.call(&mut port, &names.endpoint(), &names.body()?)?;
+            let observed = names.confirm(&bytes)?;
+            budget.remaining_decoding(&mut port)?;
+            Ok(observed.snapshot)
+        })();
+        // Evaluate the real postcheck even if the read, decoding or equality
+        // check failed. Preserve that first failure and permanently refuse.
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let snapshot = requested?;
+        checked?;
+        Ok(snapshot)
+    }
+
     pub(in crate::security_epoch) fn finish(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -412,6 +589,7 @@ const _: () = {
     local_owner!(CounterConnection);
     local_owner!(CounterRequest<'static>);
     local_owner!(CounterUseGuard);
+    local_owner!(RestoredEpochObservation);
 };
 
 impl Port for CounterReadPort<'_, '_, '_, '_> {
@@ -449,6 +627,215 @@ mod tests {
     use std::{cell::Cell, rc::Rc, time::Duration};
     use syn::parse::Parser;
     use syn::visit::Visit;
+
+    // Clock/binding adapter tests only: these construct no native role,
+    // enrolled CounterConnection, real read receipt, physical owner or Current.
+    struct ObservationClock {
+        domain: Digest,
+        now: Duration,
+    }
+
+    impl crate::security_epoch::firestore::Port for ObservationClock {
+        fn sample(&mut self) -> anyhow::Result<crate::security_epoch::firestore::Sample> {
+            Ok(crate::security_epoch::firestore::Sample {
+                domain: self.domain.clone(),
+                elapsed: self.now,
+            })
+        }
+
+        fn post(
+            &mut self,
+            _: &str,
+            _: &[u8],
+            _: &mut crate::security_epoch::firestore::Budget,
+            _: usize,
+        ) -> anyhow::Result<crate::security_epoch::firestore::EpochReply> {
+            anyhow::bail!("observation_clock_has_no_transport")
+        }
+
+        fn refuse(&mut self) {}
+    }
+
+    fn observation_clock_fixture() -> (super::RestoredEpochObservation, ObservationClock) {
+        use crate::security_epoch::firestore::{Budget, Sample};
+        let domain = Digest::new(b"actual-lower-original");
+        let budget = Budget::from_native_origin(
+            Sample {
+                domain: domain.clone(),
+                elapsed: Duration::from_secs(10),
+            },
+            Duration::from_secs(10),
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        (
+            super::RestoredEpochObservation {
+                selection: Digest::new(b"selected-store"),
+                reader: Digest::new(b"complete-restored-reader"),
+                snapshot: Digest::new(b"complete-ten-record-commitment"),
+                budget,
+                valid: true,
+                local: std::marker::PhantomData,
+            },
+            ObservationClock {
+                domain,
+                now: Duration::from_secs(10),
+            },
+        )
+    }
+
+    #[test]
+    fn restored_observation_keeps_before_io_origin_and_permanent_clock_refusal() {
+        let (mut observed, mut port) = observation_clock_fixture();
+        let selection = observed.selection.clone();
+        let reader = observed.reader.clone();
+        port.now = Duration::from_secs(14); // Delivery consumed four seconds.
+        observed
+            .remaining_bound(&selection, &reader, &mut port)
+            .unwrap();
+        assert_eq!(
+            observed.snapshot_data(),
+            &Digest::new(b"complete-ten-record-commitment")
+        );
+        port.now = Duration::from_secs(15); // Equality is refusal, not a new lease.
+        assert!(
+            observed
+                .remaining_bound(&selection, &reader, &mut port)
+                .is_err()
+        );
+        port.now = Duration::from_secs(14);
+        assert!(
+            observed
+                .remaining_bound(&selection, &reader, &mut port)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn restored_observation_replay_matches_independent_binding_clock_model() {
+        // Independent model retains its own scalar original/deadline/highwater
+        // and latch. It never reads the production Budget or validity fields.
+        for seed in 0..32_u64 {
+            let (mut observed, mut port) = observation_clock_fixture();
+            let selection = Digest::new(b"selected-store");
+            let reader = Digest::new(b"complete-restored-reader");
+            let mut valid = true;
+            let mut highwater = 10_u64;
+            for step in 0..12_u64 {
+                let event = (seed.wrapping_mul(7) + step.wrapping_mul(11)) % 9;
+                let time = match event {
+                    0 => 9,
+                    1 => 15,
+                    2 => 16,
+                    _ => 10 + step % 5,
+                };
+                let selected = if event == 3 {
+                    Digest::new(b"foreign-store")
+                } else {
+                    selection.clone()
+                };
+                let names = if event == 4 {
+                    Digest::new(b"same-selectors-different-activation")
+                } else {
+                    reader.clone()
+                };
+                let domain = if event == 5 {
+                    Digest::new(b"foreign-original")
+                } else {
+                    Digest::new(b"actual-lower-original")
+                };
+                let expected = valid
+                    && event != 3
+                    && event != 4
+                    && event != 5
+                    && time >= highwater
+                    && time < 15;
+                if expected {
+                    highwater = time;
+                } else {
+                    valid = false;
+                }
+                port.now = Duration::from_secs(time);
+                port.domain = domain;
+                let actual = observed
+                    .remaining_bound(&selected, &names, &mut port)
+                    .is_ok();
+                assert_eq!(actual, expected, "seed={seed}, step={step}, event={event}");
+            }
+        }
+    }
+
+    fn restored_read_post_order(source: &str) -> bool {
+        fn is_error_call(value: &syn::Expr, name: &str) -> bool {
+            matches!(value,syn::Expr::MethodCall(c) if c.method=="is_err" && c.args.is_empty()
+                && matches!(&*c.receiver,syn::Expr::Path(p) if p.path.is_ident(name)))
+        }
+        let file = syn::parse_file(source).unwrap();
+        let function = file.items.iter().find_map(|item| match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="CounterRequest")) => item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident=="read_restored" => Some(method), _=>None,
+            }), _=>None,
+        }).unwrap();
+        let statements = &function.block.stmts;
+        matches!(statements.first(),Some(syn::Stmt::Local(local))
+            if matches!(&local.pat,syn::Pat::Type(typed)
+                if matches!(&*typed.pat,syn::Pat::Ident(p) if p.ident=="requested")))
+            && matches!(statements.get(1),Some(syn::Stmt::Local(local)) if matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="checked") && local.init.as_ref().is_some_and(|i|matches!(&*i.expr,syn::Expr::MethodCall(c) if c.method=="check")))
+            && matches!(statements.get(2),Some(syn::Stmt::Expr(syn::Expr::If(branch),_))
+                if matches!(&*branch.cond,syn::Expr::Binary(e) if matches!(e.op,syn::BinOp::Or(_))
+                    && is_error_call(&e.left,"requested") && is_error_call(&e.right,"checked"))
+                && branch.else_branch.is_none() && branch.then_branch.stmts.len()==1
+                && matches!(branch.then_branch.stmts.first(),Some(syn::Stmt::Expr(syn::Expr::MethodCall(c),Some(_)))
+                    if c.method=="refuse" && c.args.is_empty() && matches!(&*c.receiver,syn::Expr::Path(p) if p.path.is_ident("self"))))
+            && matches!(statements.get(3),Some(syn::Stmt::Local(local)) if matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="observed") && local.init.as_ref().is_some_and(|i|matches!(&*i.expr,syn::Expr::Try(t) if matches!(&*t.expr,syn::Expr::Path(p) if p.path.is_ident("requested")))))
+            && matches!(statements.get(4),Some(syn::Stmt::Expr(syn::Expr::Try(t),Some(_))) if matches!(&*t.expr,syn::Expr::Path(p) if p.path.is_ident("checked")))
+    }
+
+    #[test]
+    fn actual_restored_reader_captures_original_before_io_and_posts_even_after_error() {
+        let source = include_str!("connection.rs");
+        let calls = method_calls(source, "CounterRequest", "read_restored");
+        for required in [
+            "budget",
+            "call",
+            "response_commitment_data",
+            "remaining_decoding",
+            "binding_data",
+        ] {
+            assert_eq!(
+                calls.iter().filter(|call| *call == required).count(),
+                1,
+                "{required}"
+            );
+        }
+        assert_eq!(calls.iter().filter(|call| *call == "check").count(), 2);
+        for denied in ["begin", "acquire", "finish", "read", "commit", "rollback"] {
+            assert!(!calls.iter().any(|call| call == denied), "{denied}");
+        }
+        let position = |name: &str| calls.iter().position(|call| call == name).unwrap();
+        assert!(position("budget") < position("call"));
+        assert!(position("call") < position("response_commitment_data"));
+        assert!(position("response_commitment_data") < position("remaining_decoding"));
+        assert!(restored_read_post_order(source));
+        // Exact production target, not a copy of the helper or a fixture string.
+        let prefix = source
+            .split_once("    pub(in crate::security_epoch) fn read_restored(")
+            .unwrap()
+            .0;
+        let body = &source[prefix.len()..];
+        let marker = "let checked = self.check(stage);";
+        let changed = body.replacen(marker, "", 1);
+        assert_ne!(body, changed);
+        assert!(!restored_read_post_order(&format!("{prefix}{changed}")));
+        let marker = "self.refuse();";
+        let changed = body.replacen(marker, "", 1);
+        assert_ne!(body, changed);
+        assert!(!restored_read_post_order(&format!("{prefix}{changed}")));
+        let marker = "let observed = requested?;";
+        let changed = body.replacen(marker, "return requested;", 1);
+        assert_ne!(body, changed);
+        assert!(!restored_read_post_order(&format!("{prefix}{changed}")));
+    }
 
     #[test]
     fn counter_request_drop_and_unwind_refuse_the_same_actual_clock_and_gate() {
@@ -498,6 +885,56 @@ mod tests {
         ] {
             assert!(counter_read_route(denied).is_err());
         }
+    }
+
+    #[test]
+    fn restore_confirmation_keeps_the_actual_read_request_and_unconditional_postcheck() {
+        let source = include_str!("connection.rs");
+        let name = "confirm_restore_reservation";
+        let calls = method_calls(source, "CounterRequest", name);
+        assert_eq!(calls.iter().filter(|call| *call == "budget").count(), 1);
+        assert_eq!(calls.iter().filter(|call| *call == "call").count(), 1);
+        assert_eq!(calls.iter().filter(|call| *call == "confirm").count(), 1);
+        assert_eq!(calls.iter().filter(|call| *call == "check").count(), 2);
+        for denied in [
+            "request",
+            "acquire",
+            "begin",
+            "finish",
+            "commit_and_readback",
+            "post",
+        ] {
+            assert!(!calls.iter().any(|call| call == denied));
+        }
+        // The actual source keeps both Results alive until the permanent
+        // refusal decision; `requested?` must not bypass the real postcheck.
+        let parsed = syn::parse_file(source).unwrap();
+        let method = parsed.items.iter().find_map(|item| match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty,syn::Type::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="CounterRequest")) => item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident==name => Some(method),
+                _=>None,
+            }),
+            _=>None,
+        }).unwrap();
+        fn checked_before_try(body: &syn::Block) -> bool {
+            let statements = &body.stmts;
+            matches!(statements.get(1), Some(syn::Stmt::Local(local))
+                if matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="checked")
+                && local.init.as_ref().is_some_and(|i|matches!(&*i.expr,syn::Expr::MethodCall(call) if call.method=="check")))
+                && matches!(
+                    statements.get(2),
+                    Some(syn::Stmt::Expr(syn::Expr::If(_), _))
+                )
+                && matches!(statements.get(3), Some(syn::Stmt::Local(local))
+                    if local.init.as_ref().is_some_and(|i|matches!(&*i.expr,syn::Expr::Try(_))))
+        }
+        assert!(checked_before_try(&method.block));
+        let mut reordered = method.block.clone();
+        reordered.stmts.swap(1, 3);
+        assert!(!checked_before_try(&reordered));
+        let mut missing = method.block.clone();
+        missing.stmts.remove(1);
+        assert!(!checked_before_try(&missing));
     }
 
     fn method_calls(source: &str, owner: &str, method: &str) -> Vec<String> {
