@@ -16,6 +16,12 @@ use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::Digest;
 use std::time::Duration;
 
+mod stop;
+pub(crate) use stop::FencedReadUnit;
+pub(in crate::security_epoch) use stop::{
+    FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
+};
+
 const EXECUTION_CHALLENGE_SECONDS: i64 = 300;
 
 /// Server-owned one-attempt challenge, never current authority across the wait.

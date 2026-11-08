@@ -19,10 +19,37 @@ use std::{
 mod execution;
 pub(in crate::security_epoch) use execution::{ControllerExecutionCeremony, ExecutionCompletion};
 
-struct AuthenticationBorrow<'borrow, 'metadata, 'storage, 'role> {
-    reader: &'borrow mut ControllerAdminReader<'metadata, 'storage, 'role>,
+struct AuthenticationBorrow<'borrow, 'fenced, 'metadata, 'storage, 'role> {
+    reader: AuthenticationReader<'borrow, 'fenced, 'metadata, 'storage, 'role>,
     held: &'borrow file::Held,
     files: &'borrow mut crate::security_epoch::AuthenticationStoreFiles,
+}
+
+enum AuthenticationReader<'borrow, 'fenced, 'metadata, 'storage, 'role> {
+    Active(&'borrow mut ControllerAdminReader<'metadata, 'storage, 'role>),
+    Fenced(
+        &'borrow mut crate::security_epoch::bootstrap::FencedRegistryLoan<
+            'fenced,
+            'metadata,
+            'storage,
+            'role,
+        >,
+    ),
+}
+
+impl AuthenticationReader<'_, '_, '_, '_, '_> {
+    fn check_local(&mut self) -> Result<()> {
+        match self {
+            Self::Active(reader) => reader.check_registry_local(),
+            Self::Fenced(reader) => reader.check_local(),
+        }
+    }
+    fn refuse(&mut self) {
+        match self {
+            Self::Active(reader) => reader.refuse(),
+            Self::Fenced(reader) => reader.refuse(),
+        }
+    }
 }
 
 pub(in crate::security_epoch) enum SigningUnit<'a> {
@@ -41,12 +68,12 @@ pub(in crate::security_epoch) enum SigningUnit<'a> {
     },
 }
 
-impl NativeBorrow for AuthenticationBorrow<'_, '_, '_, '_> {
+impl NativeBorrow for AuthenticationBorrow<'_, '_, '_, '_, '_> {
     fn check_local(&mut self) -> Result<()> {
-        let before = self.reader.check_registry_local();
+        let before = self.reader.check_local();
         let files = self.files.check();
         let registry = self.held.check_local();
-        let after = self.reader.check_registry_local();
+        let after = self.reader.check_local();
         if before.is_err() || files.is_err() || registry.is_err() || after.is_err() {
             self.files.refuse();
             self.reader.refuse();
@@ -117,7 +144,7 @@ impl ControllerCeremony {
             };
             self.intent.require_request(&statement.request)?;
             let mut borrow = AuthenticationBorrow {
-                reader: &mut *reader,
+                reader: AuthenticationReader::Active(&mut *reader),
                 held: &self.ceremony.held,
                 files: &mut *files,
             };
@@ -274,7 +301,7 @@ impl ControllerCeremony {
                 .observe_controller(reader, &expected.executor.email)?;
             let challenge = self.ceremony.challenge()?;
             let mut borrow = AuthenticationBorrow {
-                reader: &mut *reader,
+                reader: AuthenticationReader::Active(&mut *reader),
                 held: &self.ceremony.held,
                 files: &mut *files,
             };
@@ -336,7 +363,7 @@ impl ControllerCeremony {
             self.ceremony
                 .observe_controller(reader, &expected.executor.email)?;
             let mut borrow = AuthenticationBorrow {
-                reader: &mut *reader,
+                reader: AuthenticationReader::Active(&mut *reader),
                 held: &self.ceremony.held,
                 files: &mut *files,
             };
