@@ -47,6 +47,7 @@ fn actual_durable_authority_changes_cannot_rebind_the_captured_selection() -> Re
     let mut db = rusqlite::Connection::open(directory.path().join("authority.sqlite"))?;
     crate::authority_state::upgrade(&db)?;
     let document = crate::authority_state::AuthorityDocument {
+        managed_secrets: None,
         security: None,
         enabled: true,
         hosted_domain: None,

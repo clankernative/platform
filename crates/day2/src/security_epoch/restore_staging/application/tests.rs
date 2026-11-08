@@ -45,6 +45,7 @@ impl Fixture {
                 revision: 1,
             },
             document: authority_state::AuthorityDocument {
+                managed_secrets: None,
                 security: None,
                 hosted_domain: None,
                 resources: Default::default(),

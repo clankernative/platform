@@ -874,6 +874,9 @@ impl SchemaInitialization<'_> {
         crate::execution::upgrade(tx)?;
         upgrade_selection_cursors(tx)?;
         crate::authority_state::upgrade(tx)?;
+        if !exists {
+            crate::app_secrets::install(tx)?;
+        }
         crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
             // Recreate only exact historical credential units containing no
             // credential rows, within this same initialization transaction.

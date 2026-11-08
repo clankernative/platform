@@ -124,6 +124,7 @@ fn page_content_or_acknowledgement(
 }
 
 pub(crate) struct Host {
+    app_secrets: crate::app_secrets::Port,
     entropy: Arc<dyn Entropy>,
     clock: Arc<dyn Clock>,
     live_ticks: Arc<dyn LiveTicks>,
@@ -567,6 +568,7 @@ impl LocalServer {
             PresentationSource::Test(port) => Some(port),
         };
         let host = Arc::new(Host {
+            app_secrets: Arc::new(crate::app_secrets::Gcp::default()),
             entropy: entropy.clone(),
             clock: inputs.clock.clone(),
             live_ticks: inputs.live_ticks.clone(),
@@ -624,6 +626,18 @@ impl LocalServer {
 
     pub(crate) fn admission(&self) -> Admission {
         Admission(self.host.admitting.clone())
+    }
+
+    /// Trusted host injection for an explicitly selected secret provider.
+    /// An app and its HTTP clients cannot replace this port.
+    pub fn with_app_secret_provider(
+        mut self,
+        provider: Arc<dyn crate::app_secrets::Provider>,
+    ) -> Result<Self> {
+        Arc::get_mut(&mut self.host)
+            .context("listener host already shared")?
+            .app_secrets = provider;
+        Ok(self)
     }
 
     pub(crate) fn into_native_parts(
@@ -936,7 +950,9 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
         };
     }
     let (parts, body) = request.into_parts();
-    let maximum_body = if parts.uri.path().starts_with(crate::ingress::ROUTE_PREFIX) {
+    let maximum_body = if parts.uri.path() == crate::app_secrets::PATH {
+        131_072
+    } else if parts.uri.path().starts_with(crate::ingress::ROUTE_PREFIX) {
         1_048_576
     } else if parts.uri.path().starts_with(freetool_credentials::PREFIX) {
         16_384
@@ -1297,6 +1313,25 @@ impl Host {
                 crate::web_api::session_allowed(&self.runtime, &self.api, &session.actor),
                 crate::error::Failure::Forbidden
             );
+            if uri.path() == crate::app_secrets::PATH || uri.path().starts_with("/api/app-secrets/")
+            {
+                return crate::web_app_secrets::dispatch(
+                    &crate::web_api::RequestContext {
+                        runtime: &self.runtime,
+                        catalog: &self.api,
+                        secret: &self.secret,
+                        entropy: self.entropy.as_ref(),
+                        session,
+                        origin: &self.origin,
+                        at,
+                    },
+                    method,
+                    uri,
+                    headers,
+                    body,
+                    self.app_secrets.as_ref(),
+                );
+            }
             if uri.path() == crate::mcp::PATH {
                 return crate::mcp::dispatch(
                     &crate::web_api::RequestContext {
