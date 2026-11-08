@@ -384,25 +384,33 @@ fn install_pin(root: &Path, pin: &Pin, candidate: Option<&Path>) -> Result<()> {
         }
         let temporary = tempfile::tempdir_in(root.parent().context("workspace parent")?)?;
         let archive = temporary.path().join("roc.tar.gz");
-        run(
+        if let Some(bytes) = crate::release_inputs::cached(
             root,
-            Command::new("/usr/bin/curl")
-                .args([
-                    "--fail",
-                    "--location",
-                    "--proto",
-                    "=https",
-                    "--proto-redir",
-                    "=https",
-                    "--max-time",
-                    "180",
-                    "--max-filesize",
-                    "268435456",
-                    "--output",
-                ])
-                .arg(&archive)
-                .arg(pin.value["roc_archive"].as_str().context("archive URL")?),
-        )?;
+            hash_field(&pin.value, "roc_archive_sha256")?,
+            MAX_BINARY_BYTES,
+        )? {
+            fs::write(&archive, bytes)?;
+        } else {
+            run(
+                root,
+                Command::new("/usr/bin/curl")
+                    .args([
+                        "--fail",
+                        "--location",
+                        "--proto",
+                        "=https",
+                        "--proto-redir",
+                        "=https",
+                        "--max-time",
+                        "180",
+                        "--max-filesize",
+                        "268435456",
+                        "--output",
+                    ])
+                    .arg(&archive)
+                    .arg(pin.value["roc_archive"].as_str().context("archive URL")?),
+            )?;
+        }
         verify_file(
             &archive,
             hash_field(&pin.value, "roc_archive_sha256")?,

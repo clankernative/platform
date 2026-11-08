@@ -1,0 +1,68 @@
+name: Pinned release input
+description: Restore or acquire one immutable public input; verify before use and main-only publication
+inputs:
+  repository:
+    required: true
+    description: Source-owned owner/repository
+  tag:
+    required: true
+    description: Exact source-owned release tag
+  asset:
+    required: true
+    description: Exact source-owned asset name
+  sha256:
+    required: true
+    description: Existing source-owned SHA-256
+  path:
+    required: true
+    description: Fixed receiving file
+runs:
+  using: composite
+  steps:
+    - name: Create the release input directory
+      shell: bash
+      env:
+        RELEASE_PATH: ${{ inputs.path }}
+      run: mkdir -p "$(dirname "$RELEASE_PATH")"
+    - name: Restore the exact pinned archive
+      id: restored
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: day2-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sha256 }}
+    - name: Acquire the exact asset through authenticated GitHub release API
+      if: ${{ steps.restored.outputs.cache-hit != 'true' }}
+      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0, Node 24
+      env:
+        GH_TOKEN: ${{ github.token }}
+      with:
+        max_attempts: 5
+        retry_wait_seconds: 5
+        timeout_seconds: 60
+        command: >-
+          gh release download '${{ inputs.tag }}' --repo '${{ inputs.repository }}'
+          --pattern '${{ inputs.asset }}' --output '${{ inputs.path }}' --clobber
+    - name: Verify the current pinned bytes on Linux
+      if: ${{ runner.os == 'Linux' }}
+      id: linux
+      shell: bash
+      env:
+        PINNED_SHA256: ${{ inputs.sha256 }}
+        RELEASE_PATH: ${{ inputs.path }}
+      run: echo "$PINNED_SHA256  $RELEASE_PATH" | sha256sum --check
+    - name: Verify the current pinned bytes on Mac
+      if: ${{ runner.os == 'macOS' }}
+      id: mac
+      shell: bash
+      env:
+        PINNED_SHA256: ${{ inputs.sha256 }}
+        RELEASE_PATH: ${{ inputs.path }}
+      run: echo "$PINNED_SHA256  $RELEASE_PATH" | shasum -a 256 --check
+    - name: Publish verified immutable inputs only on main
+      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.restored.outputs.cache-hit != 'true' && (steps.linux.outcome == 'success' || steps.mac.outcome == 'success') }}
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: day2-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sha256 }}

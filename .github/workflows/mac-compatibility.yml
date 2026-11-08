@@ -29,9 +29,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - run: gh release download v8.30.1 --repo gitleaks/gitleaks --pattern gitleaks_8.30.1_linux_x64.tar.gz --dir /tmp/scanners
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned gitleaks_8.30.1_linux_x64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: gitleaks/gitleaks
+          tag: v8.30.1
+          asset: gitleaks_8.30.1_linux_x64.tar.gz
+          sha256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          path: /tmp/scanners/gitleaks_8.30.1_linux_x64.tar.gz
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/gitleaks.sha256"
         working-directory: /tmp/scanners
       - run: tar -xzf /tmp/scanners/gitleaks_8.30.1_linux_x64.tar.gz -C /tmp/scanners
@@ -45,9 +51,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: gh release download cargo-audit/v0.22.2 --repo RustSec/rustsec --pattern cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz --dir /tmp/scanners
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: RustSec/rustsec
+          tag: cargo-audit/v0.22.2
+          asset: cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
+          sha256: ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
+          path: /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/cargo-audit.sha256"
         working-directory: /tmp/scanners
       - run: tar -xzf /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -C /tmp/scanners
@@ -74,11 +86,14 @@ jobs:
         with:
           persist-credentials: false
       - name: Download the pinned Mac Bazel executable
-        timeout-minutes: 4
-        run: >-
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs
-          --output /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64
-          https://github.com/bazelbuild/bazel/releases/download/9.3.0/bazel-9.3.0-darwin-arm64
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: bazelbuild/bazel
+          tag: 9.3.0
+          asset: bazel-9.3.0-darwin-arm64
+          sha256: f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a
+          path: /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64
       - name: Verify the pinned Mac Bazel bytes
         run: echo 'f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a  /tmp/day2-bazel-tools/bazel-9.3.0-darwin-arm64' | shasum -a 256 --check
       - name: Install the pinned Mac Bazel executable
@@ -113,17 +128,31 @@ jobs:
             day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-mac --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
+      - name: Download the pinned OpenTofu archive
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: opentofu/opentofu
+          tag: v1.11.5
+          asset: tofu_1.11.5_darwin_arm64.zip
+          sha256: ce81702643dcdea497259b4de4639d9ee73746560683b9d2b778aae8f7d62827
+          path: /tmp/day2-opentofu/tofu.zip
       - name: Install the pinned OpenTofu CLI
         timeout-minutes: 4
         run: |
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 5 --retry-max-time 120 --connect-timeout 15 --max-time 60 --create-dirs --output /tmp/day2-opentofu/tofu.zip https://github.com/opentofu/opentofu/releases/download/v1.11.5/tofu_1.11.5_darwin_arm64.zip
           echo 'ce81702643dcdea497259b4de4639d9ee73746560683b9d2b778aae8f7d62827  /tmp/day2-opentofu/tofu.zip' | shasum -a 256 --check
           unzip -j -o /tmp/day2-opentofu/tofu.zip tofu -d /tmp/day2-opentofu/bin
           chmod 0555 /tmp/day2-opentofu/bin/tofu
           echo /tmp/day2-opentofu/bin >> "$GITHUB_PATH"
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned temporal_cli_1.6.1_darwin_arm64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: temporalio/cli
+          tag: v1.6.1
+          asset: temporal_cli_1.6.1_darwin_arm64.tar.gz
+          sha256: 94cf24e616808414c9acf861af58d098270307dfeb2a143f1b7cfd0c0841add2
+          path: /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz
       - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
@@ -151,10 +180,52 @@ jobs:
       - run: build-out/bin/xtask source-check
       - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
+      - name: Download pinned roc_nightly-macos_apple_silicon-2026-10-13-b17d287.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/nightlies
+          tag: nightly-2026-10-13-b17d287
+          asset: roc_nightly-macos_apple_silicon-2026-10-13-b17d287.tar.gz
+          sha256: 2a3ccaa478e3ac0557c88bb880fec4381103dbd2ee586f30ac17b22d9c3be6f1
+          path: .cache/day2-release/2a3ccaa478e3ac0557c88bb880fec4381103dbd2ee586f30ac17b22d9c3be6f1
+      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/basic-cli
+          tag: 0.26.0-rc2
+          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+      - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: roc-lang/http
+          tag: 1.0.0
+          asset: 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
+          sha256: e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+          path: .cache/day2-release/e9efaa950e72f6f76cdf6eaf00424572fa69b04ba612732357ac0453678f02b4
+      - name: Download pinned clanker-ui-native-0.2.2-macos-aarch64.tar.gz
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/clanker-ui
+          tag: v0.2.2
+          asset: clanker-ui-native-0.2.2-macos-aarch64.tar.gz
+          sha256: 503e1548a1b120dec2bfed224a00bc1e32f08243df093dc9e1da81a1e107cbf7
+          path: .cache/day2-release/503e1548a1b120dec2bfed224a00bc1e32f08243df093dc9e1da81a1e107cbf7
       - run: build-out/bin/xtask bootstrap
-      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download pinned roc-fmt-day2-aarch64-apple-darwin
+        timeout-minutes: 2
+        uses: ./.github/actions/pinned-release
+        with:
+          repository: clankernative/platform
+          tag: roc-formatter-2026-09-12
+          asset: roc-fmt-day2-aarch64-apple-darwin
+          sha256: beb452f23cdd099c416e2c05e5e8a20fa9d07a25a86cd33620f7f4765f510c23
+          path: /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
       - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-mac

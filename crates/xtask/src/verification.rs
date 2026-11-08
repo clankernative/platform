@@ -1209,6 +1209,8 @@ fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, St
     for pin in [
         ".github/workflows/ci.yml",
         ".github/workflows/mac-compatibility.yml",
+        ".github/workflows/native-images.yml",
+        ".github/actions/pinned-release/action.yml",
         ".github/temporal.sha256",
         ".github/temporal-linux.sha256",
     ] {
@@ -2345,6 +2347,8 @@ mod tests {
             "build-dependencies/clanker-ui.json",
             ".github/workflows/ci.yml",
             ".github/workflows/mac-compatibility.yml",
+            ".github/workflows/native-images.yml",
+            ".github/actions/pinned-release/action.yml",
             ".github/temporal.sha256",
             ".github/temporal-linux.sha256",
         ] {
@@ -2391,6 +2395,15 @@ mod tests {
                 .all(|(before, after)| *before != after)
         );
         fs::write(&pin, b"approved input")?;
+        let action = root.join(".github/actions/pinned-release/action.yml");
+        fs::write(&action, b"changed release acquisition")?;
+        assert!(
+            approved
+                .iter()
+                .zip(snapshots()?)
+                .all(|(before, after)| *before != after)
+        );
+        fs::write(&action, b"approved input")?;
         for relative in [
             "examples/chart-live/App.roc",
             "examples/chart-live/ui/app.js",
@@ -2653,46 +2666,61 @@ mod tests {
 
     #[test]
     fn tool_bootstrap_retries_only_downloads_and_checks_pins_before_installation() {
+        let action = include_str!("../../../.github/actions/pinned-release/action.yml");
         let workflows = [
             include_str!("../../../.github/workflows/ci.yml"),
             include_str!("../../../.github/workflows/mac-compatibility.yml"),
+            include_str!("../../../.github/workflows/native-images.yml"),
         ]
         .join("\n");
         assert!(!workflows.contains("opentofu/setup-opentofu@"));
         assert!(!workflows.contains("bazelisk-cache: true"));
+        assert!(!workflows.contains("curl ") && !workflows.contains("gh release download"));
         for step in workflows.split("      - ") {
-            if step.contains("name: Download the pinned Linux Bazel executable")
-                || step.contains("name: Download the pinned Mac Bazel executable")
-                || step.contains("name: Install the pinned OpenTofu CLI")
-            {
-                for required in [
-                    "timeout-minutes: 4",
-                    "--fail",
-                    "--retry 4",
-                    "--retry-delay 5",
-                    "--retry-max-time 120",
-                    "--connect-timeout 15",
-                    "--max-time 60",
-                    "--proto '=https'",
-                    "--proto-redir '=https'",
-                ] {
-                    assert!(step.contains(required), "missing {required}");
+            if step.contains("uses: ./.github/actions/pinned-release") {
+                assert!(step.contains("timeout-minutes: 2"));
+                for field in ["repository:", "tag:", "asset:", "sha256:", "path:"] {
+                    assert!(step.contains(field), "missing release input {field}");
                 }
-                assert!(!step.contains("--insecure") && !step.contains("--retry-all-errors"));
+                let digest = step
+                    .split("sha256: ")
+                    .nth(1)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap();
+                assert_eq!(digest.len(), 64);
+                assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
             }
             if step.contains("name: Install the pinned OpenTofu CLI") {
-                assert!(step.contains("/download/v1.11.5/tofu_1.11.5_"));
-                let expected = if step.contains("darwin_arm64.zip") {
-                    "ce81702643dcdea497259b4de4639d9ee73746560683b9d2b778aae8f7d62827"
-                } else {
-                    assert!(step.contains("linux_amd64.zip"));
-                    "901121681e751574d739de5208cad059eddf9bd739b575745cf9e3c961b28a13"
-                };
-                assert!(step.contains(expected));
+                assert!(step.contains("--check") && !step.contains("curl "));
                 assert!(step.find("--check").unwrap() < step.find("unzip ").unwrap());
                 assert!(step.find("unzip ").unwrap() < step.find("GITHUB_PATH").unwrap());
             }
         }
+        for required in [
+            "GH_TOKEN: ${{ github.token }}",
+            "max_attempts: 5",
+            "retry_wait_seconds: 5",
+            "timeout_seconds: 60",
+            "--clobber",
+            "inputs.sha256",
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            "steps.linux.outcome == 'success' || steps.mac.outcome == 'success'",
+        ] {
+            assert!(
+                action.contains(required),
+                "missing acquisition boundary {required}"
+            );
+        }
+        let restored = action.find("uses: actions/cache/restore@").unwrap();
+        let downloaded = action.find("gh release download").unwrap();
+        let checked = action.find("sha256sum --check").unwrap();
+        let mac_checked = action.find("shasum -a 256 --check").unwrap();
+        let published = action.find("uses: actions/cache/save@").unwrap();
+        assert!(restored < downloaded && downloaded < checked && checked < published);
+        assert!(mac_checked < published);
+        assert!(!action.contains("continue_on_error: true"));
         let mac = ci_job("verify-mac-compatibility");
         let checked = mac.find("name: Verify the pinned Mac Bazel bytes").unwrap();
         let installed = mac

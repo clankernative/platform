@@ -10,6 +10,8 @@ COMPILE_INPUTS = [
     "//:.bazelversion",
     "//:.github/workflows/ci.yml",
     "//:.github/workflows/mac-compatibility.yml",
+    "//:.github/workflows/native-images.yml",
+    "//:.github/actions/pinned-release/action.yml",
     "//:architecture/clippy.toml",
     "//:fixtures/authority-policies/reports.json",
     "//:rust-toolchain.toml",
