@@ -2,6 +2,92 @@
 # override, so this never contacts a cluster.
 mock_provider "kubernetes" {}
 
+run "managed_secret_material_is_absent_without_selection" {
+  command = plan
+  assert {
+    condition = (
+      !contains(keys(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app), "managed_secrets") &&
+      length(terraform_data.managed_secret_admission) == 0 &&
+      !contains([for item in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container : item.name], "managed-secret-token") &&
+      !contains([for item in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : item.name], "managed-secret-source")
+    )
+    error_message = "An unselected app receives no secret namespace or material delivery."
+  }
+}
+
+run "managed_secret_material_is_explicit_private_and_host_only" {
+  command = plan
+  variables {
+    managed_secrets = { project_number = 123456789012, token_secret_name = "app-secret-provider-token" }
+  }
+  assert {
+    condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.managed_secrets == {
+      project_number    = 123456789012
+      access_token_file = "/run/day2-app-secrets/access-token"
+    }
+    error_message = "The instance must bind the exact selected project and fixed private material path."
+  }
+  assert {
+    condition = (
+      one([for item in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].init_container : item.command if item.name == "managed-secret-token"]) == tolist(["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0600", "/run/day2-app-secret-source/access-token", "/run/day2-app-secrets/access-token"]) &&
+      one([for item in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : item.secret[0].secret_name if item.name == "managed-secret-source"]) == "app-secret-provider-token" &&
+      one([for item in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].volume : item.empty_dir[0].medium if item.name == "managed-secret-token"]) == "Memory" &&
+      one([for item in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : item.read_only if item.name == "managed-secret-token"]) &&
+      !contains([for item in kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].volume_mount : item.name], "managed-secret-source") &&
+      !kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].automount_service_account_token &&
+      !contains([for item in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : item.name], "managed-secret-token")
+    )
+    error_message = "Only the init container reads the named source; only the app host receives its private regular-file copy."
+  }
+}
+
+run "managed_secret_refuses_zero_project" {
+  command = plan
+  variables { managed_secrets = { project_number = 0, token_secret_name = "app-secret-provider-token" } }
+  expect_failures = [var.managed_secrets]
+}
+
+run "managed_secret_refuses_fractional_project" {
+  command = plan
+  variables { managed_secrets = { project_number = 1.5, token_secret_name = "app-secret-provider-token" } }
+  expect_failures = [var.managed_secrets]
+}
+
+run "managed_secret_refuses_null_fields" {
+  command = plan
+  variables { managed_secrets = { project_number = null, token_secret_name = null } }
+  expect_failures = [var.managed_secrets]
+}
+
+run "managed_secret_refuses_inexact_project_number" {
+  command = plan
+  variables { managed_secrets = { project_number = 9007199254740992, token_secret_name = "app-secret-provider-token" } }
+  expect_failures = [var.managed_secrets]
+}
+
+run "managed_secret_refuses_path_instead_of_secret_name" {
+  command = plan
+  variables { managed_secrets = { project_number = 123456789012, token_secret_name = "../../other-token" } }
+  expect_failures = [var.managed_secrets]
+}
+
+run "managed_secret_refuses_rolling_material_delivery" {
+  command = plan
+  variables {
+    managed_secrets = { project_number = 123456789012, token_secret_name = "app-secret-provider-token" }
+    rolling_deploys = true
+  }
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [] }
+  }
+  override_data {
+    target = data.kubernetes_resources.exclusive_workload
+    values = { objects = [] }
+  }
+  expect_failures = [terraform_data.managed_secret_admission[0]]
+}
+
 run "backup_keeps_its_default_cpu_reservation" {
   command = plan
 
