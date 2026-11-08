@@ -36,7 +36,8 @@ const VERSION: i64 = 2;
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
     super::schema::admit(db, |db| {
-        replace_empty_historical_unit(db)?;
+        replace_empty_historical_unit(db)
+            .context("unsupported OAuth schema version in oauth_restore_schema_version")?;
         install_current(db)
     })
 }

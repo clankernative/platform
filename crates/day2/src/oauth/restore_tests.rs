@@ -8,7 +8,7 @@ use rusqlite::{Connection, TransactionBehavior, params};
 use std::{collections::BTreeSet, path::Path};
 
 mod empty_historical_unit {
-    use super::*;
+    use super::{Connection, Digest, Result, install, params};
 
     fn historical() -> Result<Connection> {
         let db = Connection::open_in_memory()?;
@@ -90,6 +90,7 @@ mod empty_historical_unit {
             "CREATE TABLE OAUTH_RESTORE_ALIAS(value TEXT)",
             "DROP TABLE oauth_restore_schema_version",
             "DELETE FROM oauth_restore_schema_version",
+            "INSERT INTO oauth_restore_schema_version VALUES(2)",
             "UPDATE oauth_restore_schema_version SET version=2",
             "UPDATE oauth_restore_schema_version SET version=3",
             "DROP TABLE oauth_restore_closed",
