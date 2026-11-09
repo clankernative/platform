@@ -1236,7 +1236,8 @@ fn actual_final_role_issuer_retains_a_decision_without_reopening_or_renewing() {
     assert!(body.contains(&tokens("cohort.completion.as_ref()==Some(&completion)")));
     assert!(body.contains(&tokens("app.statement_data(costs)?")));
     assert!(body.contains(&tokens("origin_ns:app.original.origin_ns")));
-    let retain = tokens("cohort.role_decision=RestoreRoleDecision::Retained(Box::new(signed.clone()));");
+    let retain =
+        tokens("cohort.role_decision=RestoreRoleDecision::Retained(Box::new(signed.clone()));");
     let grant = tokens("Packet::RestoreRoleGrant");
     assert!(body.find(&retain).unwrap() < body.rfind(&grant).unwrap());
     assert!(body.contains(&tokens("requested?;checked")));
