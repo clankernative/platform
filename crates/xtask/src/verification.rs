@@ -2250,7 +2250,7 @@ mod tests {
         ] {
             let download = ci_step(&job, name);
             assert!(download.contains("continue-on-error: true"));
-            assert!(download.contains("timeout-minutes: 2"));
+            assert!(download.contains("timeout-minutes: 4"));
             assert!(download.contains("digest-mismatch: error"));
             assert!(download.contains("repository: clankernative/platform"));
             assert!(download.contains("run-id: ${{ github.run_id }}"));
@@ -2295,6 +2295,46 @@ mod tests {
         }
         assert!(ci_step(&job, bootstrap).contains("//crates/xtask:xtask -- install-verifier"));
         assert!(ci_step(&job, admit).contains("run: build-out/bin/xtask verify-prepare-join"));
+    }
+
+    #[test]
+    fn retained_compiler_cache_deadlines_leave_the_admission_job_bounded() {
+        for consumer in ["verify-prepare", "verify-shards", "verify"] {
+            let job = ci_job(consumer);
+            let names = if consumer == "verify-prepare" {
+                [
+                    "Download retained compiler actions for preparation admission",
+                    "Retry retained preparation compiler action download once",
+                    "Restore retained compiler actions before preparation admission",
+                ]
+            } else {
+                [
+                    "Download retained compiler actions from the admitted preparation",
+                    "Retry retained compiler action download once",
+                    "Restore retained compiler action data before admission bootstrap",
+                ]
+            };
+            let mut cache_minutes = 0;
+            for name in names {
+                let step = ci_step(&job, name);
+                let minutes = step
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("timeout-minutes: "))
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                assert_eq!(minutes, 4, "{consumer}: {name}");
+                cache_minutes += minutes;
+                assert!(step.contains("continue-on-error: true"));
+            }
+            let bootstrap = "Bootstrap the current source artifact admission guard";
+            assert!(!ci_step(&job, bootstrap).contains("        if:"));
+            assert!(job.find(names[2]).unwrap() < job.find(bootstrap).unwrap());
+            if consumer != "verify-shards" {
+                assert!(job.contains("    timeout-minutes: 20\n"));
+                assert!(cache_minutes < 20);
+            }
+        }
     }
 
     #[test]
@@ -2956,7 +2996,7 @@ mod tests {
             assert!(download.contains("repository: clankernative/platform"));
             assert!(download.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
             assert!(download.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-            assert!(download.contains("timeout-minutes: 2"));
+            assert!(download.contains("timeout-minutes: 4"));
             assert!(download.contains("continue-on-error: true"));
         }
         let first = ci_step(
