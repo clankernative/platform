@@ -399,10 +399,10 @@ impl<'tail> RestoredPeerConnection<'tail> {
     ) -> Result<CurrentStoragePeerPhase<'tail>> {
         let mut owner = PeerPhaseOwner::Restored(Box::new(self));
         #[cfg(target_os = "linux")]
-        if let PeerPhaseOwner::Restored(connection) = &mut owner {
-            if connection.original.is_none() {
-                connection.original = Some(stage.narrow_io_acquisition(5)?);
-            }
+        if let PeerPhaseOwner::Restored(connection) = &mut owner
+            && connection.original.is_none()
+        {
+            connection.original = Some(stage.narrow_io_acquisition(5)?);
         }
         #[cfg(not(target_os = "linux"))]
         let _ = &request;
@@ -457,10 +457,10 @@ impl<'peer> PeerPhaseOwner<'peer> {
         purpose: StoragePeerPurpose,
     ) -> Result<(NativeAcquisition, StageStatement, u64)> {
         #[cfg(target_os = "linux")]
-        if let Self::Restored(owner) = self {
-            if owner.original.is_none() {
-                owner.original = Some(stage.narrow_io_acquisition(5)?);
-            }
+        if let Self::Restored(owner) = self
+            && owner.original.is_none()
+        {
+            owner.original = Some(stage.narrow_io_acquisition(5)?);
         }
         let (mut acquisition, local, sequence) = match self {
             Self::Borrowed(owner) => owner.start_phase(stage, role, sequence, purpose)?,
