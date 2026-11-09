@@ -2776,10 +2776,10 @@ pub(crate) mod tests {
             "VACUUM main INTO ?1",
             [path.to_str().context("fixture backup path")?],
         )?;
-        Ok(crate::oauth::schema::RawAdmissionDatabase::open_with_flags(
+        crate::oauth::schema::RawAdmissionDatabase::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?)
+        )
     }
 
     fn assert_backup_restore_refused(

@@ -201,10 +201,10 @@ impl std::ops::Deref for RawAdmissionDatabase {
 
 impl Drop for RawAdmissionDatabase {
     fn drop(&mut self) {
-        if self.installed {
-            if let Some(db) = self.db.as_mut() {
-                let _ = db.progress_handler(0, None::<fn() -> bool>);
-            }
+        if self.installed
+            && let Some(db) = self.db.as_mut()
+        {
+            let _ = db.progress_handler(0, None::<fn() -> bool>);
         }
         let _ = self.unregister();
     }
@@ -213,12 +213,12 @@ impl Drop for RawAdmissionDatabase {
 fn raw_admission_step(connection: usize) -> bool {
     let foreign = ADMISSION.with(|active| {
         let mut active = active.borrow_mut();
-        if let Some(budget) = active.as_mut() {
-            if budget.connection != connection {
-                budget.exhausted = true;
-                budget.steps = 0;
-                return true;
-            }
+        if let Some(budget) = active.as_mut()
+            && budget.connection != connection
+        {
+            budget.exhausted = true;
+            budget.steps = 0;
+            return true;
         }
         false
     });
