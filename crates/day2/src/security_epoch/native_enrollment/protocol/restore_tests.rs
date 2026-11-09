@@ -1575,6 +1575,14 @@ fn actual_prepared_issuer_spends_the_retained_app_and_posts_before_retaining_or_
         }
         true
     }
+    // syn emits the comparison operator separately from the following borrow;
+    // raw adjacent punctuation in an expectation must not change that shape.
+    let comparison: syn::Expr = syn::parse_str("retained.as_ref()==&decision").unwrap();
+    assert_eq!(
+        tokens(&comparison.to_token_stream().to_string()),
+        tokens("retained.as_ref() == &decision")
+    );
+    assert_ne!(tokens("retained.as_ref()==&decision"), tokens("retained.as_ref() == &decision"));
     let source = include_str!("../service.rs");
     let file = syn::parse_file(source).unwrap();
     let actual = file
@@ -1592,7 +1600,7 @@ fn actual_prepared_issuer_spends_the_retained_app_and_posts_before_retaining_or_
         r#"ensure!(!app.confirmation_attempted && app.confirmation.is_none(),"native_restore_prepared_attempt_spent");"#,
         "app.confirmation_attempted=true;",
         "RestoreRoleDecision::Retained(retained)",
-        r#"ensure!(retained.as_ref()==&decision,"native_restore_prepared_decision_changed");"#,
+        r#"ensure!(retained.as_ref()== &decision,"native_restore_prepared_decision_changed");"#,
         "prepared_publish_check(issuer,attempt.cohort,attempt.acquisition,current,peer,costs)?;",
         "app.statement_data(costs)?;",
         "decision.verify_data",
@@ -1630,7 +1638,7 @@ fn actual_prepared_issuer_spends_the_retained_app_and_posts_before_retaining_or_
     for before in [
         "done:false",
         "app.confirmation_attempted=true;",
-        r#"ensure!(retained.as_ref()==&decision,"native_restore_prepared_decision_changed");"#,
+        r#"ensure!(retained.as_ref()== &decision,"native_restore_prepared_decision_changed");"#,
         r#"protocol::verify(&app.admission.statement.public_key,"restore-app-prepared-bind-v1",&(&decision,&request,&challenge),&signature)?;"#,
         "retained_app.confirmation=Some(signed.clone());",
         "requested?;checked?;attempt.done=true;Ok(())",
