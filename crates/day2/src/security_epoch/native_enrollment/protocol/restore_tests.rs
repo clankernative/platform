@@ -1236,7 +1236,7 @@ fn actual_final_role_issuer_retains_a_decision_without_reopening_or_renewing() {
     assert!(body.contains(&tokens("cohort.completion.as_ref()==Some(&completion)")));
     assert!(body.contains(&tokens("app.statement_data(costs)?")));
     assert!(body.contains(&tokens("origin_ns:app.original.origin_ns")));
-    let retain = tokens("cohort.role_decision=RestoreRoleDecision::Retained(signed.clone());");
+    let retain = tokens("cohort.role_decision=RestoreRoleDecision::Retained(Box::new(signed.clone()));");
     let grant = tokens("Packet::RestoreRoleGrant");
     assert!(body.find(&retain).unwrap() < body.rfind(&grant).unwrap());
     assert!(body.contains(&tokens("requested?;checked")));
@@ -1591,7 +1591,7 @@ fn actual_prepared_issuer_spends_the_retained_app_and_posts_before_retaining_or_
         r#"ensure!(!app.confirmation_attempted && app.confirmation.is_none(),"native_restore_prepared_attempt_spent");"#,
         "app.confirmation_attempted=true;",
         "RestoreRoleDecision::Retained(retained)",
-        r#"ensure!(*retained==decision,"native_restore_prepared_decision_changed");"#,
+        r#"ensure!(retained.as_ref()==&decision,"native_restore_prepared_decision_changed");"#,
         "prepared_publish_check(issuer,attempt.cohort,attempt.acquisition,current,peer,costs)?;",
         "app.statement_data(costs)?;",
         "decision.verify_data",
@@ -1629,7 +1629,7 @@ fn actual_prepared_issuer_spends_the_retained_app_and_posts_before_retaining_or_
     for before in [
         "done:false",
         "app.confirmation_attempted=true;",
-        r#"ensure!(*retained==decision,"native_restore_prepared_decision_changed");"#,
+        r#"ensure!(retained.as_ref()==&decision,"native_restore_prepared_decision_changed");"#,
         r#"protocol::verify(&app.admission.statement.public_key,"restore-app-prepared-bind-v1",&(&decision,&request,&challenge),&signature)?;"#,
         "retained_app.confirmation=Some(signed.clone());",
         "requested?;checked?;attempt.done=true;Ok(())",
