@@ -7164,7 +7164,6 @@ mod tests {
                 let mut statement = db.prepare(&format!("SELECT * FROM {quoted} LIMIT 129"))?;
                 let columns = statement
                     .column_names()
-                    .into_iter()
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
                 ensure!(columns.len() <= 64, "replay column budget");
@@ -7230,7 +7229,7 @@ mod tests {
         let facts = fixtures::external_fixture();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("app.sqlite");
-        let mut db = rusqlite::Connection::open(&path).unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         let key = fixtures::exchange_key();
         fixtures::quarantine_external_fixture(&mut db, &facts, &key);
         let pending = crate::oauth::external::load_pending_external(&db, facts.input(), &key, 5)

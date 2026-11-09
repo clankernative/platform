@@ -270,15 +270,15 @@ fn require_sql_callback_controls(
 
 fn sql_control_core_pin(source: &str) -> Option<&'static str> {
     match source {
-        // The only authorizer owner, and the raw schema installer's private
-        // hooks. The latter first executes foreign_keys=true before touching
-        // the progress hook; a guarded callback denies/latches that entry.
+        // The native authorizer holds the actual mutable connection before
+        // its transaction loans. Raw admission creates its own fresh database
+        // and refuses native callback entry before SQL or hook mutation.
         // No module-name exemption: any byte change requires explicit review.
         "crates/day2/src/store/native_storage.rs" => {
-            Some("sha256:ae6dbc9c0169b91c8620dd1565c53da320aa16a861e4bb3d63bb5758ee3e2306")
+            Some("sha256:c5d9b7c1bc08956f3a1f661136f27f85cda289447081c609e4c8b21a8da18e18")
         }
         "crates/day2/src/oauth/schema.rs" => {
-            Some("sha256:80e6ed96bdeef65e14f0f3149a6ae86d40c61c2c55d2ef3a6b21c35e01f82a94")
+            Some("sha256:9f4251d0cde25134e6292d94677169c1d16ad4d856dc39773a3438dc3ba3af26")
         }
         // Closed control construction only, not the large accounting module.
         "crates/day2/src/budget/atomic_control.rs" => {
@@ -363,7 +363,7 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         // memory/path/attached-db/image bounds precede serialize and copying.
         (
             "crates/day2/src/security_epoch/preparation_image.rs",
-            "sha256:ef460385d60ac63ff2e48de9bd43a5d69a35c8b6b4a2fdc021c567bae9f9d668",
+            "sha256:7ebd1e59d852fdc6fd6c9f6711b8a52e2a6b3f18df276cf422fd7bf45da949db",
         ),
         // Closed offline restore DATA builder: constructs its own fresh memory
         // connection, accepts no raw Connection/callback, bounds/deserializes
@@ -373,7 +373,7 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         // native/Runtime factory exists. No borrowed SQL callback is admitted.
         (
             "crates/day2/src/security_epoch/restore_staging.rs",
-            "sha256:60138be15a9aeb63795f04b6aea1058ca26edf498b12577d4f02f3bc456e2f99",
+            "sha256:be5b54418fea3ab588f92ba3e17d4f77b244eea5e10f7d315bd4efe822795c60",
         ),
         // Serde wire serialization, unrelated to SQLite Connection::serialize.
         (

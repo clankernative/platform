@@ -631,7 +631,7 @@ pub(super) mod tests {
             )
         }
 
-        fn begin(&self, db: &mut rusqlite::Connection) -> Result<bool> {
+        fn begin(&self, db: &mut crate::oauth::schema::RawAdmissionDatabase) -> Result<bool> {
             connect::begin_qualified(
                 db,
                 OutboundQualification {
@@ -827,7 +827,7 @@ pub(super) mod tests {
     }
 
     fn private_callback(
-        db: &mut rusqlite::Connection,
+        db: &mut crate::oauth::schema::RawAdmissionDatabase,
         fixture: &QualificationFixture,
         code_ref: &str,
         key: &KeyLease,
@@ -852,7 +852,7 @@ pub(super) mod tests {
     }
 
     pub(in crate::oauth) fn quarantine_external_fixture(
-        db: &mut rusqlite::Connection,
+        db: &mut crate::oauth::schema::RawAdmissionDatabase,
         fixture: &QualificationFixture,
         key: &KeyLease,
     ) {
@@ -1165,7 +1165,7 @@ pub(super) mod tests {
         let fixture = external_fixture();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approval-registry.sqlite");
-        let mut db = rusqlite::Connection::open(&path).unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
         let registry = test_registry(path, fixture.clone());
         assert!(registry.resolve("other", 5).unwrap().is_none());
@@ -1237,7 +1237,7 @@ pub(super) mod tests {
         let fixture = external_fixture();
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("owner.sqlite");
-        let mut db = rusqlite::Connection::open(&path)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
         db.execute_batch(crate::audit::PRINCIPALS_DDL)?;
         let observer = Arc::new(Observer {
@@ -1312,9 +1312,9 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first_path = dir.path().join("first.sqlite");
         let second_path = dir.path().join("second.sqlite");
-        let mut first = rusqlite::Connection::open(&first_path).unwrap();
+        let mut first = crate::oauth::schema::RawAdmissionDatabase::open(&first_path).unwrap();
         connect::install_schema(&first).unwrap();
-        let mut second = rusqlite::Connection::open(&second_path).unwrap();
+        let mut second = crate::oauth::schema::RawAdmissionDatabase::open(&second_path).unwrap();
         quarantine_external_fixture(&mut second, &fixture, &exchange_key());
         let registry = StoredApprovalRegistry::new(
             BTreeMap::from([
@@ -1421,7 +1421,7 @@ pub(super) mod tests {
         let fixture = external_fixture();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shell-oidc.sqlite");
-        let mut db = rusqlite::Connection::open(&path).unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
         db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
         let shell = SecurityShell::new(
@@ -1499,7 +1499,7 @@ pub(super) mod tests {
         let fixture = external_fixture();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shell.sqlite");
-        let mut db = rusqlite::Connection::open(&path).unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
         db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
         let pending = external::load_pending_external(&db, fixture.input(), &exchange_key(), 5)
@@ -1632,7 +1632,7 @@ pub(super) mod tests {
         let fixture = external_fixture();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shell-refusal.sqlite");
-        let mut db = rusqlite::Connection::open(&path).unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
         db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
         let mut headers = HeaderMap::new();
@@ -1673,7 +1673,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("external-approval.sqlite");
         {
-            let mut db = rusqlite::Connection::open(&path).unwrap();
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
             quarantine_external_fixture(&mut db, &fixture, &key);
             assert!(matches!(
                 connect::state(&db, &fixture.intent.attempt).unwrap(),
@@ -1686,7 +1686,7 @@ pub(super) mod tests {
                 .unwrap();
             assert_eq!(active, 0);
         }
-        let mut db = rusqlite::Connection::open(&path).unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         connect::install_schema(&db).unwrap();
         let pending = external::load_pending_external(&db, fixture.input(), &key, 5)
             .unwrap()
@@ -1742,7 +1742,7 @@ pub(super) mod tests {
     fn external_approval_rejects_changed_account_scope_and_stale_session() {
         let fixture = external_fixture();
         let key = exchange_key();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         quarantine_external_fixture(&mut db, &fixture, &key);
         let pending = external::load_pending_external(&db, fixture.input(), &key, 5)
             .unwrap()
@@ -1833,7 +1833,7 @@ pub(super) mod tests {
     fn external_quarantine_tamper_rolls_back_and_expiry_cleans_custody() {
         let fixture = external_fixture();
         let key = exchange_key();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         quarantine_external_fixture(&mut db, &fixture, &key);
         let pending = external::load_pending_external(&db, fixture.input(), &key, 5)
             .unwrap()
@@ -1885,7 +1885,7 @@ pub(super) mod tests {
     fn external_quarantine_write_failure_keeps_exchange_fence_and_private_code() {
         let fixture = external_fixture();
         let key = exchange_key();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         let prepared = exchange::prepare_authorization(
             fixture.input(),
@@ -2027,7 +2027,7 @@ pub(super) mod tests {
     fn qualified_exchange_encrypts_code_verifier_and_tokens_then_activates_once() {
         let fixture = qualification_fixture();
         let key = exchange_key();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         let prepared = exchange::prepare_authorization(
             fixture.input(),
@@ -2128,10 +2128,14 @@ pub(super) mod tests {
     fn active_token_fixture(
         expires_in: u64,
         settlement_at: i64,
-    ) -> (QualificationFixture, rusqlite::Connection, KeyLease) {
+    ) -> (
+        QualificationFixture,
+        crate::oauth::schema::RawAdmissionDatabase,
+        KeyLease,
+    ) {
         let fixture = qualification_fixture();
         let key = exchange_key();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         let prepared = exchange::prepare_authorization(
             fixture.input(),
@@ -2511,7 +2515,7 @@ pub(super) mod tests {
     fn changed_registration_and_lost_response_never_issue_another_permit() {
         let fixture = qualification_fixture();
         let key = exchange_key();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         let prepared = exchange::prepare_authorization(
             fixture.input(),
@@ -2562,7 +2566,7 @@ pub(super) mod tests {
     fn failed_private_token_publication_rolls_back_activation() {
         let fixture = qualification_fixture();
         let key = exchange_key();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         let prepared = exchange::prepare_authorization(
             fixture.input(),
@@ -2631,7 +2635,7 @@ pub(super) mod tests {
     fn qualified_instance_can_begin_one_exact_attempt() {
         let fixture = qualification_fixture();
         fixture.qualify().unwrap();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         assert!(fixture.begin(&mut db).unwrap());
         assert_eq!(
@@ -2662,7 +2666,7 @@ pub(super) mod tests {
         let mut changed = fixture.clone();
         changed.instance.registration.callback_url = "https://app.example/return".into();
         rejects(&changed, "derived callback");
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         assert!(changed.begin(&mut db).is_err());
         assert_eq!(connect::state(&db, &changed.intent.attempt).unwrap(), None);

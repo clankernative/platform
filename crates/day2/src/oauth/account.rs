@@ -512,7 +512,7 @@ mod tests {
             &scopes,
         )
         .unwrap();
-        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         crate::oauth::connect::install_schema(&db).unwrap();
         assert!(crate::oauth::connect::begin(&mut db, &intent, 1).unwrap());
         assert!(

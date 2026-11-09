@@ -192,8 +192,8 @@ pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Raw connections grant this installer ownership of a temporary progress
-/// callback. Runtime connections must enter `admit_with_runtime_hook` first;
+/// Raw connections retain their fresh database's owned progress callback.
+/// Runtime connections must enter `admit_with_runtime_hook` first;
 /// nested admission preserves their existing callback and cumulative counter.
 pub(crate) fn install_schema(db: &Connection) -> Result<()> {
     crate::oauth::schema::admit(db, install_schema_in)
@@ -2137,7 +2137,7 @@ impl HumanRevealPermit {
 /// authorization commit is the cutoff: closure first denies; authorization
 /// first may finish its already-authorized response.
 pub(crate) fn authorize_reveal(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     post: VerifiedHumanPost,
 ) -> Result<Option<HumanRevealPermit>> {
     let tx = crate::write_queue::immediate(db)?;
@@ -2644,8 +2644,8 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    fn current_database() -> Result<Connection> {
-        let db = Connection::open_in_memory()?;
+    fn current_database() -> Result<crate::oauth::schema::RawAdmissionDatabase> {
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install_schema(&db)?;
         Ok(db)
     }
@@ -2710,7 +2710,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ordinary_restore_allows_empty_credential_units_without_mutation() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         require_no_restore_state(&db)?;
         install_schema(&db)?;
         super::super::issuance::install(&db)?;
@@ -2729,7 +2729,7 @@ pub(crate) mod tests {
     -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("retired-family.sqlite");
-        let mut db = Connection::open(&path)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         install_schema(&db)?;
         committed_issue(&mut db)?;
         // This is valid committed private history, independent of a currently
@@ -2749,8 +2749,10 @@ pub(crate) mod tests {
         assert!(database_snapshot(&tx)? == before);
         tx.rollback()?;
         drop(db);
-        let mut db =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
         let tx = db.transaction()?;
         let error = crate::store::require_no_managed_credential_restore_state(&tx).unwrap_err();
         assert_eq!(
@@ -2765,20 +2767,25 @@ pub(crate) mod tests {
     /// SQLite's VACUUM INTO creates a complete transactionally consistent copy,
     /// including committed WAL state. This fixture is not the ops backup bundle
     /// or a security-restore implementation; copies reopen read-only.
-    fn credential_backup(db: &Connection, path: &std::path::Path) -> Result<Connection> {
+    fn credential_backup(
+        db: &Connection,
+        path: &std::path::Path,
+    ) -> Result<crate::oauth::schema::RawAdmissionDatabase> {
         assert!(db.is_autocommit());
         db.execute(
             "VACUUM main INTO ?1",
             [path.to_str().context("fixture backup path")?],
         )?;
-        Ok(Connection::open_with_flags(
+        crate::oauth::schema::RawAdmissionDatabase::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?)
+        )
     }
 
-    fn assert_backup_restore_refused(db: &mut Connection) -> Result<()> {
-        let before = database_snapshot(db)?;
+    fn assert_backup_restore_refused(
+        db: &mut dyn crate::write_queue::ConnectionOwner,
+    ) -> Result<()> {
+        let before = database_snapshot(db.connection())?;
         let tx = db.transaction()?;
         let error = crate::authority_state::invalidate_restored(
             &tx,
@@ -2792,7 +2799,7 @@ pub(crate) mod tests {
         // Do not print the private snapshot on failure.
         assert!(database_snapshot(&tx)? == before);
         tx.rollback()?;
-        assert!(database_snapshot(db)? == before);
+        assert!(database_snapshot(db.connection())? == before);
         Ok(())
     }
 
@@ -2945,7 +2952,7 @@ pub(crate) mod tests {
                     let (directory, mut db) = database()?;
                     db.pragma_update(None, "journal_mode", "WAL")?;
                     let first = committed_issue(&mut db)?;
-                    let reader = Connection::open_with_flags(
+                    let reader = crate::oauth::schema::RawAdmissionDatabase::open_with_flags(
                         directory.path().join("app.sqlite"),
                         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                     )?;
@@ -3001,7 +3008,7 @@ pub(crate) mod tests {
             if *table == "day2_credential_schema_version" {
                 continue;
             }
-            let db = Connection::open_in_memory()?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             db.execute_batch(&format!("CREATE TABLE {table}(private BLOB) STRICT"))?;
             require_no_restore_state(&db)?;
             db.execute(
@@ -3025,7 +3032,7 @@ pub(crate) mod tests {
              CREATE TABLE pragma_table_list(schema TEXT,name TEXT,strict INTEGER);
              INSERT INTO pragma_table_list VALUES('main','day2_credential_schema_version',1)",
         ] {
-            let db = Connection::open_in_memory()?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             db.execute_batch(ddl)?;
             let error = require_no_restore_state(&db).unwrap_err();
             assert_eq!(
@@ -3042,7 +3049,7 @@ pub(crate) mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         };
-        let db = current_database()?;
+        let mut db = current_database()?.retire()?;
         let samples = Arc::new(AtomicUsize::new(0));
         let observed = samples.clone();
         db.progress_handler(
@@ -3064,7 +3071,7 @@ pub(crate) mod tests {
     fn schema_current_issue_history_reopens_without_mutation() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("current.sqlite");
-        let mut db = Connection::open(&path)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         install_schema(&db)?;
         let receipt = committed_issue(&mut db)?;
         let before: (String, Vec<u8>) = db.query_row(
@@ -3098,7 +3105,7 @@ pub(crate) mod tests {
             before
         );
         drop(db);
-        let db = Connection::open(&path)?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         install_schema(&db)?;
         assert_eq!(
             db.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))?,
@@ -3119,7 +3126,7 @@ pub(crate) mod tests {
             (format!("{CREDENTIAL_DDL} CREATE INDEX hidden_credential_index ON day2_credential_material(identity_json);"), "schema object"),
             (format!("{CREDENTIAL_DDL} CREATE TRIGGER injected AFTER INSERT ON day2_credential_versions BEGIN SELECT 1; END;"), "schema object"),
         ] {
-            let db = Connection::open_in_memory()?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             db.execute_batch(&altered)?;
             db.execute("INSERT INTO day2_credential_schema_version VALUES(2)", [])?;
             let before = database_snapshot(&db)?;
@@ -3169,7 +3176,7 @@ pub(crate) mod tests {
             (CREDENTIAL_DDL.to_owned(), "schema version"),
             (format!("{CREDENTIAL_DDL} INSERT INTO day2_credential_schema_version VALUES(2)"), "invariant guard"),
         ] {
-            let db = Connection::open_in_memory()?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             db.execute_batch(&partial)?;
             let before = database_snapshot(&db)?;
             let error = install_schema(&db).unwrap_err();
@@ -3195,8 +3202,8 @@ pub(crate) mod tests {
     ) STRICT;";
 
     /// A GoLinks-like store: app rows beside a version-1 unit no app wrote to.
-    fn version_1_store(later: bool) -> Result<Connection> {
-        let db = Connection::open_in_memory()?;
+    fn version_1_store(later: bool) -> Result<crate::oauth::schema::RawAdmissionDatabase> {
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch(
             "CREATE TABLE day2_invocations(id TEXT PRIMARY KEY);
             CREATE TABLE links(path TEXT PRIMARY KEY, destination TEXT NOT NULL) STRICT;
@@ -3231,7 +3238,7 @@ pub(crate) mod tests {
 
     #[test]
     fn schema_replaces_an_empty_version_1_unit_and_keeps_app_rows() -> Result<()> {
-        let reference = Connection::open_in_memory()?;
+        let reference = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         reference.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
         open_credentials(&reference)?;
         for later in [false, true] {
@@ -3264,8 +3271,8 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    fn empty_version_2_store() -> Result<Connection> {
-        let db = Connection::open_in_memory()?;
+    fn empty_version_2_store() -> Result<crate::oauth::schema::RawAdmissionDatabase> {
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch(
             "CREATE TABLE day2_invocations(id TEXT PRIMARY KEY);
             CREATE TABLE links(path TEXT PRIMARY KEY, destination TEXT NOT NULL) STRICT;
@@ -3288,7 +3295,7 @@ pub(crate) mod tests {
         };
         open_credentials(&db)?;
         assert_eq!(app(database_snapshot(&db)?), app(before));
-        let reference = Connection::open_in_memory()?;
+        let reference = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         reference.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
         open_credentials(&reference)?;
         assert_eq!(credential_objects(&db)?, credential_objects(&reference)?);
@@ -3544,7 +3551,7 @@ pub(crate) mod tests {
     #[test]
     fn schema_budget_refusal_rolls_back_fresh_creation_and_preserves_current_rows() -> Result<()> {
         use crate::oauth::schema::admit_with_limits;
-        let fresh = Connection::open_in_memory()?;
+        let fresh = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         assert!(admit_with_limits(&fresh, 1000, 16_384, 8 * 1_048_576, install_schema).is_err());
         assert_eq!(
             fresh.query_row(
@@ -3664,7 +3671,7 @@ pub(crate) mod tests {
 
     #[test]
     fn schema_installation_preserves_the_callers_transaction() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", true)?;
         let tx = db.transaction()?;
         install_schema(&tx)?;
@@ -3683,7 +3690,7 @@ pub(crate) mod tests {
 
     #[test]
     fn schema_refuses_caller_transaction_that_started_without_foreign_keys() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", false)?;
         assert_eq!(
             db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
@@ -3871,7 +3878,7 @@ pub(crate) mod tests {
             "CREATE VIEW day2_credential_browser AS SELECT 1 AS value",
             "CREATE TABLE unrelated(value TEXT); CREATE TRIGGER DAY2_CREDENTIAL_UNKNOWN AFTER INSERT ON unrelated BEGIN SELECT 1; END",
         ] {
-            let db = Connection::open_in_memory()?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             db.execute_batch(imported)?;
             let before: i64 =
                 db.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))?;
@@ -3915,7 +3922,7 @@ pub(crate) mod tests {
     #[test]
     fn schema_raw_metadata_is_debited_before_namespace_classification() -> Result<()> {
         for prefix in ["DAY2_CREDENTIAL_", "unrelated_"] {
-            let db = Connection::open_in_memory()?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             let imported = format!("{prefix}{}", "x".repeat(65_537));
             db.execute_batch(&format!("CREATE TABLE \"{imported}\"(value TEXT)"))?;
             let error = crate::oauth::schema::admit_with_limits(
@@ -3947,7 +3954,7 @@ pub(crate) mod tests {
     fn schema_canonical_peers_survive_the_same_runtime_sequence_and_reopen() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("canonical-peers.sqlite");
-        let db = Connection::open(&path)?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         install_schema(&db)?;
         db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
         crate::oauth::schema::admit(&db, |db| {
@@ -3956,7 +3963,7 @@ pub(crate) mod tests {
             install_schema(db)
         })?;
         drop(db);
-        let db = Connection::open(&path)?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         crate::oauth::schema::admit(&db, |db| {
             install_schema(db)?;
             super::super::issuance::install(db)?;
@@ -4014,7 +4021,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    pub(super) fn restored_peer_database() -> Result<Connection> {
+    pub(super) fn restored_peer_database() -> Result<crate::oauth::schema::RawAdmissionDatabase> {
         let db = current_database()?;
         db.execute_batch(
             "CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, operation TEXT, actor TEXT)",
@@ -4632,14 +4639,16 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn database() -> Result<(TempDir, Connection)> {
+    pub(crate) fn database() -> Result<(TempDir, crate::oauth::schema::RawAdmissionDatabase)> {
         let dir = tempfile::tempdir()?;
-        let db = Connection::open(dir.path().join("app.sqlite"))?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(dir.path().join("app.sqlite"))?;
         install_schema(&db)?;
         Ok((dir, db))
     }
 
-    pub(crate) fn committed_issue(db: &mut Connection) -> Result<PublicReceipt> {
+    pub(crate) fn committed_issue(
+        db: &mut dyn crate::write_queue::ConnectionOwner,
+    ) -> Result<PublicReceipt> {
         let prepared = prepare_issue(&lease(), &family(), issue("invocation-1"))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let receipt = stage_issue(&tx, prepared)?.public_identity().clone();
@@ -4810,7 +4819,8 @@ pub(crate) mod tests {
             );
             assert!(authority.replace(vec![initial.clone()]).is_err());
             drop(db);
-            let db = Connection::open(dir.path().join("app.sqlite"))?;
+            let db =
+                crate::oauth::schema::RawAdmissionDatabase::open(dir.path().join("app.sqlite"))?;
             assert!(!check(&db)?);
             assert_eq!(
                 db.query_row(
@@ -5575,7 +5585,8 @@ pub(crate) mod tests {
         assert!(stage_rotation(&tx, &lease(), &expected, changed).is_err());
         tx.commit()?;
         drop(db);
-        let mut db = Connection::open(directory.path().join("app.sqlite"))?;
+        let mut db =
+            crate::oauth::schema::RawAdmissionDatabase::open(directory.path().join("app.sqlite"))?;
         // Reopen the same database, without reconstructing a grant from the
         // larger original ceiling or granting a retired version permission.
         install_schema(&db)?;
@@ -5695,7 +5706,7 @@ pub(crate) mod tests {
             let expected = expected.clone();
             let barrier = barrier.clone();
             threads.push(std::thread::spawn(move || -> Result<bool> {
-                let mut connection = Connection::open(path)?;
+                let mut connection = crate::oauth::schema::RawAdmissionDatabase::open(path)?;
                 connection.busy_timeout(std::time::Duration::from_secs(10))?;
                 barrier.wait();
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -5796,7 +5807,8 @@ pub(crate) mod tests {
         let (dir, mut db) = database()?;
         let first = committed_issue(&mut db)?;
         drop(db);
-        let mut reopened = Connection::open(dir.path().join("app.sqlite"))?;
+        let mut reopened =
+            crate::oauth::schema::RawAdmissionDatabase::open(dir.path().join("app.sqlite"))?;
         install_schema(&reopened)?;
         let permit = authorize_reveal(
             &mut reopened,

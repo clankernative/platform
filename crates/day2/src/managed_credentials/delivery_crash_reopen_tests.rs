@@ -301,8 +301,12 @@ pub(super) struct Observation {
     completed_transport: Transport,
 }
 
-fn denied_bindings(db: &mut Connection, e: &Expected, version: &str) -> Result<()> {
-    let before = private_image(db)?;
+fn denied_bindings(
+    db: &mut dyn crate::write_queue::ConnectionOwner,
+    e: &Expected,
+    version: &str,
+) -> Result<()> {
+    let before = private_image(db.connection())?;
     for field in 0..5 {
         let mut wrong = post(e, version, "denied-attempt");
         match field {
@@ -317,7 +321,7 @@ fn denied_bindings(db: &mut Connection, e: &Expected, version: &str) -> Result<(
             "foreign reveal binding accepted"
         );
         ensure!(
-            private_image(db)? == before,
+            private_image(db.connection())? == before,
             "denied reveal changed private rows"
         );
     }
@@ -325,7 +329,7 @@ fn denied_bindings(db: &mut Connection, e: &Expected, version: &str) -> Result<(
 }
 
 fn extra_authorization_control(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     e: &Expected,
     model: &Model,
     authorizations: u64,
@@ -333,7 +337,7 @@ fn extra_authorization_control(
     if model.closed {
         return Ok(());
     }
-    let before = private_image(db)?;
+    let before = private_image(db.connection())?;
     let tx = crate::write_queue::immediate(db)?;
     let pending = store::authorize_reveal_in(
         &tx,
@@ -347,7 +351,7 @@ fn extra_authorization_control(
     drop(pending);
     tx.rollback()?;
     ensure!(
-        private_image(db)? == before,
+        private_image(db.connection())? == before,
         "authorization control escaped rollback"
     );
     Ok(())

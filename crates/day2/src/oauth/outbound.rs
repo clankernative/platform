@@ -6,7 +6,7 @@ use super::protocol::{self, CallbackParameters, ParsedCallback, ProviderDenial};
 use anyhow::Result;
 use day2_capabilities::Digest;
 use day2_capabilities::oauth::{ProductReturnRef, ProviderCallbackRef, ProviderIssuerRef};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::BTreeSet;
 
 pub struct CallbackIngress<'a> {
@@ -34,7 +34,7 @@ pub enum CallbackOutcome {
 /// No raw callback parameter or provider error description reaches the result.
 /// A custody failure rolls back both private code storage and the attempt CAS.
 pub(super) fn handle_callback(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     ingress: CallbackIngress<'_>,
     custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
 ) -> Result<CallbackOutcome> {
@@ -50,7 +50,7 @@ pub(super) fn handle_callback(
 }
 
 pub(super) fn handle_callback_profile(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     ingress: CallbackIngress<'_>,
     parameters: &CallbackParameters,
     custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
@@ -208,8 +208,8 @@ mod tests {
         }
     }
 
-    fn prepared(fixture: &Fixture) -> Connection {
-        let mut db = Connection::open_in_memory().unwrap();
+    fn prepared(fixture: &Fixture) -> crate::oauth::schema::RawAdmissionDatabase {
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         assert!(connect::begin_bound(&mut db, &fixture.intent, &fixture.binding, 1).unwrap());
         db
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn unbound_attempt_and_unknown_callback_schema_fail_closed() {
         let fixture = fixture("attempt_1");
-        let mut db = Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         connect::install_schema(&db).unwrap();
         assert!(connect::begin(&mut db, &fixture.intent, 1).unwrap());
         assert_eq!(
@@ -429,7 +429,7 @@ mod tests {
         let fixture = fixture("attempt_1");
         let dir = tempdir().unwrap();
         let path = dir.path().join("bound-callback.sqlite");
-        let mut setup = Connection::open(&path).unwrap();
+        let mut setup = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         connect::install_schema(&setup).unwrap();
         assert!(connect::begin_bound(&mut setup, &fixture.intent, &fixture.binding, 1).unwrap());
         drop(setup);
@@ -441,7 +441,7 @@ mod tests {
                     let barrier = barrier.clone();
                     let fixture = &fixture;
                     scope.spawn(move || {
-                        let mut db = Connection::open(path).unwrap();
+                        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(path).unwrap();
                         db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
                         barrier.wait();
                         handle_callback(

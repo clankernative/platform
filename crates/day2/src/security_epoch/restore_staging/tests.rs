@@ -129,7 +129,7 @@ pub(super) struct World {
 }
 pub(super) fn world() -> Result<World> {
     let source = tempfile::tempdir()?;
-    let application = application::tests::Fixture::new()?;
+    let mut application = application::tests::Fixture::new()?;
     application.db.execute_batch("CREATE TABLE fixture_payload(value BLOB) STRICT; INSERT INTO fixture_payload VALUES(zeroblob(131072));")?;
     std::fs::write(
         source.path().join("app.sqlite"),

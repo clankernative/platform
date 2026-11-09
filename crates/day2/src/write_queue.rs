@@ -27,6 +27,62 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Exclusive ownership needed to create an actual SQLite transaction. A shared
+/// connection/Transaction cannot implement this sealed interface, and it exposes
+/// no mutable connection or callback setter. Production has one implementation.
+pub trait ConnectionOwner: sealed::Sealed {
+    fn connection(&self) -> &Connection;
+    fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>>;
+    fn transaction_with_behavior(
+        &mut self,
+        behavior: TransactionBehavior,
+    ) -> rusqlite::Result<Transaction<'_>>;
+}
+
+impl sealed::Sealed for Connection {}
+
+impl ConnectionOwner for Connection {
+    fn connection(&self) -> &Connection {
+        self
+    }
+
+    fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>> {
+        Connection::transaction(self)
+    }
+
+    fn transaction_with_behavior(
+        &mut self,
+        behavior: TransactionBehavior,
+    ) -> rusqlite::Result<Transaction<'_>> {
+        Connection::transaction_with_behavior(self, behavior)
+    }
+}
+
+#[cfg(test)]
+impl sealed::Sealed for crate::oauth::schema::RawAdmissionDatabase {}
+
+#[cfg(test)]
+impl ConnectionOwner for crate::oauth::schema::RawAdmissionDatabase {
+    fn connection(&self) -> &Connection {
+        self
+    }
+
+    fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>> {
+        crate::oauth::schema::RawAdmissionDatabase::transaction(self)
+    }
+
+    fn transaction_with_behavior(
+        &mut self,
+        behavior: TransactionBehavior,
+    ) -> rusqlite::Result<Transaction<'_>> {
+        crate::oauth::schema::RawAdmissionDatabase::transaction_with_behavior(self, behavior)
+    }
+}
+
 /// How long a writer waits for its turn before failing as busy.
 pub const WAIT: Duration = Duration::from_secs(30);
 
@@ -232,16 +288,16 @@ impl DerefMut for WriteTransaction<'_> {
 
 /// Begin an immediate transaction after this process's earlier writers to the same
 /// database, in arrival order.
-pub fn immediate(connection: &mut Connection) -> rusqlite::Result<WriteTransaction<'_>> {
+pub fn immediate(connection: &mut dyn ConnectionOwner) -> rusqlite::Result<WriteTransaction<'_>> {
     let wait = CAP.with(|cap| cap.get()).map_or(WAIT, |cap| cap.min(WAIT));
     immediate_within(connection, wait)
 }
 
 fn immediate_within(
-    connection: &mut Connection,
+    connection: &mut dyn ConnectionOwner,
     wait: Duration,
 ) -> rusqlite::Result<WriteTransaction<'_>> {
-    let turn = Turn::take(connection.path(), wait)?;
+    let turn = Turn::take(connection.connection().path(), wait)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     Ok(WriteTransaction {
         transaction: Some(transaction),
@@ -298,6 +354,26 @@ fn configuration_refused(message: &'static str) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_sql_loans_cannot_create_transaction_ownership_or_mutable_connection_access() {
+        trait AmbiguousIfOwner<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfOwner<()> for T {}
+        struct Owned;
+        impl<T: ?Sized + ConnectionOwner> AmbiguousIfOwner<Owned> for T {}
+        let _ = <&Connection as AmbiguousIfOwner<_>>::check;
+        let _ = <&Transaction<'_> as AmbiguousIfOwner<_>>::check;
+        trait AmbiguousIfMutable<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfMutable<()> for T {}
+        struct Mutable;
+        impl<T: ?Sized + DerefMut<Target = Connection>> AmbiguousIfMutable<Mutable> for T {}
+        let _ = <dyn ConnectionOwner as AmbiguousIfMutable<_>>::check;
+    }
+
     use std::sync::Barrier;
 
     const TEST_WAIT: Duration = Duration::from_secs(5);

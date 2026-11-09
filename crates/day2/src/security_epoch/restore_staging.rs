@@ -508,11 +508,11 @@ fn prepare_image(
             #[cfg(test)]
             tests::cut(tests::Point::BeforeCommit)?;
             current.local_sql()?;
-            let db = &*memory.db;
             tx.commit()?;
             #[cfg(test)]
             tests::cut(tests::Point::AfterCommit)?;
             current.local_sql()?;
+            let db = &mut *memory.db;
             ensure!(db.is_autocommit(), "restore_uncommitted_image");
             let bytes = memory_shape(db, None)?;
             let serialized = db.serialize(MAIN_DB)?;

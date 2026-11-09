@@ -1549,7 +1549,7 @@ mod tests {
     fn current_table_reopens_but_noncurrent_body_never_repairs() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("records.sqlite");
-        let db = Connection::open(&path)?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         install(&db)?;
         let (proof, original) = golden()?;
         let raw = encode_record(proof, original)?;
@@ -1558,7 +1558,7 @@ mod tests {
             ["invocation-1", &raw],
         )?;
         drop(db);
-        let db = Connection::open(path)?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(path)?;
         assert_eq!(
             load(&db, "invocation-1")?.unwrap().commitment.as_str(),
             GOLDEN_DIGEST

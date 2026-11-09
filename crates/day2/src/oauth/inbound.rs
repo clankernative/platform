@@ -180,7 +180,10 @@ pub fn record_grant(db: &Connection, id: &str, ceiling: &GrantCeiling, epoch: i6
 
 /// A code binds one client revision, exact redirect, S256 challenge and audience.
 /// A registered client alone has no grant: `grant_id` must already be active.
-pub fn issue_code(db: &mut Connection, offer: CodeOffer) -> Result<bool> {
+pub fn issue_code(
+    db: &mut dyn crate::write_queue::ConnectionOwner,
+    offer: CodeOffer,
+) -> Result<bool> {
     let CodeOffer {
         code_hash,
         grant_id,
@@ -227,7 +230,7 @@ pub fn issue_code(db: &mut Connection, offer: CodeOffer) -> Result<bool> {
 /// record in the same transaction as the private custody write. A lost response
 /// cannot redeem that code again.
 pub fn redeem_code(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     redemption: CodeRedemption,
     custody_write: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
@@ -324,7 +327,7 @@ pub fn redeem_code(
 /// A rotating refresh token is consumed once. The requested roots may only
 /// narrow the previous token's roots and remain inside the immutable grant.
 pub fn refresh(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     exchange: RefreshExchange,
     custody_write: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
@@ -424,7 +427,11 @@ pub fn refresh(
     Ok(true)
 }
 
-pub fn revoke_grant(db: &mut Connection, grant_id: &str, expected_epoch: i64) -> Result<bool> {
+pub fn revoke_grant(
+    db: &mut dyn crate::write_queue::ConnectionOwner,
+    grant_id: &str,
+    expected_epoch: i64,
+) -> Result<bool> {
     identifier(grant_id)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = tx.execute(
@@ -645,14 +652,14 @@ pub(in crate::oauth) mod tests {
         }
     }
 
-    fn prepared() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
+    fn prepared() -> crate::oauth::schema::RawAdmissionDatabase {
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         install_schema(&db).unwrap();
         assert!(record_grant(&db, "grant_1", &ceiling(), 1).unwrap());
         db
     }
 
-    fn issue(db: &mut Connection) {
+    fn issue(db: &mut dyn crate::write_queue::ConnectionOwner) {
         assert!(
             issue_code(
                 db,
@@ -746,7 +753,7 @@ pub(in crate::oauth) mod tests {
         )?;
         for _ in 0..2 {
             drop(db);
-            db = Connection::open(&path)?;
+            db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
             assert!(
                 authorize_channel_operation(
                     &db,
@@ -804,7 +811,7 @@ pub(in crate::oauth) mod tests {
     fn code_is_bound_to_client_redirect_pkce_and_resource_then_consumed_once() {
         let mut db = prepared();
         issue(&mut db);
-        let issue_once = |db: &mut Connection,
+        let issue_once = |db: &mut dyn crate::write_queue::ConnectionOwner,
                           verifier: &str,
                           client: BindingRef,
                           redirect: OAuthClientRedirectRef| {
@@ -1059,7 +1066,7 @@ pub(in crate::oauth) mod tests {
 
     #[test]
     fn unknown_inbound_schema_version_fails_closed() {
-        let db = Connection::open_in_memory().unwrap();
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         install_schema(&db).unwrap();
         db.execute("UPDATE oauth_inbound_schema_version SET version = 3", [])
             .unwrap();
@@ -1070,7 +1077,7 @@ pub(in crate::oauth) mod tests {
     fn two_sqlite_hosts_cannot_redeem_one_code_twice() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("inbound.sqlite");
-        let mut initial = Connection::open(&path).unwrap();
+        let mut initial = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         install_schema(&initial).unwrap();
         record_grant(&initial, "grant_1", &ceiling(), 1).unwrap();
         issue(&mut initial);
@@ -1082,7 +1089,8 @@ pub(in crate::oauth) mod tests {
                     let path = path.clone();
                     let barrier = barrier.clone();
                     scope.spawn(move || {
-                        let mut db = Connection::open(path).unwrap();
+                        let mut db =
+                            crate::oauth::schema::RawAdmissionDatabase::open(path).unwrap();
                         db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
                         db.execute_batch("PRAGMA foreign_keys = ON").unwrap();
                         barrier.wait();
@@ -1105,7 +1113,7 @@ pub(in crate::oauth) mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(results.into_iter().filter(|redeemed| *redeemed).count(), 1);
-        let db = Connection::open(&path).unwrap();
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM oauth_inbound_refresh", [], |row| row
                 .get::<_, i64>(
@@ -1120,7 +1128,7 @@ pub(in crate::oauth) mod tests {
     fn grant_revocation_racing_redemption_never_leaves_usable_access() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("revoke.sqlite");
-        let mut initial = Connection::open(&path).unwrap();
+        let mut initial = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         install_schema(&initial).unwrap();
         record_grant(&initial, "grant_1", &ceiling(), 1).unwrap();
         issue(&mut initial);
@@ -1130,7 +1138,7 @@ pub(in crate::oauth) mod tests {
             let redeem_barrier = barrier.clone();
             let redeem_path = path.clone();
             let redeem = scope.spawn(move || {
-                let mut db = Connection::open(redeem_path).unwrap();
+                let mut db = crate::oauth::schema::RawAdmissionDatabase::open(redeem_path).unwrap();
                 db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
                 db.execute_batch("PRAGMA foreign_keys = ON").unwrap();
                 redeem_barrier.wait();
@@ -1147,7 +1155,7 @@ pub(in crate::oauth) mod tests {
                 .unwrap()
             });
             let revoke = scope.spawn(|| {
-                let mut db = Connection::open(&path).unwrap();
+                let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
                 db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
                 db.execute_batch("PRAGMA foreign_keys = ON").unwrap();
                 barrier.wait();
@@ -1156,7 +1164,7 @@ pub(in crate::oauth) mod tests {
             let _ = redeem.join().unwrap();
             assert!(revoke.join().unwrap());
         });
-        let db = Connection::open(&path).unwrap();
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         assert!(
             !authorize_operation(
                 &db,

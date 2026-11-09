@@ -110,7 +110,7 @@ fn install_schema_in(db: &Connection) -> Result<()> {
 /// evidence. This kernel repeats the durable version/fence checks under SQLite.
 #[cfg(test)]
 fn claim_refresh(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     expected: &RefreshEligibility,
 ) -> Result<bool> {
@@ -194,7 +194,7 @@ fn claim_refresh_in(
 /// A known committed CAS is the only source of a process-local dispatch permit.
 #[cfg(test)]
 pub fn authorize_and_commit_dispatch(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
 ) -> Result<Option<RefreshDispatchPermit>> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -278,7 +278,10 @@ pub fn mark_uncertain(db: &Connection, attempt: &str) -> Result<bool> {
 /// only if this attempt still owns the active base version. A stale rejection
 /// cannot disable a successor connection.
 #[cfg(test)]
-pub(super) fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<bool> {
+pub(super) fn mark_definitive_rejection(
+    db: &mut dyn crate::write_queue::ConnectionOwner,
+    attempt: &str,
+) -> Result<bool> {
     validate_id(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = definitive_rejection_in(&tx, attempt)?;
@@ -354,7 +357,7 @@ fn definitive_rejection_in(tx: &Transaction<'_>, attempt: &str) -> Result<bool> 
 /// private vault tables. Its error rolls back both the version and receipt.
 #[cfg(test)]
 pub fn commit_replacement(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     next_version: i64,
     receipt: &str,
@@ -390,7 +393,7 @@ pub(super) fn publish_replacement(
 
 #[cfg(test)]
 fn commit_replacement_with(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     next_version: i64,
     receipt: &str,
@@ -560,7 +563,11 @@ pub(super) fn reject_current_refresh_in(
     Ok(())
 }
 
-pub fn disable_slot(db: &mut Connection, slot: &str, expected_epoch: i64) -> Result<bool> {
+pub fn disable_slot(
+    db: &mut dyn crate::write_queue::ConnectionOwner,
+    slot: &str,
+    expected_epoch: i64,
+) -> Result<bool> {
     validate_id(slot)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let captured = tx
@@ -673,10 +680,10 @@ mod tests {
     fn fence_survives_reopen_and_only_committed_receipt_recovers() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("app.sqlite");
-        let mut host_a = Connection::open(&path).unwrap();
+        let mut host_a = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         setup(&host_a);
         assert!(claim_refresh(&mut host_a, "attempt_1", &eligibility()).unwrap());
-        let mut host_b = Connection::open(&path).unwrap();
+        let mut host_b = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         host_b.execute_batch("PRAGMA foreign_keys = ON").unwrap();
         assert!(!claim_refresh(&mut host_b, "attempt_2", &eligibility()).unwrap());
         let permit = authorize_and_commit_dispatch(&mut host_a, "attempt_1")
@@ -688,7 +695,7 @@ mod tests {
             "google_subject_1"
         );
         drop(host_a);
-        let mut reopened = Connection::open(&path).unwrap();
+        let mut reopened = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         reopened.execute_batch("PRAGMA foreign_keys = ON").unwrap();
         assert!(
             authorize_and_commit_dispatch(&mut reopened, "attempt_1")
@@ -732,7 +739,7 @@ mod tests {
 
     #[test]
     fn custody_failure_rolls_back_and_disconnect_fences_late_publication() {
-        let mut db = Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         setup(&db);
         assert!(claim_refresh(&mut db, "attempt_1", &eligibility()).unwrap());
         authorize_and_commit_dispatch(&mut db, "attempt_1")
@@ -768,7 +775,7 @@ mod tests {
     fn two_sqlite_hosts_cannot_claim_one_token_version() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("race.sqlite");
-        setup(&Connection::open(&path).unwrap());
+        setup(&crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap());
         let barrier = Arc::new(Barrier::new(2));
         let results = std::thread::scope(|scope| {
             let jobs = (1..=2)
@@ -776,7 +783,8 @@ mod tests {
                     let path = path.clone();
                     let barrier = barrier.clone();
                     scope.spawn(move || {
-                        let mut db = Connection::open(path).unwrap();
+                        let mut db =
+                            crate::oauth::schema::RawAdmissionDatabase::open(path).unwrap();
                         db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
                         barrier.wait();
                         claim_refresh(&mut db, &format!("attempt_{ordinal}"), &eligibility())
@@ -793,7 +801,7 @@ mod tests {
 
     #[test]
     fn successor_generation_can_refresh_its_own_first_version() {
-        let mut db = Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         setup(&db);
         assert!(claim_refresh(&mut db, "old_attempt", &eligibility()).unwrap());
         let mut successor = eligibility();
@@ -826,7 +834,7 @@ mod tests {
 
     #[test]
     fn changed_affinity_blocks_claim_and_dispatch() {
-        let mut db = Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         setup(&db);
         let mut changed = eligibility();
         changed.affinity = "different_consent_or_registration".into();
@@ -847,7 +855,7 @@ mod tests {
 
     #[test]
     fn unknown_schema_version_fails_closed() {
-        let db = Connection::open_in_memory().unwrap();
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         install_schema(&db).unwrap();
         db.execute("UPDATE oauth_schema_version SET version = 3", [])
             .unwrap();
@@ -856,7 +864,7 @@ mod tests {
 
     #[test]
     fn definitive_rejection_cannot_disable_replaced_or_revoked_slot() {
-        let mut active = Connection::open_in_memory().unwrap();
+        let mut active = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         setup(&active);
         claim_refresh(&mut active, "attempt_1", &eligibility()).unwrap();
         authorize_and_commit_dispatch(&mut active, "attempt_1")
@@ -870,7 +878,7 @@ mod tests {
         );
         assert!(!claim_refresh(&mut active, "attempt_2", &eligibility()).unwrap());
 
-        let mut revoked = Connection::open_in_memory().unwrap();
+        let mut revoked = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         setup(&revoked);
         claim_refresh(&mut revoked, "attempt_1", &eligibility()).unwrap();
         authorize_and_commit_dispatch(&mut revoked, "attempt_1")
@@ -884,7 +892,7 @@ mod tests {
             Some(RefreshState::PublicationRejected)
         );
 
-        let mut replaced = Connection::open_in_memory().unwrap();
+        let mut replaced = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         setup(&replaced);
         claim_refresh(&mut replaced, "attempt_1", &eligibility()).unwrap();
         authorize_and_commit_dispatch(&mut replaced, "attempt_1")
@@ -920,7 +928,7 @@ mod tests {
     fn subprocess_fence_crash_reopens_uncertain() {
         const CHILD_PATH: &str = "DAY2_OAUTH_CRASH_TEST_DB";
         if let Some(path) = std::env::var_os(CHILD_PATH) {
-            let mut db = Connection::open(path).unwrap();
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open(path).unwrap();
             assert!(claim_refresh(&mut db, "attempt_1", &eligibility()).unwrap());
             let _permit = authorize_and_commit_dispatch(&mut db, "attempt_1")
                 .unwrap()
@@ -934,7 +942,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("crash.sqlite");
-        setup(&Connection::open(&path).unwrap());
+        setup(&crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap());
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("oauth::store::tests::subprocess_fence_crash_reopens_uncertain")
@@ -954,7 +962,7 @@ mod tests {
         assert!(seen_fence, "child did not commit the dispatch fence");
         child.kill().unwrap();
         child.wait().unwrap();
-        let mut reopened = Connection::open(&path).unwrap();
+        let mut reopened = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         assert_eq!(
             refresh_state(&reopened, "attempt_1").unwrap(),
             Some(RefreshState::MayHaveBeenSent)
@@ -1042,7 +1050,7 @@ mod tests {
     proptest! {
         #[test]
         fn sqlite_matches_independent_oracle(schedule in proptest::collection::vec(0u8..6, 0..30)) {
-            let mut db = Connection::open_in_memory().unwrap();
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
             setup(&db);
             let mut model = Model { state: None, active: true, version: 1 };
             for choice in schedule {

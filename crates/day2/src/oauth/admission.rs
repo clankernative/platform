@@ -2169,7 +2169,7 @@ pub(super) mod tests {
             reviewed: &terms.reviewed,
             instance: &terms.instance,
         };
-        let mut db = crate::store::open(database)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(database)?;
         // Same owning core definition used by mounted app-registry fixtures;
         // this standalone OAuth DB has no Runtime initialization entrance.
         db.execute_batch(crate::audit::PRINCIPALS_DDL)?;

@@ -580,7 +580,7 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
     use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("app.sqlite");
-    let mut db = Connection::open(&path)?;
+    let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
     initialize_restore_fence(&mut db)?;
     let token = "a".repeat(43);
     db.execute(
@@ -685,7 +685,7 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
     }
     drop(db);
     for _ in 0..2 {
-        let mut reopened = Connection::open(&path)?;
+        let mut reopened = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         let active = current(&reopened)?;
         assert!(!active.document.enabled);
         assert_ne!(active.stamp.epoch, previous.stamp.epoch);
@@ -740,7 +740,7 @@ fn prepared_restore_fence_keeps_real_usage_unknown_holds_and_old_work_across_reo
 fn prepared_restore_fence_refuses_changed_snapshot_reused_epoch_and_invalid_input_before_writes()
 -> Result<()> {
     for cut in 0..5 {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         initialize_restore_fence(&mut db)?;
         let original = current(&db)?;
         let replacement = Digest::new(b"prepared-target-epoch");
@@ -821,7 +821,7 @@ fn prepared_restore_fence_rejects_partial_unknown_or_corrupt_units_without_repai
         "DROP TABLE day2_web_secret",
         "ALTER TABLE day2_invocations ADD COLUMN unreviewed INTEGER",
     ] {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         initialize_restore_fence(&mut db)?;
         let original = current(&db)?;
         let schema = RestoreFenceSchema::prepare()?;
@@ -915,7 +915,7 @@ fn prepared_restore_fence_requires_same_active_scope_and_preserves_the_actual_ho
 #[test]
 fn prepared_restore_fence_owned_scope_stops_at_actual_vm_budget_without_denial_writes() -> Result<()>
 {
-    let mut db = Connection::open_in_memory()?;
+    let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
     initialize_restore_fence(&mut db)?;
     let original = current(&db)?;
     let schema = RestoreFenceSchema::prepare()?;
@@ -940,8 +940,8 @@ fn prepared_restore_fence_owned_scope_stops_at_actual_vm_budget_without_denial_w
             .get::<_, i64>(0))?,
         0
     );
-    // The temporary callback has actually been removed; a later finite query
-    // succeeds rather than inheriting the exhausted scope or a renewed budget.
+    // The exhausted admission counter has ended. The same held raw hook
+    // permits later finite work without inheriting or renewing that counter.
     assert_eq!(tx.query_row("WITH RECURSIVE n(v) AS(VALUES(0) UNION ALL SELECT v+1 FROM n WHERE v<1000) SELECT sum(v) FROM n",[],|r|r.get::<_,i64>(0))?,500500);
     tx.commit()?;
     assert_eq!(current(&db)?, original);
@@ -950,7 +950,7 @@ fn prepared_restore_fence_owned_scope_stops_at_actual_vm_budget_without_denial_w
 
 #[test]
 fn prepared_restore_fence_late_failure_rolls_back_inside_the_actual_owned_scope() -> Result<()> {
-    let mut db = Connection::open_in_memory()?;
+    let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
     initialize_restore_fence(&mut db)?;
     let original = current(&db)?;
     let schema = RestoreFenceSchema::prepare()?;
@@ -989,7 +989,7 @@ fn prepared_restore_fence_rollback_preserves_original_authority_and_budget_on_re
 {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("app.sqlite");
-    let mut db = Connection::open(&path)?;
+    let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
     initialize_restore_fence(&mut db)?;
     let original = current(&db)?;
     let schema = RestoreFenceSchema::prepare()?;
@@ -1006,7 +1006,7 @@ fn prepared_restore_fence_rollback_preserves_original_authority_and_budget_on_re
     }
     drop(db);
     for _ in 0..2 {
-        let db = Connection::open(&path)?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         assert_eq!(current(&db)?, original);
         assert_eq!(
             db.query_row(
@@ -1112,9 +1112,9 @@ fn active() -> ActiveAuthority {
     }
 }
 
-fn initialize_restore_fence(db: &mut Connection) -> Result<()> {
-    db.pragma_update(None, "foreign_keys", true)?;
-    db.execute_batch(crate::store::PLATFORM_DDL)?;
+fn initialize_restore_fence(db: &mut dyn crate::write_queue::ConnectionOwner) -> Result<()> {
+    db.connection().pragma_update(None, "foreign_keys", true)?;
+    db.connection().execute_batch(crate::store::PLATFORM_DDL)?;
     let tx = db.transaction()?;
     crate::audit::upgrade(&tx)?;
     upgrade(&tx)?;

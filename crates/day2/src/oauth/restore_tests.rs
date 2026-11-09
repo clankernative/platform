@@ -10,8 +10,8 @@ use std::{collections::BTreeSet, path::Path};
 mod empty_historical_unit {
     use super::{Connection, Digest, Result, install, params};
 
-    fn historical() -> Result<Connection> {
-        let db = Connection::open_in_memory()?;
+    fn historical() -> Result<crate::oauth::schema::RawAdmissionDatabase> {
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch(super::super::EMPTY_HISTORICAL_UNIT)?;
         db.execute_batch("CREATE TABLE app_rows(value TEXT); INSERT INTO app_rows VALUES('keep')")?;
@@ -42,7 +42,7 @@ mod empty_historical_unit {
                 .get::<_, String>(0))?,
             "keep"
         );
-        let current = Connection::open_in_memory()?;
+        let current = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install(&current)?;
         current.execute_batch("CREATE TABLE app_rows(value TEXT)")?;
         assert_eq!(schema(&db)?, schema(&current)?);
@@ -318,7 +318,7 @@ fn current_connect_and_use_corruption_keep_first_refusal_and_the_absent_use_rout
         (true, true, true),
         (true, false, true),
     ] {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch(crate::store::PLATFORM_DDL)?;
         db.execute(
@@ -376,8 +376,10 @@ fn current_connect_and_use_corruption_keep_first_refusal_and_the_absent_use_rout
     Ok(())
 }
 
-pub(in crate::oauth) fn database(path: &Path) -> Result<Connection> {
-    let db = Connection::open(path)?;
+pub(in crate::oauth) fn database(
+    path: &Path,
+) -> Result<crate::oauth::schema::RawAdmissionDatabase> {
+    let db = crate::oauth::schema::RawAdmissionDatabase::open(path)?;
     db.pragma_update(None, "foreign_keys", true)?;
     db.execute_batch(crate::store::PLATFORM_DDL)?;
     db.execute(
@@ -410,7 +412,7 @@ fn intent(id: &str) -> connect::ConnectIntent {
     }
 }
 
-fn seed(db: &mut Connection) -> Result<()> {
+fn seed(db: &mut dyn crate::write_queue::ConnectionOwner) -> Result<()> {
     assert!(connect::begin(db, &intent("pending"), 1)?);
     assert!(connect::begin(db, &intent("sent"), 1)?);
     assert!(connect::claim_callback(
@@ -431,15 +433,19 @@ fn seed(db: &mut Connection) -> Result<()> {
     .enumerate()
     {
         let slot = format!("refresh_slot_{index}");
-        db.execute("INSERT INTO oauth_connection_slots VALUES(?1,1,1,1,'profile','account','affinity','active')",[&slot])?;
-        db.execute("INSERT INTO oauth_refresh_attempts VALUES(?1,?2,1,1,1,'profile','account','affinity',?3,?4,?5)",
+        db.connection().execute("INSERT INTO oauth_connection_slots VALUES(?1,1,1,1,'profile','account','affinity','active')",[&slot])?;
+        db.connection().execute("INSERT INTO oauth_refresh_attempts VALUES(?1,?2,1,1,1,'profile','account','affinity',?3,?4,?5)",
             params![format!("refresh_{index}"),slot,state,if index==3 {Some(2)} else {None},if index==3 {Some("known_receipt")} else {None}])?;
     }
-    inbound::record_grant(db, "old_grant", &inbound::tests::ceiling(), 1)?;
+    inbound::record_grant(db.connection(), "old_grant", &inbound::tests::ceiling(), 1)?;
     Ok(())
 }
 
-fn cut(db: &mut Connection, profile: &Profile, seed: u64) -> Result<usize> {
+fn cut(
+    db: &mut dyn crate::write_queue::ConnectionOwner,
+    profile: &Profile,
+    seed: u64,
+) -> Result<usize> {
     let mut tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let before = Snapshot::capture(&tx, profile)?;
     let cut = crate::security_epoch::restore_cut::fixture(before.digest().clone(), seed)?;
@@ -448,7 +454,10 @@ fn cut(db: &mut Connection, profile: &Profile, seed: u64) -> Result<usize> {
     Ok(count)
 }
 
-pub(in crate::oauth) fn apply_for_storage(db: &mut Connection, seed: u64) -> Result<usize> {
+pub(in crate::oauth) fn apply_for_storage(
+    db: &mut crate::oauth::schema::RawAdmissionDatabase,
+    seed: u64,
+) -> Result<usize> {
     let scope: String = db.query_row(
         "SELECT value FROM main.day2_meta WHERE key='scope'",
         [],
@@ -506,7 +515,7 @@ fn restored_generation_floors_preserve_pending_history_and_refuse_raw_adoption()
     assert_eq!(cut(&mut db, &Profile::prepare()?, 93)?, 8);
     drop(db);
     for _ in 0..2 {
-        let mut db = Connection::open(&path)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         db.pragma_update(None, "foreign_keys", true)?;
         assert_eq!(histories(&db)?, history);
         for (slot, expected) in [
@@ -601,7 +610,7 @@ fn each_imported_generation_source_contributes_its_own_conservative_floor() -> R
         cut(&mut db, &Profile::prepare()?, 98)?;
         drop(db);
         for _ in 0..2 {
-            let db = Connection::open(&path)?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
             assert_eq!(
                 super::generation_floor(&db, slot)?,
                 Some(expected),
@@ -689,7 +698,7 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
         assert_eq!(cut(&mut db, &profile, seed_number)?, 7); // 2 connect + 4 refresh + 1 grant.
         drop(db);
         for _ in 0..2 {
-            let mut db = Connection::open(&path)?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
             db.pragma_update(None, "foreign_keys", true)?;
             assert_eq!(histories(&db)?, history);
             assert_eq!(db.query_row("SELECT count(*) FROM main.oauth_connection_slots WHERE status='reauth_required' AND security_epoch=2 AND generation=1 AND token_version=1",[],|r|r.get::<_,i64>(0))?,4);
@@ -879,7 +888,7 @@ fn actual_code_and_provider_denial_callbacks_cannot_change_cut_closed_rows_or_ma
                 cut(&mut db, &Profile::prepare()?, 92)?;
                 for _ in 0..2 {
                     drop(db);
-                    db = Connection::open(&path)?;
+                    db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
                     assert!(
                         outbound::handle_callback_profile(
                             &mut db,
@@ -1065,7 +1074,7 @@ fn missing_partial_shadow_and_unknown_units_refuse_before_any_cut() -> Result<()
 
 #[test]
 fn ordinary_restore_allows_only_empty_current_cut_metadata() -> Result<()> {
-    let mut db = Connection::open_in_memory()?;
+    let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
     {
         let tx = db.transaction()?;
         require_no_history(&tx)?;
@@ -1101,8 +1110,10 @@ fn ordinary_preflight_refuses_retained_oauth_after_selection_removal_and_readonl
     // actual ordinary preflight. Empty restore-cut tables cannot hide history.
     drop(db);
     for _ in 0..2 {
-        let mut db =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
         let tx = db.transaction()?;
         assert!(crate::store::require_no_managed_credential_restore_state(&tx).is_err());
         assert_eq!(histories(&tx)?, original);
@@ -1133,6 +1144,7 @@ fn ordinary_preflight_preserves_the_callers_actual_progress_hook_on_success_and_
         let interrupt = Arc::new(AtomicBool::new(false));
         let counter = calls.clone();
         let stop = interrupt.clone();
+        let mut db = db.retire()?;
         db.progress_handler(
             1,
             Some(move || {
@@ -1186,7 +1198,9 @@ fn actual_process_loss_before_and_after_outer_commit_has_one_replayable_cut() ->
             "child did not reach its controlled loss point"
         );
         for _ in 0..2 {
-            let db = Connection::open(directory.path().join("app.sqlite"))?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open(
+                directory.path().join("app.sqlite"),
+            )?;
             let applied = stage == 2; // Independent expected durable boundary.
             assert_eq!(
                 db.query_row("SELECT count(*) FROM main.oauth_restore_cuts", [], |r| r

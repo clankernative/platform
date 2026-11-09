@@ -1178,7 +1178,7 @@ mod tests {
         super::super::effects::scope(Arc::new(Clock), || -> Result<()> {
             let fixture = Fixture::new()?;
             let path = fixture.runtime.db().to_path_buf();
-            let mut db = store::open(&path)?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
             {
                 let tx = db.transaction()?;
                 load(
@@ -1232,7 +1232,7 @@ mod tests {
             }
             for _ in 0..2 {
                 drop(db);
-                db = store::open(&path)?;
+                db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
                 let tx = db.transaction()?;
                 assert!(
                     load(

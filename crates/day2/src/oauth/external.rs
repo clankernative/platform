@@ -121,7 +121,7 @@ impl VerifiedExternalExchange {
 /// Quarantine and the awaiting-approval state commit together. No token slot
 /// becomes active at this boundary.
 pub fn quarantine_external(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     prepared: PreparedExternalSettlement,
     current: OutboundQualification<'_>,
     now: i64,
@@ -540,14 +540,14 @@ impl ShellApprovalKeyLease {
 /// The challenge, encrypted token identity, attempt, slot CAS and activation
 /// all revalidate within the final SQLite transaction.
 pub(crate) fn approve_external(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     current: OutboundQualification<'_>,
     key: &KeyLease,
     shell: &ShellApprovalKeyLease,
     approval: FreshExternalApproval,
     now: i64,
 ) -> Result<bool> {
-    let Some(pending) = load_pending_external(db, current, key, now)? else {
+    let Some(pending) = load_pending_external(db.connection(), current, key, now)? else {
         return Ok(false);
     };
     approval.verify(&pending, shell, now)?;

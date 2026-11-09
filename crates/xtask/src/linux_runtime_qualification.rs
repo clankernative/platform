@@ -2684,11 +2684,7 @@ pub fn native_evidence(instance: &Path) -> Result<Value> {
             "evidence table name"
         );
         let mut statement = transaction.prepare(&format!("SELECT * FROM \"{table}\""))?;
-        let columns: Vec<_> = statement
-            .column_names()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let columns: Vec<_> = statement.column_names().map(str::to_owned).collect();
         let mut cursor = statement.query([])?;
         let mut rows = Vec::new();
         while let Some(row) = cursor.next()? {

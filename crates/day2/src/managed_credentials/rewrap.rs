@@ -1666,7 +1666,8 @@ mod tests {
                 "rolled-back verifier became durable"
             );
             let winner = verifier_prepared(&db, &authority, &keys, &token)?;
-            let mut competing = Connection::open(dir.path().join("app.sqlite"))?;
+            let mut competing =
+                crate::oauth::schema::RawAdmissionDatabase::open(dir.path().join("app.sqlite"))?;
             super::super::install_schema(&competing)?;
             let stale = verifier_prepared(&competing, &authority, &keys, &token)?;
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1753,7 +1754,9 @@ mod tests {
                 } else {
                     None
                 };
-                let mut competing = Connection::open(dir.path().join("app.sqlite"))?;
+                let mut competing = crate::oauth::schema::RawAdmissionDatabase::open(
+                    dir.path().join("app.sqlite"),
+                )?;
                 super::super::install_schema(&competing)?;
                 let tx = competing.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 match action {
@@ -2094,7 +2097,7 @@ mod tests {
                 old != super::super::CREDENTIAL_DDL,
                 "old schema control did not remove revision"
             );
-            let old_db = Connection::open_in_memory()?;
+            let old_db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             old_db.execute_batch(&old)?;
             old_db.execute("INSERT INTO day2_credential_schema_version VALUES(2)", [])?;
             let schema: String = old_db.query_row(
@@ -2994,7 +2997,8 @@ mod tests {
                     .context("issued version required")?,
             );
             let first = prepared(&db, &authority, &keys)?;
-            let mut competing = Connection::open(dir.path().join("app.sqlite"))?;
+            let mut competing =
+                crate::oauth::schema::RawAdmissionDatabase::open(dir.path().join("app.sqlite"))?;
             let stale = prepared(&competing, &authority, &keys)?;
             let original = first.original.ciphertext.clone();
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
