@@ -23,8 +23,6 @@ use crate::security_epoch::{
 use anyhow::Result;
 #[cfg(target_os = "linux")]
 use anyhow::ensure;
-#[cfg(target_os = "linux")]
-use day2_capabilities::Digest;
 use rustix::event::PollFlags;
 #[cfg(target_os = "linux")]
 use rustix::{
