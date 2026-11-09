@@ -296,13 +296,27 @@ fn diagnostic_observations(bytes: &[u8]) -> BTreeSet<&'static str> {
 const MAX_RUST_DIAGNOSTICS: usize = 16;
 const MAX_DIAGNOSTIC_LINE: usize = 128 * 1024;
 const MAX_DIAGNOSTIC_CATALOG: usize = 4 * 1024 * 1024;
+const MAX_MACRO_LOCATION_DEPTH: usize = 8;
 
 #[derive(Debug, Serialize)]
 struct RustDiagnostic {
     code: String,
+    location: Option<RustDiagnosticLocation>,
+}
+
+#[derive(Debug, Serialize)]
+struct RustDiagnosticLocation {
     source: String,
     line: u32,
     column: u32,
+    kind: RustLocationKind,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RustLocationKind {
+    Primary,
+    MacroCallsite,
 }
 
 #[derive(Debug, Serialize)]
@@ -314,6 +328,21 @@ struct RustDiagnostics {
     malformed_json_lines: usize,
     rejected_diagnostics: usize,
     records_truncated: bool,
+    unlocated_diagnostics: usize,
+    macro_depth_limited: bool,
+}
+
+impl RustDiagnostics {
+    fn push(&mut self, code: &str, location: Option<RustDiagnosticLocation>) {
+        if self.records.len() == MAX_RUST_DIAGNOSTICS {
+            self.records_truncated = true;
+            return;
+        }
+        self.records.push(RustDiagnostic {
+            code: code.to_owned(),
+            location,
+        });
+    }
 }
 
 // The only public paths come from the checked-in architecture catalog, never
@@ -354,9 +383,52 @@ fn diagnostic_sources(bytes: &[u8]) -> Option<BTreeSet<String>> {
         .collect()
 }
 
-// rules_rust's JSON output mode preserves the original rustc JSON before its
-// rendered-message conversion. Read only coded errors and primary locations;
-// never serialize messages, rendered output, source text, expansions or labels.
+// A macro's primary span can be in the private toolchain. Follow only the
+// bounded typed callsite chain, exporting a location solely from this catalog.
+// No macro name, definition path, source text or whole expansion is copied.
+fn diagnostic_location(
+    mut span: &Value,
+    allowed: &BTreeSet<String>,
+) -> (Option<RustDiagnosticLocation>, bool) {
+    for depth in 0..MAX_MACRO_LOCATION_DEPTH {
+        let source = span
+            .get("file_name")
+            .and_then(Value::as_str)
+            .and_then(|source| allowed.get(source));
+        let number = |key| {
+            span.get(key)
+                .and_then(Value::as_u64)
+                .and_then(|number| u32::try_from(number).ok())
+                .filter(|number| *number > 0)
+        };
+        if let (Some(source), Some(line), Some(column)) =
+            (source, number("line_start"), number("column_start"))
+        {
+            return (
+                Some(RustDiagnosticLocation {
+                    source: source.clone(),
+                    line,
+                    column,
+                    kind: if depth == 0 {
+                        RustLocationKind::Primary
+                    } else {
+                        RustLocationKind::MacroCallsite
+                    },
+                }),
+                false,
+            );
+        }
+        let Some(callsite) = span.pointer("/expansion/span") else {
+            return (None, false);
+        };
+        span = callsite;
+    }
+    (None, true)
+}
+
+// rules_rust's JSON mode preserves the original rustc diagnostic before its
+// rendered-message conversion. Coded errors survive even without an admitted
+// location; never serialize messages, rendered output, source text or labels.
 fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics {
     let mut result = RustDiagnostics {
         records: Vec::new(),
@@ -366,6 +438,8 @@ fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics
         malformed_json_lines: 0,
         rejected_diagnostics: 0,
         records_truncated: false,
+        unlocated_diagnostics: 0,
+        macro_depth_limited: false,
     };
     let bytes = &bytes[..bytes.len().min(MAX_CAPTURE)];
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
@@ -389,8 +463,7 @@ fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics
             continue;
         }
         let code = value.pointer("/code/code").and_then(Value::as_str);
-        let spans = value.get("spans").and_then(Value::as_array);
-        let (Some(code), Some(spans)) = (code, spans) else {
+        let Some(code) = code else {
             result.rejected_diagnostics += 1;
             continue;
         };
@@ -402,39 +475,25 @@ fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics
             continue;
         }
         let mut admitted = false;
-        for span in spans {
+        for span in value
+            .get("spans")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if span.get("is_primary").and_then(Value::as_bool) != Some(true) {
                 continue;
             }
-            let source = span
-                .get("file_name")
-                .and_then(Value::as_str)
-                .and_then(|source| allowed.get(source));
-            let number = |key| {
-                span.get(key)
-                    .and_then(Value::as_u64)
-                    .and_then(|number| u32::try_from(number).ok())
-                    .filter(|number| *number > 0)
-            };
-            let (Some(source), Some(line), Some(column)) =
-                (source, number("line_start"), number("column_start"))
-            else {
-                continue;
-            };
-            admitted = true;
-            if result.records.len() == MAX_RUST_DIAGNOSTICS {
-                result.records_truncated = true;
-                continue;
+            let (location, limited) = diagnostic_location(span, allowed);
+            result.macro_depth_limited |= limited;
+            if location.is_some() {
+                admitted = true;
+                result.push(code, location);
             }
-            result.records.push(RustDiagnostic {
-                code: code.to_owned(),
-                source: source.clone(),
-                line,
-                column,
-            });
         }
         if !admitted {
-            result.rejected_diagnostics += 1;
+            result.unlocated_diagnostics += 1;
+            result.push(code, None);
         }
     }
     result
@@ -839,7 +898,7 @@ mod tests {
         let summary = rust_diagnostics(&serde_json::to_vec(&coded_diagnostic(source))?, &sources);
         assert!(summary.catalog_available);
         assert_eq!(summary.records.len(), 1);
-        assert_eq!(summary.records[0].source, source);
+        assert_eq!(summary.records[0].location.as_ref().unwrap().source, source);
         assert_eq!(summary.records[0].code, "E0308");
         assert!(diagnostic_sources(&vec![b' '; MAX_DIAGNOSTIC_CATALOG + 1]).is_none());
         Ok(())
@@ -853,7 +912,7 @@ mod tests {
         let public = serde_json::to_value(rust_diagnostics(&bytes, &allowed))?;
         assert_eq!(
             public["records"],
-            json!([{"code":"E0308","source":source,"line":17,"column":9}])
+            json!([{"code":"E0308","location":{"source":source,"line":17,"column":9,"kind":"primary"}}])
         );
         assert_eq!(public["rejected_diagnostics"], 0);
         assert!(!public.to_string().contains("PRIVATE"));
@@ -875,8 +934,10 @@ mod tests {
         ] {
             let summary =
                 rust_diagnostics(&serde_json::to_vec(&coded_diagnostic(foreign))?, &allowed);
-            assert!(summary.records.is_empty());
-            assert_eq!(summary.rejected_diagnostics, 1);
+            assert_eq!(summary.records.len(), 1);
+            assert_eq!(summary.records[0].code, "E0308");
+            assert!(summary.records[0].location.is_none());
+            assert_eq!(summary.unlocated_diagnostics, 1);
             assert!(!serde_json::to_string(&summary)?.contains("PRIVATE"));
         }
         Ok(())
@@ -911,20 +972,16 @@ mod tests {
             for key in ["line_start", "column_start"] {
                 let mut diagnostic = coded_diagnostic(source);
                 diagnostic["spans"][0][key] = bad.clone();
-                assert!(
-                    rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed)
-                        .records
-                        .is_empty()
-                );
+                let summary = rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed);
+                assert_eq!(summary.records.len(), 1);
+                assert!(summary.records[0].location.is_none());
             }
         }
         let mut secondary = coded_diagnostic(source);
         secondary["spans"][0]["is_primary"] = json!(false);
-        assert!(
-            rust_diagnostics(&serde_json::to_vec(&secondary)?, &allowed)
-                .records
-                .is_empty()
-        );
+        let summary = rust_diagnostics(&serde_json::to_vec(&secondary)?, &allowed);
+        assert_eq!(summary.records.len(), 1);
+        assert!(summary.records[0].location.is_none());
         let sources = diagnostic_sources(&serde_json::to_vec(
             &json!({"version":1,"sources":[source]}),
         )?)
@@ -942,7 +999,52 @@ mod tests {
             &BTreeSet::new(),
         );
         assert!(!unavailable.catalog_available);
-        assert!(unavailable.records.is_empty());
+        assert_eq!(unavailable.records.len(), 1);
+        assert_eq!(unavailable.records[0].code, "E0308");
+        assert!(unavailable.records[0].location.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn macro_errors_keep_codes_and_only_admitted_bounded_callsite_locations() -> Result<()> {
+        let source = "crates/day2/src/lib.rs";
+        let allowed = BTreeSet::from([source.to_owned()]);
+        // Observed pinned rustc E0277 shape: the primary span is a toolchain
+        // macro definition; only its callsite is a reviewed workspace source.
+        let mut diagnostic = coded_diagnostic("/PRIVATE/definition.rs");
+        diagnostic["code"]["code"] = json!("E0277");
+        diagnostic["spans"][0]["expansion"] = json!({
+            "span":{"file_name":source,"is_primary":false,"line_start":3,"column_start":13},
+            "macro_decl_name":"PRIVATE-MACRO", "def_site_span":{"file_name":"PRIVATE-DEFINITION"}
+        });
+        let public = serde_json::to_value(rust_diagnostics(
+            &serde_json::to_vec(&diagnostic)?,
+            &allowed,
+        ))?;
+        assert_eq!(
+            public["records"],
+            json!([{"code":"E0277","location":{"source":source,"line":3,"column":13,"kind":"macro_callsite"}}])
+        );
+        assert!(!public.to_string().contains("PRIVATE"));
+        diagnostic["spans"][0]["expansion"]["span"]["file_name"] =
+            json!("../crates/day2/src/lib.rs");
+        let public = serde_json::to_value(rust_diagnostics(
+            &serde_json::to_vec(&diagnostic)?,
+            &allowed,
+        ))?;
+        assert_eq!(public["records"], json!([{"code":"E0277","location":null}]));
+        assert_eq!(public["unlocated_diagnostics"], 1);
+        assert!(!public.to_string().contains("PRIVATE"));
+        let mut nested = json!({"file_name":source,"line_start":3,"column_start":13});
+        for _ in 0..MAX_MACRO_LOCATION_DEPTH {
+            nested = json!({"file_name":"PRIVATE-DEFINITION","expansion":{"span":nested}});
+        }
+        nested["is_primary"] = json!(true);
+        diagnostic["spans"][0] = nested;
+        let summary = rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed);
+        assert!(summary.macro_depth_limited);
+        assert!(summary.records[0].location.is_none());
+        assert_eq!(summary.records[0].code, "E0277");
         Ok(())
     }
 
