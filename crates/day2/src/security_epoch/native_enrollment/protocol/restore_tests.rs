@@ -1582,7 +1582,10 @@ fn actual_prepared_issuer_spends_the_retained_app_and_posts_before_retaining_or_
         tokens(&comparison.to_token_stream().to_string()),
         tokens("retained.as_ref() == &decision")
     );
-    assert_ne!(tokens("retained.as_ref()==&decision"), tokens("retained.as_ref() == &decision"));
+    assert_ne!(
+        tokens("retained.as_ref()==&decision"),
+        tokens("retained.as_ref() == &decision")
+    );
     let source = include_str!("../service.rs");
     let file = syn::parse_file(source).unwrap();
     let actual = file
