@@ -148,6 +148,7 @@ pub(crate) struct Failure {
     children: BTreeSet<ChildStatus>,
     child_statuses_truncated: bool,
     actions: ActionDiagnostics,
+    rust_diagnostics: RustDiagnostics,
     oom_kill_delta: Option<u64>,
 }
 
@@ -155,7 +156,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Bazel build failed: primary={}, code={:?}, signal={:?}, os_error={:?}; evidence={:?}; retained={}; observations={:?}; children={:?}; child_statuses_truncated={}; actions={:?}; cgroup_oom_kill_delta={:?}",
+            "Bazel build failed: primary={}, code={:?}, signal={:?}, os_error={:?}; evidence={:?}; retained={}; observations={:?}; children={:?}; child_statuses_truncated={}; actions={:?}; rust_diagnostics={:?}; cgroup_oom_kill_delta={:?}",
             if self.process.category == "success" {
                 "capture"
             } else {
@@ -170,6 +171,7 @@ impl std::fmt::Display for Failure {
             self.children,
             self.child_statuses_truncated,
             self.actions,
+            self.rust_diagnostics,
             self.oom_kill_delta
         )
     }
@@ -289,6 +291,150 @@ fn diagnostic_observations(bytes: &[u8]) -> BTreeSet<&'static str> {
     .into_iter()
     .filter_map(|(marker, observation)| text.contains(marker).then_some(observation))
     .collect()
+}
+
+const MAX_RUST_DIAGNOSTICS: usize = 16;
+const MAX_DIAGNOSTIC_LINE: usize = 128 * 1024;
+
+#[derive(Debug, Serialize)]
+struct RustDiagnostic {
+    code: String,
+    source: String,
+    line: u32,
+    column: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct RustDiagnostics {
+    records: Vec<RustDiagnostic>,
+    catalog_available: bool,
+    input_truncated: bool,
+    oversized_lines: usize,
+    malformed_json_lines: usize,
+    rejected_diagnostics: usize,
+    records_truncated: bool,
+}
+
+// The only public paths come from the checked-in architecture catalog, never
+// from compiler-owned strings. A missing/invalid catalog exports no locations.
+fn diagnostic_sources(bytes: &[u8]) -> Option<BTreeSet<String>> {
+    if bytes.len() > MAX_CAPTURE {
+        return None;
+    }
+    let value: Value = day2::json::decode(bytes).ok()?;
+    if value.get("version")?.as_u64()? != 1 {
+        return None;
+    }
+    let sources = value.get("sources")?.as_array()?;
+    if sources.is_empty() || sources.len() > 4096 {
+        return None;
+    }
+    sources
+        .iter()
+        .map(|source| {
+            let source = source.as_str()?;
+            (source.len() <= 256
+                && source.ends_with(".rs")
+                && (source.starts_with("crates/")
+                    || source.starts_with("cli/checks/")
+                    || source == "build.rs")
+                && source.split('/').all(|part| {
+                    !part.is_empty()
+                        && part != "."
+                        && part != ".."
+                        && part
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte))
+                }))
+            .then(|| source.to_owned())
+        })
+        .collect()
+}
+
+// rules_rust's JSON output mode preserves the original rustc JSON before its
+// rendered-message conversion. Read only coded errors and primary locations;
+// never serialize messages, rendered output, source text, expansions or labels.
+fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics {
+    let mut result = RustDiagnostics {
+        records: Vec::new(),
+        catalog_available: !allowed.is_empty(),
+        input_truncated: bytes.len() > MAX_CAPTURE,
+        oversized_lines: 0,
+        malformed_json_lines: 0,
+        rejected_diagnostics: 0,
+        records_truncated: false,
+    };
+    let bytes = &bytes[..bytes.len().min(MAX_CAPTURE)];
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if result.input_truncated && !line.ends_with(b"\n") {
+            break;
+        }
+        if !line.starts_with(b"{") {
+            continue;
+        }
+        if line.len() > MAX_DIAGNOSTIC_LINE {
+            result.oversized_lines += 1;
+            continue;
+        }
+        let Ok(value) = day2::json::decode::<Value>(line) else {
+            result.malformed_json_lines += 1;
+            continue;
+        };
+        if value.get("$message_type").and_then(Value::as_str) != Some("diagnostic")
+            || value.get("level").and_then(Value::as_str) != Some("error")
+        {
+            continue;
+        }
+        let code = value.pointer("/code/code").and_then(Value::as_str);
+        let spans = value.get("spans").and_then(Value::as_array);
+        let (Some(code), Some(spans)) = (code, spans) else {
+            result.rejected_diagnostics += 1;
+            continue;
+        };
+        if code.len() != 5
+            || !code.starts_with('E')
+            || !code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+        {
+            result.rejected_diagnostics += 1;
+            continue;
+        }
+        let mut admitted = false;
+        for span in spans {
+            if span.get("is_primary").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
+            let source = span
+                .get("file_name")
+                .and_then(Value::as_str)
+                .and_then(|source| allowed.get(source));
+            let number = |key| {
+                span.get(key)
+                    .and_then(Value::as_u64)
+                    .and_then(|number| u32::try_from(number).ok())
+                    .filter(|number| *number > 0)
+            };
+            let (Some(source), Some(line), Some(column)) =
+                (source, number("line_start"), number("column_start"))
+            else {
+                continue;
+            };
+            admitted = true;
+            if result.records.len() == MAX_RUST_DIAGNOSTICS {
+                result.records_truncated = true;
+                continue;
+            }
+            result.records.push(RustDiagnostic {
+                code: code.to_owned(),
+                source: source.clone(),
+                line,
+                column,
+            });
+        }
+        if !admitted {
+            result.rejected_diagnostics += 1;
+        }
+    }
+    result
 }
 
 #[derive(Debug, Serialize)]
@@ -446,6 +592,11 @@ fn report(
         .unwrap_or_default();
     let mut actions = action_diagnostics(events.as_deref().unwrap_or_default(), &catalog);
     actions.parse_complete &= events.is_ok();
+    let sources = read_bounded(&root.join("architecture-rules.json"))
+        .ok()
+        .and_then(|bytes| diagnostic_sources(&bytes))
+        .unwrap_or_default();
+    let rust_diagnostics = rust_diagnostics(log, &sources);
     let retain = (|| -> Result<()> {
         let base = root.join("artifacts/bazel/failures");
         fs::create_dir_all(&base)?;
@@ -463,7 +614,7 @@ fn report(
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         }
         let bytes = events.as_ref().map(Vec::as_slice).unwrap_or_default();
-        let manifest = json!({"format":1,"build_process":process,"capture_problem":capture,"captured_bytes":bytes.len(),"retained_bytes":bytes.len().min(MAX_CAPTURE),"complete":bytes.len() <= MAX_CAPTURE && events.is_ok(),"child_statuses":child_statuses(log),"failed_actions":actions,"diagnostic_observations":diagnostic_observations(log),"cause_attribution":false,"cgroup_memory_before":memory_before,"cgroup_memory_at_failure":memory_after,"cgroup_memory_event_deltas":{"oom_events":memory_delta(&memory_before,&memory_after,"oom_events"),"oom_kills":oom_kill_delta,"cause_attribution":false},"diagnostic_only_not_a_preparation_or_runtime_receipt":true,"raw_retention":"private job-workspace only; never an Actions artifact input"});
+        let manifest = json!({"format":1,"build_process":process,"capture_problem":capture,"captured_bytes":bytes.len(),"retained_bytes":bytes.len().min(MAX_CAPTURE),"complete":bytes.len() <= MAX_CAPTURE && events.is_ok(),"child_statuses":child_statuses(log),"failed_actions":actions,"diagnostic_observations":diagnostic_observations(log),"rust_diagnostics":rust_diagnostics,"cause_attribution":false,"cgroup_memory_before":memory_before,"cgroup_memory_at_failure":memory_after,"cgroup_memory_event_deltas":{"oom_events":memory_delta(&memory_before,&memory_after,"oom_events"),"oom_kills":oom_kill_delta,"cause_attribution":false},"diagnostic_only_not_a_preparation_or_runtime_receipt":true,"raw_retention":"private job-workspace only; never an Actions artifact input"});
         private_write(
             &directory.join("events.jsonl"),
             &bytes[..bytes.len().min(MAX_CAPTURE)],
@@ -488,6 +639,7 @@ fn report(
         children: children.into_iter().take(8).collect(),
         child_statuses_truncated,
         actions,
+        rust_diagnostics,
         oom_kill_delta,
     }
     .into())
@@ -513,7 +665,8 @@ fn capture(root: &Path, command: &mut Command, budget: Duration, events: &Path) 
         memory_before,
     );
     // Free-form compiler/Bazel diagnostics remain private local evidence. The
-    // public error exports only the actual numeric outcome and fixed classes.
+    // public error exports only the actual numeric outcome, fixed classes and
+    // bounded coded-error locations from the reviewed source catalog.
     if result.is_ok() {
         ensure!(output.is_ok() && errors.is_ok(), "Bazel log capture failed");
         // Fixed numeric fields only, never the event object, labels, argv or
@@ -530,6 +683,9 @@ fn capture(root: &Path, command: &mut Command, budget: Duration, events: &Path) 
 
 pub(crate) fn run(root: &Path, command: &mut Command, budget: Duration) -> Result<()> {
     let events = tempfile::NamedTempFile::new()?;
+    // Keep original structured diagnostics inside the existing private capture.
+    // The upstream wrapper otherwise replaces them with free-form rendering.
+    command.arg("--@rules_rust//rust/settings:error_format=json");
     command.arg(format!(
         "--build_event_json_file={}",
         events.path().display()
@@ -656,6 +812,181 @@ mod tests {
             diagnostic_observations(b"error[E0432]: unresolved import PRIVATE"),
             BTreeSet::from(["rust_unresolved_import"])
         );
+    }
+
+    fn coded_diagnostic(source: &str) -> Value {
+        json!({
+            "$message_type":"diagnostic", "level":"error",
+            "code":{"code":"E0308","explanation":"PRIVATE-EXPLANATION"},
+            "message":"PRIVATE-MESSAGE", "rendered":"PRIVATE-RENDERED",
+            "children":[{"message":"PRIVATE-CHILD"}],
+            "spans":[{"file_name":source,"is_primary":true,"line_start":17,"column_start":9,
+                "text":[{"text":"PRIVATE-SOURCE"}],"label":"PRIVATE-LABEL",
+                "expansion":{"span":{"file_name":"PRIVATE-EXPANSION"}}}]
+        })
+    }
+
+    #[test]
+    fn coded_errors_export_only_reviewed_locations_and_fixed_fields() -> Result<()> {
+        let source = "crates/day2/src/lib.rs";
+        let allowed = BTreeSet::from([source.to_owned()]);
+        let bytes = serde_json::to_vec(&coded_diagnostic(source))?;
+        let public = serde_json::to_value(rust_diagnostics(&bytes, &allowed))?;
+        assert_eq!(
+            public["records"],
+            json!([{"code":"E0308","source":source,"line":17,"column":9}])
+        );
+        assert_eq!(public["rejected_diagnostics"], 0);
+        assert!(!public.to_string().contains("PRIVATE"));
+        let mut warning = coded_diagnostic(source);
+        warning["level"] = json!("warning");
+        assert!(
+            rust_diagnostics(&serde_json::to_vec(&warning)?, &allowed)
+                .records
+                .is_empty()
+        );
+        // No alternate normalizer may turn foreign, generated or absolute
+        // compiler locations into a reviewed public source name.
+        for foreign in [
+            "/PRIVATE/lib.rs",
+            "../crates/day2/src/lib.rs",
+            "./crates/day2/src/lib.rs",
+            "external/PRIVATE.rs",
+            "crates/day2/src/PRIVATE.rs",
+        ] {
+            let summary =
+                rust_diagnostics(&serde_json::to_vec(&coded_diagnostic(foreign))?, &allowed);
+            assert!(summary.records.is_empty());
+            assert_eq!(summary.rejected_diagnostics, 1);
+            assert!(!serde_json::to_string(&summary)?.contains("PRIVATE"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_codes_spans_and_catalogs_fail_closed() -> Result<()> {
+        let source = "crates/day2/src/lib.rs";
+        let allowed = BTreeSet::from([source.to_owned()]);
+        for code in [
+            json!("E0308-PRIVATE"),
+            json!("E12345"),
+            json!("E12x4"),
+            json!(null),
+            json!(308),
+        ] {
+            let mut diagnostic = coded_diagnostic(source);
+            diagnostic["code"]["code"] = code;
+            assert!(
+                rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed)
+                    .records
+                    .is_empty()
+            );
+        }
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(4294967296_u64),
+            json!("PRIVATE"),
+        ] {
+            for key in ["line_start", "column_start"] {
+                let mut diagnostic = coded_diagnostic(source);
+                diagnostic["spans"][0][key] = bad.clone();
+                assert!(
+                    rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed)
+                        .records
+                        .is_empty()
+                );
+            }
+        }
+        let mut secondary = coded_diagnostic(source);
+        secondary["spans"][0]["is_primary"] = json!(false);
+        assert!(
+            rust_diagnostics(&serde_json::to_vec(&secondary)?, &allowed)
+                .records
+                .is_empty()
+        );
+        let sources = diagnostic_sources(&serde_json::to_vec(
+            &json!({"version":1,"sources":[source]}),
+        )?)
+        .unwrap();
+        assert_eq!(sources, allowed);
+        for bad in [
+            json!({"version":2,"sources":[source]}),
+            json!({"version":1,"sources":[source,"/PRIVATE.rs"]}),
+            json!({"version":1,"sources":[]}),
+        ] {
+            assert!(diagnostic_sources(&serde_json::to_vec(&bad)?).is_none());
+        }
+        let unavailable = rust_diagnostics(
+            &serde_json::to_vec(&coded_diagnostic(source))?,
+            &BTreeSet::new(),
+        );
+        assert!(!unavailable.catalog_available);
+        assert!(unavailable.records.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_diagnostic_bounds_are_explicit_and_never_export_partial_json() -> Result<()> {
+        let source = "crates/day2/src/lib.rs";
+        let allowed = BTreeSet::from([source.to_owned()]);
+        let mut line = serde_json::to_vec(&coded_diagnostic(source))?;
+        line.push(b'\n');
+        let summary = rust_diagnostics(&line.repeat(MAX_RUST_DIAGNOSTICS + 1), &allowed);
+        assert_eq!(summary.records.len(), MAX_RUST_DIAGNOSTICS);
+        assert!(summary.records_truncated);
+        let mut oversized = vec![b' '; MAX_DIAGNOSTIC_LINE + 1];
+        oversized[0] = b'{';
+        oversized.extend_from_slice(b"\n{broken}\n");
+        oversized.extend_from_slice(&line);
+        let summary = rust_diagnostics(&oversized, &allowed);
+        assert_eq!(summary.oversized_lines, 1);
+        assert_eq!(summary.malformed_json_lines, 1);
+        assert_eq!(summary.records.len(), 1);
+        let summary = rust_diagnostics(&vec![b'{'; MAX_CAPTURE + 1], &allowed);
+        assert!(summary.input_truncated);
+        assert!(summary.records.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_build_retains_safe_diagnostics_without_replacing_primary_outcome() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = "crates/day2/src/lib.rs";
+        fs::write(
+            root.path().join("architecture-rules.json"),
+            serde_json::to_vec(&json!({"version":1,"sources":[source]}))?,
+        )?;
+        let log = serde_json::to_vec(&coded_diagnostic(source))?;
+        let error = report(
+            root.path(),
+            failed(),
+            Ok(success_events()),
+            &log,
+            Value::Null,
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<Failure>()
+            .context("original typed failure")?;
+        assert_eq!(failure.process.code, Some(7));
+        assert_eq!(failure.rust_diagnostics.records.len(), 1);
+        assert!(!error.to_string().contains("PRIVATE"));
+        let directory = fs::read_dir(root.path().join("artifacts/bazel/failures"))?
+            .next()
+            .context("retained build directory")??
+            .path();
+        let outcome: Value = day2::json::decode(&fs::read(directory.join("outcome.json"))?)?;
+        assert_eq!(outcome["build_process"]["code"], 7);
+        assert_eq!(outcome["rust_diagnostics"]["records"][0]["code"], "E0308");
+        assert!(!outcome.to_string().contains("PRIVATE"));
+        assert!(
+            fs::read(directory.join("stderr.bin"))?
+                .windows(b"PRIVATE-RENDERED".len())
+                .any(|part| part == b"PRIVATE-RENDERED")
+        );
+        Ok(())
     }
 
     #[test]
