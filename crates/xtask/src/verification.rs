@@ -2394,96 +2394,85 @@ mod tests {
     #[test]
     fn preparation_cache_eviction_cannot_select_outputs_or_skip_current_admission() {
         let job = ci_job("verify-prepare");
-        assert!(job.contains("timeout-minutes: 20"));
-        for name in [
-            "Download retained compiler actions for preparation admission",
-            "Retry retained preparation compiler action download once",
+        assert!(consumer_compiler_cache_flow(&job));
+        let mandatory = [
+            "Bootstrap the current source artifact admission guard",
+            "Establish the mandatory bounded native Linux compiler context",
+            "Select authenticated artifacts from successful producer attempts",
+            "Admit all three preparation parts",
+        ];
+        let mut previous = 0;
+        for name in mandatory {
+            let at = job.find(name).unwrap();
+            assert!(at > previous);
+            previous = at;
+            assert!(!ci_step(&job, name).contains("        if:"), "{name}");
+        }
+        assert!(
+            ci_step(&job, mandatory[3]).contains("run: build-out/bin/xtask verify-prepare-join")
+        );
+        for (before, after) in [
+            ("continue-on-error: true", "continue-on-error: false"),
+            ("timeout-minutes: 4", "timeout-minutes: 9"),
+            ("path: ~/.cache/bazel-disk", "path: build-out"),
+            (
+                "steps.bazel_actions.outcome == 'failure'",
+                "steps.bazel_actions.outcome == 'success'",
+            ),
+            ("run: rm -rf -- \"$HOME/.cache/bazel-disk\"", "run: true"),
+            (
+                "//crates/xtask:xtask -- install-verifier",
+                "//crates/day2:day2",
+            ),
         ] {
-            let download = ci_step(&job, name);
-            assert!(download.contains("continue-on-error: true"));
-            assert!(download.contains("timeout-minutes: 4"));
-            assert!(download.contains("digest-mismatch: error"));
-            assert!(download.contains("repository: clankernative/platform"));
-            assert!(download.contains("run-id: ${{ github.run_id }}"));
-            assert!(download.contains(
-                "name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}"
-            ));
-            assert!(!download.contains("pattern:") && !download.contains("DAY2_CACHE_ORIGIN"));
+            let step = if [
+                "continue-on-error: true",
+                "timeout-minutes: 4",
+                "path: ~/.cache/bazel-disk",
+            ]
+            .contains(&before)
+            {
+                ci_step(&job, "Restore source-keyed compiled actions")
+            } else if before == "//crates/xtask:xtask -- install-verifier" {
+                ci_step(
+                    &job,
+                    "Bootstrap the current source artifact admission guard",
+                )
+            } else {
+                ci_step(
+                    &job,
+                    "Discard incomplete compiler data after a cache restore failure",
+                )
+            };
+            let changed = job.replacen(step, &step.replacen(before, after, 1), 1);
+            assert_ne!(changed, job);
+            assert!(!consumer_compiler_cache_flow(&changed));
         }
-        let first = ci_step(
-            &job,
-            "Download retained compiler actions for preparation admission",
+        let conditional = job.replacen(
+            "      - name: Bootstrap the current source artifact admission guard\n",
+            "      - name: Bootstrap the current source artifact admission guard\n        if: ${{ steps.bazel_actions.outputs.cache-hit == 'true' }}\n",
+            1,
         );
-        let retry = ci_step(
-            &job,
-            "Retry retained preparation compiler action download once",
-        );
-        assert!(retry.contains(
-            "if: ${{ !cancelled() && steps.preparation_actions_download.outcome == 'failure' }}"
-        ));
-        assert_eq!(
-            first.split_once("        with:\n").unwrap().1.trim(),
-            retry.split_once("        with:\n").unwrap().1.trim()
-        );
-        let extract = "Restore retained compiler actions before preparation admission";
-        let bootstrap = "Bootstrap the current source artifact admission guard";
-        let context = "Establish the mandatory bounded native Linux compiler context";
-        let select = "Select authenticated artifacts from successful producer attempts";
-        let admit = "Admit all three preparation parts";
-        assert!(job.find(extract).unwrap() < job.find(bootstrap).unwrap());
-        assert!(job.find(bootstrap).unwrap() < job.find(context).unwrap());
-        assert!(job.find(context).unwrap() < job.find(select).unwrap());
-        assert!(job.find(select).unwrap() < job.find(admit).unwrap());
-        let restore = ci_step(&job, extract);
-        assert!(restore.contains("continue-on-error: true"));
-        assert!(restore.contains("-C \"$HOME/.cache/bazel-disk\""));
-        assert!(!restore.contains("$GITHUB_WORKSPACE") && !restore.contains("build-out/"));
-        for mandatory in [bootstrap, context, select, admit] {
-            assert!(
-                !ci_step(&job, mandatory).contains("        if:"),
-                "{mandatory}"
-            );
-        }
-        assert!(ci_step(&job, bootstrap).contains("//crates/xtask:xtask -- install-verifier"));
-        assert!(ci_step(&job, admit).contains("run: build-out/bin/xtask verify-prepare-join"));
+        assert!(!consumer_compiler_cache_flow(&conditional));
+        assert!(!consumer_compiler_cache_flow(&format!(
+            "{job}\nday2-bazel-linux-bootstrap-actions"
+        )));
     }
 
     #[test]
-    fn retained_compiler_cache_deadlines_leave_the_admission_job_bounded() {
-        for consumer in ["verify-prepare", "verify-shards", "verify"] {
+    fn consumer_cache_deadlines_allow_current_source_build_and_admission() {
+        for (consumer, job_minutes) in [
+            ("verify-prepare", Some(30)),
+            ("verify-shards", None),
+            ("verify", Some(30)),
+        ] {
             let job = ci_job(consumer);
-            let names = if consumer == "verify-prepare" {
-                [
-                    "Download retained compiler actions for preparation admission",
-                    "Retry retained preparation compiler action download once",
-                    "Restore retained compiler actions before preparation admission",
-                ]
-            } else {
-                [
-                    "Download retained compiler actions from the admitted preparation",
-                    "Retry retained compiler action download once",
-                    "Restore retained compiler action data before admission bootstrap",
-                ]
-            };
-            let mut cache_minutes = 0;
-            for name in names {
-                let step = ci_step(&job, name);
-                let minutes = step
-                    .lines()
-                    .find_map(|line| line.trim().strip_prefix("timeout-minutes: "))
-                    .unwrap()
-                    .parse::<u64>()
-                    .unwrap();
-                assert_eq!(minutes, 4, "{consumer}: {name}");
-                cache_minutes += minutes;
-                assert!(step.contains("continue-on-error: true"));
-            }
-            let bootstrap = "Bootstrap the current source artifact admission guard";
-            assert!(!ci_step(&job, bootstrap).contains("        if:"));
-            assert!(job.find(names[2]).unwrap() < job.find(bootstrap).unwrap());
-            if consumer != "verify-shards" {
-                assert!(job.contains("    timeout-minutes: 20\n"));
-                assert!(cache_minutes < 20);
+            assert!(consumer_compiler_cache_flow(&job), "{consumer}");
+            if let Some(minutes) = job_minutes {
+                assert!(job.contains(&format!("    timeout-minutes: {minutes}\n")));
+                // One bounded cache restore and cleanup, the measured cold
+                // bootstrap, and admission/output work must fit independently.
+                assert!(4 + 1 + 18 + 5 <= minutes);
             }
         }
     }
@@ -2655,6 +2644,49 @@ mod tests {
             .unwrap()
     }
 
+    fn consumer_compiler_cache_flow(job: &str) -> bool {
+        fn step<'a>(job: &'a str, name: &str) -> Option<&'a str> {
+            job.split_once(&format!("      - name: {name}\n"))
+                .map(|(_, tail)| tail.split("\n      - ").next().unwrap())
+        }
+        if job.contains("day2-bazel-linux-bootstrap-actions")
+            || job.contains("Download retained compiler actions")
+            || job.contains("Retry retained compiler action")
+            || job.contains("Retry retained preparation compiler action")
+        {
+            return false;
+        }
+        let cache_name = "Restore source-keyed compiled actions";
+        let cleanup_name = "Discard incomplete compiler data after a cache restore failure";
+        let bootstrap_name = "Bootstrap the current source artifact admission guard";
+        let Some(cache) = step(job, cache_name) else {
+            return false;
+        };
+        let Some(cleanup) = step(job, cleanup_name) else {
+            return false;
+        };
+        let Some(bootstrap) = step(job, bootstrap_name) else {
+            return false;
+        };
+        cache.contains("continue-on-error: true")
+            && cache.contains("timeout-minutes: 4")
+            && cache.contains("path: ~/.cache/bazel-disk")
+            && cache.contains("lookup-only: ${{ inputs.compilation_cache == 'empty' }}")
+            && cleanup
+                .contains("if: ${{ !cancelled() && steps.bazel_actions.outcome == 'failure' }}")
+            && cleanup.contains("timeout-minutes: 1")
+            && cleanup.contains("run: rm -rf -- \"$HOME/.cache/bazel-disk\"")
+            && !cleanup.contains("continue-on-error:")
+            && !bootstrap.contains("        if:")
+            && bootstrap.contains("run: bazel --batch --nosystem_rc --nohome_rc")
+            && bootstrap.contains("--config=ci-linux")
+            && bootstrap.contains("--disk_cache=\"$HOME/.cache/bazel-disk\"")
+            && bootstrap.contains("//crates/xtask:xtask -- install-verifier")
+            && !bootstrap.contains("tar -x")
+            && job.find(cache_name) < job.find(cleanup_name)
+            && job.find(cleanup_name) < job.find(bootstrap_name)
+    }
+
     #[test]
     fn linux_consumers_bootstrap_current_source_before_mounts_and_authenticated_downloads() {
         assert!(!include_str!("../../../.github/workflows/ci.yml").contains("day2-linux-verifier"));
@@ -2724,34 +2756,6 @@ mod tests {
                 .filter(|step| step.contains("uses: actions/download-artifact@"))
             {
                 let inputs = step.split_once("        with:\n").unwrap().1;
-                if step.starts_with(
-                    "name: Download retained compiler actions from the admitted preparation\n",
-                ) || step.starts_with("name: Retry retained compiler action download once\n")
-                {
-                    assert!(["verify", "verify-shards"].contains(&name));
-                    if name == "verify-shards" {
-                        assert!(job.contains("DAY2_CACHE_ORIGIN_RUN: ${{ github.run_id }}"));
-                    }
-                    assert!(inputs.contains("repository: clankernative/platform"));
-                    assert!(inputs.contains("github-token: ${{ github.token }}"));
-                    assert!(inputs.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-                    assert!(inputs.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-                    assert!(inputs.contains("path: /tmp/day2-bazel-linux-bootstrap-actions"));
-                    continue;
-                }
-                if step.starts_with(
-                    "name: Download retained compiler actions for preparation admission\n",
-                ) || step
-                    .starts_with("name: Retry retained preparation compiler action download once\n")
-                {
-                    assert_eq!(name, "verify-prepare");
-                    assert!(inputs.contains("repository: clankernative/platform"));
-                    assert!(inputs.contains("github-token: ${{ github.token }}"));
-                    assert!(inputs.contains("run-id: ${{ github.run_id }}"));
-                    assert!(inputs.contains("name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}"));
-                    assert!(inputs.contains("path: /tmp/day2-preparation-compiler-actions"));
-                    continue;
-                }
                 assert!(inputs.contains("repository: clankernative/platform"));
                 assert!(inputs.contains("run-id: ${{ github.run_id }}"));
                 assert!(inputs.contains("github-token: ${{ github.token }}"));
@@ -3136,66 +3140,27 @@ mod tests {
             !ci_job("verify-prepare-parts")
                 .contains("Persist newly compiled actions under the captured source key")
         );
-        for (consumer, download) in [
-            (
-                "verify-prepare",
-                "Download retained compiler actions for preparation admission",
-            ),
-            (
-                "verify-shards",
-                "Download retained compiler actions from the admitted preparation",
-            ),
-        ] {
-            let job = ci_job(consumer);
-            assert!(!job.contains("Restore compiled actions from this run preparation only"));
-            let prepared = ci_step(&job, download);
-            assert!(prepared.contains("digest-mismatch: error"));
-            assert!(prepared.contains("run-id:"));
+        for consumer in ["verify-prepare", "verify-shards", "verify"] {
+            assert!(consumer_compiler_cache_flow(&ci_job(consumer)));
         }
-        let final_join = ci_job("verify");
-        assert!(final_join.contains("timeout-minutes: 20"));
+        let publisher = ci_job("publish-linux-actions");
+        assert!(
+            publisher.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+        );
+        assert!(publisher.contains("needs.verify.result == 'success'"));
         let admitted = "needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true'";
         assert!(main.contains("cache_run: ${{ steps.admit.outputs.run }}"));
         assert!(main.contains("cache_attempt: ${{ steps.admit.outputs.attempt }}"));
         for origin in ["DAY2_CACHE_ORIGIN_RUN:", "DAY2_CACHE_ORIGIN_ATTEMPT:"] {
-            let selected = final_join
+            let selected = publisher
                 .lines()
                 .find(|line| line.contains(origin))
                 .unwrap();
             assert!(selected.contains(admitted));
             assert!(selected.contains("|| github.run_"));
+            assert!(!ci_job("verify").contains(origin));
+            assert!(!ci_job("verify-shards").contains(origin));
         }
-        for name in [
-            "Download retained compiler actions from the admitted preparation",
-            "Retry retained compiler action download once",
-        ] {
-            let download = ci_step(&final_join, name);
-            assert!(download.contains("repository: clankernative/platform"));
-            assert!(download.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-            assert!(download.contains("name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
-            assert!(download.contains("timeout-minutes: 4"));
-            assert!(download.contains("continue-on-error: true"));
-        }
-        let first = ci_step(
-            &final_join,
-            "Download retained compiler actions from the admitted preparation",
-        );
-        let retry = ci_step(&final_join, "Retry retained compiler action download once");
-        assert!(retry.contains(
-            "if: ${{ !cancelled() && steps.bootstrap_actions_download.outcome == 'failure' }}"
-        ));
-        assert_eq!(
-            first.split_once("        with:\n").unwrap().1.trim(),
-            retry.split_once("        with:\n").unwrap().1.trim()
-        );
-        let extract = "Restore retained compiler action data before admission bootstrap";
-        let bootstrap = "Bootstrap the current source artifact admission guard";
-        assert!(final_join.find(extract).unwrap() < final_join.find(bootstrap).unwrap());
-        assert!(ci_step(&final_join, extract).contains("-C \"$HOME/.cache/bazel-disk\""));
-        assert!(ci_step(&final_join, extract).contains(
-            "/tmp/day2-bazel-linux-bootstrap-actions/day2-bazel-linux-bootstrap-actions.tgz"
-        ));
-        assert!(!ci_step(&final_join, bootstrap).contains("        if:"));
         assert!(
             !ci_job("verify-queue-receipt")
                 .contains("Restore compiled actions from this run preparation only")
@@ -3221,47 +3186,36 @@ mod tests {
     }
 
     #[test]
-    fn admission_bootstrap_cache_is_retained_before_test_work_and_survives_reruns() {
+    fn compiler_archives_are_reserved_for_post_gate_main_publication() {
         let producer = ci_job("verify-prepare-parts");
-        let compile = "Compile and install the current verifier with Bazel";
-        let archive = "Archive current verifier bootstrap compiler actions";
-        let upload = "Retain current verifier bootstrap compiler actions";
-        assert!(producer.find(compile).unwrap() < producer.find(archive).unwrap());
-        assert!(producer.find(archive).unwrap() < producer.find(upload).unwrap());
-        let native_at = producer.find("id: native_preparation").unwrap();
-        assert!(producer.find(upload).unwrap() < native_at);
-        let snapshot = ci_step(&producer, archive);
-        assert!(snapshot.contains("if: ${{ matrix.part == 'tests' }}"));
-        assert!(snapshot.contains("timeout-minutes: 3"));
-        assert!(snapshot.contains("tar -I 'gzip -1'"));
-        assert!(snapshot.contains("-C \"$HOME/.cache/bazel-disk\" ."));
-        assert!(!snapshot.contains("build-out/") && !snapshot.contains("artifacts/"));
+        assert!(!producer.contains("Archive current verifier bootstrap compiler actions"));
+        assert!(!producer.contains("Retain current verifier bootstrap compiler actions"));
+        let full = "Archive completed Linux test compiler actions";
+        let upload = "Retain Linux compiler actions for trusted main publication";
+        assert!(producer.find("id: native_preparation").unwrap() < producer.find(full).unwrap());
+        assert!(producer.find(full).unwrap() < producer.find(upload).unwrap());
+        assert!(ci_step(&producer, full).contains("tar -I 'gzip -1'"));
         let retained = ci_step(&producer, upload);
-        assert!(retained.contains("steps.bootstrap_actions_archive.outcome == 'success'"));
+        assert!(retained.contains("steps.linux_actions_archive.outcome == 'success'"));
         assert!(retained.contains(
-            "name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ github.run_id }}"
-        ));
-        assert!(!retained.contains("github.run_attempt"));
-        assert!(retained.contains("overwrite: false"));
-        assert!(retained.contains("if-no-files-found: error"));
-        assert!(retained.contains("path: /tmp/day2-bazel-linux-bootstrap-actions.tgz"));
-        assert!(producer.contains(
             "name: day2-bazel-linux-actions-${{ github.run_id }}-${{ github.run_attempt }}"
         ));
-        let full = "Archive completed Linux test compiler actions";
-        assert!(native_at < producer.find(full).unwrap());
-        assert!(ci_step(&producer, full).contains("tar -I 'gzip -1'"));
-        let consumer = ci_job("verify");
-        for step in [
-            "Download retained compiler actions from the admitted preparation",
-            "Retry retained compiler action download once",
-        ] {
-            let download = ci_step(&consumer, step);
-            assert!(download.contains(
-                "name: day2-bazel-linux-bootstrap-actions-${{ github.sha }}-${{ env.DAY2_CACHE_ORIGIN_RUN }}"
-            ));
-            assert!(!download.contains("DAY2_CACHE_ORIGIN_ATTEMPT"));
+        assert!(retained.contains("if-no-files-found: error"));
+        let publisher = ci_job("publish-linux-actions");
+        assert!(publisher.contains("needs: [verify, verify-queue-receipt, verify-prepare-parts]"));
+        assert!(publisher.contains("needs.verify.result == 'success'"));
+        assert!(
+            publisher.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+        );
+        assert!(publisher.contains("name: day2-bazel-linux-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+        for consumer in ["verify-prepare", "verify-shards", "verify"] {
+            assert!(consumer_compiler_cache_flow(&ci_job(consumer)));
+            assert!(!ci_job(consumer).contains("day2-bazel-linux-actions-"));
         }
+        assert!(
+            !include_str!("../../../.github/workflows/ci.yml")
+                .contains("day2-bazel-linux-bootstrap-actions")
+        );
     }
 
     #[test]
