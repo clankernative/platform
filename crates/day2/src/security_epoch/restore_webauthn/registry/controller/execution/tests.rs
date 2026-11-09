@@ -17,6 +17,113 @@ use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use syn::parse::Parser;
 use syn::visit::Visit;
 
+fn attempt_method(source: &str, name: &str) -> Result<syn::Block> {
+    let file = syn::parse_file(source)?;
+    let methods: Vec<_> = file.items.iter().filter_map(|item| match item {
+        syn::Item::Impl(item) if item.trait_.is_none()
+            && matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("ExecutionCompletion")) => Some(item),
+        _ => None,
+    }).flat_map(|item|&item.items).filter_map(|item| match item {
+        syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item.block.clone()),
+        _ => None,
+    }).collect();
+    ensure!(methods.len() == 1, "one actual execution-attempt method");
+    Ok(methods[0].clone())
+}
+
+fn recorded_attempt_boundary(source: &str) -> Result<bool> {
+    let actual = attempt_method(source, "record_attempt")?;
+    let expected: syn::Block = syn::parse_quote!({
+        if self.phase != ExecutionPhase::Verified {
+            self.ceremony.ceremony.refused.set(true);
+            sql.1.refuse();
+            reader.refuse();
+            anyhow::bail!("restore_executor_attempt_already_started");
+        }
+        self.phase = ExecutionPhase::Claiming;
+        let result = self.attempt_unit(reader, sql, AttemptUnit::Record);
+        if result.is_ok() {
+            self.phase = ExecutionPhase::Claimed;
+        }
+        result
+    });
+    Ok(actual.to_token_stream().to_string() == expected.to_token_stream().to_string())
+}
+
+#[test]
+fn native_attempt_marks_sticky_in_progress_before_sql_and_requires_known_completion() -> Result<()>
+{
+    let source = include_str!("../execution.rs");
+    assert!(recorded_attempt_boundary(source)?);
+    for (from, to) in [
+        ("self.phase != ExecutionPhase::Verified", "false"),
+        (
+            "self.phase = ExecutionPhase::Claiming;",
+            "let _unarmed = ();",
+        ),
+        (
+            "self.attempt_unit(reader, sql, AttemptUnit::Record)",
+            "Ok(())",
+        ),
+        ("if result.is_ok()", "if true"),
+    ] {
+        let changed = source.replacen(from, to, 1);
+        assert_ne!(source, changed);
+        assert!(
+            !recorded_attempt_boundary(&changed)?,
+            "actual target {from}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_attempt_sql_unit_evaluates_postcheck_after_commit_error_and_keeps_primary() -> Result<()>
+{
+    let file = syn::parse_file(include_str!("../execution.rs"))?;
+    let functions: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "attempt_sql_unit" => Some(&item.block),
+            _ => None,
+        })
+        .collect();
+    ensure!(
+        functions.len() == 1,
+        "one closed execution-attempt SQL unit"
+    );
+    let block = functions[0];
+    let expected: syn::Block = syn::parse_quote!({
+        let committed = tx.commit();
+        let checked = key.check_sqlite(db);
+        committed?;
+        checked
+    });
+    let tail = syn::Block {
+        brace_token: Default::default(),
+        stmts: block.stmts[block.stmts.len() - 4..].to_vec(),
+    };
+    assert_eq!(
+        tail.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
+    );
+    let mut conditional = tail.clone();
+    conditional.stmts[1] = syn::parse_quote! { let checked = if committed.is_ok() { key.check_sqlite(db) } else { Ok(()) }; };
+    assert_ne!(
+        conditional.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
+    );
+    let mut reversed = tail;
+    reversed.stmts[2] = syn::parse_quote! { checked?; };
+    reversed.stmts[3] = syn::Stmt::Expr(syn::parse_quote!(committed), None);
+    assert_ne!(
+        reversed.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
+    );
+    Ok(())
+}
+
 fn signing_key() -> Ed25519KeyPair {
     Ed25519KeyPair::from_seed_unchecked(&[11; 32]).unwrap()
 }

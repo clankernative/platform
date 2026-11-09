@@ -73,7 +73,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
       "scope": "const",
-      "fingerprint": "sha256:7a03412aa56977fa4ece0ee9380af1694897b46ab60c0828e7331f54a0f1de79",
+      "fingerprint": "sha256:af7a8427525c557173a24bd4b8ca4c743c384e6c6bd3ef8b913f882fe90ce082",
       "registration": null
     },
     {
@@ -3093,7 +3093,8 @@
         "pub (in crate :: security_epoch) fn stop_for_restore (mut self , _intent : & kernel :: restore :: Intent) -> Result < FencedRestoreContinuation < 'metadata , 'storage , 'role > >",
         "pub (super) fn check_source (& mut self) -> Result < RestoreObservation >",
         "pub (in crate :: security_epoch) fn require_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >",
-        "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >"
+        "pub (in crate :: security_epoch) fn retain_historical_keys (& mut self , intent : & kernel :: restore :: Intent) -> Result < () >",
+        "fn begin_restore_attempt (mut self , intent : & kernel :: restore :: Intent) -> Result < RestoreAttempt < 'metadata , 'storage , 'role > >"
       ],
       "factories": [
         {
@@ -3125,6 +3126,10 @@
         {
           "owner": "AuthenticatedRestoreExecution < '_ , '_ , '_ >",
           "signature": "pub (super) fn check_source (& mut self) -> Result < RestoreObservation >"
+        },
+        {
+          "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
+          "signature": "fn begin_restore_attempt (mut self , intent : & kernel :: restore :: Intent) -> Result < RestoreAttempt < 'metadata , 'storage , 'role > >"
         }
       ],
       "proof_uses": []
@@ -3364,6 +3369,29 @@
       "proof_uses": [],
       "owning_children": [],
       "destructor": "sha256:ff86d3827decf4c697e13e9d9944ae3b265085d59a0cb243d771e2288fce7942"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
+      "type_name": "RestoreAttempt",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "fn check (& mut self) -> Result < RestoreObservation >"
+      ],
+      "factories": [
+        {
+          "owner": "AuthenticatedRestoreExecution < 'metadata , 'storage , 'role >",
+          "signature": "fn begin_restore_attempt (mut self , intent : & kernel :: restore :: Intent) -> Result < RestoreAttempt < 'metadata , 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoreAttempt < '_ , '_ , '_ >",
+          "signature": "fn check (& mut self) -> Result < RestoreObservation >"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs",
@@ -6423,9 +6451,17 @@
         {
           "owner": "ExecutionCompletion",
           "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >"
         }
       ],
       "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn attempt_sql_unit (db : & mut rusqlite :: Connection , key : & TrustedKey < '_ > , challenge : & super :: super :: super :: Challenge , signed : & SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest) , unit : AttemptUnit) -> Result < () >"
+        },
         {
           "owner": null,
           "signature": "fn check_journal (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Digest , statement : & ApprovalStatement , state : & str) -> Result < () >"
@@ -6437,6 +6473,14 @@
         {
           "owner": null,
           "signature": "fn current (tx : & Transaction < '_ > , key : & TrustedKey) -> Result < (i64 , u32) >"
+        },
+        {
+          "owner": null,
+          "signature": "fn execution_attempt_binding (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < (Digest , Digest) >"
+        },
+        {
+          "owner": null,
+          "signature": "fn verified_completion_snapshot (db : & mut rusqlite :: Connection , key : & TrustedKey < '_ > , challenge : & super :: super :: super :: Challenge , counter : u32) -> Result < (i64 , Digest) >"
         },
         {
           "owner": null,
@@ -6456,11 +6500,19 @@
         },
         {
           "owner": null,
+          "signature": "pub (super) fn check_may_execute (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < () >"
+        },
+        {
+          "owner": null,
           "signature": "pub (super) fn complete (db : & mut Connection , key : & TrustedKey , id : & Digest , expected_request : & Digest , at : i64 , assertion : & Assertion) -> Result < AssertionFacts >"
         },
         {
           "owner": null,
           "signature": "pub (super) fn issue (tx : & Transaction < '_ > , key : & TrustedKey , challenge : & Challenge , created_at : i64 , expires_at : i64) -> Result < Digest >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn mark_may_execute (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < () >"
         },
         {
           "owner": null,
@@ -6481,22 +6533,6 @@
         {
           "owner": "TrustedKey < '_ >",
           "signature": "fn validate (& self) -> Result < () >"
-        },
-        {
-          "owner": null,
-          "signature": "fn verified_completion_snapshot (db : & mut rusqlite :: Connection , key : & TrustedKey < '_ > , challenge : & super :: super :: super :: Challenge , counter : u32) -> Result < (i64 , Digest) >"
-        },
-        {
-          "owner": null,
-          "signature": "fn execution_attempt_binding (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < (Digest , Digest) >"
-        },
-        {
-          "owner": null,
-          "signature": "pub (super) fn check_may_execute (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < () >"
-        },
-        {
-          "owner": null,
-          "signature": "pub (super) fn mark_may_execute (tx : & Transaction < '_ > , key : & TrustedKey < '_ > , challenge : & Challenge , signed : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , completed : (u32 , i64 , & Digest)) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -6590,6 +6626,10 @@
         {
           "owner": "ExecutionCompletion",
           "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >"
         }
       ],
       "material_uses": [
@@ -6826,8 +6866,10 @@
       "consuming_methods": [],
       "owning_children": [],
       "methods": [
+        "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >",
-        "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >",
+        "pub (in crate :: security_epoch) fn record_attempt (& mut self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles)) -> Result < () >"
       ],
       "factories": [
         {
@@ -6838,11 +6880,19 @@
       "material_uses": [
         {
           "owner": "ExecutionCompletion",
+          "signature": "fn attempt_unit (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , unit : AttemptUnit) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionCompletion",
           "signature": "pub (in crate :: security_epoch) fn check_current (& self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
         },
         {
           "owner": "ExecutionCompletion",
           "signature": "pub (in crate :: security_epoch) fn check_fenced (& self , reader : & mut crate :: security_epoch :: bootstrap :: FencedRegistryLoan < '_ , '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles) , signed : & SignedApprovalRecord , operation : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionCompletion",
+          "signature": "pub (in crate :: security_epoch) fn record_attempt (& mut self , reader : & mut ControllerAdminReader < '_ , '_ , '_ > , sql : (& mut rusqlite :: Connection , & mut AuthenticationStoreFiles)) -> Result < () >"
         }
       ],
       "proof_uses": []

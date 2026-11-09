@@ -58,6 +58,71 @@ impl AuthenticatedRestoreExecution<'_, '_, '_> {
     }
 }
 
+/// Private pre-send phase of the SAME executor. Only a known grant-keyed SQL
+/// claim and every original/native/file postcheck can construct it. It exposes
+/// neither the executor nor a receipt-to-owner recovery operation.
+struct RestoreAttempt<'metadata, 'storage, 'role> {
+    auth: Option<AuthenticatedRestoreExecution<'metadata, 'storage, 'role>>,
+    intent: kernel::restore::Intent,
+    refused: bool,
+}
+
+impl<'metadata, 'storage, 'role> AuthenticatedRestoreExecution<'metadata, 'storage, 'role> {
+    fn begin_restore_attempt(
+        mut self,
+        intent: &kernel::restore::Intent,
+    ) -> Result<RestoreAttempt<'metadata, 'storage, 'role>> {
+        let requested = (|| {
+            self.require_historical_keys(intent)?;
+            self.completion.record_attempt(
+                &mut self.action.reader,
+                (
+                    self.action
+                        .sqlite
+                        .as_mut()
+                        .context("restore_auth_sqlite_closed")?,
+                    &mut self.action.files,
+                ),
+            )
+        })();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked?;
+        Ok(RestoreAttempt {
+            auth: Some(self),
+            intent: intent.clone(),
+            refused: false,
+        })
+    }
+}
+
+impl RestoreAttempt<'_, '_, '_> {
+    fn check(&mut self) -> Result<RestoreObservation> {
+        let auth = self.auth.as_mut().context("restore_attempt_owner_closed")?;
+        if self.refused {
+            auth.refuse();
+            anyhow::bail!("restore_attempt_refused");
+        }
+        self.refused = true;
+        let requested = auth.require_historical_keys(&self.intent);
+        let checked = auth.check();
+        if requested.is_err() || checked.is_err() {
+            auth.refuse();
+        }
+        requested?;
+        let observed = checked?;
+        self.refused = false;
+        Ok(observed)
+    }
+}
+
+// Normal Rust field destruction drops this actual executor, including its
+// RestoreOriginalGuard and NativeApprovalSource terminal refusal destructors.
+// No generic destructor, detachable guard or row-based recovery is introduced.
+
 impl AuthenticatedRestoreExecution<'_, '_, '_> {
     /// One native acquisition of the whole exact archive key set, before the
     /// Fenced CAS. The actual executor owns the material across the handoff.
@@ -647,6 +712,7 @@ const _: () = {
                 _,
             >>::check;
 
+            let _ = <RestoreAttempt<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <ExecutionSourceLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <crate::security_epoch::storage_authority::HistoricalKeyAvailability as Ambiguous<_>>::check;
             let _ =
@@ -673,6 +739,133 @@ mod tests {
     use anyhow::Result;
     use quote::ToTokens as _;
     use std::{cell::Cell, rc::Rc};
+
+    fn attempt_factory_boundary(source: &str) -> Result<bool> {
+        let actual = source_method(
+            source,
+            "AuthenticatedRestoreExecution",
+            "begin_restore_attempt",
+        )?;
+        let expected: syn::Block = syn::parse_quote!({
+            let requested = (|| {
+                self.require_historical_keys(intent)?;
+                self.completion.record_attempt(
+                    &mut self.action.reader,
+                    (
+                        self.action
+                            .sqlite
+                            .as_mut()
+                            .context("restore_auth_sqlite_closed")?,
+                        &mut self.action.files,
+                    ),
+                )
+            })();
+            let checked = self.check();
+            if requested.is_err() || checked.is_err() {
+                self.refuse();
+            }
+            requested?;
+            checked?;
+            Ok(RestoreAttempt {
+                auth: Some(self),
+                intent: intent.clone(),
+                refused: false,
+            })
+        });
+        Ok(actual.to_token_stream().to_string() == expected.to_token_stream().to_string())
+    }
+
+    #[test]
+    fn actual_attempt_factory_owns_the_executor_and_original_after_closed_claim_unit() -> Result<()>
+    {
+        let source = include_str!("stop.rs");
+        assert!(attempt_factory_boundary(source)?);
+        for (from, to) in [
+            (
+                "self.require_historical_keys(intent)?;",
+                "let _unchecked = ();",
+            ),
+            (
+                "self.completion.record_attempt(",
+                "self.completion.unchecked_attempt(",
+            ),
+            ("let checked = self.check();", "let checked = Ok(());"),
+            ("auth: Some(self)", "auth: None"),
+            (
+                "        checked?;\n        Ok(RestoreAttempt",
+                "        Ok(RestoreAttempt",
+            ),
+        ] {
+            let changed = source.replacen(from, to, 1);
+            assert_ne!(source, changed, "actual target {from}");
+            assert!(
+                !attempt_factory_boundary(&changed)?,
+                "actual mutation {from}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn actual_attempt_loss_and_incomplete_check_refuse_the_same_executor() -> Result<()> {
+        let source = include_str!("stop.rs");
+        let check = source_method(source, "RestoreAttempt", "check")?;
+        let expected: syn::Block = syn::parse_quote!({
+            let auth = self.auth.as_mut().context("restore_attempt_owner_closed")?;
+            if self.refused {
+                auth.refuse();
+                anyhow::bail!("restore_attempt_refused");
+            }
+            self.refused = true;
+            let requested = auth.require_historical_keys(&self.intent);
+            let checked = auth.check();
+            if requested.is_err() || checked.is_err() {
+                auth.refuse();
+            }
+            requested?;
+            let observed = checked?;
+            self.refused = false;
+            Ok(observed)
+        });
+        assert_eq!(
+            check.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        let parsed = syn::parse_file(source)?;
+        let owner = parsed
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == "RestoreAttempt" => Some(item),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("actual attempt owner"))?;
+        let auth = owner
+            .fields
+            .iter()
+            .find(|field| field.ident.as_ref().is_some_and(|name| name == "auth"))
+            .ok_or_else(|| anyhow::anyhow!("actual retained executor field"))?;
+        let expected_type: syn::Type =
+            syn::parse_quote!(Option<AuthenticatedRestoreExecution<'metadata, 'storage, 'role>>);
+        assert_eq!(
+            auth.ty.to_token_stream().to_string(),
+            expected_type.to_token_stream().to_string()
+        );
+        assert!(source_method(source, "RestoreAttempt", "drop").is_err());
+        let drop = source_method(
+            include_str!("../../../../../../restore_original.rs"),
+            "RestoreOriginalGuard",
+            "drop",
+        )?;
+        let expected: syn::Block = syn::parse_quote!({
+            self.refuse();
+        });
+        assert_eq!(
+            drop.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        Ok(())
+    }
 
     fn source_method(source: &str, owner: &str, name: &str) -> Result<syn::Block> {
         let mut found = Vec::new();
