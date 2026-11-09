@@ -45,6 +45,8 @@ mod runtime_reads;
 mod runtime_wire;
 #[cfg(target_os = "linux")]
 mod service;
+#[cfg(test)]
+mod service_source_tests;
 mod serving_peer;
 #[cfg(target_os = "linux")]
 mod serving_peer_native;

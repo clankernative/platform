@@ -481,6 +481,7 @@
     "crates/day2/src/security_epoch/native_enrollment/runtime_reads.rs",
     "crates/day2/src/security_epoch/native_enrollment/runtime_wire.rs",
     "crates/day2/src/security_epoch/native_enrollment/service.rs",
+    "crates/day2/src/security_epoch/native_enrollment/service_source_tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/serving_peer.rs",
     "crates/day2/src/security_epoch/native_enrollment/serving_peer_native.rs",
     "crates/day2/src/security_epoch/native_enrollment/serving_peer_wire.rs",
