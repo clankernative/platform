@@ -58,6 +58,14 @@ impl World {
             request_id: id.into(),
             expected_authority: app_secrets::list(&self.runtime, "admin")?.authority,
             expected_version: expected,
+            expected_incarnation: if operation == Operation::Create {
+                None
+            } else {
+                app_secrets::list(&self.runtime, "admin")?
+                    .secrets
+                    .first()
+                    .map(|e| e.incarnation.clone())
+            },
             value: Zeroizing::new(value.into()),
         })
     }
@@ -82,6 +90,9 @@ struct Fake {
     calls: Mutex<Vec<String>>,
     values: Mutex<Vec<Vec<u8>>>,
     unknown: bool,
+    delete_unknown: bool,
+    records: Mutex<std::collections::BTreeMap<String, Vec<Vec<u8>>>>,
+    revoke_after_access: Option<Runtime>,
     revoke_after_create: Option<Runtime>,
     revoke_after_version: Option<Runtime>,
 }
@@ -139,14 +150,51 @@ impl Provider for Fake {
             .push(format!("version:{}", target.resource()));
         let mut values = self.values.lock().unwrap();
         values.push(value.into());
+        let mut records = self.records.lock().unwrap();
+        let versions = records.entry(target.resource()).or_default();
+        versions.push(value.into());
+        let version = u64::try_from(versions.len()).unwrap();
         if let Some(runtime) = &self.revoke_after_version {
             revoke(runtime).unwrap();
         }
         if self.unknown {
             Err(ProviderFailure::Unknown)
         } else {
-            Ok(u64::try_from(values.len()).unwrap())
+            Ok(version)
         }
+    }
+    fn access(&self, target: &Target, version: u64) -> Result<Zeroizing<Vec<u8>>, ProviderFailure> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("access:{}:{version}", target.resource()));
+        let value = self
+            .records
+            .lock()
+            .unwrap()
+            .get(&target.resource())
+            .and_then(|v| v.get(usize::try_from(version - 1).unwrap()))
+            .cloned()
+            .ok_or(ProviderFailure::Refused)?;
+        if let Some(runtime) = &self.revoke_after_access {
+            revoke(runtime).unwrap();
+        }
+        Ok(Zeroizing::new(value))
+    }
+    fn delete(&self, target: &Target) -> Result<(), ProviderFailure> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("delete:{}", target.resource()));
+        if self.delete_unknown {
+            return Err(ProviderFailure::Unknown);
+        }
+        self.records
+            .lock()
+            .unwrap()
+            .remove(&target.resource())
+            .ok_or(ProviderFailure::Refused)?;
+        Ok(())
     }
 }
 
@@ -446,5 +494,342 @@ fn http_secrets_require_owner_session_origin_csrf_and_exact_input() -> Result<()
     assert_eq!(provider.calls.lock().unwrap().len(), 2);
     world.assert_private()?;
     assert!(world.directory.path().exists());
+    Ok(())
+}
+
+#[test]
+fn reveal_rechecks_current_owner_and_never_journals_values() -> Result<()> {
+    let world = World::new()?;
+    let provider = Fake::default();
+    app_secrets::write(
+        &world.runtime,
+        "admin",
+        &world.input(Operation::Create, "create-disclosure", FIRST, None)?,
+        &provider,
+    )?;
+    let listing = app_secrets::list(&world.runtime, "admin")?;
+    let input = app_secrets::Selection {
+        name: "API_KEY".into(),
+        incarnation: listing.secrets[0].incarnation.clone(),
+        version: 1,
+        expected_authority: listing.authority,
+        request_id: "reveal-once".into(),
+    };
+    let before = provider.calls.lock().unwrap().len();
+    assert!(app_secrets::reveal(&world.runtime, "alice", &input, &provider).is_err());
+    assert_eq!(provider.calls.lock().unwrap().len(), before);
+    assert_eq!(
+        app_secrets::reveal(&world.runtime, "admin", &input, &provider)?.as_slice(),
+        FIRST
+    );
+    assert!(app_secrets::reveal(&world.runtime, "admin", &input, &provider).is_err());
+    let mut input = input;
+    input.request_id = "reveal-revoked".into();
+    let provider = Fake {
+        records: Mutex::new(provider.records.into_inner().unwrap()),
+        revoke_after_access: Some(world.runtime.clone()),
+        ..Default::default()
+    };
+    assert!(app_secrets::reveal(&world.runtime, "admin", &input, &provider).is_err());
+    world.assert_private()?;
+    Ok(())
+}
+
+#[test]
+fn delete_is_guarded_audited_and_recreation_has_a_new_container_identity() -> Result<()> {
+    let world = World::new()?;
+    let provider = Fake::default();
+    let first = app_secrets::write(
+        &world.runtime,
+        "admin",
+        &world.input(Operation::Create, "create-before-delete", FIRST, None)?,
+        &provider,
+    )?;
+    let mut deletion = world.input(Operation::Delete, "delete-current", &[], Some(1))?;
+    deletion.expected_incarnation = Some("00000000000000000000000000000000".into());
+    let before = provider.calls.lock().unwrap().len();
+    assert!(app_secrets::write(&world.runtime, "admin", &deletion, &provider).is_err());
+    assert_eq!(provider.calls.lock().unwrap().len(), before);
+    deletion.expected_incarnation = Some(first.incarnation.clone());
+    assert!(app_secrets::write(&world.runtime, "alice", &deletion, &provider).is_err());
+    let deleted = app_secrets::write(&world.runtime, "admin", &deletion, &provider)?;
+    assert_eq!(deleted.state, State::Deleted);
+    assert!(
+        app_secrets::list(&world.runtime, "admin")?
+            .secrets
+            .is_empty()
+    );
+    assert!(app_secrets::write(&world.runtime, "admin", &deletion, &provider).is_err());
+    let recreated = app_secrets::write(
+        &world.runtime,
+        "admin",
+        &world.input(Operation::Create, "create-new-container", SECOND, None)?,
+        &provider,
+    )?;
+    assert_ne!(first.incarnation, recreated.incarnation);
+    assert_eq!(recreated.version, Some(1));
+    deletion.request_id = "stale-deletion".into();
+    assert!(app_secrets::write(&world.runtime, "admin", &deletion, &provider).is_err());
+    assert!(
+        provider
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .all(|v| v == &vec![SECOND.to_vec()])
+    );
+    world.assert_private()?;
+    Ok(())
+}
+
+#[test]
+fn unknown_deletion_blocks_recreation_and_further_mutations() -> Result<()> {
+    let world = World::new()?;
+    let provider = Fake {
+        delete_unknown: true,
+        ..Default::default()
+    };
+    app_secrets::write(
+        &world.runtime,
+        "admin",
+        &world.input(Operation::Create, "create-unknown-delete", FIRST, None)?,
+        &provider,
+    )?;
+    let deletion = world.input(Operation::Delete, "lost-delete", &[], Some(1))?;
+    assert_eq!(
+        app_secrets::write(&world.runtime, "admin", &deletion, &provider)?.state,
+        State::Unknown
+    );
+    assert!(app_secrets::list(&world.runtime, "admin")?.secrets[0].blocked);
+    assert!(
+        app_secrets::write(
+            &world.runtime,
+            "admin",
+            &world.input(Operation::Create, "unsafe-recreate", SECOND, None)?,
+            &provider
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn owner_sqlite_download_contains_only_admitted_business_tables() -> Result<()> {
+    let world = World::new()?;
+    let meta = day2::app_export::metadata(&world.runtime, "admin")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    db.execute("INSERT INTO day2_meta(key,value) VALUES('private_export_probe','FRAMEWORK_CUSTODY_MUST_NOT_EXPORT')",[])?;
+    assert!(day2::app_export::metadata(&world.runtime, "alice").is_err());
+    assert!(
+        day2::app_export::download(&world.runtime, "alice", &meta.authority, "denied-export")
+            .is_err()
+    );
+    db.execute("INSERT INTO links(id,version,created_at,deleted_at,destination,owner,title) VALUES(?1,1,1,0,'https://example.com','admin','EXPORTED_BUSINESS_TITLE')",[vec![1u8;16]])?;
+    let bytes =
+        day2::app_export::download(&world.runtime, "admin", &meta.authority, "export-first")?;
+    assert!(bytes.starts_with(b"SQLite format 3\0"));
+    assert!(
+        !bytes
+            .windows(b"FRAMEWORK_CUSTODY_MUST_NOT_EXPORT".len())
+            .any(|w| w == b"FRAMEWORK_CUSTODY_MUST_NOT_EXPORT")
+    );
+    let path = world.directory.path().join("business.sqlite");
+    fs::write(&path, &bytes)?;
+    let exported = rusqlite::Connection::open(&path)?;
+    assert_eq!(
+        exported.query_row("SELECT title FROM links", [], |r| r.get::<_, String>(0))?,
+        "EXPORTED_BUSINESS_TITLE"
+    );
+    let tables = exported
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert_eq!(
+        tables,
+        world
+            .runtime
+            .artifact()
+            .contract()
+            .schema
+            .models
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        day2::app_export::download(&world.runtime, "admin", &meta.authority, "export-first")
+            .is_err()
+    );
+    db.execute_batch("DROP TRIGGER day2_sensitive_access_no_delete")?;
+    assert!(
+        day2::app_export::download(&world.runtime, "admin", &meta.authority, "tampered-export")
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn sensitive_http_routes_require_owner_origin_csrf_and_return_uncached_bound_bytes() -> Result<()> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let world = World::new()?;
+    let provider = Arc::new(Fake::default());
+    app_secrets::write(
+        &world.runtime,
+        "admin",
+        &world.input(Operation::Create, "http-disclosure-create", FIRST, None)?,
+        provider.as_ref(),
+    )?;
+    let server = Server::start(world.runtime.clone(), "admin", provider.clone())?;
+    let client = server.client()?;
+    let session: Value = client
+        .get(format!("{}/api/session", server.origin))
+        .send()?
+        .json()?;
+    let csrf = session["csrf_token"].as_str().unwrap();
+    let listing = app_secrets::list(&world.runtime, "admin")?;
+    let input = json!({"name":"API_KEY","incarnation":listing.secrets[0].incarnation,"version":1,"expected_authority":listing.authority});
+    let url = format!("{}/api/app-secrets/reveal", server.origin);
+    let count = provider.calls.lock().unwrap().len();
+    assert_eq!(
+        client.post(&url).json(&input).send()?.status().as_u16(),
+        403
+    );
+    let send = |body: &Value, origin: &str, id: &str| {
+        client
+            .post(&url)
+            .header("Origin", origin)
+            .header("X-CSRF-Token", csrf)
+            .header("Idempotency-Key", id)
+            .json(body)
+            .send()
+    };
+    assert_eq!(
+        send(&input, "https://foreign.example", "foreign-reveal")?
+            .status()
+            .as_u16(),
+        403
+    );
+    let mut bad = input.clone();
+    bad["actor"] = json!("admin");
+    assert_eq!(
+        send(&bad, &server.origin, "injected-reveal")?
+            .status()
+            .as_u16(),
+        400
+    );
+    assert_eq!(provider.calls.lock().unwrap().len(), count);
+    let response = send(&input, &server.origin, "http-reveal")?;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    let metadata: Value =
+        serde_json::from_slice(&STANDARD.decode(response.headers()["x-day2-result"].to_str()?)?)?;
+    assert_eq!(metadata["scope"], world.runtime.scope());
+    assert_eq!(metadata["request_id"], "http-reveal");
+    assert_eq!(&response.bytes()?[..], FIRST);
+    let viewer = Server::start(world.runtime.clone(), "alice", provider.clone())?;
+    let viewer_client = viewer.client()?;
+    let viewer_session: Value = viewer_client
+        .get(format!("{}/api/session", viewer.origin))
+        .send()?
+        .json()?;
+    assert_eq!(
+        viewer_client
+            .post(format!("{}/api/app-secrets/reveal", viewer.origin))
+            .header("Origin", &viewer.origin)
+            .header(
+                "X-CSRF-Token",
+                viewer_session["csrf_token"].as_str().unwrap()
+            )
+            .header("Idempotency-Key", "denied-reveal")
+            .json(&input)
+            .send()?
+            .status()
+            .as_u16(),
+        403
+    );
+    let export_url = format!("{}/api/app-sqlite", server.origin);
+    assert_eq!(reqwest::blocking::get(&export_url)?.status().as_u16(), 401);
+    assert_eq!(
+        viewer_client
+            .get(format!("{}/api/app-sqlite", viewer.origin))
+            .send()?
+            .status()
+            .as_u16(),
+        403
+    );
+    let meta: Value = client.get(&export_url).send()?.json()?;
+    let export = json!({"expected_authority":meta["authority"]});
+    assert_eq!(
+        client
+            .post(&export_url)
+            .json(&export)
+            .send()?
+            .status()
+            .as_u16(),
+        403
+    );
+    let response = client
+        .post(&export_url)
+        .header("Origin", &server.origin)
+        .header("X-CSRF-Token", csrf)
+        .header("Idempotency-Key", "http-sqlite")
+        .json(&export)
+        .send()?;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(response.bytes()?.starts_with(b"SQLite format 3\0"));
+    let deletion = json!({"operation":"delete","name":"API_KEY","expected_authority":listing.authority,"expected_version":1,"expected_incarnation":listing.secrets[0].incarnation});
+    let response = client
+        .post(format!("{}{}", server.origin, app_secrets::PATH))
+        .header("Origin", &server.origin)
+        .header("X-CSRF-Token", csrf)
+        .header("Idempotency-Key", "http-delete")
+        .json(&deletion)
+        .send()?;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.json::<Value>()?["state"], "deleted");
+    world.assert_private()?;
+    Ok(())
+}
+
+#[test]
+fn sqlite_download_refuses_views_and_changed_model_shapes() -> Result<()> {
+    for view in [true, false] {
+        let world = World::new()?;
+        let meta = day2::app_export::metadata(&world.runtime, "admin")?;
+        let db = rusqlite::Connection::open(world.runtime.db())?;
+        if view {
+            db.execute_batch("DROP TABLE links;CREATE VIEW links AS SELECT 1 AS id;")?;
+        } else {
+            db.execute_batch("ALTER TABLE links ADD COLUMN unexpected_private_data TEXT;")?;
+        }
+        assert!(
+            day2::app_export::download(
+                &world.runtime,
+                "admin",
+                &meta.authority,
+                "changed-shape-export"
+            )
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_download_refuses_over_budget_source_values() -> Result<()> {
+    let world = World::new()?;
+    let meta = day2::app_export::metadata(&world.runtime, "admin")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    db.execute("INSERT INTO links(id,version,created_at,deleted_at,destination,owner,title) VALUES(?1,1,1,0,'https://example.com','admin',?2)",rusqlite::params![vec![1u8;16],"x".repeat(day2::app_export::MAX_BYTES+1)])?;
+    let error =
+        day2::app_export::download(&world.runtime, "admin", &meta.authority, "oversized-export")
+            .err()
+            .context("oversized export must fail")?;
+    assert!(error.to_string().contains("byte_budget"));
     Ok(())
 }

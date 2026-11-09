@@ -60,6 +60,7 @@ mod release_binding;
 #[allow(dead_code)]
 mod oauth;
 pub use oauth::declaration as connection_declaration;
+pub mod app_export;
 pub mod app_secrets;
 pub mod connection_codegen;
 pub mod openapi;

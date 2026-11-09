@@ -1,12 +1,14 @@
 # Owner-managed app secret storage
 
-Protocol 1 exposes `GET /api/app-secrets`,
+Protocol 2 exposes `GET /api/app-secrets`,
 `GET /api/app-secrets/requests/REQUEST_ID` and `POST /api/app-secrets` on the app
-origin. The Rust Day 2 CLI uses these endpoints after company login. Requests
+origin. `POST /api/app-secrets/reveal` returns the selected exact version as
+uncached binary bytes. The Rust Day 2 CLI uses these endpoints after company login. Requests
 use the existing IAP/app session; this surface has no machine credential,
 impersonation or local-operator authentication fallback.
 
-Active owners have `secrets.list`, `secrets.create` and `secrets.rotate`.
+Active owners have `secrets.list`, `secrets.create`, `secrets.rotate`,
+`secrets.read` and `secrets.delete`.
 Every admission and subsequent provider dispatch rechecks the active authority,
 installation/app scope and activated namespace. App users and installation
 operators without active ownership are denied. POST requires the exact origin,
@@ -36,7 +38,8 @@ and secure erasure of all transport allocations are not established here.
 Use project-scoped IAM limited to the reviewed app resources and required
 Secret Manager operations. Namespace configuration is authority, not app-owned
 data. A changed desired namespace stops operations until explicit activation.
-The physical name is `day2-<32 hex scope digest>-<logical name>`; the scope
+The physical name is `day2-<32 hex scope digest>-<32 hex incarnation>`; the
+incarnation binds scope, logical name and the original creation request. The scope
 contains installation, environment and app. Labels bind the provider container
 to the exact scope and original create request. Existing secrets are not adopted.
 Control/bootstrap secret containers cannot overlap these namespaces.
@@ -72,18 +75,19 @@ Running pods keep their startup copy. Provider rejection or expiry fails closed
 without token discovery or write retries. Rolling, release-managed and native
 enrollment workloads are refused until their material-release path is qualified.
 
-The metadata schema is installed only during fresh app initialization. Existing
+Metadata schema 2 is installed only during fresh app initialization. Existing
 databases without it fail closed. Do not erase GoLinks links or perform an
 implicit migration to enable this feature. Backup restore clears desired
 namespace selection along with the existing authority fences.
 
 ## Writes and recovery
 
-POST accepts exactly `operation` (`create` or `rotate`), `name`,
-`expected_authority`, `expected_version` and base64 `value`. Names are 1–40 ASCII
+POST accepts exactly `operation` (`create`, `rotate` or `delete`), `name`,
+`expected_authority`, `expected_version` and `expected_incarnation`. Create and
+rotate also require base64 `value`; delete refuses a value. Names are 1–40 ASCII
 letters/digits/underscores/hyphens, starting with a letter or digit. Values contain
 1–65,536 bytes. Create requires a new logical name; rotate requires the listed
-stored version, or null for an already-created empty container. Authority and
+stored incarnation and version, or null for an already-created empty container. Authority and
 version comparisons happen atomically before provider I/O.
 
 Create stores a new container and its first version. Rotate adds a new version
@@ -111,9 +115,27 @@ that name. Explicit reconciliation is future work; process restart never
 automatically repeats a provider write. A revoked owner cannot dispatch another
 step or retrieve the outcome, although already dispatched results are recorded.
 
-Secret reveal, consumer-aware activation/retirement and product deletion are
-separate features. Secret values and SQLite downloads remain unavailable through
-this API.
+Reveal admits a unique request ID and selected current incarnation/version under
+`secrets.read`, checks the exact provider resource, original creation label and
+CRC32C, then rechecks current ownership, authority and selection before returning
+bytes. Values remain outside receipts/audits. The response is
+`application/octet-stream`, `Cache-Control: no-store`, with base64 metadata in
+`X-Day2-Result`; it never includes a value in JSON.
+
+Delete requires `secrets.delete` and matching authority, incarnation and version.
+The adapter verifies exact scope/original-create labels, reads the current ETag,
+and sends one conditional delete. Admission, dispatch and outcome are audited;
+uncertain outcomes block further writes. A confirmed deletion leaves a tombstone
+and removes the entry from listing. Recreating the same logical name uses a new
+physical resource, preventing old immutable version references from aliasing new
+bytes. The provider identity needs scoped `secretmanager.versions.access` and
+`secretmanager.secrets.delete`, in addition to the creation/rotation permissions.
+Neither operation changes running bindings or revokes upstream API credentials.
+Consumer-aware activation/retirement remains separate work.
+
+`GET/POST /api/app-sqlite` uses the same human session and POST Origin/CSRF guards
+under `sqlite.download`. It exports a fresh, bounded database containing admitted
+business tables only; see [APP-SQLITE.md](APP-SQLITE.md).
 
 ## Verification
 

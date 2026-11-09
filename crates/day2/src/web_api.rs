@@ -110,6 +110,7 @@ mod cache_expiry_tests {
 
 pub(crate) fn is_json(path: &str) -> bool {
     path == crate::app_secrets::PATH
+        || path == crate::app_export::PATH
         || path.starts_with("/api/app-secrets/")
         || path.starts_with(crate::managed_credentials::ingress::PREFIX)
         || path == "/api"
