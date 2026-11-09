@@ -208,6 +208,36 @@ setup preserves and rechecks the checked-in ABI seed. Inner compiler/worker
 confinement and ELF/glibc/loader admission remain mandatory. This is separate
 from the production Mac private builder; no Linux production builder is added.
 
+The four Linux compiler/admission jobs check the container's zero-swap quota
+immediately after checkout, before downloading tools, restoring caches or
+compiling the verifier. The fixed, quiet read requires a complete `0` line from
+`/sys/fs/cgroup/memory.swap.max`; nonzero/unlimited quotas and read errors fail
+the step. Its one-minute limit does not change any job deadline. This is an early
+runner preflight: the existing Rust context guard still independently checks
+zero swap, the private cgroup, purpose-specific memory ceiling and all native
+admission requirements after bootstrap. No cgroup or host swap setting is written.
+
+This responds to a rare, recurring hosted-container setup refusal. A survey of
+281 Platform runs created in the 72 hours before November 9, 2026 at 07:02 UTC
+covered all 294 attempts recorded then: 1,767 completed context checks passed and three refused swap, on three
+different runners. All three used Ubuntu image `20261101.360.1` and requested
+equal Docker memory and memory-plus-swap limits; passing jobs used that image too.
+None logged an unsupported-swap warning. The latest refusal was
+[tests preparation on run 42568126112](https://github.com/clankernative/platform/actions/runs/42568126112/job/129021678641):
+the request was `8g`/`8g`, but the kernel readback was
+`memory.swap.max=max; memory.max=8589934592`. It spent 8m40s before refusal.
+The value establishes an unlimited swap allowance, not observed swap use or an
+image-wide failure. The earlier two refusals predated quota-value diagnostics.
+
+Retry this setup failure on a fresh hosted allocation, retaining the failed
+attempt. Repeating a check in the same unchanged container does not repair its
+quota. The early step provides a narrow setup-failure signal; it does not add
+automatic reruns or make compiler errors, OOMs or later native failures retryable.
+The Docker request is already the
+[documented no-swap configuration](https://docs.docker.com/engine/containers/resource_constraints/#--memory-swap-details). Its observed
+failure to take effect needs runner/runtime investigation; host-wide `swapoff`
+would not establish the required per-cgroup zero quota.
+
 The native join binds checkout/tree, source catalog, workflow, run/attempt and
 all required Linux evidence. Snapshots, compiler/configuration identities,
 workspace paths and executable digests remain host-specific. The original

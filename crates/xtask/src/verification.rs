@@ -3349,6 +3349,41 @@ mod tests {
     }
 
     #[test]
+    fn linux_swap_preflight_fails_closed_before_work_without_replacing_native_admission() {
+        for name in [
+            "verify-prepare-parts",
+            "verify-prepare",
+            "verify-shards",
+            "verify",
+        ] {
+            let job = ci_job(name);
+            let preflight_name = "Require zero swap before compiler bootstrap";
+            let preflight = ci_step(&job, preflight_name);
+            assert!(preflight.contains("id: linux_swap_preflight"));
+            assert!(preflight.contains("timeout-minutes: 1"));
+            assert!(preflight.contains("run: grep -Fxq 0 /sys/fs/cgroup/memory.swap.max"));
+            assert!(!preflight.contains("continue-on-error") && !preflight.contains("        if:"));
+            assert_eq!(job.matches("id: linux_swap_preflight").count(), 1);
+            assert!(
+                job.find(preflight_name).unwrap()
+                    < job
+                        .find("Download the pinned Linux Bazel executable")
+                        .unwrap()
+            );
+            assert!(
+                job.find(preflight_name).unwrap()
+                    < job.find("Restore source-keyed compiled actions").unwrap()
+            );
+            let admission = ci_step(
+                &job,
+                "Establish the mandatory bounded native Linux compiler context",
+            );
+            assert!(admission.contains("run: build-out/bin/xtask verify-linux-context"));
+            assert!(!admission.contains("continue-on-error"));
+        }
+    }
+
+    #[test]
     fn linux_context_swap_refusal_reports_bounded_current_quotas() {
         for (purpose, memory, swap) in [
             (LinuxContext::Standard, "4096\n", "max\n"),
