@@ -455,15 +455,15 @@ fn cut(
 }
 
 pub(in crate::oauth) fn apply_for_storage(
-    db: &mut dyn crate::write_queue::ConnectionOwner,
+    db: &mut crate::oauth::schema::RawAdmissionDatabase,
     seed: u64,
 ) -> Result<usize> {
-    let scope: String = db.connection().query_row(
+    let scope: String = db.query_row(
         "SELECT value FROM main.day2_meta WHERE key='scope'",
         [],
         |r| r.get(0),
     )?;
-    let schema: String = db.connection().query_row(
+    let schema: String = db.query_row(
         "SELECT value FROM main.day2_meta WHERE key='schema'",
         [],
         |r| r.get(0),

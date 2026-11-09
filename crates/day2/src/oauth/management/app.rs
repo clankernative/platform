@@ -1534,7 +1534,7 @@ mod tests {
                     .capture("calendar", Action::Connect, &fixture.identity, 100)?;
             fixture.manager.pending(&view.id, &fixture.identity, 100)?;
             let path = fixture.manager.runtime.db().to_path_buf();
-            let mut db = store::open(&path)?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
             fixture
                 .manager
                 .load(&db, &view.id, &fixture.identity, 100)?;
@@ -1553,7 +1553,7 @@ mod tests {
             );
             for _ in 0..2 {
                 drop(db);
-                db = store::open(&path)?;
+                db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
                 assert!(
                     fixture
                         .manager
@@ -1896,7 +1896,7 @@ mod tests {
                 matches!(fixture.manager.callback(&old.id,&old_query,&old_session,&fixture.identity,102)?,Reply::Completed{status} if status=="Connection active.")
             );
             let path = fixture.manager.runtime.db().to_path_buf();
-            let mut db = store::open(&path)?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
             let (mut pending, _) = fixture.manager.context(&db, &old.id)?;
             pending.attempt = "pre_restore_prepared_attempt".into();
             pending.expected_generation = Some(1);
@@ -1915,7 +1915,7 @@ mod tests {
                 fixture
                     .manager
                     .capture("calendar", Action::Disconnect, &fixture.identity, 103)?;
-            let mut db = store::open(&path)?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
             let old_pending_json: String = db.query_row(
                 "SELECT view FROM oauth_management_intents WHERE id=?1",
                 [&expiring.id],
@@ -1936,7 +1936,7 @@ mod tests {
             );
             for _ in 0..2 {
                 drop(db);
-                db = store::open(&path)?;
+                db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
                 assert!(
                     fixture
                         .manager
@@ -1969,7 +1969,7 @@ mod tests {
                 matches!(fixture.manager.callback(&fresh.id,&query,&session,&fixture.identity,502)?,Reply::Completed{status} if status=="Connection active.")
             );
             assert_eq!(fixture.port.posts.load(SeqCst), 2);
-            let db = store::open(&path)?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
             let active = Manager::fence(&db, &old.slot)?.context("fresh slot missing")?;
             assert_eq!(
                 (active.generation, active.epoch, active.status.as_str()),
@@ -2009,7 +2009,7 @@ mod tests {
                 .manager
                 .disconnect(&disconnect, &proof, &fixture.identity, 505)?;
             for _ in 0..2 {
-                let db = store::open(&path)?;
+                let db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path)?;
                 assert_eq!(
                     db.query_row(
                         "SELECT generation FROM oauth_private_tokens WHERE slot=?1",
@@ -2069,7 +2069,9 @@ mod tests {
             assert!(
                 matches!(fixture.manager.callback(&old.id,&old_query,&old_session,&fixture.identity,102)?,Reply::Completed{status} if status.contains("outcome unknown"))
             );
-            let mut db = store::open(fixture.manager.runtime.db())?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(
+                fixture.manager.runtime.db(),
+            )?;
             assert!(Manager::fence(&db, &old.slot)?.is_none());
             let code: Vec<u8> = db.query_row(
                 "SELECT ciphertext FROM oauth_private_codes WHERE attempt=?1",
@@ -2093,7 +2095,9 @@ mod tests {
                 matches!(fixture.manager.callback(&fresh.id,&query,&session,&fixture.identity,105)?,Reply::Completed{status} if status=="Connection active.")
             );
             for _ in 0..2 {
-                let db = store::open(fixture.manager.runtime.db())?;
+                let db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(
+                    fixture.manager.runtime.db(),
+                )?;
                 assert_eq!(
                     db.query_row(
                         "SELECT state FROM oauth_connect_attempts WHERE attempt=?1",
@@ -2137,7 +2141,9 @@ mod tests {
                 fixture
                     .manager
                     .capture("calendar", Action::Connect, &fixture.identity, 100)?;
-            let mut db = store::open(fixture.manager.runtime.db())?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(
+                fixture.manager.runtime.db(),
+            )?;
             db.execute(
                 "UPDATE oauth_management_intents SET state='authorized',session=?2 WHERE id=?1",
                 params![view.id, Digest::new(b"unpaired-test-session").as_str()],
@@ -2149,7 +2155,13 @@ mod tests {
             // This is deliberately inconsistent imported DATA: no actual
             // matching connect attempt exists. The cut must roll back, never
             // turn that unsupported claim into a reusable connection slot.
-            assert!(crate::oauth::restore::tests::apply_for_storage(&mut db, 97).is_err());
+            let error = crate::oauth::restore::tests::apply_for_storage(&mut db, 97).unwrap_err();
+            assert!(
+                error
+                    .chain()
+                    .any(|cause| cause.to_string() == "restore_dispatch_claim_not_closed"),
+                "restore must reach the unmatched dispatch-claim refusal"
+            );
             for table in [
                 "oauth_restore_cuts",
                 "oauth_restore_closed",
@@ -2188,7 +2200,9 @@ mod tests {
                 fixture
                     .manager
                     .callback(&old.id, &query, &session, &fixture.identity, 102)?;
-                let mut db = store::open(fixture.manager.runtime.db())?;
+                let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(
+                    fixture.manager.runtime.db(),
+                )?;
                 crate::oauth::restore::tests::apply_for_storage(&mut db, 95)?;
                 drop(db);
                 fixture.port.now.store(103, SeqCst);
@@ -2208,7 +2222,9 @@ mod tests {
                             .is_err()
                     );
                 } else {
-                    let db = store::open(fixture.manager.runtime.db())?;
+                    let db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(
+                        fixture.manager.runtime.db(),
+                    )?;
                     match changed {
                         "token_version" => {
                             db.execute("UPDATE oauth_connection_slots SET token_version=token_version+1 WHERE slot=?1",[fresh.slot.as_str()])?;
