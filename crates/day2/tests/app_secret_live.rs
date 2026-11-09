@@ -31,6 +31,7 @@ struct Canary {
     scope_label: String,
     request_label: String,
     cleanup_required: bool,
+    native_delete_attempted: bool,
 }
 
 impl Canary {
@@ -65,9 +66,16 @@ impl Canary {
         let runtime = Runtime::load(&instance, app)?;
         runtime.initialize()?;
         let resource = format!(
-            "projects/{}/secrets/{}canary",
+            "projects/{}/secrets/{}{}",
             profile.project_number,
-            day2_capabilities::app_secrets::prefix(runtime.scope())
+            day2_capabilities::app_secrets::prefix(runtime.scope()),
+            &day2_capabilities::Digest::of(&(
+                "app-secret-container-v2",
+                runtime.scope(),
+                "canary",
+                "canary-create"
+            ))?
+            .as_str()[7..39]
         );
         let token = Zeroizing::new(fs::read_to_string(&profile.access_token_file)?);
         let mut bearer =
@@ -101,6 +109,7 @@ impl Canary {
             scope_label,
             request_label,
             cleanup_required: false,
+            native_delete_attempted: false,
         })
     }
 
@@ -122,6 +131,14 @@ impl Canary {
                 .into(),
                 expected_authority: app_secrets::list(&self.runtime, "admin")?.authority,
                 expected_version: rotate.then_some(1),
+                expected_incarnation: if rotate {
+                    app_secrets::list(&self.runtime, "admin")?
+                        .secrets
+                        .first()
+                        .map(|e| e.incarnation.clone())
+                } else {
+                    None
+                },
                 value: Zeroizing::new(if rotate { SECOND } else { FIRST }.to_vec()),
             },
             &Gcp::default(),
@@ -136,6 +153,31 @@ impl Canary {
     }
 
     fn read(&self, version: u64, expected: &[u8]) -> Result<()> {
+        let listed = app_secrets::list(&self.runtime, "admin")?;
+        if let Some(entry) = listed
+            .secrets
+            .first()
+            .filter(|entry| entry.version == Some(version))
+        {
+            let actual = app_secrets::reveal(
+                &self.runtime,
+                "admin",
+                &app_secrets::Selection {
+                    name: "canary".into(),
+                    incarnation: entry.incarnation.clone(),
+                    version,
+                    expected_authority: listed.authority,
+                    request_id: format!("canary-reveal-current-{version}"),
+                },
+                &Gcp::default(),
+            )?;
+            ensure!(
+                actual.as_slice() == expected,
+                "native owner disclosure differs"
+            );
+        }
+        // Independently inspect both immutable provider versions after rotation.
+
         let name = format!("{}/versions/{version}", self.resource);
         let response = self
             .client
@@ -169,10 +211,41 @@ impl Canary {
         if !self.cleanup_required {
             return Ok(());
         }
+        if !self.native_delete_attempted {
+            let listed = app_secrets::list(&self.runtime, "admin")?;
+            if let Some(entry) = listed
+                .secrets
+                .first()
+                .filter(|entry| entry.container_created && !entry.blocked)
+            {
+                self.native_delete_attempted = true;
+                let receipt = app_secrets::write(
+                    &self.runtime,
+                    "admin",
+                    &Write {
+                        operation: Operation::Delete,
+                        name: "canary".into(),
+                        request_id: "canary-delete".into(),
+                        expected_authority: listed.authority,
+                        expected_version: entry.version,
+                        expected_incarnation: Some(entry.incarnation.clone()),
+                        value: Zeroizing::new(Vec::new()),
+                    },
+                    &Gcp::default(),
+                )?;
+                ensure!(
+                    receipt.state == State::Deleted && !receipt.activation_performed,
+                    "native deletion not confirmed"
+                );
+            }
+        }
+        // Failure cleanup retains its independent exact scope/create-label/ETag
+        // guard; it never retries a provider version write or the native request.
         let url = format!("https://secretmanager.googleapis.com/v1/{}", self.resource);
         let response = self.client.get(&url).send()?;
         if response.status().as_u16() == 404 {
             self.cleanup_required = false;
+            eprintln!("synthetic canary cleanup=404 app={}", self.runtime.app());
             return Ok(());
         }
         ensure!(

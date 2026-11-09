@@ -876,6 +876,7 @@ impl SchemaInitialization<'_> {
         crate::authority_state::upgrade(tx)?;
         if !exists {
             crate::app_secrets::install(tx)?;
+            crate::app_export::install(tx)?;
         }
         crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
             // Recreate only exact historical credential units containing no

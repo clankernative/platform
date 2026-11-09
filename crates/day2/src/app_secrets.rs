@@ -14,7 +14,9 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 mod gcp;
+mod sensitive;
 pub use gcp::Gcp;
+pub use sensitive::{Selection, reveal};
 
 pub const PATH: &str = "/api/app-secrets";
 pub const MAX_VALUE: usize = 65_536;
@@ -24,12 +26,15 @@ pub const MAX_VALUE: usize = 65_536;
 pub enum Operation {
     Create,
     Rotate,
+    Delete,
+    Reveal,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub name: String,
+    pub incarnation: String,
     pub container_created: bool,
     pub version: Option<u64>,
     pub blocked: bool,
@@ -55,6 +60,7 @@ pub struct Receipt {
     pub scope: String,
     pub actor: String,
     pub name: String,
+    pub incarnation: String,
     pub operation: Operation,
     pub request_id: String,
     pub authority: AuthorityStamp,
@@ -70,7 +76,11 @@ pub enum State {
     ContainerDispatched,
     ContainerCreated,
     VersionDispatched,
+    DeleteDispatched,
+    ReadDispatched,
     Stored,
+    Deleted,
+    Revealed,
     Refused,
     Unknown,
 }
@@ -81,6 +91,7 @@ pub struct Write {
     pub name: String,
     pub expected_authority: AuthorityStamp,
     pub expected_version: Option<u64>,
+    pub expected_incarnation: Option<String>,
     pub request_id: String,
     pub value: Zeroizing<Vec<u8>>,
 }
@@ -89,7 +100,8 @@ pub struct Write {
 pub struct Target {
     namespace: Namespace,
     scope: String,
-    name: String,
+    incarnation: String,
+    create_request: String,
 }
 impl Target {
     pub fn resource(&self) -> String {
@@ -97,7 +109,7 @@ impl Target {
             "projects/{}/secrets/{}{}",
             self.namespace.project_number,
             day2_capabilities::app_secrets::prefix(&self.scope),
-            self.name
+            self.incarnation
         )
     }
     pub fn scope(&self) -> &str {
@@ -120,13 +132,21 @@ pub trait Provider: Send + Sync {
         target: &Target,
         value: &[u8],
     ) -> std::result::Result<u64, ProviderFailure>;
+    fn access(
+        &self,
+        target: &Target,
+        version: u64,
+    ) -> std::result::Result<Zeroizing<Vec<u8>>, ProviderFailure>;
+    fn delete(&self, target: &Target) -> std::result::Result<(), ProviderFailure>;
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
     db.execute_batch("CREATE TABLE day2_app_secrets(
         name TEXT PRIMARY KEY, container_created INTEGER NOT NULL CHECK(container_created IN(0,1)),
         version INTEGER CHECK(version>0), blocked INTEGER NOT NULL CHECK(blocked IN(0,1)),
-        request_id TEXT NOT NULL, namespace TEXT NOT NULL
+        request_id TEXT NOT NULL, namespace TEXT NOT NULL,
+        incarnation TEXT NOT NULL, create_request TEXT NOT NULL,
+        deleted INTEGER NOT NULL CHECK(deleted IN(0,1))
     ) STRICT;
     CREATE TABLE day2_app_secret_requests(
         id TEXT PRIMARY KEY, receipt TEXT NOT NULL
@@ -142,7 +162,7 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
     CREATE TRIGGER day2_app_secret_events_no_replace BEFORE INSERT ON day2_app_secret_events
       WHEN EXISTS(SELECT 1 FROM day2_app_secret_events WHERE sequence=NEW.sequence)
       BEGIN SELECT RAISE(ABORT,'append_only_secret_audit'); END;
-    INSERT INTO day2_meta(key,value) VALUES('app_secrets_schema','1');")?;
+    INSERT INTO day2_meta(key,value) VALUES('app_secrets_schema','2');")?;
     Ok(())
 }
 
@@ -199,7 +219,7 @@ fn namespace_in(
         )
         .optional()?;
     ensure!(
-        schema.as_deref() == Some("1"),
+        schema.as_deref() == Some("2"),
         "app_secret_schema_requires_fresh_initialization"
     );
     // Host credential selection and namespace changes require deliberate activation.
@@ -232,13 +252,13 @@ pub fn list(runtime: &Runtime, actor: &str) -> Result<Listing> {
     runtime.sql_read(|db| {
         let (namespace, authority) = namespace_in(db, runtime, actor, Permission::SecretsList)?;
         let namespace = namespace_id(&namespace, runtime)?;
-        let mut query = db.prepare("SELECT name,container_created,version,blocked,request_id FROM day2_app_secrets WHERE namespace=?1 ORDER BY name LIMIT 129")?;
+        let mut query = db.prepare("SELECT name,container_created,version,blocked,request_id,incarnation FROM day2_app_secrets WHERE namespace=?1 AND deleted=0 ORDER BY name LIMIT 129")?;
         let secrets = query.query_map([namespace], |row| Ok(Entry {
             name: row.get(0)?, container_created: row.get(1)?, version: read_version(row, 2)?,
-            blocked: row.get(3)?, request_id: row.get(4)?,
+            blocked: row.get(3)?, request_id: row.get(4)?, incarnation: row.get(5)?,
         }))?.collect::<rusqlite::Result<Vec<_>>>()?;
         ensure!(secrets.len() <= 128, "app_secret_budget");
-        Ok(Listing { protocol: 1, kind: "app-secrets".into(), scope: runtime.scope().into(), actor: actor.into(), authority, secrets })
+        Ok(Listing { protocol: 2, kind: "app-secrets".into(), scope: runtime.scope().into(), actor: actor.into(), authority, secrets })
     })
 }
 
@@ -264,7 +284,7 @@ fn receipt_in(db: &Connection, id: &str) -> Result<Receipt> {
     crate::json::decode(raw.as_bytes())
 }
 
-fn validate_request(id: &str) -> Result<()> {
+pub(crate) fn validate_request(id: &str) -> Result<()> {
     ensure!(
         !id.is_empty()
             && id != "."
@@ -290,49 +310,91 @@ fn save(db: &Connection, receipt: &Receipt, event: &str) -> Result<()> {
     Ok(())
 }
 
-fn admit(runtime: &Runtime, actor: &str, input: &Write) -> Result<(Target, Receipt)> {
-    validate_request(&input.request_id)?;
-    let _: day2_capabilities::Name = input
-        .name
-        .clone()
-        .try_into()
-        .map_err(|_| Failure::InvalidInput)?;
-    ensure!(input.name.len() <= 40, Failure::InvalidInput);
-    ensure!(
-        !input.value.is_empty() && input.value.len() <= MAX_VALUE,
-        Failure::InvalidInput
-    );
-    let permission = match input.operation {
+fn permission(operation: Operation) -> Permission {
+    match operation {
         Operation::Create => Permission::SecretsCreate,
         Operation::Rotate => Permission::SecretsRotate,
-    };
+        Operation::Delete => Permission::SecretsDelete,
+        Operation::Reveal => Permission::SecretsRead,
+    }
+}
+
+fn valid_name(name: &str) -> Result<()> {
+    let _: day2_capabilities::Name = name
+        .to_owned()
+        .try_into()
+        .map_err(|_| Failure::InvalidInput)?;
+    ensure!(name.len() <= 40, Failure::InvalidInput);
+    Ok(())
+}
+
+struct StoredSecret {
+    created: bool,
+    version: Option<u64>,
+    blocked: bool,
+    namespace: String,
+    incarnation: String,
+    create_request: String,
+    deleted: bool,
+}
+
+fn stored_secret(db: &Connection, name: &str) -> Result<Option<StoredSecret>> {
+    Ok(db.query_row(
+        "SELECT container_created,version,blocked,namespace,incarnation,create_request,deleted FROM day2_app_secrets WHERE name=?1", [name],
+        |row| Ok(StoredSecret {created:row.get(0)?,version:read_version(row,1)?,blocked:row.get(2)?,namespace:row.get(3)?,incarnation:row.get(4)?,create_request:row.get(5)?,deleted:row.get(6)?}),
+    ).optional()?)
+}
+
+fn admit(runtime: &Runtime, actor: &str, input: &Write) -> Result<(Target, Receipt)> {
+    validate_request(&input.request_id)?;
+    valid_name(&input.name)?;
+    ensure!(
+        match input.operation {
+            Operation::Create | Operation::Rotate =>
+                !input.value.is_empty() && input.value.len() <= MAX_VALUE,
+            Operation::Delete => input.value.is_empty(),
+            Operation::Reveal => false,
+        },
+        Failure::InvalidInput
+    );
     runtime.sql_write(|db| {
-        let (namespace, authority) = namespace_in(db, runtime, actor, permission)?;
+        let (namespace, authority) = namespace_in(db, runtime, actor, permission(input.operation))?;
         ensure!(authority == input.expected_authority, Failure::AuthorityPolicyChanged);
         let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM day2_app_secret_requests WHERE id=?1)", [&input.request_id], |row| row.get(0))?;
-        // We never persist secret-derived retry fingerprints. Reusing an ID is
-        // always a conflict: inspect its receipt instead of resubmitting values.
         ensure!(!exists, Failure::IdempotencyKeyConflict);
         let namespace_id = namespace_id(&namespace, runtime)?;
-        let previous: Option<(bool, Option<u64>, bool, String)> = db.query_row(
-            "SELECT container_created,version,blocked,namespace FROM day2_app_secrets WHERE name=?1", [&input.name],
-            |row| Ok((row.get(0)?, read_version(row, 1)?, row.get(2)?, row.get(3)?)),
-        ).optional()?;
-        if let Some((created, version, blocked, selected)) = &previous {
-            ensure!(*selected == namespace_id, Failure::AuthorityPolicyChanged);
-            ensure!(!blocked, Failure::ExternalAmbiguous);
-            ensure!(match input.operation { Operation::Create => !created && input.expected_version.is_none(), Operation::Rotate => *created && *version == input.expected_version }, Failure::Conflict);
+        let previous=stored_secret(db,&input.name)?;
+        let (incarnation, create_request) = if let Some(previous) = &previous {
+            ensure!(previous.namespace == namespace_id, Failure::AuthorityPolicyChanged);
+            ensure!(!previous.blocked, Failure::ExternalAmbiguous);
+            ensure!(match input.operation {
+                Operation::Create => (!previous.created || previous.deleted) && input.expected_version.is_none() && input.expected_incarnation.is_none(),
+                Operation::Rotate | Operation::Delete => previous.created && !previous.deleted && previous.version == input.expected_version && input.expected_incarnation.as_ref() == Some(&previous.incarnation),
+                Operation::Reveal => false,
+            }, Failure::Conflict);
+            (previous.incarnation.clone(), previous.create_request.clone())
         } else {
-            ensure!(input.operation == Operation::Create && input.expected_version.is_none(), Failure::Conflict);
+            ensure!(input.operation == Operation::Create && input.expected_version.is_none() && input.expected_incarnation.is_none(), Failure::Conflict);
             let count: i64 = db.query_row("SELECT count(*) FROM day2_app_secrets", [], |row| row.get(0))?;
             ensure!(count < 128, Failure::InvalidInput);
-        }
-        let receipt = Receipt { protocol: 1, kind: "app-secret-write".into(), scope: runtime.scope().into(), actor: actor.into(), name: input.name.clone(), operation: input.operation, request_id: input.request_id.clone(), authority, state: State::Admitted, version: None, activation_performed: false };
+            (String::new(), String::new())
+        };
+        // Each new container gets its own resource identity. Recreating a logical
+        // name cannot cause an old immutable version reference to name new bytes.
+        let (incarnation, create_request) = if input.operation == Operation::Create {
+            let digest = day2_capabilities::Digest::of(&("app-secret-container-v2", runtime.scope(), &input.name, &input.request_id))?;
+            (digest.as_str()[7..39].to_owned(), input.request_id.clone())
+        } else { (incarnation, create_request) };
+        let receipt = Receipt { protocol: 2, kind: "app-secret-write".into(), scope: runtime.scope().into(), actor: actor.into(), name: input.name.clone(), incarnation: incarnation.clone(), operation: input.operation, request_id: input.request_id.clone(), authority, state: State::Admitted, version: None, activation_performed: false };
         db.execute("INSERT INTO day2_app_secret_requests(id,receipt) VALUES(?1,?2)", params![input.request_id, serde_json::to_string(&receipt)?])?;
-        db.execute("INSERT INTO day2_app_secrets(name,container_created,version,blocked,request_id,namespace) VALUES(?1,0,NULL,1,?2,?3)
-            ON CONFLICT(name) DO UPDATE SET blocked=1,request_id=excluded.request_id", params![input.name, input.request_id, namespace_id])?;
+        if input.operation == Operation::Create {
+            db.execute("INSERT INTO day2_app_secrets(name,container_created,version,blocked,request_id,namespace,incarnation,create_request,deleted) VALUES(?1,0,NULL,1,?2,?3,?4,?5,0)
+                ON CONFLICT(name) DO UPDATE SET container_created=0,version=NULL,blocked=1,request_id=excluded.request_id,incarnation=excluded.incarnation,create_request=excluded.create_request,deleted=0", params![input.name,input.request_id,namespace_id,incarnation,create_request])?;
+        } else {
+            db.execute("UPDATE day2_app_secrets SET blocked=1,request_id=?2 WHERE name=?1", params![input.name,input.request_id])?;
+        }
         save(db, &receipt, "admitted")?;
-        Ok((Target { namespace, scope: runtime.scope().into(), name: input.name.clone() }, receipt))
+        Ok((Target { namespace, scope: runtime.scope().into(), incarnation, create_request }, receipt))
     })
 }
 
@@ -341,6 +403,8 @@ fn admit(runtime: &Runtime, actor: &str, input: &Write) -> Result<(Target, Recei
 enum Step {
     CreateContainer,
     AddVersion,
+    DeleteContainer,
+    AccessVersion,
     Complete,
 }
 
@@ -388,13 +452,15 @@ fn embedded_recipe_matches_current_roc() -> Result<()> {
         actual == embedded["transitions"],
         "regenerate secret recipe with xtask app-secrets-table"
     );
-    for operation in [Operation::Create, Operation::Rotate] {
+    for operation in [Operation::Create, Operation::Rotate, Operation::Delete] {
         for phase in [
             State::Admitted,
             State::ContainerDispatched,
             State::ContainerCreated,
             State::VersionDispatched,
             State::Stored,
+            State::DeleteDispatched,
+            State::Deleted,
             State::Refused,
             State::Unknown,
         ] {
@@ -417,11 +483,7 @@ fn embedded_recipe_matches_current_roc() -> Result<()> {
 
 fn dispatch(runtime: &Runtime, actor: &str, receipt: &mut Receipt, state: State) -> Result<()> {
     runtime.sql_write(|db| {
-        let permission = match receipt.operation {
-            Operation::Create => Permission::SecretsCreate,
-            Operation::Rotate => Permission::SecretsRotate,
-        };
-        let (_, stamp) = namespace_in(db, runtime, actor, permission)?;
+        let (_, stamp) = namespace_in(db, runtime, actor, permission(receipt.operation))?;
         ensure!(stamp == receipt.authority, Failure::AuthorityPolicyChanged);
         let stored = receipt_in(db, &receipt.request_id)?;
         ensure!(stored == *receipt, Failure::Conflict);
@@ -443,8 +505,12 @@ fn settle(
     runtime.sql_write(|db| {
         authority_state::scope_matches(db, runtime)?;
         runtime.check_binding(db)?;
-        db.execute("UPDATE day2_app_secrets SET container_created=max(container_created,?2),version=coalesce(?3,version),blocked=?4
-            WHERE name=?1 AND request_id=?5", params![receipt.name, created, version, !terminal, receipt.request_id])?;
+        if receipt.state == State::Deleted {
+            ensure!(db.execute("UPDATE day2_app_secrets SET container_created=0,version=NULL,blocked=0,deleted=1 WHERE name=?1 AND request_id=?2 AND incarnation=?3",params![receipt.name,receipt.request_id,receipt.incarnation])? == 1, Failure::Conflict);
+        } else {
+            ensure!(db.execute("UPDATE day2_app_secrets SET container_created=max(container_created,?2),version=coalesce(?3,version),blocked=?4
+                WHERE name=?1 AND request_id=?5 AND incarnation=?6", params![receipt.name, created, version, !terminal, receipt.request_id, receipt.incarnation])? == 1, Failure::Conflict);
+        }
         save(db, receipt, "provider_outcome_recorded")
     })
 }
@@ -494,6 +560,27 @@ pub fn write(
                         )?;
                     }
                 }
+            }
+            Step::AccessVersion => anyhow::bail!("disclosure_requires_protected_return"),
+            Step::DeleteContainer => {
+                if let Err(error) = dispatch(runtime, actor, &mut receipt, State::DeleteDispatched)
+                {
+                    receipt.state = State::Refused;
+                    settle(runtime, &receipt, true, None, true)?;
+                    return Err(error);
+                }
+                receipt.state = match provider.delete(&target) {
+                    Ok(()) => State::Deleted,
+                    Err(ProviderFailure::Refused) => State::Refused,
+                    Err(ProviderFailure::Unknown) => State::Unknown,
+                };
+                settle(
+                    runtime,
+                    &receipt,
+                    false,
+                    None,
+                    receipt.state != State::Unknown,
+                )?;
             }
             Step::AddVersion => {
                 if let Err(error) = dispatch(runtime, actor, &mut receipt, State::VersionDispatched)

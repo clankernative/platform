@@ -1,5 +1,5 @@
 {
-  "source": "sha256:06b7f8c1d93a47381a164b43b6646104ca5a839e3b9a6aac654a9ff79d4031ab",
+  "source": "sha256:92e39336e19b2c8cefc5a690e1936974c69d01faa7ecf74e1da7053a5d79dded",
   "transitions": [
     {
       "operation": "create",
@@ -15,6 +15,46 @@
       "operation": "rotate",
       "phase": "admitted",
       "step": "add_version"
+    },
+    {
+      "operation": "delete",
+      "phase": "admitted",
+      "step": "delete_container"
+    },
+    {
+      "operation": "reveal",
+      "phase": "admitted",
+      "step": "access_version"
+    },
+    {
+      "operation": "reveal",
+      "phase": "revealed",
+      "step": "complete"
+    },
+    {
+      "operation": "reveal",
+      "phase": "refused",
+      "step": "complete"
+    },
+    {
+      "operation": "reveal",
+      "phase": "unknown",
+      "step": "complete"
+    },
+    {
+      "operation": "delete",
+      "phase": "deleted",
+      "step": "complete"
+    },
+    {
+      "operation": "delete",
+      "phase": "refused",
+      "step": "complete"
+    },
+    {
+      "operation": "delete",
+      "phase": "unknown",
+      "step": "complete"
     },
     {
       "operation": "create",

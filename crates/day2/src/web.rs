@@ -1317,7 +1317,9 @@ impl Host {
                 crate::web_api::session_allowed(&self.runtime, &self.api, &session.actor),
                 crate::error::Failure::Forbidden
             );
-            if uri.path() == crate::app_secrets::PATH || uri.path().starts_with("/api/app-secrets/")
+            if uri.path() == crate::app_secrets::PATH
+                || uri.path().starts_with("/api/app-secrets/")
+                || uri.path() == crate::app_export::PATH
             {
                 return crate::web_app_secrets::dispatch(
                     &crate::web_api::RequestContext {

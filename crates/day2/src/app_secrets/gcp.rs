@@ -1,10 +1,10 @@
 //! Bounded, explicitly credentialled Secret Manager writes. No ADC or retries.
 use super::{Provider, ProviderFailure, Target};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use reqwest::{blocking::Client, header, redirect::Policy};
+use reqwest::{Method, blocking::Client, header, redirect::Policy};
 use serde_json::{Value, json};
 use std::{fs, io::Read as _, time::Duration};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 pub struct Gcp {
     origin: String,
@@ -19,12 +19,13 @@ impl Default for Gcp {
 }
 
 impl Gcp {
-    fn request(
+    fn exchange(
         &self,
         target: &Target,
         path: &str,
         body: Option<Zeroizing<String>>,
-    ) -> Result<Value, ProviderFailure> {
+        method: Method,
+    ) -> Result<Zeroizing<Vec<u8>>, ProviderFailure> {
         let token_path = std::path::Path::new(&target.namespace.access_token_file);
         let metadata = fs::symlink_metadata(token_path).map_err(|_| ProviderFailure::Refused)?;
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
@@ -72,13 +73,12 @@ impl Gcp {
             .map_err(|_| ProviderFailure::Refused)?;
         authorization.set_sensitive(true);
         let endpoint = format!("{}{path}", self.origin);
-        let request = match &body {
-            Some(body) => client
-                .post(endpoint)
+        let mut request = client.request(method, endpoint);
+        if let Some(body) = &body {
+            request = request
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(body.as_bytes().to_vec()),
-            None => client.get(endpoint),
-        };
+                .body(body.as_bytes().to_vec());
+        }
         let response = request
             .header(header::AUTHORIZATION, authorization)
             .header(header::ACCEPT, "application/json")
@@ -100,12 +100,27 @@ impl Gcp {
         }
         let mut bytes = Zeroizing::new(Vec::new());
         response
-            .take(16_385)
+            .take(98_305)
             .read_to_end(&mut bytes)
             .map_err(|_| ProviderFailure::Unknown)?;
-        if bytes.len() > 16_384 {
+        if bytes.len() > 98_304 {
             return Err(ProviderFailure::Unknown);
         }
+        Ok(bytes)
+    }
+
+    fn request(
+        &self,
+        target: &Target,
+        path: &str,
+        body: Option<Zeroizing<String>>,
+    ) -> Result<Value, ProviderFailure> {
+        let method = if body.is_some() {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        let bytes = self.exchange(target, path, body, method)?;
         crate::json::decode(&bytes).map_err(|_| ProviderFailure::Unknown)
     }
 
@@ -116,11 +131,19 @@ impl Gcp {
     fn selected(&self, target: &Target, value: &Value) -> bool {
         value["name"].as_str() == Some(&target.resource())
             && value["labels"]["day2_scope"].as_str() == Some(Self::scope_label(target).as_str())
+            && value["labels"]["day2_request"].as_str()
+                == Some(
+                    &day2_capabilities::Digest::new(target.create_request.as_bytes()).as_str()
+                        [7..47],
+                )
     }
 }
 
 impl Provider for Gcp {
     fn create(&self, target: &Target, request_id: &str) -> Result<(), ProviderFailure> {
+        if request_id != target.create_request {
+            return Err(ProviderFailure::Refused);
+        }
         let resource = target.resource();
         let (_, secret_id) = resource.rsplit_once('/').ok_or(ProviderFailure::Refused)?;
         let path = format!(
@@ -168,6 +191,88 @@ impl Provider for Gcp {
             return Err(ProviderFailure::Unknown);
         }
         Ok(version)
+    }
+    fn access(&self, target: &Target, version: u64) -> Result<Zeroizing<Vec<u8>>, ProviderFailure> {
+        if version == 0 || i64::try_from(version).is_err() {
+            return Err(ProviderFailure::Refused);
+        }
+        let resource = target.resource();
+        let metadata = self
+            .request(target, &format!("/v1/{resource}"), None)
+            .map_err(|_| ProviderFailure::Refused)?;
+        if !self.selected(target, &metadata) {
+            return Err(ProviderFailure::Refused);
+        }
+        #[derive(serde::Deserialize)]
+        struct Encoded(String);
+        impl Drop for Encoded {
+            fn drop(&mut self) {
+                self.0.zeroize();
+            }
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Payload {
+            data: Encoded,
+            data_crc32c: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Access {
+            name: String,
+            payload: Payload,
+        }
+        let path = format!("/v1/{resource}/versions/{version}:access");
+        let raw = self.exchange(target, &path, None, Method::GET)?;
+        let access: Access = crate::json::decode(&raw).map_err(|_| ProviderFailure::Unknown)?;
+        if access.name != format!("{resource}/versions/{version}") {
+            return Err(ProviderFailure::Unknown);
+        }
+        let bytes = Zeroizing::new(
+            STANDARD
+                .decode(&access.payload.data.0)
+                .map_err(|_| ProviderFailure::Unknown)?,
+        );
+        let crc = access
+            .payload
+            .data_crc32c
+            .parse::<u32>()
+            .map_err(|_| ProviderFailure::Unknown)?;
+        if bytes.is_empty()
+            || bytes.len() > super::MAX_VALUE
+            || crc.to_string() != access.payload.data_crc32c
+            || crc32c::crc32c(&bytes) != crc
+        {
+            return Err(ProviderFailure::Unknown);
+        }
+        Ok(bytes)
+    }
+
+    fn delete(&self, target: &Target) -> Result<(), ProviderFailure> {
+        let resource = target.resource();
+        let metadata = self
+            .request(target, &format!("/v1/{resource}"), None)
+            .map_err(|_| ProviderFailure::Refused)?;
+        if !self.selected(target, &metadata) {
+            return Err(ProviderFailure::Refused);
+        }
+        let etag = metadata["etag"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 1024 && s.bytes().all(|b| b.is_ascii_graphic()))
+            .ok_or(ProviderFailure::Refused)?;
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("etag", etag)
+            .finish();
+        let raw = self.exchange(
+            target,
+            &format!("/v1/{resource}?{query}"),
+            None,
+            Method::DELETE,
+        )?;
+        let value: Value = crate::json::decode(&raw).map_err(|_| ProviderFailure::Unknown)?;
+        if value.as_object().is_none_or(|v| !v.is_empty()) {
+            return Err(ProviderFailure::Unknown);
+        }
+        Ok(())
     }
 }
 
@@ -260,7 +365,8 @@ mod tests {
                 access_token_file: file.to_string_lossy().into(),
             },
             scope: "company/test/reports".into(),
-            name: "API_KEY".into(),
+            incarnation: "0123456789abcdef0123456789abcdef".into(),
+            create_request: "create-1".into(),
         }
     }
     fn metadata(target: &Target, id: &str) -> Value {
@@ -353,7 +459,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            provider.create(&target, "x"),
+            provider.create(&target, "create-1"),
             Err(ProviderFailure::Refused)
         ));
         fs::set_permissions(
@@ -363,15 +469,98 @@ mod tests {
         .unwrap();
         fs::write(&target.namespace.access_token_file, vec![b'x'; 8193]).unwrap();
         assert!(matches!(
-            provider.create(&target, "x"),
+            provider.create(&target, "create-1"),
             Err(ProviderFailure::Refused)
         ));
         let symlink = directory.path().join("symlink");
         std::os::unix::fs::symlink(&target.namespace.access_token_file, &symlink).unwrap();
         target.namespace.access_token_file = symlink.to_string_lossy().into();
         assert!(matches!(
-            provider.create(&target, "x"),
+            provider.create(&target, "create-1"),
             Err(ProviderFailure::Refused)
+        ));
+    }
+    #[test]
+    fn disclosure_checks_resource_version_checksum_and_original_create_label() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = target(directory.path());
+        let good = json!({"name":format!("{}/versions/2",target.resource()),"payload":{"data":STANDARD.encode(b"123456789"),"dataCrc32c":"3808858755"}});
+        for (body, ok) in [
+            (good.clone(), true),
+            (
+                {
+                    let mut x = good.clone();
+                    x["name"] = json!(format!("{}/versions/1", target.resource()));
+                    x
+                },
+                false,
+            ),
+            (
+                {
+                    let mut x = good.clone();
+                    x["payload"]["dataCrc32c"] = json!("1");
+                    x
+                },
+                false,
+            ),
+        ] {
+            let server = Server::start(vec![
+                (200, metadata(&target, "create-1").to_string()),
+                (200, body.to_string()),
+            ]);
+            let provider = Gcp {
+                origin: server.origin.clone(),
+            };
+            let result = provider.access(&target, 2);
+            assert_eq!(result.is_ok(), ok);
+            if let Ok(value) = result {
+                assert_eq!(value.as_slice(), b"123456789");
+            }
+        }
+        let server = Server::start(vec![(200, metadata(&target, "foreign-create").to_string())]);
+        let provider = Gcp {
+            origin: server.origin.clone(),
+        };
+        assert!(provider.access(&target, 2).is_err());
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deletion_requires_matching_scope_create_label_and_etag_before_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = target(directory.path());
+        let mut current = metadata(&target, "create-1");
+        current["etag"] = json!("current-etag");
+        let server = Server::start(vec![(200, current.to_string()), (200, "{}".into())]);
+        let provider = Gcp {
+            origin: server.origin.clone(),
+        };
+        assert!(provider.delete(&target).is_ok());
+        assert!(server.requests.lock().unwrap()[1].starts_with(&format!(
+            "DELETE /v1/{}?etag=current-etag ",
+            target.resource()
+        )));
+        for body in [
+            metadata(&target, "create-1"),
+            metadata(&target, "foreign-create"),
+        ] {
+            let server = Server::start(vec![(200, body.to_string())]);
+            let provider = Gcp {
+                origin: server.origin.clone(),
+            };
+            assert!(matches!(
+                provider.delete(&target),
+                Err(ProviderFailure::Refused)
+            ));
+            assert_eq!(server.requests.lock().unwrap().len(), 1);
+        }
+        let server = Server::start(vec![(200, current.to_string()), (500, "{}".into())]);
+        let provider = Gcp {
+            origin: server.origin.clone(),
+        };
+        assert!(matches!(
+            provider.delete(&target),
+            Err(ProviderFailure::Unknown)
         ));
     }
 }

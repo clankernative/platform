@@ -3,15 +3,15 @@
 An app's owners are exactly `policy.admins` in its active authority document.
 There is no separate registry, global owner role or mutable desired-file grant.
 The shared native `owners::authorize_in` guard covers `audit.read`,
-`secrets.list`, `secrets.read`, `secrets.create`, `secrets.rotate` and
+`secrets.list`, `secrets.read`, `secrets.create`, `secrets.rotate`, `secrets.delete` and
 `sqlite.download`. Audit reads and [app secret storage](APP-SECRETS.md) use this
-guard. Secret reveal and snapshot export remain future operations.
+guard, including reveal/deletion and [business SQLite export](APP-SQLITE.md).
 
 Checks require an enabled app, current validated authority, the exact installation
 and artifact binding, current hosted-domain selection and applicable native
 security admission. They run inside the protected database read transaction.
 A returned stamp or a CLI `check` result is diagnostic data, not a credential or
-permission that a later read can reuse. A future endpoint must authenticate its
+permission that a later read can reuse. Every endpoint must authenticate its
 actor and call the guard inside the actual read/export admission transaction.
 It must also resolve only that app's approved secret bindings or snapshot identity;
 ownership grants no access to arbitrary shared/platform secrets or other apps.
@@ -57,7 +57,7 @@ All commands emit one JSON object on success:
 Native errors follow the platform CLI's existing stderr/nonzero-exit contract.
 No secret material or private replay evidence belongs in these results.
 `list` returns `stamp`, `enabled`, active `owners`, `desired_owners`,
-`desired_matches_active` and the six permission names. It never includes the
+`desired_matches_active` and the seven permission names. It never includes the
 rest of the app policy or provider bindings. `check` returns the requested
 `actor`, `permission` and `allowed` boolean. False is a diagnostic denial, not a
 failure to evaluate the command. The standalone Rust CLI maps it to exit code 3.
