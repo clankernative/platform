@@ -1535,12 +1535,11 @@
     "license": "MIT",
     "name": "libsqlite3-sys",
     "notices": [
-      "LICENSE",
-      "sqlcipher/LICENSE"
+      "LICENSE"
     ],
     "repository": "https://github.com/rusqlite/rusqlite",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.38.2"
+    "version": "0.39.1"
   },
   {
     "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -3032,7 +3031,7 @@
     ],
     "repository": "https://github.com/rusqlite/rusqlite",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.40.2"
+    "version": "0.41.1"
   },
   {
     "license": "Apache-2.0 OR MIT",
