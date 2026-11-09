@@ -298,6 +298,77 @@ const MAX_DIAGNOSTIC_LINE: usize = 128 * 1024;
 const MAX_DIAGNOSTIC_CATALOG: usize = 4 * 1024 * 1024;
 const MAX_MACRO_LOCATION_DEPTH: usize = 8;
 
+// Closed public code vocabulary from pinned rustc 1.98.1 -W help. Unknown
+// or custom lint names remain private; no arbitrary identifier is exported.
+const RUSTC_LINT_CODES: &str = "
+aarch64_softfloat_neon absolute_paths_not_starting_with_crate ambiguous_associated_items
+ambiguous_derive_helpers ambiguous_glob_imported_traits ambiguous_glob_imports
+ambiguous_glob_reexports ambiguous_import_visibilities ambiguous_negative_literals
+ambiguous_panic_imports ambiguous_wide_pointer_comparisons anonymous_parameters arithmetic_overflow
+array_into_iter asm_sub_register async_fn_in_trait bad_asm_style bare_trait_objects
+binary_asm_labels bindings_with_variant_name boxed_slice_into_iter break_with_label_and_loop
+c_void_returns clashing_extern_declarations closure_returning_async_block coherence_leak_check
+conflicting_repr_hints confusable_idents const_evaluatable_unchecked const_item_interior_mutations
+const_item_mutation dangerous_implicit_autorefs dangling_pointers_from_locals
+dangling_pointers_from_temporaries dead_code dead_code_pub_in_binary
+default_overrides_default_fields dependency_on_unit_never_type_fallback deprecated
+deprecated_in_future deprecated_llvm_intrinsic deprecated_safe_2024 deprecated_where_clause_location
+deref_into_dyn_supertrait deref_nullptr double_negations drop_bounds dropping_copy_types
+dropping_references duplicate_features duplicate_macro_attributes dyn_drop
+edition_2024_expr_fragment_specifier elided_lifetimes_in_associated_constant
+elided_lifetimes_in_paths ellipsis_inclusive_range_patterns enum_intrinsics_non_enums
+explicit_builtin_cfgs_in_flags explicit_outlives_requirements exported_private_dependencies
+ffi_unwind_calls float_literal_f32_fallback for_loops_over_fallibles forbidden_lint_groups
+forgetting_copy_types forgetting_references function_casts_as_integer function_item_references
+hidden_glob_reexports if_let_rescope ill_formed_attribute_input impl_trait_overcaptures
+impl_trait_redundant_captures implicit_provenance_casts improper_ctypes improper_ctypes_definitions
+improper_gpu_kernel_arg incomplete_features incomplete_include ineffective_unstable_trait_impl
+inline_no_sanitize integer_to_ptr_transmutes internal_eq_trait_method_impls internal_features
+invalid_atomic_ordering invalid_doc_attributes invalid_from_utf8 invalid_from_utf8_unchecked
+invalid_macro_export_arguments invalid_nan_comparisons invalid_null_arguments
+invalid_reference_casting invalid_runtime_symbol_definitions invalid_type_param_default
+invalid_value irrefutable_let_patterns keyword_idents_2018 keyword_idents_2024 large_assignments
+late_bound_lifetime_arguments legacy_derive_helpers let_underscore_drop let_underscore_lock
+linker_info linker_messages long_running_const_eval
+macro_expanded_macro_exports_accessed_by_absolute_paths macro_use_extern_crate
+malformed_diagnostic_attributes malformed_diagnostic_format_literals map_unit_fn
+meta_variable_misuse mismatched_lifetime_syntaxes misplaced_diagnostic_attributes missing_abi
+missing_copy_implementations missing_debug_implementations missing_docs
+missing_gpu_kernel_export_name missing_unsafe_on_extern mixed_script_confusables
+multiple_supertrait_upcastable must_not_suspend mutable_transmutes named_arguments_used_positionally
+named_asm_labels never_type_fallback_flowing_into_unsafe no_mangle_const_items
+no_mangle_generic_items non_ascii_idents non_camel_case_types non_contiguous_range_endpoints
+non_exhaustive_omitted_patterns non_fmt_panics non_local_definitions non_shorthand_field_patterns
+non_snake_case non_upper_case_globals noop_method_call opaque_hidden_inferred_bound
+out_of_scope_macro_calls overflowing_literals overlapping_range_endpoints path_statements
+patterns_in_fns_without_body private_bounds private_interfaces proc_macro_derive_resolution_fallback
+ptr_to_integer_transmute_in_consts pub_use_of_private_extern_crate redundant_imports
+redundant_lifetimes redundant_semicolons refining_impl_trait_internal refining_impl_trait_reachable
+renamed_and_removed_lints repr_c_enums_larger_than_int resolving_to_items_shadowing_supertrait_items
+rtsan_nonblocking_async rust_2021_incompatible_closure_captures rust_2021_incompatible_or_patterns
+rust_2021_prefixes_incompatible_syntax rust_2021_prelude_collisions
+rust_2024_guarded_string_incompatible_syntax rust_2024_incompatible_pat rust_2024_prelude_collisions
+self_constructor_from_outer_item semicolon_in_expressions_from_macros shadowing_supertrait_items
+single_use_lifetimes special_module_name stable_features static_mut_refs suspicious_double_ref_op
+suspicious_runtime_symbol_definitions tail_call_track_caller tail_expr_drop_order test_unstable_lint
+text_direction_codepoint_in_comment text_direction_codepoint_in_literal trivial_bounds trivial_casts
+trivial_numeric_casts type_alias_bounds tyvar_behind_raw_pointer uncommon_codepoints
+unconditional_panic unconditional_recursion uncovered_param_in_projection undropped_manually_drops
+unexpected_cfgs unfulfilled_lint_expectations ungated_async_fn_track_caller uninhabited_static
+unit_bindings unknown_crate_types unknown_diagnostic_attributes unknown_lints unnameable_test_items
+unnameable_types unnecessary_transmutes unpredictable_function_pointer_comparisons
+unqualified_local_imports unreachable_cfg_select_predicates unreachable_code unreachable_patterns
+unreachable_pub unsafe_attr_outside_unsafe unsafe_code unsafe_op_in_unsafe_fn unstable_features
+unstable_name_collisions unstable_syntax_pre_expansion unsupported_calling_conventions
+unused_allocation unused_assignments unused_associated_type_bounds unused_attributes unused_braces
+unused_comparisons unused_crate_dependencies unused_doc_comments unused_extern_crates
+unused_features unused_import_braces unused_imports unused_labels unused_lifetimes
+unused_macro_rules unused_macros unused_must_use unused_mut unused_parens unused_qualifications
+unused_results unused_unsafe unused_variables unused_visibilities useless_deprecated
+useless_ptr_null_checks uses_power_alignment varargs_without_pattern variant_size_differences
+warnings while_true
+";
+
 #[derive(Debug, Serialize)]
 struct RustDiagnostic {
     code: String,
@@ -327,6 +398,8 @@ struct RustDiagnostics {
     oversized_lines: usize,
     malformed_json_lines: usize,
     rejected_diagnostics: usize,
+    missing_or_non_string_codes: usize,
+    unadmitted_codes: usize,
     records_truncated: bool,
     unlocated_diagnostics: usize,
     macro_depth_limited: bool,
@@ -389,12 +462,13 @@ fn diagnostic_sources(bytes: &[u8]) -> Option<BTreeSet<String>> {
 fn diagnostic_location(
     mut span: &Value,
     allowed: &BTreeSet<String>,
+    root: &Path,
 ) -> (Option<RustDiagnosticLocation>, bool) {
     for depth in 0..MAX_MACRO_LOCATION_DEPTH {
         let source = span
             .get("file_name")
             .and_then(Value::as_str)
-            .and_then(|source| allowed.get(source));
+            .and_then(|source| diagnostic_source(source, allowed, root));
         let number = |key| {
             span.get(key)
                 .and_then(Value::as_u64)
@@ -426,10 +500,54 @@ fn diagnostic_location(
     (None, true)
 }
 
+fn diagnostic_source<'a>(
+    source: &str,
+    allowed: &'a BTreeSet<String>,
+    root: &Path,
+) -> Option<&'a String> {
+    if let Some(source) = allowed.get(source).or_else(|| {
+        source
+            .strip_prefix("./")
+            .and_then(|relative| allowed.get(relative))
+    }) {
+        return Some(source);
+    }
+    if !root.is_absolute() {
+        return None;
+    }
+    // Accept only exact known workspace spellings, never an arbitrary path
+    // suffix, traversal, symlink resolution or a foreign workspace prefix.
+    for base in [
+        root.to_owned(),
+        root.join(".cache/bazel-executor/execroot/_main"),
+    ] {
+        let Some(base) = base.to_str() else { continue };
+        if let Some(relative) = source
+            .strip_prefix(base.trim_end_matches('/'))
+            .and_then(|path| path.strip_prefix('/'))
+            && let Some(source) = allowed.get(relative)
+        {
+            return Some(source);
+        }
+    }
+    None
+}
+
+fn diagnostic_code_allowed(code: &str) -> bool {
+    code.len() <= 64
+        && ((code.len() == 5
+            && code.starts_with('E')
+            && code.as_bytes()[1..].iter().all(u8::is_ascii_digit))
+            || RUSTC_LINT_CODES
+                .split_ascii_whitespace()
+                .any(|lint| lint == code))
+}
+
 // rules_rust's JSON mode preserves the original rustc diagnostic before its
-// rendered-message conversion. Coded errors survive even without an admitted
-// location; never serialize messages, rendered output, source text or labels.
-fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics {
+// rendered-message conversion. Rust E-codes and closed builtin lint codes survive
+// even without an admitted location. Never serialize messages, rendered output,
+// source text or labels.
+fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>, root: &Path) -> RustDiagnostics {
     let mut result = RustDiagnostics {
         records: Vec::new(),
         catalog_available: !allowed.is_empty(),
@@ -437,6 +555,8 @@ fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics
         oversized_lines: 0,
         malformed_json_lines: 0,
         rejected_diagnostics: 0,
+        missing_or_non_string_codes: 0,
+        unadmitted_codes: 0,
         records_truncated: false,
         unlocated_diagnostics: 0,
         macro_depth_limited: false,
@@ -465,13 +585,12 @@ fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics
         let code = value.pointer("/code/code").and_then(Value::as_str);
         let Some(code) = code else {
             result.rejected_diagnostics += 1;
+            result.missing_or_non_string_codes += 1;
             continue;
         };
-        if code.len() != 5
-            || !code.starts_with('E')
-            || !code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
-        {
+        if !diagnostic_code_allowed(code) {
             result.rejected_diagnostics += 1;
+            result.unadmitted_codes += 1;
             continue;
         }
         let mut admitted = false;
@@ -484,7 +603,7 @@ fn rust_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> RustDiagnostics
             if span.get("is_primary").and_then(Value::as_bool) != Some(true) {
                 continue;
             }
-            let (location, limited) = diagnostic_location(span, allowed);
+            let (location, limited) = diagnostic_location(span, allowed, root);
             result.macro_depth_limited |= limited;
             if location.is_some() {
                 admitted = true;
@@ -658,7 +777,7 @@ fn report(
         .ok()
         .and_then(|bytes| diagnostic_sources(&bytes))
         .unwrap_or_default();
-    let rust_diagnostics = rust_diagnostics(log, &sources);
+    let rust_diagnostics = rust_diagnostics(log, &sources, root);
     let retain = (|| -> Result<()> {
         let base = root.join("artifacts/bazel/failures");
         fs::create_dir_all(&base)?;
@@ -895,7 +1014,11 @@ mod tests {
         let sources = diagnostic_sources(&bytes).context("complete reviewed source catalog")?;
         let source = "crates/xtask/src/build_capture.rs";
         assert!(sources.contains(source));
-        let summary = rust_diagnostics(&serde_json::to_vec(&coded_diagnostic(source))?, &sources);
+        let summary = rust_diagnostics(
+            &serde_json::to_vec(&coded_diagnostic(source))?,
+            &sources,
+            &root,
+        );
         assert!(summary.catalog_available);
         assert_eq!(summary.records.len(), 1);
         assert_eq!(summary.records[0].location.as_ref().unwrap().source, source);
@@ -909,7 +1032,11 @@ mod tests {
         let source = "crates/day2/src/lib.rs";
         let allowed = BTreeSet::from([source.to_owned()]);
         let bytes = serde_json::to_vec(&coded_diagnostic(source))?;
-        let public = serde_json::to_value(rust_diagnostics(&bytes, &allowed))?;
+        let public = serde_json::to_value(rust_diagnostics(
+            &bytes,
+            &allowed,
+            Path::new("/reviewed/workspace"),
+        ))?;
         assert_eq!(
             public["records"],
             json!([{"code":"E0308","location":{"source":source,"line":17,"column":9,"kind":"primary"}}])
@@ -919,21 +1046,27 @@ mod tests {
         let mut warning = coded_diagnostic(source);
         warning["level"] = json!("warning");
         assert!(
-            rust_diagnostics(&serde_json::to_vec(&warning)?, &allowed)
-                .records
-                .is_empty()
+            rust_diagnostics(
+                &serde_json::to_vec(&warning)?,
+                &allowed,
+                Path::new("/reviewed/workspace")
+            )
+            .records
+            .is_empty()
         );
         // No alternate normalizer may turn foreign, generated or absolute
         // compiler locations into a reviewed public source name.
         for foreign in [
             "/PRIVATE/lib.rs",
             "../crates/day2/src/lib.rs",
-            "./crates/day2/src/lib.rs",
             "external/PRIVATE.rs",
             "crates/day2/src/PRIVATE.rs",
         ] {
-            let summary =
-                rust_diagnostics(&serde_json::to_vec(&coded_diagnostic(foreign))?, &allowed);
+            let summary = rust_diagnostics(
+                &serde_json::to_vec(&coded_diagnostic(foreign))?,
+                &allowed,
+                Path::new("/reviewed/workspace"),
+            );
             assert_eq!(summary.records.len(), 1);
             assert_eq!(summary.records[0].code, "E0308");
             assert!(summary.records[0].location.is_none());
@@ -957,9 +1090,13 @@ mod tests {
             let mut diagnostic = coded_diagnostic(source);
             diagnostic["code"]["code"] = code;
             assert!(
-                rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed)
-                    .records
-                    .is_empty()
+                rust_diagnostics(
+                    &serde_json::to_vec(&diagnostic)?,
+                    &allowed,
+                    Path::new("/reviewed/workspace")
+                )
+                .records
+                .is_empty()
             );
         }
         for bad in [
@@ -972,14 +1109,22 @@ mod tests {
             for key in ["line_start", "column_start"] {
                 let mut diagnostic = coded_diagnostic(source);
                 diagnostic["spans"][0][key] = bad.clone();
-                let summary = rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed);
+                let summary = rust_diagnostics(
+                    &serde_json::to_vec(&diagnostic)?,
+                    &allowed,
+                    Path::new("/reviewed/workspace"),
+                );
                 assert_eq!(summary.records.len(), 1);
                 assert!(summary.records[0].location.is_none());
             }
         }
         let mut secondary = coded_diagnostic(source);
         secondary["spans"][0]["is_primary"] = json!(false);
-        let summary = rust_diagnostics(&serde_json::to_vec(&secondary)?, &allowed);
+        let summary = rust_diagnostics(
+            &serde_json::to_vec(&secondary)?,
+            &allowed,
+            Path::new("/reviewed/workspace"),
+        );
         assert_eq!(summary.records.len(), 1);
         assert!(summary.records[0].location.is_none());
         let sources = diagnostic_sources(&serde_json::to_vec(
@@ -997,11 +1142,89 @@ mod tests {
         let unavailable = rust_diagnostics(
             &serde_json::to_vec(&coded_diagnostic(source))?,
             &BTreeSet::new(),
+            Path::new("/reviewed/workspace"),
         );
         assert!(!unavailable.catalog_available);
         assert_eq!(unavailable.records.len(), 1);
         assert_eq!(unavailable.records[0].code, "E0308");
         assert!(unavailable.records[0].location.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn denied_builtin_lints_admit_only_reviewed_workspace_source_spellings() -> Result<()> {
+        let root = Path::new("/reviewed/workspace");
+        let source = "crates/day2/src/lib.rs";
+        let allowed = BTreeSet::from([source.to_owned()]);
+        for code in ["unused_imports", "dead_code", "unused_variables"] {
+            for path in [
+                source.to_owned(),
+                format!("./{source}"),
+                format!("/reviewed/workspace/{source}"),
+                format!("/reviewed/workspace/.cache/bazel-executor/execroot/_main/{source}"),
+            ] {
+                let mut diagnostic = coded_diagnostic(&path);
+                diagnostic["code"]["code"] = json!(code);
+                let public = serde_json::to_value(rust_diagnostics(
+                    &serde_json::to_vec(&diagnostic)?,
+                    &allowed,
+                    root,
+                ))?;
+                assert_eq!(
+                    public["records"],
+                    json!([{"code":code,"location":{"source":source,"line":17,"column":9,"kind":"primary"}}])
+                );
+                assert_eq!(public["rejected_diagnostics"], 0);
+                assert!(!public.to_string().contains("PRIVATE"));
+                assert!(!public.to_string().contains("/reviewed/workspace"));
+            }
+        }
+        for foreign in [
+            format!("/foreign/workspace/{source}"),
+            format!("/reviewed/workspace-other/{source}"),
+            format!("/reviewed/workspace/../{source}"),
+            format!("/reviewed/workspace/.cache/bazel-executor/execroot/foreign/{source}"),
+            format!("./../{source}"),
+        ] {
+            let mut diagnostic = coded_diagnostic(&foreign);
+            diagnostic["code"]["code"] = json!("unused_imports");
+            let summary = rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed, root);
+            assert_eq!(summary.records[0].code, "unused_imports");
+            assert!(summary.records[0].location.is_none());
+            assert_eq!(summary.unlocated_diagnostics, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_lint_codes_and_missing_codes_have_closed_rejection_reasons() -> Result<()> {
+        let root = Path::new("/reviewed/workspace");
+        let source = "crates/day2/src/lib.rs";
+        let allowed = BTreeSet::from([source.to_owned()]);
+        for code in [
+            "PRIVATE_TOKEN",
+            "private_token_123",
+            "unused_imports PRIVATE",
+            "clippy::private_token",
+        ] {
+            let mut diagnostic = coded_diagnostic(source);
+            diagnostic["code"]["code"] = json!(code);
+            let summary = rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed, root);
+            assert!(summary.records.is_empty());
+            assert_eq!(summary.rejected_diagnostics, 1);
+            assert_eq!(summary.unadmitted_codes, 1);
+            assert_eq!(summary.missing_or_non_string_codes, 0);
+            assert!(!serde_json::to_string(&summary)?.contains(code));
+        }
+        for missing in [Value::Null, json!(17), json!({"code":null})] {
+            let mut diagnostic = coded_diagnostic(source);
+            diagnostic["code"] = missing;
+            let summary = rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed, root);
+            assert!(summary.records.is_empty());
+            assert_eq!(summary.rejected_diagnostics, 1);
+            assert_eq!(summary.missing_or_non_string_codes, 1);
+            assert_eq!(summary.unadmitted_codes, 0);
+        }
         Ok(())
     }
 
@@ -1020,6 +1243,7 @@ mod tests {
         let public = serde_json::to_value(rust_diagnostics(
             &serde_json::to_vec(&diagnostic)?,
             &allowed,
+            Path::new("/reviewed/workspace"),
         ))?;
         assert_eq!(
             public["records"],
@@ -1031,6 +1255,7 @@ mod tests {
         let public = serde_json::to_value(rust_diagnostics(
             &serde_json::to_vec(&diagnostic)?,
             &allowed,
+            Path::new("/reviewed/workspace"),
         ))?;
         assert_eq!(public["records"], json!([{"code":"E0277","location":null}]));
         assert_eq!(public["unlocated_diagnostics"], 1);
@@ -1041,7 +1266,11 @@ mod tests {
         }
         nested["is_primary"] = json!(true);
         diagnostic["spans"][0] = nested;
-        let summary = rust_diagnostics(&serde_json::to_vec(&diagnostic)?, &allowed);
+        let summary = rust_diagnostics(
+            &serde_json::to_vec(&diagnostic)?,
+            &allowed,
+            Path::new("/reviewed/workspace"),
+        );
         assert!(summary.macro_depth_limited);
         assert!(summary.records[0].location.is_none());
         assert_eq!(summary.records[0].code, "E0277");
@@ -1054,18 +1283,26 @@ mod tests {
         let allowed = BTreeSet::from([source.to_owned()]);
         let mut line = serde_json::to_vec(&coded_diagnostic(source))?;
         line.push(b'\n');
-        let summary = rust_diagnostics(&line.repeat(MAX_RUST_DIAGNOSTICS + 1), &allowed);
+        let summary = rust_diagnostics(
+            &line.repeat(MAX_RUST_DIAGNOSTICS + 1),
+            &allowed,
+            Path::new("/reviewed/workspace"),
+        );
         assert_eq!(summary.records.len(), MAX_RUST_DIAGNOSTICS);
         assert!(summary.records_truncated);
         let mut oversized = vec![b' '; MAX_DIAGNOSTIC_LINE + 1];
         oversized[0] = b'{';
         oversized.extend_from_slice(b"\n{broken}\n");
         oversized.extend_from_slice(&line);
-        let summary = rust_diagnostics(&oversized, &allowed);
+        let summary = rust_diagnostics(&oversized, &allowed, Path::new("/reviewed/workspace"));
         assert_eq!(summary.oversized_lines, 1);
         assert_eq!(summary.malformed_json_lines, 1);
         assert_eq!(summary.records.len(), 1);
-        let summary = rust_diagnostics(&vec![b'{'; MAX_CAPTURE + 1], &allowed);
+        let summary = rust_diagnostics(
+            &vec![b'{'; MAX_CAPTURE + 1],
+            &allowed,
+            Path::new("/reviewed/workspace"),
+        );
         assert!(summary.input_truncated);
         assert!(summary.records.is_empty());
         Ok(())
