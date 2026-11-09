@@ -7,6 +7,141 @@ use day2_capabilities::Digest;
 use rusqlite::{Connection, TransactionBehavior, params};
 use std::{collections::BTreeSet, path::Path};
 
+mod empty_historical_unit {
+    use super::{Connection, Digest, Result, install, params};
+
+    fn historical() -> Result<Connection> {
+        let db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", true)?;
+        db.execute_batch(super::super::EMPTY_HISTORICAL_UNIT)?;
+        db.execute_batch("CREATE TABLE app_rows(value TEXT); INSERT INTO app_rows VALUES('keep')")?;
+        Ok(db)
+    }
+
+    fn schema(db: &Connection) -> Result<Vec<(String, String, Option<String>)>> {
+        Ok(db
+            .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    #[test]
+    fn exact_empty_restore_unit_is_replaced_without_changing_app_rows() -> Result<()> {
+        let db = historical()?;
+        install(&db)?;
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM oauth_restore_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT value FROM app_rows", [], |row| row
+                .get::<_, String>(0))?,
+            "keep"
+        );
+        let current = Connection::open_in_memory()?;
+        install(&current)?;
+        current.execute_batch("CREATE TABLE app_rows(value TEXT)")?;
+        assert_eq!(schema(&db)?, schema(&current)?);
+        let before = schema(&db)?;
+        install(&db)?;
+        assert_eq!(schema(&db)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn historical_restore_history_is_refused_and_retained() -> Result<()> {
+        let db = historical()?;
+        let cut = Digest::new(b"historical restore cut DATA");
+        let inventory = Digest::new(b"historical restore inventory DATA");
+        db.execute(
+            "INSERT INTO oauth_restore_cuts(digest,binding,inventory) VALUES(?1,'{}',?2)",
+            params![cut.as_str(), inventory.as_str()],
+        )?;
+        db.execute(
+            "INSERT INTO oauth_restore_closed(kind,id,cut) VALUES('fresh','closed-original',?1)",
+            [cut.as_str()],
+        )?;
+        let before = schema(&db)?;
+        let error = format!("{:#}", install(&db).unwrap_err());
+        assert!(error.contains("holds security history"), "{error}");
+        assert_eq!(schema(&db)?, before);
+        assert_eq!(
+            db.query_row("SELECT digest FROM oauth_restore_cuts", [], |row| row
+                .get::<_, String>(0))?,
+            cut.as_str()
+        );
+        assert_eq!(
+            db.query_row("SELECT id FROM oauth_restore_closed", [], |row| row
+                .get::<_, String>(0))?,
+            "closed-original"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_or_incomplete_restore_units_are_refused_without_mutation() -> Result<()> {
+        for change in [
+            "CREATE TABLE oauth_restore_unknown(value TEXT)",
+            "CREATE INDEX oauth_restore_extra ON oauth_restore_cuts(binding)",
+            "CREATE TABLE OAUTH_RESTORE_ALIAS(value TEXT)",
+            "DROP TABLE oauth_restore_schema_version",
+            "DELETE FROM oauth_restore_schema_version",
+            "INSERT INTO oauth_restore_schema_version VALUES(2)",
+            "UPDATE oauth_restore_schema_version SET version=2",
+            "UPDATE oauth_restore_schema_version SET version=3",
+            "DROP TABLE oauth_restore_closed",
+            "DROP TRIGGER oauth_restore_cut_no_delete",
+            "DROP TRIGGER oauth_restore_cuts_shape_INSERT_v1",
+            "DROP TRIGGER oauth_restore_cut_no_delete; CREATE TRIGGER oauth_restore_cut_no_delete BEFORE DELETE ON oauth_restore_cuts BEGIN SELECT 1; END",
+            "ALTER TABLE oauth_restore_cuts ADD COLUMN unknown TEXT",
+        ] {
+            let db = historical()?;
+            db.execute_batch(change)?;
+            let before = schema(&db)?;
+            assert!(install(&db).is_err(), "{change}");
+            assert_eq!(schema(&db)?, before, "{change}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_restore_replacement_rolls_back_with_later_admission_refusal() -> Result<()> {
+        let db = historical()?;
+        let before = schema(&db)?;
+        let result = crate::oauth::schema::admit(&db, |db| -> Result<()> {
+            install(db)?;
+            anyhow::bail!("later admission refused")
+        });
+        assert!(result.is_err());
+        assert_eq!(schema(&db)?, before);
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM oauth_restore_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_restore_replacement_preserves_the_shared_admission_budget() -> Result<()> {
+        let db = historical()?;
+        let before = schema(&db)?;
+        let result =
+            crate::oauth::schema::admit_with_limits(&db, 1_000_000, 1, 8 * 1_048_576, install);
+        assert!(format!("{:#}", result.unwrap_err()).contains("budget"));
+        assert_eq!(schema(&db)?, before);
+        install(&db)?;
+        Ok(())
+    }
+}
+
 #[test]
 fn current_use_admits_its_connect_dependency_once_through_the_actual_owner() -> Result<()> {
     use syn::visit::{self, Visit};

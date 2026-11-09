@@ -35,6 +35,106 @@ impl Kind {
 const VERSION: i64 = 2;
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
+    super::schema::admit(db, |db| {
+        replace_empty_historical_unit(db)
+            .context("unsupported OAuth schema version in oauth_restore_schema_version")?;
+        install_current(db)
+    })
+}
+
+// Older runtimes installed this unit even when no restore had ever occurred.
+// Only the complete, exact, empty version-1 unit can be replaced. A cut or
+// closure is permanent security history and must never be discarded.
+const EMPTY_HISTORICAL_UNIT: &str = include_str!("../../fixtures/restore-schema-v1-empty.sql");
+
+fn replace_empty_historical_unit(db: &Connection) -> Result<()> {
+    use super::schema;
+    if schema::schema_sql(db, "table", "oauth_restore_schema_version")?.is_none() {
+        return Ok(());
+    }
+    let mut statement = db.prepare("SELECT version FROM oauth_restore_schema_version")?;
+    let mut rows = statement.query([])?;
+    let mut versions = Vec::new();
+    while let Some(row) = rows.next()? {
+        schema::materialize(row)?;
+        versions.push(row.get::<_, i64>(0)?);
+        ensure!(
+            versions.len() <= 1,
+            "unsupported historical restore version"
+        );
+    }
+    drop(rows);
+    drop(statement);
+    if versions != [1] {
+        return Ok(());
+    }
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(EMPTY_HISTORICAL_UNIT)?;
+    let mut objects = Vec::new();
+    let mut statement =
+        db.prepare("SELECT type,name,tbl_name FROM sqlite_master ORDER BY type,name")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        schema::materialize(row)?;
+        let kind = row.get_ref(0)?.as_str()?;
+        let name = row.get_ref(1)?.as_str()?;
+        let table = row.get_ref(2)?.as_str()?;
+        let owned = |value: &str| {
+            value
+                .get(.."oauth_restore_".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("oauth_restore_"))
+        };
+        if !owned(name) && !owned(table) {
+            continue;
+        }
+        let known: bool = expected.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2 AND tbl_name=?3)",
+            [kind, name, table],
+            |row| row.get(0),
+        )?;
+        ensure!(known, "unsupported historical restore object {name}");
+        objects.push((kind.to_owned(), name.to_owned()));
+    }
+    drop(rows);
+    drop(statement);
+    let required: i64 =
+        expected.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))?;
+    ensure!(
+        objects.len() == usize::try_from(required)?,
+        "incomplete historical restore unit"
+    );
+    for (kind, name) in objects {
+        if kind == "trigger" {
+            ensure!(
+                schema::schema_sql(db, &kind, &name)?
+                    == schema::schema_sql(&expected, &kind, &name)?,
+                "unsupported historical restore trigger {name}"
+            );
+        }
+    }
+    for table in [
+        "oauth_restore_schema_version",
+        "oauth_restore_cuts",
+        "oauth_restore_closed",
+    ] {
+        schema::exact_layout(db, &expected, table)?;
+    }
+    let occupied: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM oauth_restore_cuts)
+             OR EXISTS(SELECT 1 FROM oauth_restore_closed)",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(!occupied, "historical restore unit holds security history");
+    db.execute_batch(
+        "DROP TABLE oauth_restore_closed;
+         DROP TABLE oauth_restore_cuts;
+         DROP TABLE oauth_restore_schema_version",
+    )?;
+    Ok(())
+}
+
+fn install_current(db: &Connection) -> Result<()> {
     super::schema::install_current(db, "oauth_restore_schema_version", VERSION,
         "CREATE TABLE IF NOT EXISTS oauth_restore_schema_version(version INTEGER PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS oauth_restore_cuts(
