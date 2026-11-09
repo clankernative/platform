@@ -303,6 +303,8 @@ async fn signing_journal_real_child_death_preserves_attempt_state_without_recons
             .optional()?;
         // Independent table from actual transaction boundaries. A committed
         // MaySign/published row remains DATA, never a resumed native signer.
+        // A lost local publication commit says nothing about whether the
+        // earlier external publication succeeded; it cannot authorize a retry.
         let expected = match n {
             6 => None,
             7 | 8 => Some(("prepared".into(), false)),
