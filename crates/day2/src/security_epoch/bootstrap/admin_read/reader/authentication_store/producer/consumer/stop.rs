@@ -1767,7 +1767,7 @@ enum IssuerFinishCallKind<'pending> {
         pending: &'pending mut crate::security_epoch::native_enrollment::IssuerRestoreFinishing,
         step: IssuerFinishStep,
     },
-    Finish(crate::security_epoch::native_enrollment::IssuerRestoreFinishing),
+    Finish(Box<crate::security_epoch::native_enrollment::IssuerRestoreFinishing>),
     Check(&'pending mut crate::security_epoch::native_enrollment::CompletedRestoreIssuer),
     RoleHandoff {
         completed: &'pending mut crate::security_epoch::native_enrollment::CompletedRestoreIssuer,
@@ -1783,7 +1783,7 @@ enum IssuerFinishCallKind<'pending> {
     },
     RoleActivationFinish {
         completed: &'pending mut crate::security_epoch::native_enrollment::CompletedRestoreIssuer,
-        pending: IssuerRestoreRoleActivating,
+        pending: Box<IssuerRestoreRoleActivating>,
     },
     RoleActivationCheck {
         completed: &'pending mut crate::security_epoch::native_enrollment::CompletedRestoreIssuer,
@@ -2655,7 +2655,7 @@ impl<'frame, 'confirm, 'metadata, 'storage, 'role, 'target, 'selection>
         let requested = self.installation.issuer_native(IssuerFinishCall {
             kind: IssuerFinishCallKind::RoleActivationFinish {
                 completed: &mut self.issuer,
-                pending,
+                pending: Box::new(pending),
             },
         });
         if requested.is_err() {
@@ -2834,7 +2834,7 @@ impl<'frame, 'confirm, 'metadata, 'storage, 'role, 'target, 'selection>
             }
         }
         let reply = self.issuer_native(IssuerFinishCall {
-            kind: IssuerFinishCallKind::Finish(pending),
+            kind: IssuerFinishCallKind::Finish(Box::new(pending)),
         })?;
         let issuer = match reply.kind {
             IssuerFinishReplyKind::Completed(issuer) => issuer,
@@ -2971,7 +2971,7 @@ impl RestoreControllerInstallation<'_, '_, '_, '_, '_, '_, '_> {
                     IssuerFinishReplyKind::Step
                 }
                 IssuerFinishCallKind::Finish(pending) => IssuerFinishReplyKind::Completed(
-                    pending.finish(&mut storage, self.frame.peer, &mut loan)?,
+                    (*pending).finish(&mut storage, self.frame.peer, &mut loan)?,
                 ),
                 IssuerFinishCallKind::Check(completed) => {
                     completed.check(&mut storage, self.frame.peer, &mut loan)?;
@@ -3053,7 +3053,7 @@ impl RestoreControllerInstallation<'_, '_, '_, '_, '_, '_, '_> {
                     IssuerFinishReplyKind::Step
                 }
                 IssuerFinishCallKind::RoleActivationFinish { completed, pending } => {
-                    IssuerFinishReplyKind::RoleActivated(pending.finish(
+                    IssuerFinishReplyKind::RoleActivated((*pending).finish(
                         &mut storage,
                         self.frame.peer,
                         completed,
@@ -9933,7 +9933,7 @@ mod activation_transport_source_tests {
                 completed,
                 &mut loan
             )),
-            syn::parse_quote!(pending.finish(&mut storage, self.frame.peer, completed, &mut loan)),
+            syn::parse_quote!((*pending).finish(&mut storage, self.frame.peer, completed, &mut loan)),
             syn::parse_quote!(activation.check(
                 &mut storage,
                 self.frame.peer,
@@ -10282,7 +10282,7 @@ mod activation_transport_source_tests {
                     "IssuerFinishStep :: Grant",
                     "IssuerFinishCallKind :: Step { pending : & mut pending , step }",
                     "IssuerFinishReplyKind :: Step",
-                    "IssuerFinishCallKind :: Finish (pending)",
+                    "IssuerFinishCallKind :: Finish (Box :: new (pending))",
                     "IssuerFinishReplyKind :: Completed (issuer)",
                     "Ok (RestoreIssuerCompletedInstallation { installation : self , issuer",
                 ],
@@ -10296,7 +10296,7 @@ mod activation_transport_source_tests {
             ),
             ("IssuerFinishStep :: Nonce", "IssuerFinishStep :: Hello"),
             (
-                "IssuerFinishCallKind :: Finish (pending)",
+                "IssuerFinishCallKind :: Finish (Box :: new (pending))",
                 "IssuerFinishCallKind :: Skip",
             ),
             ("installation : self", "installation : other"),
@@ -10497,7 +10497,7 @@ mod activation_transport_source_tests {
                 "if ! matches !",
                 "IssuerFinishReplyKind :: Step",
                 "restore_app_role_step_reply_changed",
-                "RoleActivationFinish { completed : & mut self . issuer , pending",
+                "RoleActivationFinish { completed : & mut self . issuer , pending : Box :: new (pending)",
                 "let activation = match requested ? . kind",
                 "IssuerFinishReplyKind :: RoleActivated (activation) => activation",
                 "restore_app_role_finish_reply_changed",
