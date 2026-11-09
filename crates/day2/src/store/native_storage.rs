@@ -306,11 +306,13 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
         self.unit(|sql| {
             let connection = sql.connection.as_mut().context("SQL connection closed")?;
             connection.pragma_update(None, "query_only", true)?;
+            let callbacks = CallbackHooks::install(connection, SqlMode::Read)?;
+            let control = callbacks.control.clone();
             let result = (|| {
                 sql.owner.check()?;
-                let tx = connection.transaction()?;
+                let tx = callbacks.db.transaction()?;
                 sql.owner.check()?;
-                let policy = CallbackPolicy::install(&tx, SqlMode::Read)?;
+                let policy = CallbackPolicy::activate(&tx, control)?;
                 let value = (|| {
                     super::check_database_scope(&tx, &sql.scope)?;
                     // Diagnostic model/state reads remain available after a
@@ -333,6 +335,11 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
                     }
                 }
             })();
+            let cleared = callbacks.finish();
+            let result = match (result, cleared) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            };
             let restored = connection.pragma_update(None, "query_only", false);
             match result {
                 Ok(value) => {
@@ -352,32 +359,41 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
             sql.owner.require_write()?;
             sql.owner.check()?;
             let connection = sql.connection.as_mut().context("SQL connection closed")?;
-            // Preserve the ordinary FIFO, its bounds and SQLite busy handler.
-            let tx = crate::write_queue::immediate(connection)?;
-            sql.owner.check()?;
-            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
-            let value = (|| {
-                super::check_database_scope(&tx, &sql.scope)?;
-                crate::audit::require_current_schema(&tx)?;
-                operation(&tx)
-            })();
-            let admitted = policy.finish();
-            match (value, admitted) {
-                (Ok(SqlDecision::Commit(value)), Ok(())) => {
-                    sql.owner.commit_write(tx)?;
-                    Ok(value)
-                }
-                (Ok(SqlDecision::Rollback(value)), Ok(())) => {
-                    sql.owner.rollback_write(tx)?;
-                    Ok(value)
-                }
-                (Err(error), _) | (_, Err(error)) => {
-                    let rolled_back = tx.rollback();
-                    if rolled_back.is_err() {
-                        return Err(error.context("SQL rollback also refused"));
+            let callbacks = CallbackHooks::install(connection, SqlMode::Write)?;
+            let control = callbacks.control.clone();
+            let result = (|| {
+                // Preserve the ordinary FIFO, its bounds and SQLite busy handler.
+                let tx = crate::write_queue::immediate(callbacks.db)?;
+                sql.owner.check()?;
+                let policy = CallbackPolicy::activate(&tx, control)?;
+                let value = (|| {
+                    super::check_database_scope(&tx, &sql.scope)?;
+                    crate::audit::require_current_schema(&tx)?;
+                    operation(&tx)
+                })();
+                let admitted = policy.finish();
+                match (value, admitted) {
+                    (Ok(SqlDecision::Commit(value)), Ok(())) => {
+                        sql.owner.commit_write(tx)?;
+                        Ok(value)
                     }
-                    Err(error)
+                    (Ok(SqlDecision::Rollback(value)), Ok(())) => {
+                        sql.owner.rollback_write(tx)?;
+                        Ok(value)
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        let rolled_back = tx.rollback();
+                        if rolled_back.is_err() {
+                            return Err(error.context("SQL rollback also refused"));
+                        }
+                        Err(error)
+                    }
                 }
+            })();
+            let cleared = callbacks.finish();
+            match (result, cleared) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(error), _) | (_, Err(error)) => Err(error),
             }
         })
     }
@@ -414,6 +430,7 @@ struct CallbackControl {
     connection: usize,
     mode: SqlMode,
     denied: AtomicBool,
+    scoped: AtomicBool,
     active_step: AtomicBool,
     ticket: AtomicU8,
 }
@@ -439,6 +456,16 @@ fn current_control(connection: &Connection) -> Result<Option<Arc<CallbackControl
         );
     }
     Ok(control)
+}
+
+/// A raw schema adapter cannot replace a native business callback or its
+/// permanent VM budget. Latch the same unit's refusal before any hook mutation.
+pub(crate) fn refuse_raw_schema_admission(db: &Connection) -> Result<()> {
+    if let Some(control) = current_control(db)? {
+        control.denied.store(true, Ordering::SeqCst);
+        anyhow::bail!("native SQL raw schema admission refused");
+    }
+    Ok(())
 }
 
 fn unregister_control(control: &Arc<CallbackControl>) -> Result<()> {
@@ -591,22 +618,89 @@ pub(crate) fn budget_atomic<T>(
     }
 }
 
-struct CallbackPolicy<'db> {
-    db: &'db Connection,
+/// Own the SQLite callback while the actual connection is exclusively borrowed.
+/// The callback is inactive for owner transaction control, and is removed only
+/// after every transaction/statement loan has ended.
+struct CallbackHooks<'db> {
+    db: &'db mut Connection,
     control: Arc<CallbackControl>,
     installed: bool,
-    registered: bool,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-impl<'db> CallbackPolicy<'db> {
-    fn install(db: &'db Connection, mode: SqlMode) -> Result<Self> {
+impl<'db> CallbackHooks<'db> {
+    fn install(db: &'db mut Connection, mode: SqlMode) -> Result<Self> {
         let control = Arc::new(CallbackControl {
             connection: connection_identity(db),
             mode,
             denied: AtomicBool::new(false),
+            scoped: AtomicBool::new(false),
             active_step: AtomicBool::new(false),
             ticket: AtomicU8::new(0),
         });
+        let callback = control.clone();
+        let owner = Self {
+            db,
+            control,
+            installed: true,
+            local: std::marker::PhantomData,
+        };
+        owner.db.authorizer(Some(move |context: AuthContext<'_>| {
+            if !callback.scoped.load(Ordering::SeqCst) || callback.allows(context.action) {
+                Authorization::Allow
+            } else {
+                callback.denied.store(true, Ordering::SeqCst);
+                Authorization::Deny
+            }
+        }))?;
+        Ok(owner)
+    }
+
+    fn finish(mut self) -> Result<()> {
+        ensure!(
+            !self.control.scoped.load(Ordering::SeqCst),
+            "native SQL callback scope remains active"
+        );
+        let cleared = self
+            .db
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        self.installed = cleared.is_err();
+        if cleared.is_err() {
+            self.control.denied.store(true, Ordering::SeqCst);
+        }
+        cleared?;
+        Ok(())
+    }
+}
+
+impl Drop for CallbackHooks<'_> {
+    fn drop(&mut self) {
+        self.control.scoped.store(false, Ordering::SeqCst);
+        if self.installed
+            && self
+                .db
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .is_err()
+        {
+            self.control.denied.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Only the business callback activates the already installed hook. Dropping
+/// this guard deactivates it before Transaction rolls back during unwinding.
+struct CallbackPolicy<'db> {
+    db: &'db Connection,
+    control: Arc<CallbackControl>,
+    registered: bool,
+}
+
+impl<'db> CallbackPolicy<'db> {
+    fn activate(db: &'db Connection, control: Arc<CallbackControl>) -> Result<Self> {
+        ensure!(
+            control.connection == connection_identity(db) && !control.scoped.load(Ordering::SeqCst),
+            "native SQL callback connection changed"
+        );
         CALLBACK_CONTROLS.with(|controls| -> Result<()> {
             let mut controls = controls.borrow_mut();
             ensure!(controls.len() < 64, "native SQL callback nesting bound");
@@ -619,24 +713,10 @@ impl<'db> CallbackPolicy<'db> {
             controls.push(control.clone());
             Ok(())
         })?;
-        let callback = control.clone();
-        let installed = db.authorizer(Some(move |context: AuthContext<'_>| {
-            if callback.allows(context.action) {
-                Authorization::Allow
-            } else {
-                callback.denied.store(true, Ordering::SeqCst);
-                Authorization::Deny
-            }
-        }));
-        if let Err(error) = installed {
-            control.denied.store(true, Ordering::SeqCst);
-            unregister_control(&control)?;
-            return Err(error.into());
-        }
+        control.scoped.store(true, Ordering::SeqCst);
         Ok(Self {
             db,
             control,
-            installed: true,
             registered: true,
         })
     }
@@ -645,13 +725,9 @@ impl<'db> CallbackPolicy<'db> {
         if self.db.is_autocommit() {
             self.control.denied.store(true, Ordering::SeqCst);
         }
-        let cleared = self
-            .db
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-        self.installed = cleared.is_err();
+        self.control.scoped.store(false, Ordering::SeqCst);
         let unregistered = unregister_control(&self.control);
         self.registered = false;
-        cleared?;
         unregistered?;
         ensure!(
             !self.control.denied.load(Ordering::SeqCst),
@@ -663,16 +739,7 @@ impl<'db> CallbackPolicy<'db> {
 
 impl Drop for CallbackPolicy<'_> {
     fn drop(&mut self) {
-        // Restore control before Transaction's rollback during unwinding. The
-        // surrounding unit records terminal refusal and resumes the panic.
-        if self.installed
-            && self
-                .db
-                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-                .is_err()
-        {
-            self.control.denied.store(true, Ordering::SeqCst);
-        }
+        self.control.scoped.store(false, Ordering::SeqCst);
         if self.registered {
             let _ = unregister_control(&self.control);
         }
@@ -799,8 +866,10 @@ mod tests {
     fn budget_sql_real_nested_accounting_preserves_caught_exclusion_and_other_outer_work()
     -> Result<()> {
         let mut db = budget_database()?;
-        let tx = db.transaction()?;
-        let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+        let callbacks = CallbackHooks::install(&mut db, SqlMode::Write)?;
+        let control = callbacks.control.clone();
+        let tx = callbacks.db.transaction()?;
+        let policy = CallbackPolicy::activate(&tx, control)?;
         tx.execute("INSERT INTO control_probe VALUES(1)", [])?;
         // reserve_in calls sync_definitions_in, a genuinely nested atomic
         // operation. The later exhausted account must roll back both levels.
@@ -825,6 +894,7 @@ mod tests {
         policy.finish()?;
         assert!(!tx.is_autocommit(), "only the outer owner may commit");
         tx.commit()?;
+        callbacks.finish()?;
         assert_eq!(
             db.query_row("SELECT count(*) FROM control_probe", [], |r| r
                 .get::<_, i64>(0))?,
@@ -850,12 +920,15 @@ mod tests {
             "ROLLBACK",
         ] {
             let mut db = budget_database()?;
-            let tx = db.transaction()?;
-            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+            let callbacks = CallbackHooks::install(&mut db, SqlMode::Write)?;
+            let control = callbacks.control.clone();
+            let tx = callbacks.db.transaction()?;
+            let policy = CallbackPolicy::activate(&tx, control)?;
             crate::budget::reserve_in(&tx, &budget_request(false))?;
             assert!(tx.execute_batch(sql).is_err(), "{sql}");
             assert!(policy.finish().is_err(), "caught denial stays latched");
             tx.rollback()?;
+            callbacks.finish()?;
             assert_eq!(
                 db.query_row("SELECT count(*) FROM day2_budget_reservations", [], |r| r
                     .get::<_, i64>(
@@ -875,13 +948,16 @@ mod tests {
             "PRAGMA table_info(control_probe)",
         ] {
             let mut db = budget_database()?;
-            let tx = db.transaction()?;
-            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+            let callbacks = CallbackHooks::install(&mut db, SqlMode::Write)?;
+            let control = callbacks.control.clone();
+            let tx = callbacks.db.transaction()?;
+            let policy = CallbackPolicy::activate(&tx, control)?;
             assert!(tx.execute_batch("COMMIT").is_err());
             assert!(policy.control.denied.load(Ordering::SeqCst));
             assert!(tx.execute_batch(following).is_err(), "{following}");
             assert!(policy.finish().is_err());
             tx.rollback()?;
+            callbacks.finish()?;
         }
         Ok(())
     }
@@ -892,12 +968,15 @@ mod tests {
         // continued after refusal; its adapter policy ends before the VM probe.
         let mut db = Connection::open_in_memory()?;
         configure_connection(&mut db)?;
-        let tx = db.transaction()?;
-        let policy = CallbackPolicy::install(&tx, SqlMode::Read)?;
+        let callbacks = CallbackHooks::install(&mut db, SqlMode::Read)?;
+        let control = callbacks.control.clone();
+        let tx = callbacks.db.transaction()?;
+        let policy = CallbackPolicy::activate(&tx, control)?;
         assert!(crate::oauth::schema::admit(&tx, |_| Ok(())).is_err());
         assert!(tx.execute_batch("SELECT 1").is_err());
         assert!(policy.finish().is_err());
         tx.rollback()?;
+        callbacks.finish()?;
         let error = db.query_row(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",
             [], |row| row.get::<_, i64>(0),
@@ -912,15 +991,20 @@ mod tests {
     #[test]
     fn budget_sql_read_and_foreign_connections_refuse_before_account_mutation() -> Result<()> {
         let mut db = budget_database()?;
-        let tx = db.transaction()?;
-        let policy = CallbackPolicy::install(&tx, SqlMode::Read)?;
+        let callbacks = CallbackHooks::install(&mut db, SqlMode::Read)?;
+        let control = callbacks.control.clone();
+        let tx = callbacks.db.transaction()?;
+        let policy = CallbackPolicy::activate(&tx, control)?;
         assert!(crate::budget::reserve_in(&tx, &budget_request(false)).is_err());
         assert!(policy.finish().is_err());
         tx.rollback()?;
+        callbacks.finish()?;
         let mut other = budget_database()?;
-        let tx = db.transaction()?;
+        let callbacks = CallbackHooks::install(&mut db, SqlMode::Write)?;
+        let control = callbacks.control.clone();
+        let tx = callbacks.db.transaction()?;
         let foreign = other.transaction()?;
-        let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+        let policy = CallbackPolicy::activate(&tx, control)?;
         assert!(crate::budget::reserve_in(&foreign, &budget_request(false)).is_err());
         assert_eq!(
             foreign.query_row("SELECT count(*) FROM day2_budget_reservations", [], |r| r
@@ -932,14 +1016,17 @@ mod tests {
         assert!(policy.finish().is_err());
         foreign.rollback()?;
         tx.rollback()?;
+        callbacks.finish()?;
         Ok(())
     }
 
     #[test]
     fn budget_sql_lost_outer_transaction_cannot_start_or_release_a_replacement() -> Result<()> {
         let mut db = budget_database()?;
-        let tx = db.transaction()?;
-        let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+        let callbacks = CallbackHooks::install(&mut db, SqlMode::Write)?;
+        let control = callbacks.control.clone();
+        let tx = callbacks.db.transaction()?;
+        let policy = CallbackPolicy::activate(&tx, control)?;
         tx.execute("INSERT INTO control_probe VALUES(1)", [])?;
         assert!(
             tx.execute("INSERT OR ROLLBACK INTO control_probe VALUES(1)", [])
@@ -958,6 +1045,7 @@ mod tests {
         );
         assert!(policy.finish().is_err());
         assert!(tx.rollback().is_err());
+        callbacks.finish()?;
         assert_eq!(
             db.query_row("SELECT count(*) FROM control_probe", [], |r| r
                 .get::<_, i64>(0))?,
@@ -977,8 +1065,10 @@ mod tests {
     fn budget_sql_ticket_is_one_command_and_drop_or_unwind_never_leaves_permission() -> Result<()> {
         for panic in [false, true] {
             let mut db = budget_database()?;
-            let tx = db.transaction()?;
-            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+            let callbacks = CallbackHooks::install(&mut db, SqlMode::Write)?;
+            let control = callbacks.control.clone();
+            let tx = callbacks.db.transaction()?;
+            let policy = CallbackPolicy::activate(&tx, control)?;
             let control = policy.control.clone();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let guard = BudgetStepGuard::enter(&tx, BudgetStep::Begin).unwrap();
@@ -998,6 +1088,7 @@ mod tests {
             assert!(tx.execute_batch("SAVEPOINT day2_budget_atomic").is_err());
             assert!(policy.finish().is_err());
             tx.rollback()?;
+            callbacks.finish()?;
         }
         Ok(())
     }
@@ -1011,8 +1102,10 @@ mod tests {
             "INSERT INTO control_probe VALUES(1)",
         ] {
             let mut db = budget_database()?;
-            let tx = db.transaction()?;
-            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+            let callbacks = CallbackHooks::install(&mut db, SqlMode::Write)?;
+            let control = callbacks.control.clone();
+            let tx = callbacks.db.transaction()?;
+            let policy = CallbackPolicy::activate(&tx, control)?;
             let guard = BudgetStepGuard::enter(&tx, BudgetStep::Begin)?;
             tx.execute_batch("SAVEPOINT day2_budget_atomic")?;
             assert_eq!(policy.control.ticket.load(Ordering::SeqCst), 0);
@@ -1022,6 +1115,7 @@ mod tests {
             drop(guard);
             assert!(policy.finish().is_err());
             tx.rollback()?;
+            callbacks.finish()?;
             assert_eq!(
                 db.query_row("SELECT count(*) FROM control_probe", [], |row| row
                     .get::<_, i64>(0))?,

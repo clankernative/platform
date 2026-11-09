@@ -121,7 +121,7 @@ impl PreparedAuthorization {
         &self.binding.code_ref
     }
 
-    pub fn begin(self, db: &mut Connection, now: i64) -> Result<bool> {
+    pub fn begin(self, db: &mut dyn crate::write_queue::ConnectionOwner, now: i64) -> Result<bool> {
         connect::begin_prepared(db, self, now)
     }
 
@@ -347,7 +347,7 @@ impl ExchangeDispatchPermit {
 }
 
 pub fn authorize_and_commit_qualified_exchange(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     input: OutboundQualification<'_>,
     now: i64,
 ) -> Result<Option<ExchangeDispatchPermit>> {
@@ -371,7 +371,7 @@ pub(in crate::oauth) fn authorize_managed_exchange(
 }
 
 fn authorize_checked(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     input: OutboundQualification<'_>,
     now: i64,
 ) -> Result<Option<ExchangeDispatchPermit>> {
@@ -491,7 +491,7 @@ pub(super) fn callback_parameters(
 /// The parser owns the one-time claim; the code is encrypted in its transaction
 /// using the current qualified attempt and exact exchange binding.
 pub(crate) fn handle_qualified_callback(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     input: OutboundQualification<'_>,
     ingress: super::outbound::CallbackIngress<'_>,
     key: &crate::managed_credentials::crypto::KeyLease,
@@ -632,7 +632,7 @@ impl VerifiedMappedExchange {
 }
 
 pub fn settle_mapped(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     prepared: PreparedMappedSettlement,
     current: OutboundQualification<'_>,
     current_mapping_revision: &Digest,

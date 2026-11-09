@@ -1091,7 +1091,7 @@ mod tests {
     #[test]
     fn custody_schema_reopens_current_and_refuses_other_versions() {
         for version in [1, 2, 3, 4, 99] {
-            let db = Connection::open_in_memory().unwrap();
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
             super::super::connect::install_schema(&db).unwrap();
             super::super::connect::install_schema(&db).unwrap();
             db.execute(

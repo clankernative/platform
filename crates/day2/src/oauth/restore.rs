@@ -336,13 +336,14 @@ fn schema(db: &Connection, database: &'static str) -> Result<Schema> {
 }
 
 fn canonical() -> Result<(Connection, Schema)> {
-    let db = Connection::open_in_memory()?;
-    db.execute_batch(crate::store::PLATFORM_DDL)?;
-    // These are the canonical product installers, including their full current
-    // dependency units. Nothing is installed or repaired on the imported DB.
-    super::usage::install(&db)?;
-    super::inbound::install_schema(&db)?;
-    let expected = super::schema::admit(&db, |db| schema(db, "main"))?;
+    let (db, expected) = super::schema::raw_memory(|db| {
+        db.execute_batch(crate::store::PLATFORM_DDL)?;
+        // These are the canonical product installers, including their full current
+        // dependency units. Nothing is installed or repaired on the imported DB.
+        super::usage::install(db)?;
+        super::inbound::install_schema(db)?;
+        super::schema::admit(db, |db| schema(db, "main"))
+    })?;
     ensure!(
         expected.values().all(|(table, _)| UNITS
             .iter()
@@ -701,7 +702,7 @@ impl Snapshot {
                 hash.update(table.as_bytes());
                 let mut statement =
                     db.prepare(&format!("SELECT * FROM main.{table} ORDER BY rowid"))?;
-                let columns = statement.column_names();
+                let columns = statement.column_names().collect::<Vec<_>>();
                 let floor_columns = match table.as_str() {
                     "oauth_connection_slots"
                     | "oauth_private_tokens"

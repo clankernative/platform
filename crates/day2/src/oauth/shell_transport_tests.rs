@@ -215,7 +215,7 @@ impl Fixture {
             unreachable!()
         };
         *owner = HUMAN.into();
-        let mut db = crate::store::open(&path).unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_ordinary(&path).unwrap();
         db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
         fixtures::quarantine_external_fixture(&mut db, &facts, &fixtures::exchange_key());
         drop(db);

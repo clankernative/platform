@@ -853,7 +853,7 @@ mod tests {
             let bytes = serde_json::to_vec(&call)?;
             let decoded: CallData = crate::json::decode(&bytes)?;
             decoded.require_intent(&intent)?;
-            let mut db = Connection::open_in_memory()?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             install(&db)?;
             for wrong in PURPOSES
                 .into_iter()
@@ -961,7 +961,7 @@ mod tests {
     fn one_credential_attempt_cannot_fork_into_another_action_or_terminal_original() -> Result<()> {
         for selected in 0..3 {
             for stage in 0..4 {
-                let mut db = Connection::open_in_memory()?;
+                let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
                 install(&db)?;
                 let intent = credential_intent(selected)?;
                 let owner = Digest::new(b"one original owner");
@@ -1015,7 +1015,7 @@ mod tests {
                 }
             }
         }
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install(&db)?;
         db.execute("DROP INDEX native_fresh_credential_attempt", [])?;
         let before = schema_rows(&db)?;
@@ -1051,7 +1051,7 @@ mod tests {
                 if purpose == expected {
                     continue;
                 }
-                let db = Connection::open_in_memory()?;
+                let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
                 install(&db)?;
                 ensure!(db.execute("INSERT INTO native_fresh_owners(original,attempt,purpose,human,subject,context,owner,created_at,expires_at,stage) VALUES(?1,?2,?3,?4,?5,?6,?7,0,300,'allocated')",
                     params![intent.commitment()?.as_str(), intent.attempt(), purpose, intent.human(), intent.subject(), serde_json::to_string(&intent)?, Digest::new(b"owner").as_str()]).is_err(), "SQLite accepted a foreign intent purpose");
@@ -1063,7 +1063,7 @@ mod tests {
                 );
             }
         }
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch(&SCHEMA.replacen("CredentialIssueIntent", "CredentialIntent", 1))?;
         db.execute("INSERT INTO native_fresh_schema_version VALUES(1)", [])?;
         let before = schema_rows(&db)?;
@@ -1131,7 +1131,7 @@ mod tests {
 
     #[test]
     fn lost_claim_and_second_shell_cannot_replace_the_original_allocation() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install(&db)?;
         let intent = intent()?;
         let first = Digest::new(b"first actual shell incarnation");
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn original_and_stage_claims_are_enforced_by_actual_sqlite() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install(&db)?;
         let intent = intent()?;
         let owner = Digest::new(b"one original owner");
@@ -1240,7 +1240,7 @@ mod tests {
             crate::oauth::restore::tests::apply_for_storage(&mut db, 90 + stage)?;
             for _ in 0..2 {
                 drop(db);
-                db = Connection::open(&path)?;
+                db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 assert!(claim(&tx, &original, &owner, 1).is_err());
                 assert!(publish(&tx, &original, &owner, &options(), 2).is_err());
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn one_result_terminal_history_is_not_a_post_expiry_regrant() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install(&db)?;
         let intent = intent()?;
         let owner = Digest::new(b"original owner");
@@ -1292,7 +1292,7 @@ mod tests {
 
     #[test]
     fn publication_wire_and_actual_sqlite_refuse_hidden_or_unbound_fields() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install(&db)?;
         let intent = intent()?;
         let owner = Digest::new(b"one Google owner");
@@ -1337,7 +1337,7 @@ mod tests {
 
     #[test]
     fn unknown_existing_schema_refuses_without_repair() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch("CREATE TABLE native_fresh_owners(untrusted TEXT); INSERT INTO native_fresh_owners VALUES('preserve');")?;
         let before = schema_rows(&db)?;
         assert!(install(&db).is_err());
@@ -1351,8 +1351,8 @@ mod tests {
         Ok(())
     }
 
-    fn historical_unit() -> Result<Connection> {
-        let db = Connection::open_in_memory()?;
+    fn historical_unit() -> Result<crate::oauth::schema::RawAdmissionDatabase> {
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch(EMPTY_HISTORICAL_UNIT)?;
         db.execute_batch("CREATE TABLE app_rows(value TEXT); INSERT INTO app_rows VALUES('keep')")?;
         Ok(db)
@@ -1362,7 +1362,7 @@ mod tests {
     fn empty_historical_unit_is_recreated_atomically_with_app_rows_preserved() -> Result<()> {
         let db = historical_unit()?;
         install(&db)?;
-        let current = Connection::open_in_memory()?;
+        let current = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         install(&current)?;
         assert_eq!(schema_rows(&db)?, schema_rows(&current)?);
         assert_eq!(
@@ -1442,7 +1442,7 @@ mod tests {
                 .collect::<rusqlite::Result<_>>()?;
             assert_eq!(after, before, "{change}");
         }
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch(&EMPTY_HISTORICAL_UNIT.replace("created_at >= 0", "created_at >= -1"))?;
         let before = schema_rows(&db)?;
         assert!(install(&db).is_err());

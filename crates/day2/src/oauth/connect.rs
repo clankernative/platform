@@ -246,14 +246,18 @@ fn install_schema_in(db: &Connection) -> Result<()> {
 
 /// Records an already authorized interactive intent. The exact active pointer
 /// and security epoch are captured before redirecting to the provider.
-pub(super) fn begin(db: &mut Connection, intent: &ConnectIntent, now: i64) -> Result<bool> {
+pub(super) fn begin(
+    db: &mut dyn crate::write_queue::ConnectionOwner,
+    intent: &ConnectIntent,
+    now: i64,
+) -> Result<bool> {
     begin_inner(db, intent, None, None, now)
 }
 
 /// The legacy kernel path checks exact provider and instance qualification.
 /// Production exchange setup also prepares encrypted PKCE custody.
 pub(super) fn begin_qualified(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     input: super::profiles::OutboundQualification<'_>,
     now: i64,
 ) -> Result<bool> {
@@ -271,7 +275,7 @@ pub(super) fn begin_qualified(
 /// Internal protocol tests may record a callback binding directly. Production
 /// callers use `begin_qualified` so registration evidence is checked first.
 pub(super) fn begin_bound(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     intent: &ConnectIntent,
     binding: &CallbackBinding,
     now: i64,
@@ -281,7 +285,7 @@ pub(super) fn begin_bound(
 }
 
 pub(super) fn begin_prepared(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     prepared: super::exchange::PreparedAuthorization,
     now: i64,
 ) -> Result<bool> {
@@ -291,7 +295,7 @@ pub(super) fn begin_prepared(
 }
 
 fn begin_inner(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     intent: &ConnectIntent,
     binding: Option<&CallbackBinding>,
     private: Option<(
@@ -411,7 +415,7 @@ fn begin_in(
 /// `code_ref` names quarantined private custody, never a raw authorization code.
 /// A duplicate callback cannot move the attempt back to ExchangeReady.
 pub(super) fn claim_callback(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     code_ref: &str,
     now: i64,
@@ -442,7 +446,7 @@ pub(super) fn claim_callback(
 }
 
 pub(super) fn authorize_and_commit_exchange(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     now: i64,
 ) -> Result<Option<LegacyExchangeDispatchPermit>> {
@@ -519,7 +523,7 @@ pub fn record_denial(db: &Connection, attempt: &str, now: i64) -> Result<bool> {
 /// The cleanup closure removes quarantined private material in the same
 /// transaction. Cancellation never returns an exchange dispatch permit.
 pub fn cancel(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     custody_cleanup: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
@@ -527,7 +531,7 @@ pub fn cancel(
 }
 
 pub fn expire(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     now: i64,
     custody_cleanup: impl FnOnce(&Transaction<'_>) -> Result<()>,
@@ -536,7 +540,7 @@ pub fn expire(
 }
 
 fn finish_blocked(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     now: Option<i64>,
     outcome: &str,
@@ -574,7 +578,7 @@ fn finish_blocked(
 /// quarantine in the same transaction as the approval state. The caller supplies
 /// stable verified account and scope evidence, never display email selection.
 pub(super) fn await_account_approval(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     account: &str,
     scope_evidence: &str,
@@ -613,7 +617,7 @@ pub(super) fn await_account_approval(
 }
 
 pub(super) fn quarantine_external_bound(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     verified: &super::account::VerifiedExternalAccount,
     exchange: &super::exchange::ExchangeBinding,
     now: i64,
@@ -680,7 +684,7 @@ pub(super) fn quarantine_external_bound(
 /// Kernel activation is one transaction with caller-supplied custody
 /// publication. The qualified exchange path also checks its sealed binding.
 pub(super) fn activate_mapped(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     verified: &super::account::VerifiedMappedAccount,
     current_mapping_revision: &Digest,
     now: i64,
@@ -697,7 +701,7 @@ pub(super) fn activate_mapped(
 }
 
 pub(super) fn activate_mapped_bound(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     verified: &super::account::VerifiedMappedAccount,
     binding: &super::exchange::ExchangeBinding,
     current_mapping_revision: &Digest,
@@ -715,7 +719,7 @@ pub(super) fn activate_mapped_bound(
 }
 
 fn activate_mapped_inner(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     verified: &super::account::VerifiedMappedAccount,
     exchange: Option<&super::exchange::ExchangeBinding>,
     current_mapping_revision: &Digest,
@@ -787,7 +791,7 @@ pub(super) fn activate_mapped_in(
 
 #[cfg(test)]
 fn activate(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     account: &str,
     scope_evidence: &str,
@@ -816,7 +820,7 @@ struct ActivationGuard<'a> {
 }
 
 pub(super) fn activate_external_bound(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     intent: &ConnectIntent,
     exchange: &super::exchange::ExchangeBinding,
     account: &str,
@@ -839,7 +843,7 @@ pub(super) fn activate_external_bound(
 }
 
 fn activate_bound(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
     attempt: &str,
     account_scope: (&str, &str),
     guard: ActivationGuard<'_>,
@@ -1166,7 +1170,7 @@ mod tests {
     fn callback_replay_and_unsent_fence_survive_reopen() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("connect.sqlite");
-        let mut first = Connection::open(&path).unwrap();
+        let mut first = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         install_schema(&first).unwrap();
         assert!(begin(&mut first, &intent("attempt_1"), 1).unwrap());
         assert!(!begin(&mut first, &intent("attempt_1"), 1).unwrap());
@@ -1180,7 +1184,7 @@ mod tests {
             ("attempt_1".to_owned(), "private_code_1".to_owned())
         );
         drop(first);
-        let mut reopened = Connection::open(&path).unwrap();
+        let mut reopened = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         install_schema(&reopened).unwrap();
         assert!(
             authorize_and_commit_exchange(&mut reopened, "attempt_1", 4)
@@ -1196,7 +1200,7 @@ mod tests {
 
     #[test]
     fn terminal_outcomes_fence_late_exchange_and_activation() {
-        let mut db = Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         install_schema(&db).unwrap();
         begin(&mut db, &intent("denied"), 1).unwrap();
         assert!(record_denial(&db, "denied", 2).unwrap());
@@ -1246,7 +1250,7 @@ mod tests {
     fn two_sqlite_hosts_claim_callback_once() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("callback-race.sqlite");
-        let mut first = Connection::open(&path).unwrap();
+        let mut first = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         install_schema(&first).unwrap();
         assert!(begin(&mut first, &intent("attempt_1"), 1).unwrap());
         drop(first);
@@ -1257,7 +1261,8 @@ mod tests {
                     let path = path.clone();
                     let barrier = barrier.clone();
                     scope.spawn(move || {
-                        let mut db = Connection::open(path).unwrap();
+                        let mut db =
+                            crate::oauth::schema::RawAdmissionDatabase::open(path).unwrap();
                         db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
                         barrier.wait();
                         claim_callback(
@@ -1276,7 +1281,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(results.into_iter().filter(|claimed| *claimed).count(), 1);
-        let mut reopened = Connection::open(&path).unwrap();
+        let mut reopened = crate::oauth::schema::RawAdmissionDatabase::open(&path).unwrap();
         assert_eq!(
             state(&reopened, "attempt_1").unwrap(),
             Some(ConnectState::ExchangeReady)
@@ -1295,7 +1300,7 @@ mod tests {
 
     #[test]
     fn approval_binds_exact_account_and_only_one_generation_activates() {
-        let mut db = Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         install_schema(&db).unwrap();
         assert!(begin(&mut db, &intent("attempt_1"), 1).unwrap());
         assert!(begin(&mut db, &intent("attempt_2"), 1).unwrap());
@@ -1388,7 +1393,7 @@ mod tests {
 
     #[test]
     fn failed_custody_write_rolls_back_callback_and_activation() {
-        let mut db = Connection::open_in_memory().unwrap();
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         install_schema(&db).unwrap();
         begin(&mut db, &intent("attempt_1"), 1).unwrap();
         assert!(
@@ -1432,7 +1437,7 @@ mod tests {
 
     #[test]
     fn unknown_connect_schema_version_fails_closed() {
-        let db = Connection::open_in_memory().unwrap();
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory().unwrap();
         install_schema(&db).unwrap();
         db.execute("UPDATE oauth_connect_schema_version SET version = 4", [])
             .unwrap();

@@ -138,7 +138,7 @@ impl Port {
 
     fn record(&self, phase: &str) -> Result<()> {
         if let Some(path) = &self.transport {
-            let log = Connection::open(path)?;
+            let log = crate::oauth::schema::RawAdmissionDatabase::open(path)?;
             log.execute("INSERT INTO sends(phase) VALUES(?1)", [phase])?;
         }
         Ok(())
@@ -1133,7 +1133,9 @@ fn compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication() -> Res
     for point in points {
         let directory = tempfile::tempdir()?;
         let result = fixture_result(|| -> Result<()> {
-            let transport = Connection::open(directory.path().join("transport.sqlite"))?;
+            let transport = crate::oauth::schema::RawAdmissionDatabase::open(
+                directory.path().join("transport.sqlite"),
+            )?;
             transport.execute_batch(
                 "CREATE TABLE sends(seq INTEGER PRIMARY KEY, phase TEXT NOT NULL)",
             )?;

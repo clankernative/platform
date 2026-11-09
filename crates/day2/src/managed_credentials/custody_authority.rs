@@ -252,7 +252,7 @@ mod tests {
 
     struct Fixture {
         _directory: tempfile::TempDir,
-        db: Connection,
+        db: crate::oauth::schema::RawAdmissionDatabase,
         binding: CredentialFamilyBinding,
         family: ManifestFamily,
         version: String,

@@ -45,7 +45,7 @@ impl Fixture {
             PathBuf::new(),
             contract,
         );
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "temp_store", "MEMORY")?;
         db.pragma_update(None, "journal_mode", "MEMORY")?;
         db.pragma_update(None, "foreign_keys", true)?;
@@ -198,7 +198,7 @@ impl Fixture {
             200,
         )?;
         Ok(Self {
-            db,
+            db: db.retire()?,
             namespace,
             artifact,
             previous,
@@ -353,7 +353,7 @@ fn complete_reset_revokes_and_closes_without_erasing_history_or_budget_debt() ->
         let path = directory.path().join("unpublished.sqlite");
         std::fs::write(&path, &*bytes)?;
         for _ in 0..2 {
-            let db = Connection::open(&path)?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
             let active = authority_state::current(&db)?;
             assert!(!active.document.enabled);
             assert_ne!(active.stamp.epoch, fixture.previous.stamp.epoch);
@@ -978,7 +978,7 @@ fn history(
                     let path = directory.path().join("observation.sqlite");
                     std::fs::write(&path, &*image)?;
                     for _ in 0..2 {
-                        let reopened = Connection::open(&path)?;
+                        let reopened = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
                         assert!(before == snapshot(&reopened)?);
                         assert_eq!(
                             observation(&reopened, &fixture.token)?,

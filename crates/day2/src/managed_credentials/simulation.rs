@@ -20,7 +20,6 @@ use day2_capabilities::{
         ResourceAudienceRef,
     },
 };
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -361,7 +360,7 @@ fn run(seed: u64, steps: &[Step]) -> Result<Trace> {
     effects::scope(world.clone(), || {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("credentials.sqlite");
-        let mut db = Connection::open(&path)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         store::install_schema(&db)?;
         let mut model = Model {
             now: 1_000,
@@ -381,7 +380,7 @@ fn run(seed: u64, steps: &[Step]) -> Result<Trace> {
                     receipt = Some(issued);
                     if matches!(step, Step::LostIssueResponse) {
                         drop(db);
-                        db = Connection::open(&path)?;
+                        db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
                         store::install_schema(&db)?;
                     }
                     true

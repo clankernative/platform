@@ -239,7 +239,7 @@ fn note_work(db: &Connection, step: &'static str) {
 /// functions. The test selection is synthetic, not native or human authority.
 #[cfg(test)]
 pub(crate) fn seed_first_epoch_for_tests(
-    db: &mut Connection,
+    db: &mut dyn crate::write_queue::ConnectionOwner,
 ) -> Result<(PublicReceipt, zeroize::Zeroizing<String>)> {
     let mut intent = super::tests::issue("invocation-1");
     intent.security_epoch = 1;
@@ -355,7 +355,11 @@ mod tests {
     use super::*;
     use rusqlite::{Connection, TransactionBehavior};
 
-    fn database() -> Result<(tempfile::TempDir, Connection, PublicReceipt)> {
+    fn database() -> Result<(
+        tempfile::TempDir,
+        crate::oauth::schema::RawAdmissionDatabase,
+        PublicReceipt,
+    )> {
         let (dir, mut db) = fixture::database()?;
         db.pragma_update(None, "foreign_keys", true)?;
         let receipt = fixture::committed_issue(&mut db)?;
@@ -394,7 +398,9 @@ mod tests {
                 );
                 tx.commit()?;
                 drop(db);
-                let db = Connection::open(dir.path().join("app.sqlite"))?;
+                let db = crate::oauth::schema::RawAdmissionDatabase::open(
+                    dir.path().join("app.sqlite"),
+                )?;
                 let after: (String, Vec<u8>, Vec<u8>) = db.query_row(
                     "SELECT identity_json,nonce,ciphertext FROM day2_credential_material",
                     [],
@@ -474,7 +480,7 @@ mod tests {
                     ))?,
                     "active"
                 );
-                let mut empty = Connection::open_in_memory()?;
+                let mut empty = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
                 empty.pragma_update(None, "foreign_keys", true)?;
                 let tx = empty.transaction()?;
                 assert!(stage_reset(&tx, &fixture::namespace(), 7).is_err());
@@ -489,7 +495,7 @@ mod tests {
     }
 
     fn reveal(
-        db: &mut Connection,
+        db: &mut dyn crate::write_queue::ConnectionOwner,
         version: &str,
         attempt: &str,
     ) -> Result<zeroize::Zeroizing<String>> {
@@ -568,7 +574,9 @@ mod tests {
                 assert_eq!(stage_reset(&tx, &ns, 7)?.versions, 2);
                 tx.commit()?;
                 drop(db);
-                let mut db = Connection::open(dir.path().join("app.sqlite"))?;
+                let mut db = crate::oauth::schema::RawAdmissionDatabase::open(
+                    dir.path().join("app.sqlite"),
+                )?;
                 assert!(!accepts(&db, &old)?);
                 assert!(!accepts(&db, &current_token)?);
                 let post = VerifiedHumanPost {

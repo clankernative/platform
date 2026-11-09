@@ -1,6 +1,7 @@
 //! Inbound histories use a separate symbolic oracle: no production transition
 //! or stored state predicts acceptance. Custody failure must roll back issuance.
 use super::{World, effects, implementation, next, snapshot};
+use crate::oauth::schema::RawAdmissionDatabase;
 use crate::oauth::{custody, inbound};
 use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use anyhow::{Result, ensure};
@@ -8,7 +9,6 @@ use day2_capabilities::{
     BindingRef, Name,
     oauth::{ClientChannelContract, OAuthClientRedirectRef},
 };
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -153,7 +153,7 @@ fn run(program: &Program) -> Result<Vec<Observation>> {
     effects::scope(world.clone(), || {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("inbound.sqlite");
-        let mut db = Connection::open(&path)?;
+        let mut db = RawAdmissionDatabase::open(&path)?;
         db.execute_batch("PRAGMA journal_mode=WAL;")?;
         inbound::install_schema(&db)?;
         let ceiling = inbound::tests::ceiling();
@@ -282,7 +282,7 @@ fn run(program: &Program) -> Result<Vec<Observation>> {
                 Step::Revoke => inbound::revoke_grant(&mut db, "grant", 1)?,
                 Step::Reopen => {
                     drop(db);
-                    db = Connection::open(&path)?;
+                    db = RawAdmissionDatabase::open(&path)?;
                     inbound::install_schema(&db)?;
                     true
                 }

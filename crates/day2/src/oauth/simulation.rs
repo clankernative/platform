@@ -312,7 +312,6 @@ pub(in crate::oauth) fn snapshot(db: &Connection) -> Result<serde_json::Value> {
         let mut statement = db.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
         let columns = statement
             .column_names()
-            .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let mut rows = statement.query([])?;
@@ -364,7 +363,7 @@ fn run(program: &Program) -> Result<Trace> {
     effects::scope(world.clone(), || {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("oauth.sqlite");
-        let mut db = Connection::open(&path)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         db.execute_batch("PRAGMA journal_mode=WAL;")?;
         connect::install_schema(&db)?;
         let fixture = profiles::tests::external_fixture();
@@ -479,7 +478,7 @@ fn run(program: &Program) -> Result<Trace> {
                 Step::Expire => connect::expire(&mut db, &fixture.intent.attempt, now, |_| Ok(()))?,
                 Step::Reopen => {
                     drop(db);
-                    db = Connection::open(&path)?;
+                    db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
                     connect::install_schema(&db)?;
                     true
                 }

@@ -22,42 +22,249 @@ struct Budget {
 
 thread_local! {
     static ADMISSION: RefCell<Option<Budget>> = const { RefCell::new(None) };
+    static RAW_HOOKS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Own only this admission's thread counter, raw hook and savepoint. Runtime
-/// hooks belong to store::open and must survive ordinary refusal and unwind.
+/// Fresh raw DATA only: the factory creates the actual SQLite connection.
+/// Its stable boxed connection is never exposed mutably or adopted from a
+/// Runtime. Moving/swapping this owner moves the box and hook identity together.
+pub(crate) struct RawAdmissionDatabase {
+    db: Option<Box<Connection>>,
+    connection: usize,
+    installed: bool,
+    registered: bool,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+enum RawSource {
+    Memory,
+    #[cfg(test)]
+    File(std::path::PathBuf, rusqlite::OpenFlags),
+    #[cfg(test)]
+    OrdinaryFile(std::path::PathBuf),
+}
+
+impl RawAdmissionDatabase {
+    fn memory() -> Result<Self> {
+        Self::from_source(RawSource::Memory)
+    }
+
+    fn from_source(source: RawSource) -> Result<Self> {
+        ensure!(
+            ADMISSION.with(|active| active.borrow().is_none()),
+            "raw admission hook cannot replace an active admission"
+        );
+        let (db, owns_hook) = match source {
+            RawSource::Memory => (Connection::open_in_memory()?, true),
+            #[cfg(test)]
+            RawSource::File(path, flags) => {
+                crate::store::require_ordinary_database(&path)?;
+                (Connection::open_with_flags(path, flags)?, true)
+            }
+            #[cfg(test)]
+            RawSource::OrdinaryFile(path) => {
+                crate::store::require_ordinary_database(&path)?;
+                // The fixed ordinary factory installs the permanent lifetime
+                // counter and admission_step(1_000). Never replace that hook.
+                (crate::store::open(&path)?, false)
+            }
+        };
+        let db = Box::new(db);
+        let connection = std::ptr::from_ref(&*db) as usize;
+        RAW_HOOKS.with(|owners| -> Result<()> {
+            let mut owners = owners.borrow_mut();
+            ensure!(owners.len() < 64, "raw admission hook owner bound");
+            ensure!(
+                !owners.contains(&connection),
+                "raw admission hook already owned"
+            );
+            owners.push(connection);
+            Ok(())
+        })?;
+        let mut owner = Self {
+            db: Some(db),
+            connection,
+            installed: owns_hook,
+            registered: true,
+            local: std::marker::PhantomData,
+        };
+        if owns_hook {
+            owner
+                .db
+                .as_mut()
+                .context("raw admission database closed")?
+                .progress_handler(1, Some(move || raw_admission_step(connection)))?;
+        }
+        Ok(owner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_in_memory() -> Result<Self> {
+        Self::memory()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Self::open_with_flags(path, rusqlite::OpenFlags::default())
+    }
+
+    /// The fixture's actual ordinary configuration, including its permanent
+    /// progress counter, comes only from this fixed fresh-file constructor.
+    #[cfg(test)]
+    pub(crate) fn open_ordinary(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Self::from_source(RawSource::OrdinaryFile(path.as_ref().to_path_buf()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_flags(
+        path: impl AsRef<std::path::Path>,
+        flags: rusqlite::OpenFlags,
+    ) -> Result<Self> {
+        Self::from_source(RawSource::File(path.as_ref().to_path_buf(), flags))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire(self) -> Result<Connection> {
+        self.finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transaction(&mut self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        self.db
+            .as_mut()
+            .expect("held raw admission database")
+            .transaction()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transaction_with_behavior(
+        &mut self,
+        behavior: rusqlite::TransactionBehavior,
+    ) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        self.db
+            .as_mut()
+            .expect("held raw admission database")
+            .transaction_with_behavior(behavior)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn serialize<N: rusqlite::Name>(
+        &mut self,
+        schema: N,
+    ) -> rusqlite::Result<rusqlite::serialize::Data<'_>> {
+        self.db
+            .as_mut()
+            .expect("held raw admission database")
+            .serialize(schema)
+    }
+
+    fn unregister(&mut self) -> Result<()> {
+        if self.registered {
+            RAW_HOOKS.with(|owners| -> Result<()> {
+                let mut owners = owners.borrow_mut();
+                let index = owners
+                    .iter()
+                    .position(|owner| *owner == self.connection)
+                    .context("raw admission hook owner missing")?;
+                owners.remove(index);
+                Ok(())
+            })?;
+            self.registered = false;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Connection> {
+        let cleared = if self.installed {
+            self.db
+                .as_mut()
+                .context("raw admission database closed")?
+                .progress_handler(0, None::<fn() -> bool>)
+        } else {
+            Ok(())
+        };
+        self.installed = cleared.is_err();
+        let unregistered = self.unregister();
+        cleared?;
+        unregistered?;
+        Ok(*self.db.take().context("raw admission database closed")?)
+    }
+}
+
+impl std::ops::Deref for RawAdmissionDatabase {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.db.as_deref().expect("held raw admission database")
+    }
+}
+
+impl Drop for RawAdmissionDatabase {
+    fn drop(&mut self) {
+        if self.installed {
+            if let Some(db) = self.db.as_mut() {
+                let _ = db.progress_handler(0, None::<fn() -> bool>);
+            }
+        }
+        let _ = self.unregister();
+    }
+}
+
+fn raw_admission_step(connection: usize) -> bool {
+    let foreign = ADMISSION.with(|active| {
+        let mut active = active.borrow_mut();
+        if let Some(budget) = active.as_mut() {
+            if budget.connection != connection {
+                budget.exhausted = true;
+                budget.steps = 0;
+                return true;
+            }
+        }
+        false
+    });
+    foreign || admission_step(1)
+}
+
+/// Create the raw connection before installing its hook; never accept an
+/// existing connection or lend mutable connection access. After the scoped
+/// operation, checked cleanup retires the hook before returning plain DATA.
+pub(crate) fn raw_memory<T>(
+    operation: impl for<'db> FnOnce(&'db mut RawAdmissionDatabase) -> Result<T>,
+) -> Result<(Connection, T)> {
+    let mut owner = RawAdmissionDatabase::memory()?;
+    let result = operation(&mut owner);
+    let finished = owner.finish();
+    match (result, finished) {
+        (Ok(value), Ok(db)) => Ok((db, value)),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+/// Own only this admission's thread counter and savepoint. Hook ownership is
+/// held outside every shared transaction/statement loan.
 struct AdmissionScope<'a> {
     db: &'a Connection,
-    raw_hook: bool,
     savepoint: bool,
 }
 
 impl AdmissionScope<'_> {
     fn clear_budget(&mut self) -> Result<bool> {
-        let exhausted = ADMISSION.with(|active| {
+        Ok(ADMISSION.with(|active| {
             active
                 .borrow_mut()
                 .take()
                 .is_some_and(|budget| budget.exhausted)
-        });
-        if self.raw_hook {
-            self.db.progress_handler(0, None::<fn() -> bool>)?;
-            self.raw_hook = false;
-        }
-        Ok(exhausted)
+        }))
     }
 }
 
 impl Drop for AdmissionScope<'_> {
     fn drop(&mut self) {
-        // On panic, clear our exhausted counter before cleanup SQL. Never
-        // replace/reset the permanent runtime callback or its lifetime cap.
+        // Clear our exhausted counter before cleanup SQL. The outer owner keeps
+        // the same hook installed until all transaction loans have ended.
         ADMISSION.with(|active| {
             active.borrow_mut().take();
         });
-        if self.raw_hook {
-            let _ = self.db.progress_handler(0, None::<fn() -> bool>);
-        }
         if self.savepoint && !self.db.is_autocommit() {
             let _ = self.db.execute_batch(
                 "ROLLBACK TO day2_identity_admission; RELEASE day2_identity_admission",
@@ -139,9 +346,9 @@ pub(crate) fn remaining_work_for_tests(db: &Connection) -> Option<(usize, usize,
     })
 }
 
-/// Raw SQLite adapters explicitly grant ownership of their progress callback:
-/// this installs/removes a temporary hook, and cannot preserve an unknown hook.
-/// Production connections use `admit_with_runtime_hook` instead.
+/// Raw SQLite adapters must retain the actual fresh database's hook owner.
+/// This shared scope never installs, replaces or clears a progress callback.
+/// Production Runtime connections enter `admit_with_runtime_hook` instead.
 pub(crate) fn admit<T>(
     db: &Connection,
     admission: impl FnOnce(&Connection) -> Result<T>,
@@ -224,6 +431,13 @@ fn admit_inner<T>(
         );
         return admission(db);
     }
+    if !runtime_hook {
+        crate::store::refuse_raw_schema_admission(db)?;
+        ensure!(
+            RAW_HOOKS.with(|owners| owners.borrow().contains(&connection)),
+            "identity admission requires the actual owned raw hook"
+        );
+    }
     // SQLite cannot change this pragma inside a caller transaction. Never turn
     // it off for admission, and refuse a transaction that started without it.
     db.pragma_update(None, "foreign_keys", true)?;
@@ -242,12 +456,8 @@ fn admit_inner<T>(
     });
     let mut scope = AdmissionScope {
         db,
-        raw_hook: !runtime_hook,
         savepoint: false,
     };
-    if !runtime_hook {
-        db.progress_handler(1, Some(|| admission_step(1)))?;
-    }
     let result = (|| {
         db.execute_batch("SAVEPOINT day2_identity_admission")?;
         scope.savepoint = true;
@@ -594,6 +804,165 @@ fn normalize_sql(sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::oauth::schema::RawAdmissionDatabase as RawConnection;
+
+    #[test]
+    fn raw_owner_cannot_expose_mutable_connection_and_retirement_refuses_admission() -> Result<()> {
+        trait AmbiguousIfMutable<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfMutable<()> for T {}
+        struct Mutable;
+        impl<T: ?Sized + std::ops::DerefMut<Target = Connection>> AmbiguousIfMutable<Mutable> for T {}
+        let _ = <RawConnection as AmbiguousIfMutable<_>>::check;
+        let mut raw = RawConnection::open_in_memory()?;
+        let tx = raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        admit(&tx, |db| {
+            db.execute_batch(
+                "CREATE TABLE owner_probe(value INTEGER); INSERT INTO owner_probe VALUES(7)",
+            )?;
+            Ok(())
+        })?;
+        tx.commit()?;
+        let image = raw.serialize(rusqlite::MAIN_DB)?;
+        assert!(!image.is_empty());
+        drop(image);
+        let db = raw.retire()?;
+        let called = std::cell::Cell::new(false);
+        assert!(
+            admit(&db, |_| {
+                called.set(true);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!called.get());
+        assert_eq!(
+            db.query_row("SELECT value FROM owner_probe", [], |r| r.get::<_, i64>(0))?,
+            7
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn whole_raw_owner_swap_preserves_each_real_connection_hook() -> Result<()> {
+        let mut first = RawConnection::open_in_memory()?;
+        let mut second = RawConnection::open_in_memory()?;
+        first.execute_batch(
+            "CREATE TABLE owner_probe(value INTEGER); INSERT INTO owner_probe VALUES(1)",
+        )?;
+        second.execute_batch(
+            "CREATE TABLE owner_probe(value INTEGER); INSERT INTO owner_probe VALUES(2)",
+        )?;
+        std::mem::swap(&mut first, &mut second);
+        for (db, expected) in [(&first, 2), (&second, 1)] {
+            assert_eq!(db.connection, std::ptr::from_ref(&**db) as usize);
+            assert_eq!(
+                admit(db, |db| Ok(db.query_row(
+                    "SELECT value FROM owner_probe",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?))?,
+                expected
+            );
+            assert!(admit_with_limits(db, 20, 100, 1024, |db| {
+                db.query_row("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n", [], |r| r.get::<_, i64>(0))?;
+                Ok(())
+            }).is_err());
+        }
+        first.finish()?;
+        second.finish()?;
+        Ok(())
+    }
+
+    #[test]
+    fn raw_owner_foreign_entry_cannot_reset_active_admission() -> Result<()> {
+        let first = RawConnection::open_in_memory()?;
+        let second = RawConnection::open_in_memory()?;
+        second.execute_batch("CREATE TABLE owner_probe(value INTEGER)")?;
+        let before = RAW_HOOKS.with(|owners| owners.borrow().len());
+        let result = admit(&first, |_| {
+            assert!(RawConnection::open_in_memory().is_err());
+            assert_eq!(RAW_HOOKS.with(|owners| owners.borrow().len()), before);
+            assert!(admit(&second, |_| Ok(())).is_err());
+            assert!(
+                second
+                    .execute("INSERT INTO owner_probe VALUES(1)", [])
+                    .is_err()
+            );
+            Ok(())
+        });
+        assert!(
+            result.is_err(),
+            "caught foreign work still exhausts this admission"
+        );
+        assert_eq!(
+            second.query_row("SELECT count(*) FROM owner_probe", [], |r| r
+                .get::<_, i64>(0))?,
+            0
+        );
+        first.finish()?;
+        second.finish()?;
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_raw_factory_preserves_permanent_progress_through_admission_and_retirement()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ordinary.sqlite");
+        let outer = RawConnection::open_in_memory()?;
+        admit(&outer, |_| {
+            assert!(RawConnection::open_ordinary(&path).is_err());
+            assert!(!path.exists(), "refuse before opening a foreign database");
+            Ok(())
+        })?;
+        drop(outer);
+        let owner = RawConnection::open_ordinary(&path)?;
+        assert!(!owner.installed, "the permanent hook is never replaced");
+        assert!(owner.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))?);
+        assert!(!owner.pragma_query_value(None, "trusted_schema", |row| row.get::<_, bool>(0))?);
+        let connection = owner.connection;
+        let work = |db: &Connection| -> Result<()> {
+            db.query_row(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(())
+        };
+        assert!(work(&owner).is_err(), "exhaust the actual lifetime counter");
+        assert!(admit(&owner, work).is_err(), "admission must not renew it");
+        let db = owner.retire()?;
+        assert!(!RAW_HOOKS.with(|owners| owners.borrow().contains(&connection)));
+        assert!(work(&db).is_err(), "retirement must not clear that counter");
+        Ok(())
+    }
+
+    #[test]
+    fn raw_factory_error_and_unwind_retire_only_their_actual_owner() -> Result<()> {
+        let before = RAW_HOOKS.with(|owners| owners.borrow().len());
+        let failed: Result<(Connection, ())> = raw_memory(|db| {
+            admit(db, |db| {
+                db.execute_batch("CREATE TABLE owner_probe(value INTEGER)")?;
+                Ok(())
+            })?;
+            anyhow::bail!("controlled raw operation refusal")
+        });
+        assert!(failed.is_err());
+        assert_eq!(RAW_HOOKS.with(|owners| owners.borrow().len()), before);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(Connection, ())> = raw_memory(|db| {
+                admit(db, |_| -> Result<()> {
+                    panic!("controlled raw owner unwind")
+                })
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(RAW_HOOKS.with(|owners| owners.borrow().len()), before);
+        assert!(ADMISSION.with(|active| active.borrow().is_none()));
+        Ok(())
+    }
     #[test]
     fn owned_memory_transaction_rejects_nested_and_foreign_scope_without_budget_renewal()
     -> Result<()> {
@@ -671,7 +1040,7 @@ mod tests {
 
     #[test]
     fn cumulative_nested_budget_interrupts_and_removes_only_owned_hook() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         let mut first_finished = false;
         let error = admit_with_limits(&db, 15_000, 100, 1024, |db| {
             db.query_row(SCAN, [], |row| row.get::<_, i64>(0))?;
@@ -691,7 +1060,7 @@ mod tests {
 
     #[test]
     fn admission_materialization_refuses_before_owned_value_allocation() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch(
             "CREATE TABLE imported(value TEXT); INSERT INTO imported VALUES(hex(zeroblob(2048)))",
         )?;
@@ -711,8 +1080,8 @@ mod tests {
 
     #[test]
     fn nested_admission_cannot_publish_on_another_connection() -> Result<()> {
-        let first = Connection::open_in_memory()?;
-        let second = Connection::open_in_memory()?;
+        let first = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
+        let second = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         assert!(
             admit(&first, |_| admit(&second, |db| {
                 db.execute_batch("CREATE TABLE escaped(value INTEGER)")?;
@@ -733,7 +1102,7 @@ mod tests {
 
     #[test]
     fn budget_exhaustion_rolls_back_fresh_creation_without_publishing_a_marker() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         let error = admit_with_limits(&db, 12_000, 16_384, 8 * 1_048_576, |db| {
             super::super::store::install_schema(db)?;
             db.query_row(SCAN, [], |row| row.get::<_, i64>(0))?;
@@ -756,7 +1125,7 @@ mod tests {
 
     #[test]
     fn ordinary_failure_preserves_caller_savepoint_and_success_is_uncommitted() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch("CREATE TABLE caller(value INTEGER)")?;
         let tx = db.transaction()?;
@@ -797,7 +1166,7 @@ mod tests {
 
     #[test]
     fn admission_unwind_cleans_owned_scope_and_preserves_caller_transaction() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch("CREATE TABLE caller(value INTEGER)")?;
         let tx = db.transaction()?;
@@ -840,7 +1209,7 @@ mod tests {
 
     #[test]
     fn swallowed_budget_errors_cannot_complete_admission() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.execute_batch(
             "CREATE TABLE imported(value TEXT); INSERT INTO imported VALUES('bounded')",
         )?;
@@ -865,7 +1234,7 @@ mod tests {
 
     #[test]
     fn current_version_with_missing_guard_is_refused_without_repair() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         super::super::connect::install_schema(&db)?;
         db.execute_batch("DROP TRIGGER oauth_refresh_attempts_shape_UPDATE_v2")?;
         assert!(super::super::connect::install_schema(&db).is_err());
@@ -879,7 +1248,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         };
-        let db = Connection::open_in_memory()?;
+        let mut db = Connection::open_in_memory()?;
         let ticks = Arc::new(AtomicUsize::new(0));
         let captured = ticks.clone();
         db.progress_handler(
@@ -894,7 +1263,7 @@ mod tests {
         fn moved(db: Connection) -> Connection {
             db
         }
-        let db = moved(db); // Connection moves do not change the callback's state.
+        let mut db = moved(db); // Connection moves do not change the callback's state.
         admit_with_runtime_hook(&db, |db| admit(db, super::super::connect::install_schema))?;
         let after_success = ticks.load(Ordering::Relaxed);
         assert!(after_success > before);
@@ -952,7 +1321,7 @@ mod tests {
 
     #[test]
     fn sqlite_write_interrupt_can_abort_the_entire_caller_transaction() -> Result<()> {
-        let mut db = Connection::open_in_memory()?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", true)?;
         db.execute_batch("CREATE TABLE caller(value INTEGER)")?;
         let tx = db.transaction()?;
@@ -1012,8 +1381,8 @@ mod tests {
         Ok(Snapshot { objects, tables })
     }
 
-    fn current_connect() -> Result<Connection> {
-        let db = Connection::open_in_memory()?;
+    fn current_connect() -> Result<crate::oauth::schema::RawAdmissionDatabase> {
+        let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
         super::super::connect::install_schema(&db)?;
         db.execute_batch("INSERT INTO oauth_connection_slots VALUES('slot',1,1,1,'profile','account','affinity','active');
             INSERT INTO oauth_refresh_attempts VALUES('attempt','slot',1,1,1,'profile','account','affinity','ready',NULL,NULL);
@@ -1207,7 +1576,7 @@ mod tests {
             "CREATE TABLE oauth_connect_attempts(attempt TEXT PRIMARY KEY)",
             "CREATE VIEW OAUTH_SCHEMA_VERSION AS SELECT 2 AS version",
         ] {
-            let db = Connection::open_in_memory()?;
+            let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
             db.execute_batch(ddl)?;
             let before = snapshot(&db)?;
             assert!(
@@ -1389,12 +1758,12 @@ mod tests {
     fn current_guards_survive_reopen_and_preserve_atomic_rollback() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("current.sqlite");
-        let db = Connection::open(&path)?;
+        let db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         super::super::connect::install_schema(&db)?;
         db.execute_batch("INSERT INTO oauth_connection_slots VALUES('slot',1,1,1,'profile','account','affinity','active');
             INSERT INTO oauth_refresh_attempts VALUES('attempt','slot',1,1,1,'profile','account','affinity','ready',NULL,NULL)")?;
         drop(db);
-        let mut db = Connection::open(&path)?;
+        let mut db = crate::oauth::schema::RawAdmissionDatabase::open(&path)?;
         super::super::connect::install_schema(&db)?;
         {
             let tx = db.transaction()?;

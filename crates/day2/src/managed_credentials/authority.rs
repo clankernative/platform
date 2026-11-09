@@ -1782,7 +1782,6 @@ mod delivery_tests {
         credentials::{DeliveryProfile, ManagementPredicate, RotationProfile},
         oauth::{ResourceAudienceRef, SecurityOriginRef},
     };
-    use rusqlite::Connection;
     use std::sync::{
         Mutex, Weak,
         atomic::{AtomicUsize, Ordering},
@@ -2005,7 +2004,7 @@ mod delivery_tests {
 
     struct Fixture {
         _directory: tempfile::TempDir,
-        db: Connection,
+        db: crate::oauth::schema::RawAdmissionDatabase,
         selected: Selection,
         provider: Arc<Provider>,
         authority: Arc<SelectedAuthority>,
@@ -2021,7 +2020,9 @@ mod delivery_tests {
             substitute: u8,
         ) -> Result<Self> {
             let directory = tempfile::tempdir()?;
-            let mut db = Connection::open(directory.path().join("app.sqlite"))?;
+            let mut db = crate::oauth::schema::RawAdmissionDatabase::open(
+                directory.path().join("app.sqlite"),
+            )?;
             store::install_schema(&db)?;
             let selected = selection();
             let prepared = store::prepare_issue(

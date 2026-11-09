@@ -61,8 +61,8 @@ impl FreshMemoryDatabase {
         result
     }
 
-    fn freeze(self, acquisition: &mut NativeAcquisition) -> Result<FrozenPreparationImage> {
-        FrozenPreparationImage::freeze(&self.connection, acquisition)
+    fn freeze(mut self, acquisition: &mut NativeAcquisition) -> Result<FrozenPreparationImage> {
+        FrozenPreparationImage::freeze(&mut self.connection, acquisition)
     }
 }
 
@@ -432,7 +432,7 @@ impl FrozenPreparationImage {
     /// The caller must have initialized the complete admitted framework/app
     /// schema and seed/marker in one committed transaction. This function only
     /// freezes DATA; it does not admit that schema or authorize file creation.
-    fn freeze(connection: &Connection, acquisition: &mut NativeAcquisition) -> Result<Self> {
+    fn freeze(connection: &mut Connection, acquisition: &mut NativeAcquisition) -> Result<Self> {
         let result = (|| {
             acquisition.remaining()?;
             ensure!(
@@ -457,6 +457,8 @@ impl FrozenPreparationImage {
                     "epoch_preparation_attached_database_refused"
                 );
             }
+            drop(rows);
+            drop(databases);
             let mode: String =
                 connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
             ensure!(mode == "memory", "epoch_preparation_initial_journal_mode");
@@ -638,8 +640,8 @@ pub(super) mod tests {
 
     #[test]
     fn frozen_image_survives_source_mutation_and_readback_is_read_only() {
-        let db = database();
-        let image = FrozenPreparationImage::freeze(&db, &mut acquisition()).unwrap();
+        let mut db = database();
+        let image = FrozenPreparationImage::freeze(&mut db, &mut acquisition()).unwrap();
         db.execute("UPDATE initial_marker SET seed='replacement'", [])
             .unwrap();
         drop(db);
@@ -681,27 +683,27 @@ pub(super) mod tests {
     #[test]
     fn uncommitted_or_attached_or_expired_images_refuse() {
         let mut db = database();
-        let tx = db.transaction().unwrap();
-        assert!(FrozenPreparationImage::freeze(&tx, &mut acquisition()).is_err());
-        tx.rollback().unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        assert!(FrozenPreparationImage::freeze(&mut db, &mut acquisition()).is_err());
+        db.execute_batch("ROLLBACK").unwrap();
         db.execute_batch("ATTACH ':memory:' AS other").unwrap();
-        assert!(FrozenPreparationImage::freeze(&db, &mut acquisition()).is_err());
-        let db = database();
+        assert!(FrozenPreparationImage::freeze(&mut db, &mut acquisition()).is_err());
+        let mut db = database();
         let mut expired = NativeAcquisition::fixture(
             Digest::new(b"expired-image-clock"),
             std::process::id(),
             Duration::from_secs(100),
             Duration::ZERO,
         );
-        assert!(FrozenPreparationImage::freeze(&db, &mut expired).is_err());
+        assert!(FrozenPreparationImage::freeze(&mut db, &mut expired).is_err());
     }
 
     #[test]
     fn changed_temp_storage_refuses_before_schema_sorting() {
-        let db = database();
+        let mut db = database();
         db.pragma_update(None, "temp_store", "FILE").unwrap();
         let mut interval = acquisition();
-        assert!(FrozenPreparationImage::freeze(&db, &mut interval).is_err());
+        assert!(FrozenPreparationImage::freeze(&mut db, &mut interval).is_err());
         assert!(interval.remaining().is_err());
     }
 
