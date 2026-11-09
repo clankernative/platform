@@ -17,6 +17,7 @@ package
 		GkeRelease,
 		NativeEnrollment,
 		SecretRetirement,
+		SecureRestore,
 		AppSecrets,
 		UiDependency,
 		Tooling,

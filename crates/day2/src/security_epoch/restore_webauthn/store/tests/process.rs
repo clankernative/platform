@@ -85,7 +85,7 @@ fn challenge_child() -> Result<()> {
     ensure!(bytes.len() <= 4096, "challenge_child_config_bound");
     let config: Config = crate::json::decode(&bytes)?;
     ensure!(config.database.is_absolute(), "challenge_child_path");
-    if (6..=10).contains(&config.cut) {
+    if (6..=10).contains(&config.cut) || config.cut == 14 {
         return journal_child(&config);
     }
     if (11..=13).contains(&config.cut) {
@@ -162,6 +162,9 @@ fn journal_child(config: &Config) -> Result<()> {
     }
     let tx = db.transaction()?;
     record_publication(&tx, &f.key, &id, &record)?;
+    if config.cut == 14 {
+        pause()?;
+    }
     tx.commit()?;
     if config.cut == 10 {
         pause()?;
@@ -278,7 +281,7 @@ async fn execute(config: &Config, input: &std::path::Path, kill: bool) -> Result
 #[tokio::test(flavor = "current_thread")]
 async fn signing_journal_real_child_death_preserves_attempt_state_without_reconstructing_owner()
 -> Result<()> {
-    for n in 6..=10 {
+    for n in [6, 7, 8, 9, 14, 10] {
         let root = tempfile::tempdir()?;
         let config = Config {
             database: root.path().join("outside-restore.sqlite"),
@@ -303,7 +306,7 @@ async fn signing_journal_real_child_death_preserves_attempt_state_without_recons
         let expected = match n {
             6 => None,
             7 | 8 => Some(("prepared".into(), false)),
-            9 => Some(("may_sign".into(), false)),
+            9 | 14 => Some(("may_sign".into(), false)),
             10 => Some(("published".into(), true)),
             _ => unreachable!(),
         };
@@ -324,6 +327,34 @@ async fn signing_journal_real_child_death_preserves_attempt_state_without_recons
         );
         assert_eq!(observed(&db), ("verified".into(), 2, 7));
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn journal_publication_checkpoint_exit_is_not_death_or_completed_delivery() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = Config {
+        database: root.path().join("outside-restore.sqlite"),
+        cut: 14,
+        exit_at_cut: true,
+    };
+    let input = root.path().join("publication-not-a-death.json");
+    std::fs::write(&input, serde_json::to_vec(&config)?)?;
+    let exit = execute(&config, &input, false).await?;
+    assert_eq!(exit.code, Some(0));
+    assert!(require_death(&exit, 14).is_err());
+    let db = Connection::open(&config.database)?;
+    assert_eq!(observed(&db), ("verified".into(), 2, 7));
+    // Publication was changed inside an uncommitted transaction. A verified
+    // assertion and MaySign history do not prove signing or delivery completed.
+    assert_eq!(
+        db.query_row(
+            "SELECT state,signed_record IS NOT NULL FROM main.restore_approval_issuance",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        )?,
+        ("may_sign".into(), false)
+    );
     Ok(())
 }
 
