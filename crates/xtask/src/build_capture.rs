@@ -295,6 +295,7 @@ fn diagnostic_observations(bytes: &[u8]) -> BTreeSet<&'static str> {
 
 const MAX_RUST_DIAGNOSTICS: usize = 16;
 const MAX_DIAGNOSTIC_LINE: usize = 128 * 1024;
+const MAX_DIAGNOSTIC_CATALOG: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 struct RustDiagnostic {
@@ -318,10 +319,12 @@ struct RustDiagnostics {
 // The only public paths come from the checked-in architecture catalog, never
 // from compiler-owned strings. A missing/invalid catalog exports no locations.
 fn diagnostic_sources(bytes: &[u8]) -> Option<BTreeSet<String>> {
-    if bytes.len() > MAX_CAPTURE {
+    if bytes.len() > MAX_DIAGNOSTIC_CATALOG {
         return None;
     }
-    let value: Value = day2::json::decode(bytes).ok()?;
+    // This is the same bounded persisted-evidence decoder used by the
+    // architecture gate, not the smaller application/worker transport decoder.
+    let value: Value = day2::json::decode_evidence(bytes).ok()?;
     if value.get("version")?.as_u64()? != 1 {
         return None;
     }
@@ -824,6 +827,22 @@ mod tests {
                 "text":[{"text":"PRIVATE-SOURCE"}],"label":"PRIVATE-LABEL",
                 "expansion":{"span":{"file_name":"PRIVATE-EXPANSION"}}}]
         })
+    }
+
+    #[test]
+    fn full_current_architecture_catalog_admits_a_coded_error_location() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let bytes = read_bounded(&root.join("architecture-rules.json"))?;
+        let sources = diagnostic_sources(&bytes).context("complete reviewed source catalog")?;
+        let source = "crates/xtask/src/build_capture.rs";
+        assert!(sources.contains(source));
+        let summary = rust_diagnostics(&serde_json::to_vec(&coded_diagnostic(source))?, &sources);
+        assert!(summary.catalog_available);
+        assert_eq!(summary.records.len(), 1);
+        assert_eq!(summary.records[0].source, source);
+        assert_eq!(summary.records[0].code, "E0308");
+        assert!(diagnostic_sources(&vec![b' '; MAX_DIAGNOSTIC_CATALOG + 1]).is_none());
+        Ok(())
     }
 
     #[test]
