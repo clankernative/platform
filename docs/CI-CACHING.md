@@ -44,10 +44,12 @@ checkout, so a failed-jobs-only rerun does not request a nonexistent new-attempt
 cache artifact. This exception applies only to compiler-cache data, never to
 verification receipts or prepared executables. This keeps cache eviction during
 a long campaign from forcing a cold verifier rebuild inside the join's unchanged
-twenty-minute budget. Artifact
-transport has the same two-minute deadline and one retry; failures leave the
-ordinary compilation path in place. The archive contains only content-addressed
-compiler data, never a verifier to install directly or a reusable test outcome.
+twenty-minute budget. Retained compiler-action downloads have a four-minute
+deadline and one retry; extraction has a separate four-minute deadline. These
+multi-gigabyte archives can exceed the small verification receipts' two-minute
+download deadlines, which remain unchanged. The archive contains only
+content-addressed compiler data, never a verifier to install directly or a
+reusable test outcome.
 Bazel still builds the current source verifier, and native-output selection,
 source/byte/mode admission and complete receipt composition still follow it.
 The Linux preparation join also restores the completed test compiler archive
@@ -59,6 +61,27 @@ failed-jobs-only rerun, falls back to current-source compilation. The archive is
 extracted only into the content-addressed compiler cache; current-source bootstrap,
 native context, authenticated preparation selection and all three-part admission
 remain mandatory. Runtime shards retain their existing same-run cache restore.
+
+The independent source-keyed Actions cache restore stays in place: the early
+bootstrap archive can lack compiler actions needed by later verification checks.
+Cache downloads and extraction remain optional; their failure cannot skip
+bootstrap, native context checks or receipt admission. The sum of retained-cache
+step ceilings (4 + 4 + 4 minutes) stays below the unchanged twenty-minute
+admission-job deadline. This is not a guarantee that other setup, a cold rebuild
+and composition will finish in the remaining time.
+
+For context, [run 42547688656, attempt 1](https://github.com/clankernative/platform/actions/runs/42547688656/attempts/1)
+downloaded a 3.10 GB retained archive in 42 seconds, but extraction reached its
+old 120-second cutoff. The preceding source-keyed restore had already taken
+149 seconds. Bootstrap still finished in 97 seconds; later composition was
+cancelled after 688 seconds at the job deadline. In
+[preparation job 128924396181](https://github.com/clankernative/platform/actions/runs/42539746772/job/128924396181),
+both downloads of the completed compiler-action archive reached their old
+120-second cutoffs; that run retained a 3.50 GB archive. These observations
+establish too-short transfer/extraction deadlines, not a cold-bootstrap failure
+or proof that runner contention caused them. Existing logs do not separate
+extraction CPU time from disk contention. Cache transport remains optional and checksum
+verification, source/run binding, test coverage and job deadlines are unchanged.
 
 The independent Mac compatibility workflow publishes its own completed compiler actions directly
 after native admission in that existing Mac job; no second Mac allocation or queue artifact is
