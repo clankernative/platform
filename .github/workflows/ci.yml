@@ -266,6 +266,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Require zero swap before compiler bootstrap
+        id: linux_swap_preflight
+        timeout-minutes: 1
+        run: grep -Fxq 0 /sys/fs/cgroup/memory.swap.max
       - name: Create the single-job Rust codegen jobserver
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
@@ -722,6 +726,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Require zero swap before compiler bootstrap
+        id: linux_swap_preflight
+        timeout-minutes: 1
+        run: grep -Fxq 0 /sys/fs/cgroup/memory.swap.max
       - name: Create the single-job Rust codegen jobserver
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
@@ -1061,6 +1069,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Require zero swap before compiler bootstrap
+        id: linux_swap_preflight
+        timeout-minutes: 1
+        run: grep -Fxq 0 /sys/fs/cgroup/memory.swap.max
       - name: Create the single-job Rust codegen jobserver
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
@@ -1538,6 +1550,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Require zero swap before compiler bootstrap
+        id: linux_swap_preflight
+        timeout-minutes: 1
+        run: grep -Fxq 0 /sys/fs/cgroup/memory.swap.max
       - name: Create the single-job Rust codegen jobserver
         run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
