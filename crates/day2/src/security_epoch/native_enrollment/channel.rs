@@ -995,7 +995,7 @@ mod tests {
         let initial = Digest::new(b"retained peer data");
         assert!(left.notify_idle(PeerChannel::Storage, &initial, 1).is_err());
         assert!(left.notify_idle(PeerChannel::Storage, &initial, 2).is_err());
-        assert!(left.refused);
+        assert!(left.refused.get());
     }
 
     struct ChildOwner(std::process::Child);
