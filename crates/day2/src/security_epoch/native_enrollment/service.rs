@@ -45,7 +45,7 @@ struct FrozenCohort {
 enum RestoreRoleDecision {
     Fresh,
     Spent,
-    Retained(protocol::SignedRestoreRoleActivation),
+    Retained(Box<protocol::SignedRestoreRoleActivation>),
 }
 
 struct AuthorizedRestore {
@@ -58,7 +58,7 @@ struct AuthorizedRestore {
 enum RestoreAppAdmission {
     Available,
     Started,
-    Retained(AuthorizedRestoreApp),
+    Retained(Box<AuthorizedRestoreApp>),
 }
 
 impl RestoreAppAdmission {
@@ -76,7 +76,7 @@ impl RestoreAppAdmission {
             matches!(self, Self::Started),
             "native_restore_app_cohort_repeated"
         );
-        *self = Self::Retained(app);
+        *self = Self::Retained(Box::new(app));
         Ok(())
     }
 }
@@ -1568,7 +1568,7 @@ fn restore_role_decision(
         )?;
         // Retain BEFORE the possibly ambiguous send. This state deliberately
         // remains frozen and is neither delivery nor future cold eligibility.
-        cohort.role_decision = RestoreRoleDecision::Retained(signed.clone());
+        cohort.role_decision = RestoreRoleDecision::Retained(Box::new(signed.clone()));
         let sent = channel.send(
             &Packet::RestoreRoleGrant {
                 activation: Box::new(signed),
@@ -1689,7 +1689,7 @@ fn restore_app_confirmation(
             anyhow::bail!("native_restore_role_decision_missing")
         };
         ensure!(
-            *retained == decision,
+            retained.as_ref() == &decision,
             "native_restore_prepared_decision_changed"
         );
         let completion = attempt
