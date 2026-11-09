@@ -82,6 +82,28 @@ content-addressed compiler data, never a verifier to install directly or a
 reusable test outcome.
 Bazel still builds the current source verifier, and native-output selection,
 source/byte/mode admission and complete receipt composition still follow it.
+
+The final compose recipe only joins authenticated evidence; it does not build
+fixtures. It therefore does not initialize the optional fixture-output cache or
+rebuild a configured verifier just to calculate that cache's identity. The current
+source bootstrap, architecture/compiler/proof checks, all prepared executable and
+native fixture admission, live producer authentication and complete receipt join
+still run. Every other recipe retains its existing fixture-cache behavior, and
+the final job keeps its twenty-minute deadline. This distinction matters because
+a warm initial bootstrap does not guarantee a second configured build stays warm.
+
+In the November 9 sample, PR 433's compose took 2m34s and PR 448's took 2m28s.
+PR 446's successful rerun took 12m56s in compose: its captured configured-verifier
+build alone took 11m17s, with 568 local action-cache misses and 565 Rust compiler
+action requests. Those requests are not a native code-generation count. The
+corresponding build in 433 and 448 took about thirteen seconds and one action
+request. Both older 446 and 448 merge-group jobs hit twenty minutes after their
+architecture checks, before that captured build returned, although their initial
+bootstraps took only forty and thirty-six seconds. Their exact unfinished build
+outcomes remain unknown. Skipping unused fixture-cache initialization removes the
+known redundant build; it does not skip source compilation or reuse test outcomes.
+The hosted follow-up must measure the new compose time before claiming a saving.
+
 The Linux preparation join also restores the completed test compiler archive
 from its own run and attempt before building its current verifier. This protects
 its unchanged twenty-minute budget when cache-service entries were evicted after

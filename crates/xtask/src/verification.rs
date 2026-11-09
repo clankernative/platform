@@ -555,7 +555,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut simulation = None;
     let mut simulation_started = None;
     let mut timings = Timings::new();
-    let mut cache = load_cache(root, scope, &snapshot)?;
+    let mut cache = campaign_fixture_cache(recipe, scope, &snapshot, || {
+        load_cache(root, scope, &snapshot)
+    })?;
     let mut fixture_ui = if recipe == "verify-prepare-part-fixtures" {
         Some(crate::ui_dependency::Session::new(root)?)
     } else {
@@ -1347,6 +1349,23 @@ fn fixture_compiler_identity(root: &Path) -> Result<shards::BuildIdentity> {
         )?,
     )?;
     Ok(compiler)
+}
+
+fn campaign_fixture_cache(
+    recipe: &str,
+    scope: &str,
+    snapshot: &str,
+    load: impl FnOnce() -> Result<VerificationCache>,
+) -> Result<VerificationCache> {
+    if recipe == "verify-compose" {
+        // Compose only admits and joins existing evidence. It never builds a
+        // fixture, so initializing optional fixture reuse can only add a
+        // redundant configured compiler build. All prepared-output and fixture
+        // admission still runs independently below, before the Roc join.
+        Ok(VerificationCache::empty(scope, snapshot, None))
+    } else {
+        load()
+    }
 }
 
 fn load_cache(root: &Path, scope: &str, snapshot: &str) -> Result<VerificationCache> {
@@ -2149,6 +2168,138 @@ fn required_steps(scope: &str) -> Result<Vec<&'static str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composition_never_initializes_an_unused_fixture_compiler() -> Result<()> {
+        let cache = campaign_fixture_cache("verify-compose", "linux", "current", || {
+            panic!("composition must not invoke the optional fixture compiler")
+        })?;
+        assert_eq!(cache.format, CACHE_FORMAT);
+        assert_eq!(cache.scope, "linux");
+        assert_eq!(cache.snapshot, "current");
+        assert!(cache.compiler.is_none());
+        assert!(cache.fixtures.is_empty());
+        let (_, recipe) = day2::automation::SOURCES
+            .iter()
+            .find(|(name, _)| *name == "ops/Verify.roc")
+            .unwrap();
+        let recipe = std::str::from_utf8(recipe)
+            .unwrap()
+            .split_once("compose! = |host!| {")
+            .unwrap()
+            .1
+            .split_once("\n\t}")
+            .unwrap()
+            .0;
+        assert_eq!(recipe.matches("Capability.call!").count(), 2);
+        assert!(recipe.contains("Capability.call!(\"verify-join\", \"{}\", host!)?"));
+        assert!(recipe.contains(
+            "Capability.call!(\"verify-receipt\", Json.to_str({ scope: \"linux\" }), host!)"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn composition_cache_selection_is_wired_before_complete_admission() {
+        fn admitted_setup(source: &str) -> bool {
+            let Some((_, execute)) = source.split_once("\npub fn execute(") else {
+                return false;
+            };
+            let Some((execute, _)) = execute.split_once("\n}\n") else {
+                return false;
+            };
+            let execute = execute.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut previous = None;
+            for guard in [
+                "architecture::check(root)?;",
+                "architecture_dependencies::check(root)?;",
+                "architecture_proofs::check(root)?;",
+                "let snapshot = verification_snapshot(",
+                "let runner = workflows::build(root)?;",
+                "let mut cache = campaign_fixture_cache(recipe, scope, &snapshot, || { load_cache(root, scope, &snapshot) })?;",
+                "let mut prepared = if recipe.starts_with(\"verify-shard-\") || recipe == \"verify-compose\" {",
+                "let prepared = shards::load(root, &snapshot, recipe.strip_prefix(\"verify-shard-\"))?;",
+                "fixtures = shards::fixtures(root, &prepared)?;",
+                "day2::automation::run(&runner, &arguments, |request| {",
+            ] {
+                let Some(position) = execute.find(guard) else {
+                    return false;
+                };
+                if previous.is_some_and(|previous| previous >= position) {
+                    return false;
+                }
+                previous = Some(position);
+            }
+            execute.matches("let mut cache =").count() == 1
+        }
+
+        let source = include_str!("verification.rs");
+        assert!(admitted_setup(source));
+        for (current, changed) in [
+            (
+                "campaign_fixture_cache(recipe, scope, &snapshot, || {\n        load_cache(root, scope, &snapshot)\n    })?",
+                "load_cache(root, scope, &snapshot)?",
+            ),
+            (" || recipe == \"verify-compose\"", ""),
+            (
+                "let prepared = shards::load(root, &snapshot, recipe.strip_prefix(\"verify-shard-\"))?;",
+                "let prepared = unadmitted;",
+            ),
+            ("fixtures = shards::fixtures(root, &prepared)?;", ""),
+        ] {
+            let mutant = source.replacen(current, changed, 1);
+            assert_ne!(mutant, source);
+            assert!(!admitted_setup(&mutant));
+        }
+    }
+
+    #[test]
+    fn other_campaigns_preserve_fixture_cache_loading_and_errors() -> Result<()> {
+        for recipe in [
+            "verify-fast",
+            "verify-reports",
+            "verify",
+            "verify-prepare",
+            "verify-prepare-join",
+            "verify-mac",
+            "verify-private-build-probe",
+            "verify-prepare-part-inputs",
+            "verify-prepare-part-fixtures",
+            "verify-prepare-part-tests",
+            "verify-shard-workspace-day2",
+            "verify-shard-workspace-day2-runtime",
+            "verify-shard-workspace-control",
+            "verify-shard-workspace-other",
+            "verify-shard-simulation",
+            "verify-shard-parallel-runtime",
+            "control-verify",
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let cache = campaign_fixture_cache(recipe, "scope", "current", || {
+                calls.set(calls.get() + 1);
+                let mut cache = VerificationCache::empty("retained", "retained", None);
+                cache.fixtures.insert(
+                    "reports".into(),
+                    FixtureCacheEntry {
+                        artifact: "retained-artifact".into(),
+                        snapshot: "retained-snapshot".into(),
+                    },
+                );
+                Ok(cache)
+            })?;
+            assert_eq!(calls.get(), 1);
+            assert_eq!(cache.scope, "retained");
+            assert_eq!(cache.fixtures["reports"].artifact, "retained-artifact");
+            assert_eq!(cache.fixtures["reports"].snapshot, "retained-snapshot");
+            assert!(
+                campaign_fixture_cache(recipe, "scope", "current", || {
+                    Err(std::io::Error::other("fixture cache read failed").into())
+                })
+                .is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn storage_capacity_uses_checked_numeric_blocks_and_inodes() -> Result<()> {
