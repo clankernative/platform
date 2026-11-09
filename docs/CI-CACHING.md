@@ -16,6 +16,36 @@ read their trusted base caches and save only under GitHub's isolated PR ref;
 those entries cannot seed main or another PR. Existing repository storage limits
 and eviction apply. No paid cache allowance is enabled.
 
+GitHub release archives fetched by Bazel use the existing checksum-addressed
+repository cache, restored before compilation on both hosts. In CI, formatting
+uses the same configured Bazel command builder as ordinary builds and queries,
+so `@rules_rust//:rustfmt` receives the shared repository and compiled-action
+cache flags before the run target and argument separator. It still formats the
+complete authored target catalog, with the same check mode and deadline.
+
+This matters during GitHub's anonymous-download incidents: an unconfigured
+formatter can fetch a release again even after a successful source-cache restore.
+In [run 42568126112, attempt 3](https://github.com/clankernative/platform/actions/runs/42568126112/attempts/3),
+the inputs lane restored the main source cache but failed fetching `rules_license`
+1.0.0 during formatting. A recent retained source-cache snapshot contains that
+archive with its independently checked pinned SHA-256. The formatter previously
+omitted the CI cache configuration, so it used Bazel's default cache instead.
+
+Prefer this existing cache path over adding a credential helper for this failure.
+The exact dependency-key snapshot stays first; a miss may restore an older
+dependency-key snapshot within the same OS/architecture partition. Only the
+download cache's `content_addressable` tree is restored, excluding resolved
+repository contents and compiled outputs. Bazel checks each requested archive
+against its current checksum before use, so older snapshots cannot supply a
+different pinned version or replace current verification. Publication scopes,
+primary dependency keys and downloader retry limits stay unchanged. No token is added to
+Bazel's environment, arguments, repository cache or native build sandbox. A cold
+or evicted cache still needs network access. A future authenticated miss path
+would need separately reviewed token lifetime and host/redirect scope, a helper
+available before Bazel bootstraps, and proof that GitHub authenticates the release
+endpoint it uses. This cache correction does not authenticate cold downloads or
+make cached compiler/test outcomes authoritative.
+
 Main publishes the Linux bootstrap actions it already compiled. Its queue-proof
 fast path skips native preparation, so the separate Linux publisher downloads only
 the compiler-action archives from the exact origin run and attempt admitted by

@@ -125,6 +125,8 @@ jobs:
         with:
           path: ~/.cache/bazel-repo/content_addressable
           key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+          restore-keys: |
+            day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
@@ -292,6 +294,8 @@ jobs:
         with:
           path: ~/.cache/bazel-repo/content_addressable
           key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+          restore-keys: |
+            day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
@@ -748,6 +752,8 @@ jobs:
         with:
           path: ~/.cache/bazel-repo/content_addressable
           key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+          restore-keys: |
+            day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
@@ -1087,6 +1093,8 @@ jobs:
         with:
           path: ~/.cache/bazel-repo/content_addressable
           key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+          restore-keys: |
+            day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
@@ -1564,6 +1572,8 @@ jobs:
         with:
           path: ~/.cache/bazel-repo/content_addressable
           key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+          restore-keys: |
+            day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
@@ -1953,6 +1963,8 @@ jobs:
         with:
           path: ~/.cache/bazel-repo/content_addressable
           key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}
+          restore-keys: |
+            day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:

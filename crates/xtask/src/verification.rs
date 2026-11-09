@@ -2915,6 +2915,32 @@ mod tests {
     }
 
     #[test]
+    fn source_archive_fallback_stays_host_partitioned_and_outside_compiler_outputs() {
+        for name in [
+            "verify-queue-receipt",
+            "verify-prepare-parts",
+            "verify-prepare",
+            "verify-shards",
+            "verify",
+            "verification-diagnostics",
+            "verify-mac-compatibility",
+        ] {
+            let job = ci_job(name);
+            let restore = ci_step(&job, "Restore checksum-addressed Bazel source downloads");
+            assert!(restore.contains("path: ~/.cache/bazel-repo/content_addressable"));
+            assert!(restore.contains("key: day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock') }}"));
+            assert!(restore.contains("restore-keys: |\n            day2-bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-"));
+            assert!(restore.contains("continue-on-error: true"));
+            assert!(!restore.contains("bazel-disk") && !restore.contains("build-out/"));
+            assert!(
+                job.find("Restore checksum-addressed Bazel source downloads")
+                    .unwrap()
+                    < job.find("//crates/xtask:xtask").unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn remote_bazel_cache_cannot_publish_shared_pr_outputs_or_skip_fresh_mac_checks() {
         let job = ci_job("verify-mac-compatibility");
         let cache = ci_step(&job, "Restore Bazel compilation and repository caches");
