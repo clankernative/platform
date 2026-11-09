@@ -348,11 +348,8 @@ fn pinned_root_helper_exposes_named_replacement_and_refuses_symlinks_and_foreign
     std::fs::rename(&path, temporary.path().join("old-root"))?;
     std::fs::create_dir(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
-    assert_ne!(
-        restore_private_directory(&restore_pin_directory(&volume)?)?,
-        original
-    );
-    assert_eq!(restore_private_directory(&held)?, original);
+    assert!(restore_private_directory(&restore_pin_directory(&volume)?)? != original);
+    assert!(restore_private_directory(&held)? == original);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
     assert!(restore_private_directory(&restore_pin_directory(&volume)?).is_err());
     std::fs::remove_dir(&path)?;
