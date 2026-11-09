@@ -106,7 +106,7 @@ impl AuthorizedRestoreApp {
         costs: &Costs,
     ) -> Result<super::restore_peer_wire::RestoreAppStatement> {
         self.check(costs)?;
-        let requested: Result<_> = (|| {
+        let requested: Result<_> = {
             let admitted = &self.admission.statement;
             Ok(super::restore_peer_wire::RestoreAppStatement {
                 certificate: self.certificate.clone(),
@@ -118,7 +118,7 @@ impl AuthorizedRestoreApp {
                     deadline_ns: admitted.effective_deadline_ns,
                 },
             })
-        })();
+        };
         let checked = self.check(costs);
         if requested.is_err() || checked.is_err() {
             self.original.refuse();

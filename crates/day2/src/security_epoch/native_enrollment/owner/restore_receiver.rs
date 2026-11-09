@@ -1329,10 +1329,10 @@ impl ReceiverRendezvous {
                 self.admission.check(storage)?;
                 #[cfg(target_os = "linux")]
                 {
-                    if let Some(root) = &self.receiver.root {
-                        if let Some(directory) = &self.receiver.directory {
-                            directory.check(root)?;
-                        }
+                    if let Some(root) = &self.receiver.root
+                        && let Some(directory) = &self.receiver.directory
+                    {
+                        directory.check(root)?;
                     }
                     for socket in [&self.receiver.listener, &self.receiver.socket]
                         .into_iter()
