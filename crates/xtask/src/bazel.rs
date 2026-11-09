@@ -664,15 +664,21 @@ pub(crate) fn docs(root: &Path) -> Result<()> {
     run_with_budget(root, &mut command, Duration::from_secs(12_600))
 }
 
-pub(crate) fn format(root: &Path, check: bool) -> Result<()> {
-    let mut command = command(root);
-    command.args(["run", "@rules_rust//:rustfmt", "--"]);
-    // Query authored targets explicitly: generated evidence and strict-policy
-    // fixture output bases may contain foreign BUILD files beneath the root.
-    command.args(targets(root)?.into_iter().map(|target| target.label));
+fn format_command(root: &Path, selected: &[Target], check: bool) -> Result<Command> {
+    let mut command = build_command(root, "run", None)?;
+    command.args(["@rules_rust//:rustfmt", "--"]);
+    command.args(selected.iter().map(|target| &target.label));
     if check {
         command.args(["--", "--check"]);
     }
+    Ok(command)
+}
+
+pub(crate) fn format(root: &Path, check: bool) -> Result<()> {
+    // Query authored targets explicitly: generated evidence and strict-policy
+    // fixture output bases may contain foreign BUILD files beneath the root.
+    let selected = targets(root)?;
+    let mut command = format_command(root, &selected, check)?;
     run_with_budget(root, &mut command, Duration::from_secs(600))
 }
 
@@ -1145,6 +1151,58 @@ pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formatter_preserves_all_targets_and_receives_bazel_configuration_before_operands()
+    -> Result<()> {
+        use std::ffi::OsStr;
+        let root = Path::new("/reviewed/workspace");
+        let labels = ["//crates/example:lib", "//crates/example:unit_lib"];
+        let selected = labels
+            .iter()
+            .map(|label| Target {
+                package: "example".into(),
+                directory: "crates/example".into(),
+                target: "example".into(),
+                kind: vec!["lib".into()],
+                label: (*label).into(),
+                test: false,
+                source: "crates/example/src/lib.rs".into(),
+            })
+            .collect::<Vec<_>>();
+        let configured = build_command(root, "run", None)?;
+        let prefix = configured.get_args().collect::<Vec<_>>();
+        if prefix
+            .iter()
+            .any(|value| value.to_string_lossy().starts_with("--config=ci-"))
+        {
+            for flag in ["--config=ci-", "--disk_cache=", "--repository_cache="] {
+                assert!(
+                    prefix
+                        .iter()
+                        .any(|value| value.to_string_lossy().starts_with(flag)),
+                    "formatter must inherit the shared CI compiler and source-cache configuration"
+                );
+            }
+        }
+        for check in [false, true] {
+            let command = format_command(root, &selected, check)?;
+            let actual = command.get_args().collect::<Vec<_>>();
+            // Do not print process arguments or inherited environment on failure.
+            assert!(actual.starts_with(&prefix));
+            let mut expected = vec!["@rules_rust//:rustfmt", "--", labels[0], labels[1]];
+            if check {
+                expected.extend(["--", "--check"]);
+            }
+            assert!(
+                actual[prefix.len()..]
+                    .iter()
+                    .copied()
+                    .eq(expected.iter().map(OsStr::new))
+            );
+        }
+        Ok(())
+    }
 
     fn scripted_download(
         statuses: Vec<u16>,
