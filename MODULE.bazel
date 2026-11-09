@@ -88,7 +88,12 @@ crate.annotation(
 crate.annotation(
     crate = "libsqlite3-sys",
     version = "0.39.1",
-    patches = ["//build/bazel:patches/libsqlite3-sys-0.39.1-filestat-identity.patch"],
+    patches = [
+        "//build/bazel:patches/libsqlite3-sys-0.39.1-filestat-identity.patch",
+        # SQLite 3.54.1 registers WALSTAT under FILESTAT, unlike its definition.
+        # Match the definition guard; keep FILESTAT without enabling WALSTAT.
+        "//build/bazel:patches/libsqlite3-sys-0.39.1-walstat-registration.patch",
+    ],
     patch_args = ["-p1"],
     build_script_env = {"LIBSQLITE3_FLAGS": "-DSQLITE_ENABLE_FILESTAT"},
 )

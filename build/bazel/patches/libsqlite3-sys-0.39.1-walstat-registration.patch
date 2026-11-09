@@ -1,0 +1,11 @@
+--- a/sqlite3/sqlite3.c
++++ b/sqlite3/sqlite3.c
+@@ -137687,6 +137687,8 @@
+ #endif
+ #if defined(SQLITE_DEBUG) || defined(SQLITE_ENABLE_FILESTAT)
+     FUNCTION(sqlite_filestat,    1, 0, 0, filestatFunc     ),
++#endif
++#if defined(SQLITE_DEBUG) || defined(SQLITE_ENABLE_WALSTAT)
+     FUNCTION(sqlite_walstat,     1, 0, 0, walstatFunc      ),
+ #endif
+     FUNCTION(ltrim,              1, 1, 0, trimFunc         ),
