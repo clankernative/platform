@@ -9933,7 +9933,12 @@ mod activation_transport_source_tests {
                 completed,
                 &mut loan
             )),
-            syn::parse_quote!((*pending).finish(&mut storage, self.frame.peer, completed, &mut loan)),
+            syn::parse_quote!((*pending).finish(
+                &mut storage,
+                self.frame.peer,
+                completed,
+                &mut loan
+            )),
             syn::parse_quote!(activation.check(
                 &mut storage,
                 self.frame.peer,
