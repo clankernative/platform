@@ -432,15 +432,26 @@ pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
 fn drain_artifact(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
     // Immutable admitted declarations can exclude this pump without opening
     // SQLite. Queue emptiness itself must be read under the SQL-unit guard.
-    let commands: Vec<_> = runtime
+    let operations: Vec<_> = runtime
         .artifact()
         .contract()
         .operations
         .iter()
-        .filter(|operation| operation.kind == "command")
+        .filter(|operation| {
+            operation.kind == "command" || (runtime.rolling() && operation.kind == "query")
+        })
         .map(|operation| operation.name.clone())
+        .chain(
+            runtime
+                .artifact()
+                .contract()
+                .pages
+                .iter()
+                .filter(|_| runtime.rolling())
+                .map(|page| format!("$page.{}", page.name)),
+        )
         .collect();
-    if commands.is_empty() {
+    if operations.is_empty() {
         return Ok(Vec::new());
     }
     let mut completed = Vec::new();
@@ -448,7 +459,7 @@ fn drain_artifact(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
     let mut first_error = None;
     for _ in 0..budget {
         let next = runtime
-            .sql_read(|connection| select_ready(runtime, connection, &commands, &interrupted))?;
+            .sql_read(|connection| select_ready(runtime, connection, &operations, &interrupted))?;
         let Some(ReadyInvocation {
             id,
             parent,
@@ -498,11 +509,11 @@ struct ReadyInvocation {
 fn select_ready(
     runtime: &Runtime,
     connection: &Connection,
-    commands: &[String],
+    operations: &[String],
     interrupted: &[String],
 ) -> Result<Option<ReadyInvocation>> {
     runtime.check_binding(connection)?;
-    let next: Option<(String,String,String)> = connection.query_row("SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1", params![runtime.artifact().id(),serde_json::to_string(commands)?,serde_json::to_string(interrupted)?,runtime.host().now_ms()?], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+    let next: Option<(String,String,String)> = connection.query_row("SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1", params![runtime.artifact().id(),serde_json::to_string(operations)?,serde_json::to_string(interrupted)?,runtime.host().now_ms()?], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
     next.map(|(id, parent, operation)| {
         Ok(ReadyInvocation {
             continuing: crate::execution::phase(connection, &id)?.is_some(),
