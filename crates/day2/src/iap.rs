@@ -28,6 +28,7 @@
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -320,6 +321,25 @@ impl Verifier {
 /// list. So the first subject seen for an address is kept, and a different one
 /// is refused until an operator decides the address has changed hands.
 pub(crate) fn bind_subject(db: &rusqlite::Connection, verified: &Verified, now: i64) -> Result<()> {
+    // Most requests repeat an existing binding. A no-op INSERT still takes
+    // SQLite's writer lock and can refuse an otherwise valid account while a
+    // business transaction is active. Always check the current row, read-only.
+    let bound: Option<String> = db
+        .query_row(
+            "SELECT subject FROM day2_principals WHERE email=?1",
+            [&verified.email],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(bound) = bound {
+        ensure!(
+            bound == verified.subject,
+            crate::error::Failure::PrincipalSubjectChanged
+        );
+        return Ok(());
+    }
+    // Concurrent first requests may bind the address before this INSERT.
+    // Re-read its winner; the supplied assertion cannot replace that subject.
     db.execute(
         "INSERT INTO day2_principals(email,subject,first_seen) VALUES(?1,?2,?3)
          ON CONFLICT(email) DO NOTHING",

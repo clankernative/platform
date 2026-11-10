@@ -439,6 +439,52 @@ fn an_address_stays_with_the_first_account_seen_for_it() {
 }
 
 #[test]
+fn known_accounts_can_authenticate_while_a_business_writer_is_active() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("principals.sqlite");
+    let db = rusqlite::Connection::open(&path)?;
+    db.pragma_update(None, "journal_mode", "WAL")?;
+    db.execute_batch(crate::audit::PRINCIPALS_DDL)?;
+    let original = Verified {
+        email: "ada@example.com".into(),
+        subject: "accounts.google.com:1".into(),
+    };
+    bind_subject(&db, &original, NOW)?;
+    let mut writer = rusqlite::Connection::open(&path)?;
+    let pending = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    db.busy_timeout(std::time::Duration::ZERO)?;
+
+    bind_subject(&db, &original, NOW + 1)?;
+    let successor = Verified {
+        subject: "accounts.google.com:2".into(),
+        ..original.clone()
+    };
+    assert_eq!(
+        classify(&bind_subject(&db, &successor, NOW + 2).unwrap_err()),
+        Failure::PrincipalSubjectChanged
+    );
+    let unseen = Verified {
+        email: "grace@example.com".into(),
+        ..original.clone()
+    };
+    assert_eq!(
+        classify(&bind_subject(&db, &unseen, NOW + 3).unwrap_err()),
+        Failure::StorageBusy
+    );
+    pending.rollback()?;
+    bind_subject(&db, &unseen, NOW + 4)?;
+    assert_eq!(
+        db.query_row(
+            "SELECT first_seen FROM day2_principals WHERE email=?1",
+            [&original.email],
+            |row| row.get::<_, i64>(0),
+        )?,
+        NOW
+    );
+    Ok(())
+}
+
+#[test]
 fn a_genuine_assertion_over_the_size_bound_is_refused_unread() {
     let (signer, keys, verifier) = setup();
     let padded = signer.sign(with(json!({"padding": "x".repeat(MAX_ASSERTION_BYTES)})));
