@@ -112,7 +112,13 @@ completion/audit evidence, but get no durable preparation journal by default.
 
 Local web serving owns the scheduler. It resumes accepted commands independently
 of HTTP request capacity; multiple schedulers converge on transaction receipts and
-provider idempotency. Admission captures the active authority epoch and revision.
+provider idempotency. The ordinary same-node rolling profile also drains accepted
+queries interrupted before execution. The successor executes them under their
+original admitted artifact, so a pending read cannot strand source work and
+prevent rollout completion. Queries do not acquire command execution stripes:
+their guarded read/completion transaction arbitrates duplicates without deferring
+ordinary pages behind unrelated commands. Native storage keeps its command-only pump
+and immutable declaration exclusion. Admission captures the active authority epoch and revision.
 Every later phase requires that stamp in its database transaction. External
 calls require a separate transactional dispatch admission, followed by the
 provider call outside the business transaction. A changed stamp or binding blocks
