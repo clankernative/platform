@@ -529,7 +529,8 @@ operations; `rollout` always selects a Deployment. `request_id` is for
 and `mark-activated`, which take the same request file;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
 optional. The tooling image must come from the same platform build as the
-target app image: its `day2 admit` is the store admission the rehearsal runs.
+target app image: activation rehearses its `day2 admit-maintenance` with the
+request's operator, the same admission used after the live activation.
 
 What the session guarantees, whatever the recipe does:
 
@@ -549,8 +550,10 @@ What the session guarantees, whatever the recipe does:
   a disposable copy in the pod: the in-pod backup, moved under the target
   instance once its verified local copy exists (`/srv/day2/admission/`, on the
   pod's scratch volume, never the app's) and removed with it afterwards, the
-  shown migration plan applied, the target activated, then `day2 admit` from
-  the target build's tooling image. `day2 admit` is the store admission
+  shown migration plan applied, the target activated, then `day2 admit-maintenance`
+  from the target build's tooling image with the same operator. An unauthorized
+  operator is refused on this copy before the live migration fence. This runs
+  the store admission
   `day2-serve` runs at startup (`deployment::admit_store`: storage binding and
   authority, platform upgrades, the private credential schema, the authority's
   security requirements, and the private OAuth schema of an app with OAuth

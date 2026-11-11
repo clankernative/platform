@@ -2126,8 +2126,8 @@ impl Session {
     }
 
     /// Rehearse what the fence would commit to on a disposable copy, then open
-    /// the copy with the target build's store admission (`day2 admit`, the code
-    /// day2-serve runs on its store at startup). The copy is the verified
+    /// the copy with the target build's maintenance admission and the actual
+    /// request operator. The copy is the verified
     /// in-pod backup, moved under the target instance once its verified local
     /// copy is the session's backup, and removed with it after the admission;
     /// it is migrated with the shown plan and activated for the target exactly
@@ -2319,9 +2319,9 @@ impl Session {
                 self.exec(&["cp", TARGET, ADMISSION_INSTANCE], Duration::from_secs(60))?;
             }
         }
-        let admission_args = if self.operation == Operation::Activate
-            && self.request.kind(self.operation) == WorkloadKind::Deployment
-        {
+        // Rehearse the same maintenance operation and operator used after the
+        // fence, including for exclusive StatefulSet activation.
+        let admission_args = if self.operation == Operation::Activate {
             vec![
                 DAY2,
                 "admit-maintenance",
