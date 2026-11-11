@@ -138,6 +138,7 @@ struct FakeCluster {
     backup_receipt: Option<Value>,
     backup_failed: bool,
     fail_on: Option<String>,
+    denied_operator: Option<String>,
     drop_on_copy_out: Option<String>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
     replicas: u64,
@@ -400,6 +401,10 @@ impl Cluster for FakeCluster {
                 json!({"requested":true}).to_string()
             }
             ["exec", _, "--", DAY2, "admit", instance, app] => self.admit(instance, app)?,
+            ["exec", _, "--", DAY2, "admit-maintenance", instance, app, operator] => {
+                ensure!(self.denied_operator.as_deref() != Some(*operator), "Error: maintenance_operator_required");
+                self.admit(instance, app)?
+            }
             ["exec", pod, "--", "find", STATE, "-maxdepth", "1", "-type", "f", "-exec", "stat", "-c", "%s %n", "{}", "+"] => {
                 assert!(pod.ends_with("-measure"), "measured from the probe");
                 self.volume
@@ -500,6 +505,7 @@ impl Harness {
             released_instance: None,
             helper_service: false,
             fail_on: None,
+            denied_operator: None,
             drop_on_copy_out: None,
             annotations: self.annotations.clone(),
             replicas: 1,
@@ -734,6 +740,66 @@ fn a_store_the_target_refuses_stops_activate_before_the_fence_and_restores_the_a
 }
 
 #[test]
+fn an_unauthorized_maintenance_operator_is_refused_before_the_fence_and_restores_the_app()
+-> Result<()> {
+    let harness = Harness::new();
+    let operator = "infra@example.com";
+    let path = harness.request(Operation::Activate);
+    let mut request: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    request["operator"] = operator.into();
+    fs::write(&path, serde_json::to_vec(&request)?)?;
+    let mut session = Session::open(
+        "activate",
+        &path,
+        harness.tools(
+            |cluster| cluster.denied_operator = Some(operator.into()),
+            true,
+        ),
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    let error = format!("{:#}", session.admission().unwrap_err());
+    assert!(
+        error.starts_with("target_store_admission_refused")
+            && error.contains("maintenance_operator_required"),
+        "{error}"
+    );
+    ensure!(
+        session.confirm().is_err()
+            && session.fence().is_err()
+            && session.migration("apply").is_err(),
+        "an unauthorized maintenance operator never reaches the fence"
+    );
+    drop(session);
+    assert!(harness.deleted_pod() && harness.scaled_up());
+    assert_eq!(*harness.asked.borrow(), 0);
+    assert!(harness.annotations.borrow().is_empty());
+    let calls: Vec<String> = harness
+        .calls
+        .borrow()
+        .iter()
+        .map(|call| call.join(" "))
+        .collect();
+    assert!(calls.iter().any(|call| call.contains(&format!(
+        "admit-maintenance {ADMISSION_INSTANCE} example_app {operator}"
+    ))));
+    for call in calls {
+        if call.contains("migration-apply") || call.contains(r#"\"activate\""#) {
+            assert!(call.contains(ADMISSION_INSTANCE), "{call}");
+        }
+    }
+    assert!(
+        !harness
+            .journal()
+            .iter()
+            .any(|step| step == "fence" || step == "authority-activated")
+    );
+    Ok(())
+}
+
+#[test]
 fn after_the_fence_the_old_image_is_never_restarted() -> Result<()> {
     let harness = Harness::new();
     let mut session = harness.open(
@@ -817,9 +883,12 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     let at_call = |needle: &str| calls.iter().position(|call| call.contains(needle)).unwrap();
     assert!(
         at_call(&format!("migration-apply {ADMISSION_INSTANCE}"))
-            < at_call(&format!("admit {ADMISSION_INSTANCE}"))
-            && at_call(&format!("admit {ADMISSION_INSTANCE}"))
-                < at_call(&format!("migration-apply {TARGET}"))
+            < at_call(&format!(
+                "admit-maintenance {ADMISSION_INSTANCE} example_app ops@example.com"
+            ))
+            && at_call(&format!(
+                "admit-maintenance {ADMISSION_INSTANCE} example_app ops@example.com"
+            )) < at_call(&format!("migration-apply {TARGET}"))
     );
     // The rehearsal moved the in-pod backup into its copy and removed both.
     let scratch: Vec<String> = fs::read_dir(harness.directory.path().join("pod/srv/day2"))?
