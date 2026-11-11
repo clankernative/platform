@@ -6,6 +6,8 @@ set -euo pipefail
 
 state_dir=/var/lib/gitea-instance-ci
 install -d -m 0700 "$state_dir"
+exec 9>"$state_dir/startup.lock"
+flock -n 9 || { echo "runner startup is already running" >&2; exit 1; }
 
 if [[ ! -f "$state_dir/provisioned-v1" ]]; then
   export DEBIAN_FRONTEND=noninteractive
@@ -74,6 +76,47 @@ docker rm -f act_runner >/dev/null 2>&1 || true
 env_file_args=()
 [[ -f "$state_dir/registration.env" ]] && env_file_args=(--env-file "$state_dir/registration.env")
 install -d -m 0700 /var/lib/gitea-instance-ci-docker
+%{ if warm_job_image ~}
+# Job images live in the inner daemon, not the host daemon. Warm the reviewed
+# digest there before starting the configured runner. The temporary daemon and
+# runner must never open the shared data directory concurrently. Registry auth
+# stays in RAM in the temporary container, outside the job containers.
+existing_runner="$(docker container ls --all --quiet --filter 'name=^/act_runner$')"
+[[ -z "$existing_runner" ]] || { echo "prior runner was not removed" >&2; exit 1; }
+docker rm -f act_runner_prewarm >/dev/null 2>&1 || true
+trap 'docker rm -f act_runner_prewarm >/dev/null 2>&1 || true' EXIT
+docker run -d --rm --name act_runner_prewarm --privileged \
+  -v /var/lib/gitea-instance-ci-docker:/var/lib/docker \
+  --tmpfs /root/.docker:rw,nosuid,nodev,noexec,mode=0700 \
+  -e DOCKER_TLS_CERTDIR= \
+  -e DOCKER_HOST=unix:///var/run/docker.sock \
+  --entrypoint dockerd-entrypoint.sh \
+  '${controller_image}' dockerd --host=unix:///var/run/docker.sock
+
+ready=false
+for _ in $(seq 1 30); do
+  if timeout 3 docker exec act_runner_prewarm docker info >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+[[ "$ready" == true ]] || { echo "job-image daemon did not become ready" >&2; exit 1; }
+if ! docker exec act_runner_prewarm docker image inspect '${job_image}' >/dev/null 2>&1; then
+  access_token="$(curl -fsS --connect-timeout 5 --max-time 30 --retry 3 \
+    -H 'Metadata-Flavor: Google' \
+    'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+    | jq -er '.access_token | select(type == "string" and length > 0)')"
+  printf '%s' "$access_token" | docker exec -i act_runner_prewarm \
+    docker login -u oauth2accesstoken --password-stdin '${registry_host}' >/dev/null
+  unset access_token
+  timeout 600 docker exec act_runner_prewarm docker pull '${job_image}'
+fi
+[[ "$(docker exec act_runner_prewarm docker image inspect --format '{{.Os}}/{{.Architecture}}' '${job_image}')" == linux/amd64 ]] || \
+  { echo "job image must be native linux/amd64" >&2; exit 1; }
+docker stop --time 60 act_runner_prewarm >/dev/null
+trap - EXIT
+%{ endif ~}
 docker run -d --name act_runner --restart=always --privileged \
   -v "$state_dir:/data" \
   -v /var/lib/gitea-instance-ci-docker:/var/lib/docker \

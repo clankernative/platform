@@ -60,6 +60,25 @@ accepts its canonical URL as the sole audience, matching the auth action's
 default. Use the root's `workload_identity_provider`, `oidc_audience` and
 `runner_label` outputs in the instance-owned workflow configuration.
 
+For a private compiled job image, set `job_image` to its reviewed digest and
+`job_image_repository_id` to its Artifact Registry repository in the selected
+project and region. The VM gains `artifactregistry.reader` on that repository
+only. Startup stops the prior controller, then opens the persistent inner Docker
+data directory in a temporary daemon using the same pinned controller image.
+An already cached digest needs no token or pull. A cold cache uses the VM's
+short-lived metadata token and a RAM-backed Docker configuration, then verifies
+`linux/amd64` and stops the temporary daemon before starting the configured
+runner. Prewarm failure leaves the configured runner stopped. Neither registry
+credentials nor a Docker socket are mounted in job containers.
+
+Select the image in workflows only after verifying this path on the actual
+runner. Apply the repository-reader/startup inputs first, then run startup while
+the runner has no active job and record cold/warm inner-daemon pulls before the
+workflow image change. Updating instance metadata alone does not run startup
+on an already running VM. Keep the persistent Docker data directory across
+reboots; a host-daemon image pull does not populate the job daemon's cache.
+The root's source-only tests do not establish this live qualification.
+
 App compilation and release still execute the platform's pinned
 [operations recipes](../../../ops/README.md), under their existing guards.
 This runner is for infrastructure plans/applies, not an alternative app builder

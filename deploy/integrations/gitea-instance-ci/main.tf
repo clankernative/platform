@@ -45,6 +45,8 @@ locals {
     runner_label        = var.runner_label
     job_image           = var.job_image
     controller_image    = var.runner_controller_image
+    warm_job_image      = var.job_image_repository_id != ""
+    registry_host       = "${var.region}-docker.pkg.dev"
     registration_secret = "projects/${var.project_id}/secrets/${var.runner_registration_secret_id}/versions/latest"
   })
 }
@@ -132,6 +134,16 @@ resource "google_project_iam_member" "runner_log_writer" {
   member  = "serviceAccount:${google_service_account.runner.email}"
 }
 
+resource "google_artifact_registry_repository_iam_member" "runner_job_image" {
+  count = var.job_image_repository_id == "" ? 0 : 1
+
+  project    = var.project_id
+  location   = var.region
+  repository = var.job_image_repository_id
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${google_service_account.runner.email}"
+}
+
 resource "google_compute_instance" "runner" {
   name           = var.name
   project        = var.project_id
@@ -176,10 +188,21 @@ resource "google_compute_instance" "runner" {
     enable_integrity_monitoring = true
   }
 
+  lifecycle {
+    precondition {
+      condition = (
+        var.job_image_repository_id == "" ||
+        startswith(var.job_image, "${var.region}-docker.pkg.dev/${var.project_id}/${var.job_image_repository_id}/")
+      )
+      error_message = "The private job image must belong to the selected repository in this project and region."
+    }
+  }
+
   depends_on = [
     google_compute_firewall.runner_iap_ssh,
     google_compute_router_nat.runner,
     google_secret_manager_secret_iam_member.runner_registration,
+    google_artifact_registry_repository_iam_member.runner_job_image,
   ]
 }
 
