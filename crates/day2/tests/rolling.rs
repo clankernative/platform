@@ -4,7 +4,7 @@ use day2::{
     authority_state::LocalOperator,
     invocations,
     rollout::{self, Phase},
-    store::{Fault, Runtime},
+    store::{ActingAs, Fault, Runtime},
 };
 use serde_json::{Value, json};
 use std::{
@@ -69,6 +69,215 @@ fn prepare(world: &World, candidate: &Path, operator: &LocalOperator) -> Result<
         "release-one",
         operator,
     )?;
+    Ok(())
+}
+
+fn hold_execution_stripe(world: &World, id: &str) -> Result<fs::File> {
+    let stripe = u16::from_str_radix(&day2::digest(id.as_bytes())[7..11], 16)? % 1024;
+    let directory = world.runtime.db().parent().unwrap().join("execution-locks");
+    fs::create_dir_all(&directory)?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join(format!("reports-{stripe}.lock")))?;
+    lock.try_lock()?;
+    Ok(lock)
+}
+
+#[test]
+fn deferred_queries_drain_under_their_original_artifact_after_source_exit() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    let reads = [
+        ("api-query-deferred-source-read", "reports.list"),
+        ("page-deferred-source-read", "$page.reports"),
+    ];
+    for (id, operation) in reads {
+        world.runtime.accept_on_behalf_of(
+            operation,
+            ActingAs {
+                authenticated: "viewer",
+                actor: "viewer",
+                trigger: day2::audit::Trigger::Request,
+            },
+            id,
+            &json!({"after":"","limit":1}),
+            100,
+        )?;
+    }
+    let replacement = Runtime::load(&candidate, "reports")?;
+    // The source performs no more execution. Its successor owns the backlog.
+    let completed = invocations::drain(&replacement, 16)?;
+    for (id, operation) in reads {
+        assert!(
+            completed
+                .iter()
+                .any(|entry| entry.id == id && entry.status == "success")
+        );
+        let receipt = invocations::status(&replacement, id, "viewer")?;
+        assert_eq!(receipt.status, "success");
+        let trace = replacement.trace(id)?;
+        assert_eq!(trace.artifact, world.runtime.artifact().id());
+        assert_eq!(trace.request.context.actor, "viewer");
+        assert_eq!(trace.request.operation, operation);
+    }
+    assert_eq!(
+        invocations::status(&replacement, reads[0].0, "viewer")?.result["items"],
+        json!([])
+    );
+    assert_eq!(
+        invocations::status(&replacement, reads[1].0, "viewer")?.result["items"],
+        json!([])
+    );
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Serving,
+        Phase::Draining,
+        &operator,
+    )?;
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Draining,
+        Phase::Complete,
+        &operator,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn deferred_queries_keep_their_captured_authority_when_grants_are_restored() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    let id = "api-query-revoked-source-read";
+    world.runtime.accept(
+        "reports.list",
+        "viewer",
+        id,
+        &json!({"after":"","limit":1}),
+        100,
+    )?;
+    let replacement = Runtime::load(&candidate, "reports")?;
+    let mut actors = std::collections::BTreeSet::new();
+    world.change_policy(|policy| {
+        actors = std::mem::take(&mut policy.operations.get_mut("reports.list").unwrap().actors);
+    })?;
+    // Activation already fences pending work; the pump must leave it blocked.
+    assert!(invocations::drain(&replacement, 16)?.is_empty());
+    world.change_policy(|policy| {
+        policy.operations.get_mut("reports.list").unwrap().actors = actors;
+    })?;
+    assert!(invocations::drain(&replacement, 16)?.is_empty());
+    let receipt = invocations::status(&replacement, id, "viewer")?;
+    assert_eq!(receipt.status, "blocked");
+    assert!(receipt.result.is_null());
+    assert_eq!(
+        world
+            .runtime
+            .invoke(
+                "reports.list",
+                "viewer",
+                "fresh-read",
+                &json!({"after":"","limit":1}),
+                101,
+                Fault::None
+            )?
+            .status,
+        "success"
+    );
+    Ok(())
+}
+
+#[test]
+fn queries_do_not_wait_for_unrelated_command_execution_stripes() -> Result<()> {
+    let (world, _, _) = fixture()?;
+    let id = "command-shaped-query-identity";
+    let lock = hold_execution_stripe(&world, id)?;
+    let outcome = world.runtime.invoke(
+        "reports.list",
+        "viewer",
+        id,
+        &json!({"after":"","limit":1}),
+        100,
+        Fault::None,
+    )?;
+    assert_eq!(outcome.status, "success");
+    assert_eq!(outcome.result["items"], json!([]));
+    drop(lock);
+    Ok(())
+}
+
+#[test]
+fn pages_do_not_wait_for_unrelated_command_execution_stripes() -> Result<()> {
+    let (world, _, _) = fixture()?;
+    let id = "command-shaped-page-identity";
+    let lock = hold_execution_stripe(&world, id)?;
+    let outcome =
+        world
+            .runtime
+            .render_page("reports", "viewer", id, &json!({"after":"","limit":1}), 100)?;
+    assert_eq!(outcome.status, "success");
+    assert_eq!(outcome.result["items"], json!([]));
+    drop(lock);
+    Ok(())
+}
+
+#[test]
+fn overlapping_query_executors_return_the_same_committed_receipt() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    let source = world.runtime.instance_path().to_path_buf();
+    for attempt in 0..8 {
+        let id = format!("overlapping-read-{attempt}");
+        world.runtime.accept(
+            "reports.list",
+            "viewer",
+            &id,
+            &json!({"after":"","limit":1}),
+            100,
+        )?;
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| -> Result<_> {
+            let first = scope.spawn(|| -> Result<_> {
+                let runtime = Runtime::load(&source, "reports");
+                barrier.wait();
+                runtime?.execute(&id, Fault::None)
+            });
+            let second = scope.spawn(|| -> Result<_> {
+                let runtime = Runtime::load(&candidate, "reports");
+                barrier.wait();
+                runtime?.execute(&id, Fault::None)
+            });
+            Ok((first.join().unwrap()?, second.join().unwrap()?))
+        })?;
+        assert_eq!(outcomes.0.status, "success");
+        assert_eq!(outcomes.1.status, "success");
+        assert_eq!(outcomes.0.result, outcomes.1.result);
+    }
     Ok(())
 }
 
@@ -547,17 +756,8 @@ fn a_paused_executor_keeps_ownership_until_its_kernel_lock_is_released() -> Resu
         Phase::Serving,
         &operator,
     )?;
-    let id = "paused-command";
-    let stripe = u16::from_str_radix(&day2::digest(id.as_bytes())[7..11], 16)? % 1024;
-    let directory = world.runtime.db().parent().unwrap().join("execution-locks");
-    fs::create_dir_all(&directory)?;
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(directory.join(format!("reports-{stripe}.lock")))?;
-    lock.try_lock()?;
+    let id = "api-query-shaped-command-identity";
+    let lock = hold_execution_stripe(&world, id)?;
     let replacement = Runtime::load(&candidate, "reports")?;
     let deferred = replacement.invoke(
         "reports.submit",

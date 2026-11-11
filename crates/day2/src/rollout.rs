@@ -1064,6 +1064,21 @@ pub(crate) fn execution_lock(runtime: &Runtime, id: &str) -> Result<Option<Invoc
     if !runtime.rolling() || runtime.uses_native_storage() {
         return Ok(Some(InvocationOwner { _file: None }));
     }
+    let query = runtime.sql_read(|db| {
+        runtime.check_binding(db)?;
+        let operation: String = db.query_row(
+            "SELECT operation FROM day2_invocations WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok(runtime.artifact().route(&operation)?.kind == "query")
+    })?;
+    if query {
+        // Queries have no external writes and their read/completion transaction
+        // already arbitrates duplicates. Unrelated command stripes must not
+        // turn ordinary page reads into pending invocations.
+        return Ok(Some(InvocationOwner { _file: None }));
+    }
     let directory = runtime
         .db()
         .parent()

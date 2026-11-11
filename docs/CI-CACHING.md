@@ -10,11 +10,14 @@ bind compiler inputs. [Build commands and profiles](BAZEL.md) describe the graph
 The source-controlled disk-cache garbage-collection settings are size/age targets,
 not a hard per-snapshot bound; batch invocations do not establish that idle
 collection ran. Actual saved/restored bytes and repository eviction must be
-measured. OS/architecture partitions cannot supply another host's executables. Main
-pushes and merge-group workflows may publish shared caches. Pull requests may
-read their trusted base caches and save only under GitHub's isolated PR ref;
-those entries cannot seed main or another PR. Existing repository storage limits
-and eviction apply. No paid cache allowance is enabled.
+measured. OS/architecture partitions cannot supply another host's executables.
+Only trusted main can publish shared Linux actions. Its bootstrap job may publish
+the actions it just compiled before queue-proof admission or the full gate. The
+separate publisher of completed-test archives still requires an admitted full
+proof and exact origin. Pull requests may read trusted base caches; saves from a
+PR's Mac compatibility job remain under its isolated PR ref and cannot seed main
+or another PR. Existing storage limits and eviction apply; no paid allowance is
+enabled.
 
 GitHub release archives fetched by Bazel use the existing checksum-addressed
 repository cache, restored before compilation on both hosts. In CI, formatting
@@ -63,25 +66,14 @@ A missing archive, including on a
 failed-jobs-only rerun with an earlier producer attempt, merely loses this optional
 acceleration. It cannot supply a receipt or skip the current verification gate.
 
-The final verification join restores a separate bootstrap compiler-action snapshot
-captured immediately after tests preparation compiles the current verifier, before
-test compilation grows the cache. Both Linux archives use fast gzip compression;
-the bootstrap no longer depends on the larger post-test archive completing within
-its three-minute deadline. It uses the exact checkout SHA and its own preparation
-run, or the exact queue origin already admitted by the reuse guard. The first
-complete bootstrap snapshot is immutable across attempts of that same run and
-checkout, so a failed-jobs-only rerun does not request a nonexistent new-attempt
-cache artifact. This exception applies only to compiler-cache data, never to
-verification receipts or prepared executables. This keeps cache eviction during
-a long campaign from forcing a cold verifier rebuild inside the join's unchanged
-twenty-minute budget. Retained compiler-action downloads have a four-minute
-deadline and one retry; extraction has a separate four-minute deadline. These
-multi-gigabyte archives can exceed the small verification receipts' two-minute
-download deadlines, which remain unchanged. The archive contains only
-content-addressed compiler data, never a verifier to install directly or a
-reusable test outcome.
-Bazel still builds the current source verifier, and native-output selection,
-source/byte/mode admission and complete receipt composition still follow it.
+Linux preparation, runtime shards and final verification restore only the
+existing source-keyed Actions compiler cache before their mandatory current-source
+Bazel bootstrap. They do not download compiler-action artifacts from preparation.
+A cache miss, error or four-minute restore timeout falls back to ordinary source
+compilation. A failed restore first discards its incomplete compiler-cache data;
+cleanup failure refuses the job. No cached verifier is installed directly, and
+cache status cannot waive compilation, native context, authenticated artifact
+selection, source/byte/mode admission or the complete receipt join.
 
 The final compose recipe only joins authenticated evidence; it does not build
 fixtures. It therefore does not initialize the optional fixture-output cache or
@@ -89,8 +81,8 @@ rebuild a configured verifier just to calculate that cache's identity. The curre
 source bootstrap, architecture/compiler/proof checks, all prepared executable and
 native fixture admission, live producer authentication and complete receipt join
 still run. Every other recipe retains its existing fixture-cache behavior, and
-the final job keeps its twenty-minute deadline. This distinction matters because
-a warm initial bootstrap does not guarantee a second configured build stays warm.
+the final job still has a separate orchestration deadline. A warm initial bootstrap
+does not guarantee an otherwise redundant configured build would stay warm.
 
 In the November 9 sample, PR 433's compose took 2m34s and PR 448's took 2m28s.
 PR 446's successful rerun took 12m56s in compose: its captured configured-verifier
@@ -104,36 +96,35 @@ outcomes remain unknown. Skipping unused fixture-cache initialization removes th
 known redundant build; it does not skip source compilation or reuse test outcomes.
 The hosted follow-up must measure the new compose time before claiming a saving.
 
-The Linux preparation join also restores the completed test compiler archive
-from its own run and attempt before building its current verifier. This protects
-its unchanged twenty-minute budget when cache-service entries were evicted after
-the tests lane finished. Download and extraction remain optional, with bounded
-transport and one retry. Missing data, including an earlier-attempt producer on a
-failed-jobs-only rerun, falls back to current-source compilation. The archive is
-extracted only into the content-addressed compiler cache; current-source bootstrap,
-native context, authenticated preparation selection and all three-part admission
-remain mandatory. Runtime shards retain their existing same-run cache restore.
+Preparation and final verification each have a thirty-minute orchestration
+budget. The measured cold bootstrap reached 17m31s; admission and output work
+takes about five minutes. Four optional cache minutes, one cleanup minute,
+eighteen estimated cold-build minutes and five admission minutes total twenty-eight,
+leaving orchestration margin. This is an estimate from observed work, not a
+worst-case throughput guarantee. The unused configured-verifier rebuild has been
+removed from compose, so its former extra budget is unnecessary. These job budgets
+do not change any test, provider/native/authority clock, target, filter, concurrency,
+memory, swap or PID limit. Runtime shards keep their existing job budgets.
 
-The independent source-keyed Actions cache restore stays in place: the early
-bootstrap archive can lack compiler actions needed by later verification checks.
-Cache downloads and extraction remain optional; their failure cannot skip
-bootstrap, native context checks or receipt admission. The sum of retained-cache
-step ceilings (4 + 4 + 4 minutes) stays below the unchanged twenty-minute
-admission-job deadline. This is not a guarantee that other setup, a cold rebuild
-and composition will finish in the remaining time.
+In [453's merge group](https://github.com/clankernative/platform/actions/runs/42670487237/job/129352726024),
+two optional downloads of a 3.93 GB archive each reached four minutes, then the
+current guard built in 5m35s. The job reached output retention but hit its old
+20-minute deadline. Its existing 3.03 GB Actions cache had downloaded in about
+28 seconds on the same runner; general bandwidth starvation is not established.
+The separate bootstrap snapshot was 3.54 GB and was offered to all six shards
+and final verify. Removing those duplicate handoffs avoids about 28.73 GB of
+scheduled consumer payload per full entry before retries, plus the bootstrap
+snapshot upload. These are scheduled bytes, not completed-transfer measurements.
 
-For context, [run 42547688656, attempt 1](https://github.com/clankernative/platform/actions/runs/42547688656/attempts/1)
-downloaded a 3.10 GB retained archive in 42 seconds, but extraction reached its
-old 120-second cutoff. The preceding source-keyed restore had already taken
-149 seconds. Bootstrap still finished in 97 seconds; later composition was
-cancelled after 688 seconds at the job deadline. In
-[preparation job 128924396181](https://github.com/clankernative/platform/actions/runs/42539746772/job/128924396181),
-both downloads of the completed compiler-action archive reached their old
-120-second cutoffs; that run retained a 3.50 GB archive. These observations
-establish too-short transfer/extraction deadlines, not a cold-bootstrap failure
-or proof that runner contention caused them. Existing logs do not separate
-extraction CPU time from disk contention. Cache transport remains optional and checksum
-verification, source/run binding, test coverage and job deadlines are unchanged.
+The [same-source successful PR run](https://github.com/clankernative/platform/actions/runs/42657572318)
+had neither compiler artifact: preparation passed in 12m14s and final verify in
+11m26s, using ordinary source builds. A successful retained cache can still save
+build time, so removal is not a general speedup claim. Actual before/after build
+and admission times must be measured. The completed-test archive remains only
+for the existing post-full-gate trusted-main publisher; its origin/run/attempt
+and full-proof publication rules are unchanged. There is no separate bootstrap
+snapshot or compatibility fallback. Prepared programs, native fixtures and test
+receipts retain their existing authenticated transport and freshness requirements.
 
 The independent Mac compatibility workflow publishes its own completed compiler actions directly
 after native admission in that existing Mac job; no second Mac allocation or queue artifact is
@@ -188,7 +179,8 @@ suites, control simulation and the reviewed parallel compiler probes. The three
 Linux sandbox/compilation launchers are a separate mandatory inventory. Their
 current bytes, permissions and native target are admitted before installation
 beside test supervisors and rechecked after transport. Shards execute the
-prepared programs without rebuilding their platform code.
+prepared test programs; their current-source bootstrap builds the admission guard,
+not another set of test programs.
 
 The native Apple Silicon lane retains the real isolated-build and installation
 campaigns, its source-owned ABI/worker/confinement/formatter/compiler inventory
