@@ -199,7 +199,7 @@ variable "runner_controller_image" {
   default     = "docker.io/gitea/act_runner@sha256:578925b4bdec5f60d93b5ba766cf02f2f9f32b1c8a4ec665ddf4d53d45f683c7"
 
   validation {
-    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.runner_controller_image))
+    condition     = can(regex("^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$", var.runner_controller_image))
     error_message = "runner_controller_image must be pinned by digest."
   }
 }
@@ -210,8 +210,19 @@ variable "job_image" {
   default     = "docker.io/gitea/runner-images@sha256:7c285821aab503cffc21024bbb216822a86326c1b22ea53e341492e2aa6df245"
 
   validation {
-    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.job_image))
+    condition     = can(regex("^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$", var.job_image))
     error_message = "job_image must be pinned by digest."
+  }
+}
+
+variable "job_image_repository_id" {
+  description = "Optional Artifact Registry repository in project_id/region holding job_image. Grants the VM read access and warms the pinned image in the job daemon before starting the configured runner. Empty keeps public-image startup."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.job_image_repository_id == "" || can(regex("^[a-z][a-z0-9_-]{0,62}$", var.job_image_repository_id))
+    error_message = "job_image_repository_id must be empty or a repository ID."
   }
 }
 

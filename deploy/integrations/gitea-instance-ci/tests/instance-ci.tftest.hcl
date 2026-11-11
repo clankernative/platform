@@ -131,3 +131,92 @@ run "images_must_be_pinned" {
 
   expect_failures = [var.job_image]
 }
+
+run "public_images_add_no_registry_authority_or_prewarm_daemon" {
+  command = plan
+
+  assert {
+    condition = (
+      length(google_artifact_registry_repository_iam_member.runner_job_image) == 0 &&
+      !strcontains(google_compute_instance.runner.metadata["startup-script"], "--name act_runner_prewarm")
+    )
+    error_message = "public-image startup must not add private registry access or a second daemon"
+  }
+}
+
+run "private_job_image_has_only_its_repository_reader_and_inner_daemon_cache" {
+  command = plan
+
+  variables {
+    job_image_repository_id = "ci"
+    job_image               = "us-central1-docker.pkg.dev/example-project/ci/instance-job@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+
+  assert {
+    condition = (
+      length(google_artifact_registry_repository_iam_member.runner_job_image) == 1 &&
+      google_artifact_registry_repository_iam_member.runner_job_image[0].project == "example-project" &&
+      google_artifact_registry_repository_iam_member.runner_job_image[0].location == "us-central1" &&
+      google_artifact_registry_repository_iam_member.runner_job_image[0].repository == "ci" &&
+      google_artifact_registry_repository_iam_member.runner_job_image[0].role == "roles/artifactregistry.reader" &&
+      google_artifact_registry_repository_iam_member.runner_job_image[0].member == "serviceAccount:instance-ci-plan@example-project.iam.gserviceaccount.com"
+    )
+    error_message = "the VM may only read the selected repository; jobs retain their separate provisioning identities"
+  }
+
+  assert {
+    condition = (
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "--name act_runner_prewarm") &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "--tmpfs /root/.docker:rw,nosuid,nodev,noexec,mode=0700") &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "docker image inspect 'us-central1-docker.pkg.dev/example-project/ci/instance-job@sha256:") &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "--password-stdin 'us-central1-docker.pkg.dev'") &&
+      !strcontains(google_compute_instance.runner.metadata["startup-script"], "-v /var/run/docker.sock") &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "docker_host: \"-\"")
+    )
+    error_message = "private image startup must warm the job daemon with ephemeral auth and keep sockets out of jobs"
+  }
+}
+
+run "private_image_cannot_borrow_another_repositorys_reader" {
+  command = plan
+
+  variables {
+    job_image_repository_id = "ci"
+    job_image               = "us-central1-docker.pkg.dev/example-project/other/instance-job@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+
+  expect_failures = [google_compute_instance.runner]
+}
+
+run "private_image_cannot_borrow_another_projects_reader" {
+  command = plan
+
+  variables {
+    job_image_repository_id = "ci"
+    job_image               = "us-central1-docker.pkg.dev/another-project/ci/instance-job@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+
+  expect_failures = [google_compute_instance.runner]
+}
+
+run "private_image_cannot_borrow_another_regions_reader" {
+  command = plan
+
+  variables {
+    job_image_repository_id = "ci"
+    job_image               = "europe-west1-docker.pkg.dev/example-project/ci/instance-job@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+
+  expect_failures = [google_compute_instance.runner]
+}
+
+run "pinned_image_names_cannot_contain_shell_syntax" {
+  command = plan
+
+  variables {
+    job_image               = "bad'image@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    runner_controller_image = "bad'image@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+
+  expect_failures = [var.job_image, var.runner_controller_image]
+}
