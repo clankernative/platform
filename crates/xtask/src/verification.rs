@@ -1364,11 +1364,11 @@ fn campaign_fixture_cache(
     snapshot: &str,
     load: impl FnOnce() -> Result<VerificationCache>,
 ) -> Result<VerificationCache> {
-    if recipe == "verify-compose" {
-        // Compose only admits and joins existing evidence. It never builds a
-        // fixture, so initializing optional fixture reuse can only add a
-        // redundant configured compiler build. All prepared-output and fixture
-        // admission still runs independently below, before the Roc join.
+    if matches!(recipe, "verify-prepare-join" | "verify-compose") {
+        // These recipes only admit and join existing evidence. They never build
+        // a fixture, so optional fixture reuse adds a redundant configured
+        // compiler build. Complete prepared-output and fixture admission still
+        // runs through the ordinary authenticated join paths.
         Ok(VerificationCache::empty(scope, snapshot, None))
     } else {
         load()
@@ -2191,15 +2191,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn composition_never_initializes_an_unused_fixture_compiler() -> Result<()> {
-        let cache = campaign_fixture_cache("verify-compose", "linux", "current", || {
-            panic!("composition must not invoke the optional fixture compiler")
-        })?;
-        assert_eq!(cache.format, CACHE_FORMAT);
-        assert_eq!(cache.scope, "linux");
-        assert_eq!(cache.snapshot, "current");
-        assert!(cache.compiler.is_none());
-        assert!(cache.fixtures.is_empty());
+    fn evidence_joins_never_initialize_an_unused_fixture_compiler() -> Result<()> {
+        for (recipe, scope) in [("verify-prepare-join", "all"), ("verify-compose", "linux")] {
+            let cache = campaign_fixture_cache(recipe, scope, "current", || {
+                panic!("{recipe} must not invoke the optional fixture compiler")
+            })?;
+            assert_eq!(cache.format, CACHE_FORMAT);
+            assert_eq!(cache.scope, scope);
+            assert_eq!(cache.snapshot, "current");
+            assert!(cache.compiler.is_none());
+            assert!(cache.fixtures.is_empty());
+        }
         let (_, recipe) = day2::automation::SOURCES
             .iter()
             .find(|(name, _)| *name == "ops/Verify.roc")
@@ -2216,6 +2218,13 @@ mod tests {
         assert!(recipe.contains("Capability.call!(\"verify-join\", \"{}\", host!)?"));
         assert!(recipe.contains(
             "Capability.call!(\"verify-receipt\", Json.to_str({ scope: \"linux\" }), host!)"
+        ));
+        let (_, recipe) = day2::automation::SOURCES
+            .iter()
+            .find(|(name, _)| *name == "ops/Verify.roc")
+            .unwrap();
+        assert!(std::str::from_utf8(recipe)?.contains(
+            "prepare_join! = |host!| Capability.call!(\"verify-preparation-join\", \"{}\", host!)"
         ));
         Ok(())
     }
@@ -2281,7 +2290,6 @@ mod tests {
             "verify-reports",
             "verify",
             "verify-prepare",
-            "verify-prepare-join",
             "verify-mac",
             "verify-private-build-probe",
             "verify-prepare-part-inputs",
