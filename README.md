@@ -107,6 +107,10 @@ are separate from the core runtime deployment stacks.
 using a native artifact on a target kernel. Cloud infrastructure tests are mocked
 contract tests; they are not evidence that a company's live deployment is qualified.
 
+The [online runtime/SDK upgrade plan](docs/ONLINE-RUNTIME-UPGRADES.md) describes
+the proposed runtime-pair protocol and qualification. Current runtime activation
+remains an exclusive operation.
+
 ## Read next
 
 - [Public Reports example](examples/reports/README.md) and [application layout](docs/APP-LAYOUT.md)

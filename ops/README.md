@@ -189,3 +189,7 @@ permission. Cache maintenance failures never waive any verification obligation.
 Preview the read-only plan with
 `bazel run //crates/xtask:xtask -- ci-cache-preview linux` (or `mac`). The preview
 prints IDs and changes neither cache contents nor billing/storage limits.
+
+The [online runtime/SDK upgrade plan](../docs/ONLINE-RUNTIME-UPGRADES.md)
+describes proposed runtime-pair admission, recovery and qualification. Existing
+`maintain activate` remains exclusive; this document does not enable the proposal.
