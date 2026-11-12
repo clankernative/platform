@@ -172,7 +172,9 @@ fn demonstration(action: Action) -> Demonstration {
         Action::WorkspaceDirectoryCapture
         | Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchy
-        | Action::WorkspaceDirectoryPage => Demonstration::NativeAdapterRead,
+        | Action::WorkspaceDirectoryPage
+        | Action::WorkspaceDirectoryHierarchyDelivery
+        | Action::WorkspaceDirectoryDeliveryPage => Demonstration::NativeAdapterRead,
         // The live capture pipeline against Carta's own wire world, then a
         // local read of the published capture.
         Action::CartaSnapshot | Action::CartaRecord => Demonstration::AdmittedAdapterRead,
@@ -952,6 +954,8 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
                 | Action::WorkspaceDirectoryUserPath
                 | Action::WorkspaceDirectoryHierarchy
                 | Action::WorkspaceDirectoryPage
+                | Action::WorkspaceDirectoryHierarchyDelivery
+                | Action::WorkspaceDirectoryDeliveryPage
         ),
         "not a Workspace Directory native read"
     );
@@ -977,6 +981,23 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         let result = serde_json::to_string(&crate::workspace_directory::collect_user_path(
             input, &mut port,
         )?)?;
+        let after = worlds(&database)?;
+        return Ok(Observed {
+            result,
+            before,
+            after,
+        });
+    }
+    if matches!(
+        action,
+        Action::WorkspaceDirectoryHierarchyDelivery | Action::WorkspaceDirectoryDeliveryPage
+    ) {
+        let (delivery, staged) = crate::workspace_directory::deliver_hierarchy(input, &mut port)?;
+        let result = if action == Action::WorkspaceDirectoryHierarchyDelivery {
+            serde_json::to_string(&delivery)?
+        } else {
+            staged.pages[0].clone()
+        };
         let after = worlds(&database)?;
         return Ok(Observed {
             result,

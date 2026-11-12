@@ -1889,6 +1889,8 @@ fn provider_resource_fixture(
                 Action::WorkspaceDirectoryUserPath,
                 Action::WorkspaceDirectoryHierarchy,
                 Action::WorkspaceDirectoryPage,
+                Action::WorkspaceDirectoryHierarchyDelivery,
+                Action::WorkspaceDirectoryDeliveryPage,
             ],
         ),
         (

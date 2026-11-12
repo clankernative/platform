@@ -38,6 +38,20 @@ WorkspaceDirectory :: [].{
 
 	Page : { items : List(OrgUnit), next : U64, done : Bool }
 
+	# A complete hierarchy handed to this invocation. There is no expiry: its pages
+	# exist only until this preparation ends, so persist what you keep. `id` is
+	# the content identity; an unchanged hierarchy delivers the same `id`.
+	HierarchyDelivery : {
+		id : Str,
+		customer_id : Str,
+		org_unit_count : U64,
+		page_count : U64,
+		captured_at : I64,
+	}
+
+	# At most 256 units, one `Tx.create_many` batch, in stable ID order.
+	DeliveryPage : { items : List(OrgUnit), page : U64, done : Bool }
+
 	capture : Context -> Observe(Capture)
 	capture = |context| Resource.bind(context, "workspace_directory").and_then(capture_with)
 
@@ -80,6 +94,33 @@ WorkspaceDirectory :: [].{
 			parsed : Try(HierarchyCapture, _)
 			parsed = Json.parse(raw)
 			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_hierarchy"))
+		},
+	)
+
+	deliver_hierarchy : Context -> Observe(HierarchyDelivery)
+	deliver_hierarchy = |context| Resource.bind(context, "workspace_directory").and_then(deliver_hierarchy_with)
+
+	deliver_hierarchy_with : Resource -> Observe(HierarchyDelivery)
+	deliver_hierarchy_with = |resource| Observe.capability(
+		"workspace_directory.hierarchy.v2",
+		Json.to_str({ handle: Resource.token(resource) }),
+	).and_then(
+		|raw| {
+			parsed : Try(HierarchyDelivery, _)
+			parsed = Json.parse(raw)
+			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_delivery"))
+		},
+	)
+
+	delivery_page_with : Resource, Str, U64 -> Observe(DeliveryPage)
+	delivery_page_with = |resource, capture_id, page| Observe.capability(
+		"workspace_directory.page.v2",
+		Json.to_str({ handle: Resource.token(resource), capture_id, page }),
+	).and_then(
+		|raw| {
+			parsed : Try(DeliveryPage, _)
+			parsed = Json.parse(raw)
+			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_delivery_page"))
 		},
 	)
 

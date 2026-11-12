@@ -634,13 +634,16 @@ pub(crate) fn record_use(
         params![resource.handle,resource.grant.resource.id,resource.grant.policy.id],|row|row.get(0),
     )?;
     ensure!(
-        // A validated local cache plan, or a record read from a published live
-        // Carta capture, consumes no provider calls. Local work remains bounded
+        // A validated local cache plan, a page of this invocation's staged
+        // delivery, or a record read from a published live Carta capture,
+        // consumes no provider calls. Local work remains bounded
         // by the host's observation/transaction budgets.
         (resource.planned_calls > 0
             || matches!(
                 resource.action,
-                Action::WorkspaceDirectoryHierarchy | Action::CartaRecord
+                Action::WorkspaceDirectoryHierarchy
+                    | Action::WorkspaceDirectoryDeliveryPage
+                    | Action::CartaRecord
             ))
             && u64::try_from(count)?
                 .checked_add(resource.planned_calls)

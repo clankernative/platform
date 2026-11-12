@@ -398,6 +398,12 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
         input.clone(),
         &mut NativeFixturePort(units.clone()),
     )?;
+    let (delivery, staged) = day2::workspace_directory::deliver_hierarchy(
+        input.clone(),
+        &mut NativeFixturePort(units.clone()),
+    )?;
+    let delivery_json = serde_json::to_string(&delivery)?;
+    let delivery_page = staged.pages[0].clone();
     let hierarchy =
         day2::workspace_directory::collect_hierarchy(input, &mut NativeFixturePort(units))?;
     let membership_json = serde_json::to_string(membership.metadata())?;
@@ -445,7 +451,46 @@ requested_hierarchy_action = |resource_json| {
         _ => Bool.False
     }
 }
+read_delivery = |raw, resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.deliver_hierarchy_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+read_delivery_page = |raw, page| {
+    program = Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| WorkspaceDirectory.delivery_page_with(resource, "fixture-capture", page))
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+requested_delivery_action = |resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.deliver_hierarchy_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => request.instruction.model == DELIVERY_CAPABILITY
+        _ => Bool.False
+    }
+}
 expect requested_hierarchy_action("{\"token\":\"fixture-handle\"}")
+expect requested_delivery_action("{\"token\":\"fixture-handle\"}")
+expect match read_delivery(DELIVERY_JSON, "{\"token\":\"fixture-handle\"}") {
+    Done(result) => result.consumed == 1 and result.value.customer_id == "customer-1"
+        and result.value.org_unit_count == 2 and result.value.page_count == 1 and result.value.captured_at == 200
+    _ => Bool.False
+}
+expect match read_delivery_page(STAGED_DELIVERY_ROWS, 0) {
+    Done(result) => result.consumed == 1 and result.value.done and result.value.page == 0
+        and result.value.items.len() == 2
+        and result.value.items.any(|unit| unit.id == "eng" and unit.parent_id == Some("root") and unit.parent_path == Some("/"))
+    _ => Bool.False
+}
 expect match read_page(PAGE_JSON, 0) {
     Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2
         and result.value.items.len() == 2
@@ -473,6 +518,14 @@ expect match read_hierarchy(HIERARCHY_JSON, "{\"token\":\"fixture-handle\"}") {
         .replace("EMPTY_JSON", &serde_json::to_string(&empty)?)
         .replace("MEMBERSHIP_JSON", &serde_json::to_string(&membership_json)?)
         .replace("HIERARCHY_JSON", &serde_json::to_string(&hierarchy_json)?)
+        .replace("DELIVERY_JSON", &serde_json::to_string(&delivery_json)?)
+        .replace("STAGED_DELIVERY_ROWS", &serde_json::to_string(&delivery_page)?)
+        .replace(
+            "DELIVERY_CAPABILITY",
+            &serde_json::to_string(
+                &day2_capabilities::registry::Action::WorkspaceDirectoryHierarchyDelivery.capability(),
+            )?,
+        )
         .replace(
             "HIERARCHY_CAPABILITY",
             &serde_json::to_string(&day2_capabilities::registry::Action::WorkspaceDirectoryHierarchy.capability())?,
@@ -494,7 +547,7 @@ expect match read_hierarchy(HIERARCHY_JSON, "{\"token\":\"fixture-handle\"}") {
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (5) tests passed"),
+        output.status.success() && diagnostics.contains("All (8) tests passed"),
         "native Directory contracts ({}): {diagnostics}",
         output.status
     );

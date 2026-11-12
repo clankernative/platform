@@ -869,6 +869,135 @@ pub fn page(units: &[OrgUnit], offset: u64) -> Result<Page> {
     })
 }
 
+/// What `workspace_directory.hierarchy.v2` returns. The hierarchy itself
+/// travels in `page_count` pages that only this invocation can read; there is
+/// no expiry because nothing outlives the invocation. `id` is the content
+/// identity of the hierarchy read through this connection, so an application
+/// can compare it with what it last persisted and skip an unchanged sync.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HierarchyDelivery {
+    pub id: String,
+    pub customer_id: String,
+    pub org_unit_count: u64,
+    pub page_count: u64,
+    pub captured_at: i64,
+}
+
+/// One delivered page: at most one `Tx.create_many` batch of units, in the
+/// capture's stable order (sorted by organizational-unit ID).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryPage {
+    pub items: Vec<OrgUnit>,
+    pub page: u64,
+    pub done: bool,
+}
+
+/// The grant authority a delivery is bound to and every page read compares.
+pub fn delivery_authority(customer_id: &str, connection_id: &str, actor: &str) -> Result<String> {
+    Ok(serde_json::to_string(&(
+        "workspace_directory.hierarchy.v2",
+        customer_id,
+        connection_id,
+        actor,
+    ))?)
+}
+
+pub const DELIVERY_KIND: &str = "workspace_directory.hierarchy";
+
+/// Collect a complete hierarchy directly from the provider port and split it
+/// into staged delivery pages. Unlike v1 there is no host cache: the plan is
+/// always a provider read and the application owns any reuse.
+pub fn deliver_hierarchy(
+    input: CaptureInput,
+    port: &mut dyn DirectoryReadPort,
+) -> Result<(HierarchyDelivery, crate::capture_delivery::Staged)> {
+    let authority = delivery_authority(&input.customer_id, &input.connection_id, &input.actor)?;
+    let connection_id = input.connection_id.clone();
+    let complete = collect_hierarchy(input, port)?;
+    let units = complete.units;
+    let id = crate::digest(&serde_json::to_vec(&(
+        "workspace-directory-hierarchy-v2",
+        &complete.metadata.customer_id,
+        &connection_id,
+        &units,
+    ))?);
+    let pages = delivery_pages(&units)?;
+    let delivery = HierarchyDelivery {
+        id: id.clone(),
+        customer_id: complete.metadata.customer_id,
+        org_unit_count: u64::try_from(units.len())?,
+        page_count: u64::try_from(pages.len())?,
+        captured_at: complete.metadata.captured_at,
+    };
+    Ok((
+        delivery,
+        crate::capture_delivery::Staged {
+            id,
+            kind: DELIVERY_KIND,
+            authority,
+            item_count: u64::try_from(units.len())?,
+            pages,
+        },
+    ))
+}
+
+/// Greedy split under both the item and the journaled-byte bound. Each unit's
+/// escaped size is measured once; each finished page is then checked exactly.
+pub fn delivery_pages(units: &[OrgUnit]) -> Result<Vec<String>> {
+    use crate::capture_delivery::{
+        MAX_PAGE_ITEMS, MAX_PAGE_JOURNAL_BYTES, MAX_PAGES, journal_bytes,
+    };
+    ensure!(
+        !units.is_empty() && units.len() <= MAX_ORG_UNITS,
+        "workspace_directory_org_unit_count_invalid"
+    );
+    // `{"items":[`, `],"page":N,"done":false}` and the string's quotes, escaped.
+    const ENVELOPE: usize = 96;
+    let mut groups: Vec<Vec<OrgUnit>> = Vec::new();
+    let mut current: Vec<OrgUnit> = Vec::new();
+    let mut current_bytes = ENVELOPE;
+    for unit in units {
+        let size = journal_bytes(&serde_json::to_string(unit)?)? - 2;
+        ensure!(
+            ENVELOPE + size <= MAX_PAGE_JOURNAL_BYTES,
+            "workspace_directory_record_too_large"
+        );
+        let separator = usize::from(!current.is_empty());
+        if current.len() == MAX_PAGE_ITEMS
+            || current_bytes + separator + size > MAX_PAGE_JOURNAL_BYTES
+        {
+            groups.push(std::mem::take(&mut current));
+            current_bytes = ENVELOPE;
+        }
+        current_bytes += usize::from(!current.is_empty()) + size;
+        current.push(unit.clone());
+    }
+    groups.push(current);
+    ensure!(
+        groups.len() <= MAX_PAGES,
+        "workspace_directory_delivery_exceeds_invocation"
+    );
+    let last = groups.len() - 1;
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, items)| {
+            let encoded = serde_json::to_string(&DeliveryPage {
+                items,
+                page: u64::try_from(index)?,
+                done: index == last,
+            })?;
+            ensure!(
+                journal_bytes(&encoded)? <= MAX_PAGE_JOURNAL_BYTES,
+                "workspace_directory_page_too_large"
+            );
+            Ok(encoded)
+        })
+        .collect()
+}
+
 fn validate_org_unit(unit: &OrgUnit) -> Result<()> {
     bounded(&unit.id, 256, "workspace_directory_org_unit_id_invalid")?;
     bounded(&unit.name, 512, "workspace_directory_org_unit_name_invalid")?;

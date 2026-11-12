@@ -161,6 +161,10 @@ providers! {
             WorkspaceDirectoryUserPath => "workspace_directory.user_path.v1" (read, data),
             WorkspaceDirectoryHierarchy => "workspace_directory.hierarchy.v1" (read, data),
             WorkspaceDirectoryPage => "workspace_directory.page.v1" (read, data),
+            // A complete hierarchy handed to the reading invocation, with no
+            // host cache or expiry; its pages exist only for that invocation.
+            WorkspaceDirectoryHierarchyDelivery => "workspace_directory.hierarchy.v2" (read, data),
+            WorkspaceDirectoryDeliveryPage => "workspace_directory.page.v2" (read, data),
         },
     },
     // App-to-app delegation. The "provider" is another application in this same

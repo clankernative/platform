@@ -64,6 +64,14 @@ struct WorkspaceDirectoryPageRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorkspaceDirectoryDeliveryPageRequest {
+    handle: String,
+    capture_id: String,
+    page: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkspaceDirectoryUserPathRequest {
     handle: String,
 }
@@ -149,6 +157,18 @@ enum Action {
         capture_id: String,
         offset: u64,
         now: i64,
+    },
+    /// A fresh complete hierarchy staged for this invocation only.
+    WorkspaceDirectoryDelivery {
+        input: crate::workspace_directory::CaptureInput,
+        invocation: String,
+    },
+    /// A page of this invocation's staged hierarchy. Local; reaches no provider.
+    WorkspaceDirectoryDeliveryPage {
+        invocation: String,
+        authority: String,
+        capture_id: String,
+        page: u64,
     },
     Recipient(String),
     Latest {
@@ -341,7 +361,9 @@ pub(crate) fn authorized(
         "workspace_directory.capture.v1"
         | "workspace_directory.hierarchy.v1"
         | "workspace_directory.user_path.v1"
-        | "workspace_directory.page.v1" => {
+        | "workspace_directory.page.v1"
+        | "workspace_directory.hierarchy.v2"
+        | "workspace_directory.page.v2" => {
             ensure!(
                 resource.grant.provider == Provider::WorkspaceDirectory
                     && matches!(
@@ -471,6 +493,70 @@ pub(crate) fn authorized(
                         crate::error::Failure::ResourceForbidden
                     );
                     Action::WorkspaceDirectoryCapture(plan)
+                }
+                "workspace_directory.hierarchy.v2" => {
+                    let input: WorkspaceDirectoryCaptureRequest =
+                        serde_json::from_str(&instruction.data)?;
+                    let ResourceTarget::WorkspaceDirectory { customer_id } = &resource.grant.target
+                    else {
+                        anyhow::bail!(crate::error::Failure::ResourceForbidden)
+                    };
+                    ensure!(
+                        input.handle == resource.handle
+                            && resource.grant.limits.max_response_bytes
+                                >= crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+                            && resource.grant.limits.max_request_bytes
+                                >= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                            && instruction.data.len() as u64
+                                <= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES,
+                        crate::error::Failure::ResourceForbidden
+                    );
+                    // Always a provider read: there is no host cache to reuse.
+                    resource.planned_calls = match resource.grant.live.as_ref() {
+                        Some(LiveConnection::WorkspaceDirectory {
+                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                            ..
+                        }) => 4,
+                        Some(LiveConnection::WorkspaceDirectory { .. }) => 5,
+                        _ => anyhow::bail!(crate::error::Failure::ResourceForbidden),
+                    };
+                    quote.request_bytes = crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES;
+                    quote.response_bytes = crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES;
+                    Action::WorkspaceDirectoryDelivery {
+                        input: crate::workspace_directory::CaptureInput {
+                            customer_id: customer_id.clone(),
+                            connection_id: directory_connection_id(&resource),
+                            actor: resource.actor.clone(),
+                            captured_at: request.context.now,
+                        },
+                        invocation: request.context.invocation_id.clone(),
+                    }
+                }
+                "workspace_directory.page.v2" => {
+                    let input: WorkspaceDirectoryDeliveryPageRequest =
+                        serde_json::from_str(&instruction.data)?;
+                    let ResourceTarget::WorkspaceDirectory { customer_id } = &resource.grant.target
+                    else {
+                        anyhow::bail!(crate::error::Failure::ResourceForbidden)
+                    };
+                    ensure!(
+                        input.handle == resource.handle && input.capture_id.len() == 71,
+                        crate::error::Failure::ResourceForbidden
+                    );
+                    // A local read of this invocation's own staged pages.
+                    quote.request_bytes = 0;
+                    quote.response_bytes = 0;
+                    resource.planned_calls = 0;
+                    Action::WorkspaceDirectoryDeliveryPage {
+                        invocation: request.context.invocation_id.clone(),
+                        authority: crate::workspace_directory::delivery_authority(
+                            customer_id,
+                            &directory_connection_id(&resource),
+                            &resource.actor,
+                        )?,
+                        capture_id: input.capture_id,
+                        page: input.page,
+                    }
                 }
                 _ => {
                     let input: WorkspaceDirectoryPageRequest =
@@ -762,6 +848,14 @@ pub(crate) fn authorized(
     })
 }
 
+/// The reviewed connection identity a Directory capture is bound to.
+fn directory_connection_id(resource: &crate::resources::ResourceUse) -> String {
+    format!(
+        "{}@{}",
+        resource.grant.connection.id, resource.grant.connection.revision
+    )
+}
+
 fn require_native_bearer_fence(action: day2_capabilities::resources::Action) -> Result<()> {
     ensure!(
         !action.returns_external_bearer(),
@@ -954,6 +1048,44 @@ fn workspace_directory_user_path(
         };
     let observed = crate::workspace_directory::collect_user_path(input.clone(), port.as_mut())?;
     Ok(serde_json::to_string(&observed)?)
+}
+
+/// Collect directly from the provider port, then stage the validated pages in
+/// the application's own database for this invocation only.
+fn workspace_directory_delivery(
+    runtime: &Runtime,
+    resource: &crate::resources::ResourceUse,
+    input: &crate::workspace_directory::CaptureInput,
+    invocation: &str,
+) -> Result<String> {
+    let mut port: Box<dyn crate::workspace_directory::DirectoryReadPort> =
+        if runtime.integrations().uses_simulated_providers() {
+            Box::new(crate::workspace_directory::SimulatedDirectoryPort::new(
+                runtime.db(),
+                runtime.scope(),
+                &input.customer_id,
+                &input.actor,
+                input.captured_at,
+            )?)
+        } else {
+            let connection = resource
+                .grant
+                .live
+                .as_ref()
+                .ok_or(crate::error::Failure::ResourceForbidden)?;
+            let authentication =
+                crate::workspace_directory::AuthenticationPlan::from_connection(connection)?;
+            Box::new(crate::workspace_directory::NativeDirectoryPort::new(
+                authentication,
+                &input.customer_id,
+                input.captured_at,
+                CaptureMode::Hierarchy,
+            )?)
+        };
+    let (delivery, staged) =
+        crate::workspace_directory::deliver_hierarchy(input.clone(), port.as_mut())?;
+    runtime.sql_write(|tx| crate::capture_delivery::stage(tx, invocation, &staged))?;
+    Ok(serde_json::to_string(&delivery)?)
 }
 
 fn workspace_directory_capture(
@@ -1183,6 +1315,52 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
                 &capability.action,
                 request_bytes,
             );
+        }
+        Action::WorkspaceDirectoryDelivery { input, invocation } => {
+            let result =
+                workspace_directory_delivery(runtime, &capability.resource, &input, &invocation);
+            // The aggregate provider envelope is reserved and consumed as for a
+            // v1 cold capture, whether staging succeeds or not.
+            return ProviderResult {
+                result,
+                correlation: Vec::new(),
+                pending: false,
+                usage: crate::resources::ProviderUsage {
+                    calls: capability.resource.planned_calls,
+                    request_bytes,
+                    response_bytes: crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES,
+                    cost_microunits: 0,
+                    known: true,
+                    dispatched: true,
+                },
+            };
+        }
+        Action::WorkspaceDirectoryDeliveryPage {
+            invocation,
+            authority,
+            capture_id,
+            page,
+        } => {
+            let result = runtime.sql_read(|db| {
+                crate::capture_delivery::page(
+                    db,
+                    &invocation,
+                    crate::workspace_directory::DELIVERY_KIND,
+                    &authority,
+                    &capture_id,
+                    page,
+                )
+            });
+            // Read from this invocation's staged pages: no provider call, no traffic.
+            return ProviderResult {
+                result,
+                correlation: Vec::new(),
+                pending: false,
+                usage: crate::resources::ProviderUsage {
+                    known: true,
+                    ..Default::default()
+                },
+            };
         }
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
         Action::CartaCapture(plan) => {
