@@ -90,6 +90,8 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         ".github/workflows/mac-compatibility.yml",
         ".github/workflows/native-images.yml",
         ".github/actions/pinned-release/action.yml",
+        ".github/temporal.sha256",
+        ".github/temporal-linux.sha256",
         ".bazelrc",
         ".bazelversion",
         "BUILD.bazel",
@@ -225,6 +227,8 @@ fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> 
         ".github/workflows/mac-compatibility.yml",
         ".github/workflows/native-images.yml",
         ".github/actions/pinned-release/action.yml",
+        ".github/temporal.sha256",
+        ".github/temporal-linux.sha256",
     ] {
         let directory = tempfile::tempdir()?;
         let approved = platform(directory.path())?;
