@@ -1329,7 +1329,13 @@ pub fn local_resource_fixture(
                     issuer_id: issuer_id.into(),
                     children: CartaChildren::Include,
                 }),
-                vec![Action::CartaSnapshot, Action::CartaRecord],
+                vec![
+                    Action::CartaSnapshot,
+                    Action::CartaRecord,
+                    Action::CartaSnapshotDelivery,
+                    Action::CartaDeliveryPage,
+                    Action::CartaRelease,
+                ],
             ),
         ];
         for (name, kind, provider, target, actions) in families {

@@ -1,4 +1,6 @@
 import Observe
+import Effects
+import Api
 import Resource
 import Context
 
@@ -8,6 +10,8 @@ import Context
 # Provider arrays are transported as individual records, preserving their parent
 # external IDs. Applications own validation, import decisions and calculations.
 Carta :: [].{
+	release_effect = Api.external("carta.release.v2")
+
 	OptionalText : [Some(Str), None]
 
 	Snapshot : {
@@ -87,6 +91,63 @@ Carta :: [].{
 	}
 
 	ReadResult : [Stakeholder(Stakeholder), Grant(Grant), VestingEvent(VestingEvent), Exercise(Exercise), Done]
+
+	Record : [Stakeholder(Stakeholder), Grant(Grant), VestingEvent(VestingEvent), Exercise(Exercise)]
+
+	# A complete capture held in this application's own database until it calls
+	# `release_with`. Any later invocation can read its pages; nothing expires it.
+	Delivery : {
+		id : Str,
+		issuer_id : Str,
+		record_count : U64,
+		stakeholder_count : U64,
+		grant_count : U64,
+		vesting_event_count : U64,
+		exercise_count : U64,
+		source_profile : Str,
+		page_count : U64,
+	}
+
+	# At most 256 records, one `Tx.create_many` batch, in provider order.
+	DeliveryPage : { records : List(Record), page : U64, done : Bool }
+
+	deliver : Context -> Observe(Delivery)
+	deliver = |context| Resource.bind(context, "carta").and_then(deliver_with)
+
+	deliver_with : Resource -> Observe(Delivery)
+	deliver_with = |resource| Observe.capability("carta.snapshot.v2", Json.to_str({ handle: Resource.token(resource) }))
+		.and_then(
+			|raw| {
+				parsed : Try(Delivery, _)
+				parsed = Json.parse(raw)
+				Observe.from_host(parsed.map_err(|_| "invalid_carta_delivery"))
+			},
+		)
+
+	delivery_page_with : Resource, Str, U64 -> Observe(DeliveryPage)
+	delivery_page_with = |resource, capture_id, page| Observe.capability(
+		"carta.page.v2",
+		Json.to_str({ handle: Resource.token(resource), capture_id, page }),
+	).and_then(
+		|raw| {
+			parsed : Try(DeliveryPage, _)
+			parsed = Json.parse(raw)
+			Observe.from_host(parsed.map_err(|_| "invalid_carta_delivery_page"))
+		},
+	)
+
+	# Release a held capture once its records are persisted. Idempotent.
+	release_with : Resource, Str -> Effects({ released : Bool })
+	release_with = |resource, capture_id| Effects.capability(
+		"carta.release.v2",
+		Json.to_str({ handle: Resource.token(resource), capture_id }),
+	).and_then(
+		|raw| {
+			parsed : Try({ released : Bool }, _)
+			parsed = Json.parse(raw)
+			Effects.from_host(parsed.map_err(|_| "invalid_carta_release"))
+		},
+	)
 
 	begin : Context -> Observe(Snapshot)
 	begin = |context| Resource.bind(context, "carta").and_then(begin_with)

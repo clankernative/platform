@@ -223,6 +223,19 @@ pub(crate) fn decode_next(instruction: &Instruction) -> Result<(String, u64)> {
     Ok((next.snapshot_id, next.cursor))
 }
 
+/// A `carta_<sha256 hex>` capture identity, as both stores issue it.
+pub(crate) fn validate_snapshot_id(id: &str) -> Result<()> {
+    ensure!(
+        id.len() == 70
+            && id.starts_with("carta_")
+            && id[6..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "invalid_carta_snapshot_id"
+    );
+    Ok(())
+}
+
 pub(crate) fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
     let count = |index| {
         let value = row.get::<_, i64>(index)?;
@@ -529,6 +542,199 @@ pub fn fail_reads(runtime: &Runtime, snapshot_id: &str, cursor: u64, count: u32)
     let connection = crate::store::open(&runtime.db().with_file_name("carta.synthetic.sqlite"))?;
     connection.execute("INSERT INTO carta_failures VALUES(?1,?2,?3,?4) ON CONFLICT(scope,snapshot,ordinal) DO UPDATE SET remaining=excluded.remaining", params![runtime.scope(), snapshot_id, i64::try_from(cursor)?, i64::from(count)])?;
     Ok(())
+}
+
+/// The delivery kind for application-held Carta captures.
+pub const DELIVERY_KIND: &str = "carta.issuer";
+
+/// What `carta.snapshot.v2` returns: the capture's facts and how many pages
+/// the application holds until it releases them with `carta.release.v2`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Delivery {
+    pub id: String,
+    pub issuer_id: String,
+    pub record_count: u64,
+    pub stakeholder_count: u64,
+    pub grant_count: u64,
+    pub vesting_event_count: u64,
+    pub exercise_count: u64,
+    pub source_profile: String,
+    pub page_count: u64,
+}
+
+/// One record on a delivered page, in the SDK's tag encoding.
+#[derive(Serialize)]
+enum PageRecord<'a> {
+    Stakeholder(&'a Stakeholder),
+    Grant(&'a Grant),
+    VestingEvent(&'a VestingEvent),
+    Exercise(&'a Exercise),
+}
+
+impl<'a> From<&'a Record> for PageRecord<'a> {
+    fn from(record: &'a Record) -> Self {
+        match record {
+            Record::Stakeholder(value) => Self::Stakeholder(value),
+            Record::Grant(value) => Self::Grant(value),
+            Record::VestingEvent(value) => Self::VestingEvent(value),
+            Record::Exercise(value) => Self::Exercise(value),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DeliveryPage<'a> {
+    records: Vec<PageRecord<'a>>,
+    page: u64,
+    done: bool,
+}
+
+/// The delivery a capture becomes, bound to `authority`. Records keep provider
+/// order and duplicates; a capture with no records is one empty, final page.
+pub(crate) fn delivery(
+    snapshot: &Snapshot,
+    records: &[Record],
+    authority: String,
+) -> Result<(Delivery, crate::capture_delivery::Staged)> {
+    ensure!(
+        u64::try_from(records.len())? == snapshot.record_count,
+        "carta_record_count_budget"
+    );
+    let pages = delivery_pages(records)?;
+    Ok((
+        Delivery {
+            id: snapshot.id.clone(),
+            issuer_id: snapshot.issuer_id.clone(),
+            record_count: snapshot.record_count,
+            stakeholder_count: snapshot.stakeholder_count,
+            grant_count: snapshot.grant_count,
+            vesting_event_count: snapshot.vesting_event_count,
+            exercise_count: snapshot.exercise_count,
+            source_profile: snapshot.source_profile.clone(),
+            page_count: u64::try_from(pages.len())?,
+        },
+        crate::capture_delivery::Staged {
+            id: snapshot.id.clone(),
+            kind: DELIVERY_KIND,
+            authority,
+            item_count: snapshot.record_count,
+            pages,
+        },
+    ))
+}
+
+/// Greedy split under the item and journaled-byte bounds: each page is at most
+/// one `Tx.create_many` batch and fits one observation.
+pub fn delivery_pages(records: &[Record]) -> Result<Vec<String>> {
+    use crate::capture_delivery::{
+        MAX_HELD_PAGES, MAX_PAGE_ITEMS, MAX_PAGE_JOURNAL_BYTES, journal_bytes,
+    };
+    ensure!(records.len() <= MAX_RECORDS, "carta_record_count_budget");
+    // `{"records":[`, `],"page":N,"done":false}` and the string's quotes, escaped.
+    const ENVELOPE: usize = 96;
+    let mut groups: Vec<Vec<&Record>> = Vec::new();
+    let mut current: Vec<&Record> = Vec::new();
+    let mut current_bytes = ENVELOPE;
+    for record in records {
+        let size = journal_bytes(&serde_json::to_string(&PageRecord::from(record))?)? - 2;
+        ensure!(
+            ENVELOPE + size <= MAX_PAGE_JOURNAL_BYTES,
+            "carta_record_byte_budget"
+        );
+        if current.len() == MAX_PAGE_ITEMS
+            || current_bytes + usize::from(!current.is_empty()) + size > MAX_PAGE_JOURNAL_BYTES
+        {
+            groups.push(std::mem::take(&mut current));
+            current_bytes = ENVELOPE;
+        }
+        current_bytes += usize::from(!current.is_empty()) + size;
+        current.push(record);
+    }
+    groups.push(current);
+    ensure!(groups.len() <= MAX_HELD_PAGES, "carta_capture_byte_budget");
+    let last = groups.len() - 1;
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let encoded = serde_json::to_string(&DeliveryPage {
+                records: group.into_iter().map(PageRecord::from).collect(),
+                page: u64::try_from(index)?,
+                done: index == last,
+            })?;
+            ensure!(
+                journal_bytes(&encoded)? <= MAX_PAGE_JOURNAL_BYTES,
+                "carta_record_byte_budget"
+            );
+            Ok(encoded)
+        })
+        .collect()
+}
+
+/// The authority a synthetic delivery is bound to: the runtime scope and issuer.
+pub(crate) fn synthetic_delivery_authority(scope: &str, issuer_id: &str) -> Result<String> {
+    Ok(serde_json::to_string(&(
+        "carta.issuer.v2",
+        scope,
+        "synthetic",
+        issuer_id,
+    ))?)
+}
+
+/// The runtime scope's selected synthetic capture and all of its records, read
+/// in one snapshot of the seeded provider store.
+pub(crate) fn synthetic_capture(
+    runtime: &Runtime,
+    issuer_id: &str,
+) -> Result<(Snapshot, Vec<Record>)> {
+    let path = runtime.db().with_file_name("carta.synthetic.sqlite");
+    // A missing store is an unconfigured provider, never an empty capture.
+    ensure!(path.is_file(), "carta_unconfigured");
+    let mut connection = crate::store::open(&path)?;
+    let tx = connection.transaction()?;
+    let seeded: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='carta_active')",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(seeded, "carta_unconfigured");
+    let snapshot: Snapshot = tx
+        .query_row(
+            "SELECT s.id,s.issuer_id,s.record_count,s.stakeholder_count,s.grant_count,s.vesting_event_count,s.exercise_count,s.source_profile FROM carta_active a JOIN carta_snapshots s ON s.scope=a.scope AND s.id=a.snapshot WHERE a.scope=?1 AND s.issuer_id=?2",
+            params![runtime.scope(), issuer_id],
+            snapshot_from_row,
+        )
+        .optional()?
+        .context("carta_unconfigured")?;
+    ensure!(
+        snapshot.record_count <= MAX_RECORDS as u64,
+        "carta_record_count_budget"
+    );
+    let mut statement = tx.prepare(
+        "SELECT envelope FROM carta_records WHERE scope=?1 AND snapshot=?2 ORDER BY ordinal",
+    )?;
+    let envelopes = statement
+        .query_map(params![runtime.scope(), snapshot.id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let records = envelopes
+        .iter()
+        .map(|envelope| {
+            let envelope: serde_json::Value = crate::json::decode(envelope.as_bytes())?;
+            let data = envelope["data"].as_str().context("carta_record_invalid")?;
+            Ok(serde_json::from_value::<Record>(json!({
+                "kind": envelope["kind"],
+                "data": crate::json::decode::<serde_json::Value>(data.as_bytes())?,
+            }))?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        u64::try_from(records.len())? == snapshot.record_count,
+        "carta_snapshot_unavailable"
+    );
+    Ok((snapshot, records))
 }
 
 pub(crate) fn observe(runtime: &Runtime, read: Read) -> Result<String> {

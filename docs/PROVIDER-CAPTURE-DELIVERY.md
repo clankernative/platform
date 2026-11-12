@@ -5,10 +5,11 @@ is handed to the reading application, which persists what it keeps in its own
 models and owns that retention. The host does not keep provider data for an
 application in a sibling store with a platform-chosen expiry.
 
-Status: the Workspace Directory path (`workspace_directory.hierarchy.v2` and
-`workspace_directory.page.v2`) is implemented. Carta needs a decision first;
-see [Carta: decision needed](#carta-decision-needed). The v1 capabilities are
-unchanged.
+Status: both paths are implemented beside the unchanged v1 capabilities.
+Workspace Directory (`workspace_directory.hierarchy.v2`, `page.v2`) uses an
+invocation-held delivery. Carta (`carta.snapshot.v2`, `page.v2`,
+`release.v2`) uses an application-held delivery, the option chosen in
+[Carta](#carta-application-held-delivery).
 
 ## What this replaces
 
@@ -36,7 +37,7 @@ write that bypasses the step budget. That is the fork described below.
 | Directory hierarchy | 10,000 units, 4 MiB, one provider response | Up to 31 pages: about 7,900 typical units. Home's own bound is 256. |
 | Carta issuer | 10,000 records, 32 MiB encoded (128 MiB store) | Only small issuers: 32 MiB needs at least 546 pages of 60 KiB. |
 
-## Delivery: the implemented design
+## Workspace Directory: invocation-held delivery
 
 ```
 prepare (one invocation)
@@ -149,49 +150,78 @@ The daily sync that another thread is adding should switch from
    Directory policy slot; v2 needs the same response limit and call allowance as
    the v1 hierarchy.
 
-## Carta: decision needed
+## Carta: application-held delivery
 
 Equity imports one record per invocation and keeps `capture_id + cursor` across
 up to 10,000 invocations. A Carta capture (up to 32 MiB encoded) cannot cross
 into Equity's tables within one invocation's budget. So "a transient buffer
 that never outlives the invocation" and "the app receives the whole capture"
-cannot both hold for Carta under the current budgets. Something has to give:
+cannot both hold for Carta under the current budgets. The options were:
 
-**A. App-held delivery (recommended).** Use the same `day2_capture_deliveries`
-tables, but the staged capture is held for the app rather than for one
-invocation. `carta.snapshot.v2` stages the capture in the app's own database.
-`carta.page.v2 {capture_id, page}` reads ≤256-record pages from any invocation
-of the same app under the same connection authority and issuer.
-`carta.release.v2` deletes it. A per-resource cap (for example, two unreleased
-captures) makes a further snapshot fail with `carta_delivery_capacity`. It never
-prunes silently. There is no platform expiry. The capture is backed up and
-restored with Equity's cursor, so a restore cannot strand an import. Equity
-goes from about one invocation per record to about one invocation per 31 pages
-(around 7,900 records). Cost: the app database temporarily holds up to 32 MiB per
-unreleased capture. The staged rows are host tables, not app models. Their
-retention is app-controlled but not app-defined.
+- **A. App-held delivery (chosen).** The same tables, held for the app instead
+  of one invocation, until the app releases the capture.
+- **B. Re-collect per invocation.** Infeasible for Carta: one collection is up
+  to 101 calls and 64 MiB, repeated for every slice.
+- **C. Host bulk ingest into app-declared models.** One invocation and no host
+  table, but a new sealed `Tx` primitive, Rust-side encoding of app rows, and
+  10,000-row writes and verification snapshots. Still the long-term option if
+  captures should become app models with no host table at all.
+- **D. Larger budgets for capture reads.** Rejected: it weakens a global
+  invariant for one feature.
 
-**B. Re-collect per invocation.** Hold nothing. Each invocation recollects the
-issuer and reads a slice, and the app checks that `id` is unchanged. This is
-infeasible for Carta: one collection is up to 101 calls and 64 MiB, repeated
-for every slice. It is plausible only for Directory beyond 7,900 units.
+### How A works
 
-**C. Host bulk ingest into app-declared models.** A new sealed `Tx` primitive
-writes a whole validated capture into an app model shaped like the SDK record,
-in the decision transaction, as one bounded step. This is the purest option:
-one invocation, no staging, app tables only. It is also the largest change. Rust
-would encode rows in the app's generated codec, audit up to 10,000 rows per
-step, enlarge verification snapshots, and keep N snapshots of 10,000 rows that
-can only be soft-deleted.
+- **Holder**: `day2_capture_deliveries.holder` is the invocation id for
+  Directory and empty for an application-held capture. The sweep only ever
+  touches invocation-held rows.
+- **`carta.snapshot.v2`** (observation): collects exactly as v1 does. A live
+  connection uses the same plan, token, pagination, bounds, failure codes and
+  metered settlement; a connection without `live` uses the seeded synthetic
+  capture. It stages the typed records in pages of at most 256 records and
+  56 KiB journaled, and returns `Delivery` (v1's snapshot facts plus
+  `page_count`). Nothing is published to `carta.sqlite`.
+- **Identity**: `id` is the v1 capture identity (`carta_<sha256>`): scope,
+  connection authority, environment, issuer, child mode, records, counts and
+  source, with no time. An unchanged recapture of a held capture returns the
+  same `id` and stores nothing new.
+- **Authority**: a held capture is bound to the runtime scope, connection
+  authority (connection id and revision, environment, OAuth client and
+  credential reference), issuer, child-record mode and source profile. A
+  synthetic capture is bound to the scope and issuer. Any other grant, including
+  another connection revision or a live binding reading a synthetic capture, gets
+  `capture_delivery_authority_changed`.
+- **`carta.page.v2 {capture_id, page}`** (observation): a local read with no
+  calls or bytes. Any invocation of the app can read it while the authority
+  matches. Pages encode records as SDK tags:
+  `{"records":[{"Stakeholder":{...}},{"Grant":{...}},…],"page":0,"done":true}`.
+- **`carta.release.v2 {capture_id}`** (effect): deletes the app's held copy and
+  returns `{"released": bool}`. It is idempotent, so it is classified for safe
+  retry. It is a write because it changes state the app relies on. It is not
+  destroying: it removes a recapturable copy, never an app row or provider data.
+- **Bounds**: at most two unreleased captures per authority. A third snapshot
+  fails with `capture_delivery_release_required` and discards nothing. All held
+  captures in one app database are capped at 128 MiB
+  (`capture_delivery_capacity`), the old `carta.sqlite` bound.
+- **Backup and restore**: held pages live in `app.sqlite`, so they are copied
+  and restored together with Equity's cursor. A restore cannot strand an import.
 
-**D. Larger budgets for capture reads.** This weakens a global invariant for
-one feature. Rejected.
+### Equity migration
 
-Recommendation: **A** for Carta, and for any future capture that exceeds one
-invocation, including Directory beyond about 7,900 units. It reuses this
-module's tables, authority binding and bounds. Only the holder (invocation or
-app) and an explicit release are added. **C** remains the long-term option if
-captures should become app models with no host table at all.
+1. `CaptureImport.prepare`: `Carta.deliver(context)`. Store `delivery.id` and
+   `page_count` on the import run in place of the v1 `capture_id` and record
+   count. If an earlier run already persisted this `id`, release it and skip.
+2. `AdvanceImport.prepare`: read pages from the saved page cursor with
+   `Carta.delivery_page_with(resource, id, page)`, as many as the invocation's
+   budget allows (up to about 31). `decide` maps `DeliveryPage.records` into
+   Equity's models with one `create_many` per page and advances the page cursor.
+   This replaces one invocation per record with one per batch of pages.
+3. At completion (`PruneImport`, or the final `AdvanceImport`), deliver
+   `Carta.release_with(resource, id)` from an effects handler, and declare
+   `Carta.release_effect` in its execution bounds.
+4. Operators add `carta.snapshot.v2`, `carta.page.v2` and `carta.release.v2` to
+   Equity's Carta slot. `release.v2` must be in the operation's effects.
+5. Verification campaigns keep working: disposable verification grants the v2
+   actions from the declarations, and the synthetic seed backs `snapshot.v2`.
 
 ## Notifications
 
@@ -207,27 +237,36 @@ provider's history. This is not implemented.
 ## Deprecation path (proposed, not executed)
 
 1. Ship v2 beside v1. This change does that.
-2. Migrate Home as described above, then Equity once the Carta decision is made.
-3. Remove `workspace_directory.capture.v1` / `hierarchy.v1` / `page.v1` and the
-   `carta.snapshot.v1` / `record.v1` live path, with `workspace_directory.sqlite`
-   and `carta.sqlite`. `user_path.v1` stores nothing and stays. No data
-   migration: under AGENTS.md the stores are disposable caches, and app tables
-   now hold what matters.
-4. Drop `SOURCE_TTL_SECONDS` and the cache plan.
+2. Migrate Home (Directory v2) and Equity (Carta v2) as described above.
+3. Remove `workspace_directory.capture.v1` / `hierarchy.v1` / `page.v1` and
+   `carta.snapshot.v1` / `record.v1`, with `workspace_directory.sqlite`,
+   `carta.sqlite` and their sweep/prune code. `user_path.v1` stores nothing and
+   stays. Keep the synthetic seed store; it is the synthetic provider, not an app
+   capture. No data migration: under AGENTS.md the stores are disposable caches,
+   and app tables now hold what matters.
+4. Drop `SOURCE_TTL_SECONDS` and the Directory cache plan.
 
 ## Implementation map
 
-- [`capture_delivery.rs`](../crates/day2/src/capture_delivery.rs): staging,
-  page reads, release and sweep, bounds.
+- [`capture_delivery.rs`](../crates/day2/src/capture_delivery.rs): holders,
+  staging, page reads, release, sweep and bounds.
 - [`workspace_directory.rs`](../crates/day2/src/workspace_directory.rs):
   `deliver_hierarchy` and `delivery_pages`.
+- [`carta.rs`](../crates/day2/src/carta.rs): `Delivery`, tagged page encoding,
+  `delivery_pages`, and the synthetic capture reader.
+  [`carta_live.rs`](../crates/day2/src/carta_live.rs): typed records on a
+  complete capture, and the delivery authority.
 - [`capabilities.rs`](../crates/day2/src/capabilities.rs): authorization, quotes,
-  observe and usage.
-- [`preparation.rs`](../crates/day2/src/preparation.rs): release at the
-  decision boundary or on failure.
+  observe, execute and usage for all five v2 capabilities.
+- [`preparation.rs`](../crates/day2/src/preparation.rs): release of
+  invocation-held deliveries at the decision boundary or on failure.
+- SDK: `WorkspaceDirectory.roc` and `Carta.roc` (both sealed; pins refreshed).
 - Registry actions, disposable-verification bindings and coverage
-  demonstrations for both capabilities.
-- Tests: `capture_delivery::tests` (SQLite bounds, isolation, sweep),
-  `store::capture_delivery_host_tests` (admitted capability path, budgets,
-  settlement, faults, v1 coexistence), and the native Roc decode test in
-  `tests/app_contract.rs`.
+  demonstrations (`HeldCaptureRelease` for the release effect).
+- Tests:
+  - `capture_delivery::tests`: bounds, isolation, sweep, app holder, cap and
+    release.
+  - `store::capture_delivery_host_tests`: admitted Directory path.
+  - `integrations::coverage_tests::carta`: admitted Carta v2 path: live
+    simulated wire, synthetic seed, authority refusals, cap, release.
+  - `tests/app_contract.rs`: native Roc decode tests for both SDKs.

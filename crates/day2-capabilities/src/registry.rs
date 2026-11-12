@@ -140,6 +140,12 @@ providers! {
         actions: {
             CartaSnapshot => "carta.snapshot.v1" (read, data),
             CartaRecord => "carta.record.v1" (read, data),
+            // A complete capture held in the reading application's own database
+            // until that application releases it; no host store or pruning.
+            CartaSnapshotDelivery => "carta.snapshot.v2" (read, data),
+            CartaDeliveryPage => "carta.page.v2" (read, data),
+            // Local: releases the application's own held copy, never provider data.
+            CartaRelease => "carta.release.v2" (write, data),
         },
     },
     SyntheticGoogleDirectory {

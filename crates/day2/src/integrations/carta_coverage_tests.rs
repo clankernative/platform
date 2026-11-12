@@ -18,7 +18,16 @@ use std::{cell::Cell, fs};
 const ACTOR: &str = "alice";
 const INVOCATION: &str = "carta-coverage";
 const ISSUER: &str = "4242";
+const SYNTHETIC_ISSUER: &str = "synthetic-issuer-1";
 const ACTIONS: [Action; 2] = [Action::CartaSnapshot, Action::CartaRecord];
+/// Every action the admitted slot grants, including the v2 held delivery.
+const GRANTED: [Action; 5] = [
+    Action::CartaSnapshot,
+    Action::CartaRecord,
+    Action::CartaSnapshotDelivery,
+    Action::CartaDeliveryPage,
+    Action::CartaRelease,
+];
 
 fn label(variant: Variant) -> &'static str {
     match variant {
@@ -121,26 +130,30 @@ impl Harness {
         };
         let slot = |id: &str| {
             json!({"kind":"carta_issuer","allowed_resources":[{"id":id,"revision":1}],
-            "actions":ACTIONS,"limits":{"max_request_bytes":65536,"max_response_bytes":4194304,
+            "actions":GRANTED,"limits":{"max_request_bytes":65536,"max_response_bytes":4194304,
                 "max_calls_per_invocation":16},"budgets":[{"id":"calls","revision":1}]})
         };
         let instance = json!({"installation":"cartaco","environment":"test","resources":{
-            "version":1,"connections":{"carta":connection("coverage-client"),"other":connection("other-client")},
+            "version":1,"connections":{"carta":connection("coverage-client"),"other":connection("other-client"),
+                "synthetic":{"revision":1,"provider":"carta"}},
             "resources":{"main":resource("carta",ISSUER),"other_connection":resource("other",ISSUER),
-                "other_issuer":resource("carta","4343")},
+                "other_issuer":resource("carta","4343"),"synthetic":resource("synthetic",SYNTHETIC_ISSUER)},
             "policies":{"carta":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],
                 "max_duration_seconds":null,"slots":{"carta":slot("main"),
-                    "other_connection":slot("other_connection"),"other_issuer":slot("other_issuer")}}},
+                    "other_connection":slot("other_connection"),"other_issuer":slot("other_issuer"),
+                    "synthetic":slot("synthetic")}}},
             "budgets":{"calls":{"revision":1,"scope":"app","period_seconds":3600,
                 "limits":{"calls":100,"bytes":100000000,"concurrency":1}}}},
             "apps":{"app":{"artifact":artifact_path,"readers":[ACTOR],"writers":[ACTOR],
                 "authority":{"version":1,"admins":[],"operations":{"carta":{"actors":[ACTOR],
                     "mode":{"kind":"current_state"},"models":{},
-                    "observations":ACTIONS.iter().map(|action|action.capability()).collect::<Vec<_>>(),"effects":[]}}},
+                    "observations":GRANTED.iter().filter(|action| !action.is_write()).map(|action|action.capability()).collect::<Vec<_>>(),
+                    "effects":GRANTED.iter().filter(|action| action.is_write()).map(|action|action.capability()).collect::<Vec<_>>()}}},
                 "resource_policies":[{"policy":{"id":"carta","revision":1},"operation":"carta",
                     "bindings":{"carta":{"id":"main","revision":1},
                         "other_connection":{"id":"other_connection","revision":1},
-                        "other_issuer":{"id":"other_issuer","revision":1}}}]}}});
+                        "other_issuer":{"id":"other_issuer","revision":1},
+                        "synthetic":{"id":"synthetic","revision":1}}}]}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let admitted = Instance::load(&path)?;
         let artifact = LoadedArtifact::from_contract_for_tests(
@@ -243,7 +256,12 @@ impl Harness {
             runtime,
             &request,
             &Instruction {
-                kind: "observe".into(),
+                kind: if action.is_write() {
+                    "external"
+                } else {
+                    "observe"
+                }
+                .into(),
                 model: action.capability().into(),
                 data: data.to_string(),
                 ..Default::default()
@@ -266,7 +284,11 @@ impl Harness {
         let before = worlds_in_scope(self.runtime().db(), self.runtime().scope())?;
         let resource = authorized.resource().clone();
         // The admission transaction has closed before provider I/O.
-        let outcome = capabilities::observe(self.runtime(), authorized, "carta-attempt");
+        let outcome = if action.is_write() {
+            capabilities::execute(self.runtime(), authorized, "carta-effect", "carta-attempt")
+        } else {
+            capabilities::observe(self.runtime(), authorized, "carta-attempt")
+        };
         let result = outcome.result?;
         crate::resources::validate_result(&resource, &result)?;
         let after = worlds_in_scope(self.runtime().db(), self.runtime().scope())?;
@@ -280,6 +302,41 @@ impl Harness {
     fn snapshot(&self) -> Result<crate::carta::Snapshot> {
         Ok(serde_json::from_str(
             &self.dispatch(Action::CartaSnapshot, json!({}))?.result,
+        )?)
+    }
+
+    fn deliver(&self) -> Result<crate::carta::Delivery> {
+        Ok(serde_json::from_str(
+            &self
+                .dispatch(Action::CartaSnapshotDelivery, json!({}))?
+                .result,
+        )?)
+    }
+
+    fn page(&self, id: &str, page: u64) -> Result<Value> {
+        Ok(serde_json::from_str(
+            &self
+                .dispatch(
+                    Action::CartaDeliveryPage,
+                    json!({"capture_id":id,"page":page}),
+                )?
+                .result,
+        )?)
+    }
+
+    fn release(&self, id: &str) -> Result<Value> {
+        Ok(serde_json::from_str(
+            &self
+                .dispatch(Action::CartaRelease, json!({"capture_id":id}))?
+                .result,
+        )?)
+    }
+
+    fn held(&self) -> Result<i64> {
+        Ok(crate::store::open(self.runtime().db())?.query_row(
+            "SELECT count(*) FROM day2_capture_deliveries WHERE holder=''",
+            [],
+            |row| row.get(0),
         )?)
     }
 
@@ -300,6 +357,11 @@ pub(super) fn observe(action: Action, variant: Variant) -> Result<Observed> {
         Action::CartaRecord => {
             let snapshot = harness.snapshot()?;
             harness.dispatch(action, json!({"snapshot_id":snapshot.id,"cursor":0}))
+        }
+        Action::CartaSnapshotDelivery => harness.dispatch(action, json!({})),
+        Action::CartaDeliveryPage => {
+            let delivery = harness.deliver()?;
+            harness.dispatch(action, json!({"capture_id":delivery.id,"page":0}))
         }
         _ => anyhow::bail!("not a Carta coverage action"),
     }
@@ -487,6 +549,226 @@ fn carta_capture_refuses_a_different_admitted_issuer() -> Result<()> {
             .with_file_name(crate::carta_live::STORE)
             .exists(),
         "failed capture must publish nothing"
+    );
+    Ok(())
+}
+
+/// The SDK's tag encoding of a record, built independently of the page encoder.
+fn tagged(record: &Record) -> Result<Value> {
+    let value = serde_json::to_value(record)?;
+    let tag = match value["kind"].as_str().context("record kind")? {
+        "stakeholder" => "Stakeholder",
+        "grant" => "Grant",
+        "vesting_event" => "VestingEvent",
+        "exercise" => "Exercise",
+        other => anyhow::bail!("unexpected record kind {other}"),
+    };
+    Ok(json!({ tag: value["data"] }))
+}
+
+/// Release changes no provider world: it removes the application's own held
+/// copy. Demonstrated by holding a capture of each world, releasing it, and
+/// observing that its pages are gone while every world is unchanged.
+pub(super) fn check_release(action: Action) -> std::result::Result<(), String> {
+    let run = |variant| -> Result<()> {
+        ensure!(action == Action::CartaRelease, "not a Carta release");
+        let harness = Harness::new(variant)?;
+        let delivery = harness.deliver()?;
+        ensure!(harness.held()? == 1, "the capture was not held");
+        let before = worlds_in_scope(harness.runtime().db(), harness.runtime().scope())?;
+        ensure!(
+            harness.release(&delivery.id)? == json!({"released":true}),
+            "first release must release"
+        );
+        ensure!(
+            harness.release(&delivery.id)? == json!({"released":false}),
+            "release must be idempotent"
+        );
+        ensure!(harness.held()? == 0, "the released capture is still held");
+        ensure!(
+            harness.page(&delivery.id, 0).is_err(),
+            "a released capture still answered a page"
+        );
+        ensure!(
+            worlds_in_scope(harness.runtime().db(), harness.runtime().scope())? == before,
+            "release changed a provider world"
+        );
+        Ok(())
+    };
+    for variant in [Variant::A, Variant::B] {
+        run(variant).map_err(|error| format!("{action:?}: {error:#}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn carta_delivery_holds_the_complete_capture_in_the_app_database_until_released() -> Result<()> {
+    for variant in [Variant::A, Variant::B] {
+        let harness = Harness::new(variant)?;
+        let delivery = harness.deliver()?;
+        assert_eq!(delivery.issuer_id, ISSUER);
+        assert_eq!(delivery.source_profile, "carta_simulated");
+        assert_eq!(
+            (
+                delivery.record_count,
+                delivery.stakeholder_count,
+                delivery.grant_count,
+                delivery.vesting_event_count,
+                delivery.exercise_count,
+                delivery.page_count,
+            ),
+            (3, 2, 1, 0, 0, 1)
+        );
+        assert!(delivery.id.starts_with("carta_"));
+        assert_eq!(harness.provider()?.calls.len(), 4);
+        assert!(
+            !harness
+                .runtime()
+                .db()
+                .with_file_name(crate::carta_live::STORE)
+                .exists(),
+            "v2 publishes nothing beside the app database"
+        );
+        let page = harness.page(&delivery.id, 0)?;
+        let expected = expected_records(variant)
+            .iter()
+            .map(tagged)
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(page, json!({"records":expected,"page":0,"done":true}));
+        assert_eq!(
+            harness.provider()?.calls.len(),
+            4,
+            "pages make no provider call"
+        );
+        assert!(harness.page(&delivery.id, 1).is_err());
+
+        // A later invocation of the same app reads the held capture: the
+        // harness reuses the invocation, so read it from the store directly too.
+        assert_eq!(harness.held()?, 1);
+        // An unchanged recapture is the capture already held.
+        assert_eq!(harness.deliver()?.id, delivery.id);
+        assert_eq!(harness.held()?, 1);
+        assert_eq!(harness.provider()?.calls.len(), 8);
+
+        // Another connection or issuer cannot read or release it.
+        for binding in ["other_connection", "other_issuer"] {
+            for (action, input) in [
+                (
+                    Action::CartaDeliveryPage,
+                    json!({"capture_id":delivery.id,"page":0}),
+                ),
+                (Action::CartaRelease, json!({"capture_id":delivery.id})),
+            ] {
+                let authorized = harness.authorize(action, input, binding, ACTOR)?;
+                let outcome = if action.is_write() {
+                    capabilities::execute(harness.runtime(), authorized, "foreign", "foreign")
+                } else {
+                    capabilities::observe(harness.runtime(), authorized, "foreign")
+                };
+                assert_eq!(
+                    outcome.result.unwrap_err().to_string(),
+                    "capture_delivery_authority_changed",
+                    "{binding} {action:?}"
+                );
+            }
+        }
+        assert_eq!(harness.held()?, 1);
+        assert_eq!(harness.release(&delivery.id)?, json!({"released":true}));
+        assert_eq!(
+            harness.page(&delivery.id, 0).unwrap_err().to_string(),
+            "capture_delivery_unavailable"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn carta_delivery_refuses_a_third_unreleased_capture_instead_of_pruning() -> Result<()> {
+    let harness = Harness::new(Variant::A)?;
+    let mut held = Vec::new();
+    for name in ["First", "Second"] {
+        simulated::update_carta(harness.runtime().db(), harness.runtime().scope(), |world| {
+            world.world.stakeholder_pages[1]["stakeholders"][0]["fullName"] = json!(name);
+            Ok(())
+        })?;
+        held.push(harness.deliver()?.id);
+    }
+    assert_ne!(held[0], held[1]);
+    simulated::update_carta(harness.runtime().db(), harness.runtime().scope(), |world| {
+        world.world.stakeholder_pages[1]["stakeholders"][0]["fullName"] = json!("Third");
+        Ok(())
+    })?;
+    let Err(refused) = harness.dispatch(Action::CartaSnapshotDelivery, json!({})) else {
+        anyhow::bail!("a third unreleased capture was held")
+    };
+    let refused = refused.to_string();
+    assert_eq!(refused, "capture_delivery_release_required");
+    // Nothing the application holds was discarded to make room.
+    for id in &held {
+        assert!(harness.page(id, 0).is_ok());
+    }
+    assert_eq!(harness.release(&held[0])?, json!({"released":true}));
+    let third = harness.deliver()?;
+    assert!(!held.contains(&third.id));
+    assert!(harness.page(&held[1], 0).is_ok());
+    Ok(())
+}
+
+#[test]
+fn synthetic_carta_delivery_holds_the_seeded_capture() -> Result<()> {
+    let harness = Harness::new(Variant::A)?;
+    let observe = |action: Action, data: Value| -> Result<String> {
+        let authorized = harness.authorize(action, data, "synthetic", ACTOR)?;
+        let outcome = if action.is_write() {
+            capabilities::execute(harness.runtime(), authorized, "synthetic", "synthetic")
+        } else {
+            capabilities::observe(harness.runtime(), authorized, "synthetic")
+        };
+        outcome.result
+    };
+    // An unseeded synthetic source is unconfigured, never an empty capture.
+    assert_eq!(
+        observe(Action::CartaSnapshotDelivery, json!({}))
+            .unwrap_err()
+            .to_string(),
+        "carta_unconfigured"
+    );
+    let example = crate::carta::synthetic_example();
+    let seeded = crate::carta::seed_synthetic(harness.runtime(), &example)?;
+    let delivery: crate::carta::Delivery =
+        serde_json::from_str(&observe(Action::CartaSnapshotDelivery, json!({}))?)?;
+    assert_eq!(delivery.id, seeded.id);
+    assert_eq!(delivery.source_profile, "synthetic");
+    assert_eq!(delivery.record_count, 8);
+    assert_eq!(delivery.page_count, 1);
+    let page: Value = serde_json::from_str(&observe(
+        Action::CartaDeliveryPage,
+        json!({"capture_id":delivery.id,"page":0}),
+    )?)?;
+    let expected = example
+        .records
+        .iter()
+        .map(tagged)
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(page, json!({"records":expected,"page":0,"done":true}));
+    // The live binding of the same app cannot read the synthetic capture.
+    let authorized = harness.authorize(
+        Action::CartaDeliveryPage,
+        json!({"capture_id":delivery.id,"page":0}),
+        "carta",
+        ACTOR,
+    )?;
+    assert!(
+        capabilities::observe(harness.runtime(), authorized, "cross")
+            .result
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&observe(
+            Action::CartaRelease,
+            json!({"capture_id":delivery.id})
+        )?)?,
+        json!({"released":true})
     );
     Ok(())
 }

@@ -635,8 +635,9 @@ pub(crate) fn record_use(
     )?;
     ensure!(
         // A validated local cache plan, a page of this invocation's staged
-        // delivery, or a record read from a published live Carta capture,
-        // consumes no provider calls. Local work remains bounded
+        // delivery, a record read from a published live Carta capture, or a
+        // page or release of an application-held Carta capture, consumes no
+        // provider calls. Local work remains bounded
         // by the host's observation/transaction budgets.
         (resource.planned_calls > 0
             || matches!(
@@ -644,6 +645,8 @@ pub(crate) fn record_use(
                 Action::WorkspaceDirectoryHierarchy
                     | Action::WorkspaceDirectoryDeliveryPage
                     | Action::CartaRecord
+                    | Action::CartaDeliveryPage
+                    | Action::CartaRelease
             ))
             && u64::try_from(count)?
                 .checked_add(resource.planned_calls)
@@ -689,6 +692,12 @@ pub(crate) fn validate_result(resource: &ResourceUse, result: &str) -> Result<()
     {
         let snapshot: crate::carta::Snapshot = crate::json::decode(result.as_bytes())?;
         ensure!(&snapshot.issuer_id == issuer_id, Failure::ResourceForbidden);
+    }
+    if let ResourceTarget::CartaIssuer { issuer_id, .. } = &resource.grant.target
+        && resource.action == Action::CartaSnapshotDelivery
+    {
+        let delivery: crate::carta::Delivery = crate::json::decode(result.as_bytes())?;
+        ensure!(&delivery.issuer_id == issuer_id, Failure::ResourceForbidden);
     }
     if let ResourceTarget::GoogleDirectory { customer_id, .. } = &resource.grant.target
         && resource.action == Action::GoogleDirectorySnapshot

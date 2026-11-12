@@ -141,7 +141,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Carta.roc",
         "",
-        "aa4caf76a0c30c7ab8c0ab00bde723930d9acaf4ca04112ff98c2cd99caff2d3",
+        "493b6e880977c9acf3d1ebc80302c7a214e17a248d7311694a826d1c3139cfcd",
     ),
     (
         "Audit.roc",

@@ -216,6 +216,21 @@ impl CapturePlan {
     pub fn source_profile(&self) -> SourceProfile {
         self.source_profile
     }
+
+    /// Everything a held delivery is bound to: runtime scope, connection
+    /// authority, environment, issuer, child-record mode and source. A page or
+    /// release under any other grant is refused.
+    pub fn delivery_authority(&self) -> Result<String> {
+        Ok(serde_json::to_string(&(
+            "carta.issuer.v2",
+            &self.scope,
+            &self.connection,
+            self.environment.name(),
+            &self.issuer_id,
+            self.children.name(),
+            self.source_profile.name(),
+        ))?)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -848,11 +863,17 @@ pub struct CompleteCapture {
     environment: CartaEnvironment,
     children: CartaChildren,
     envelopes: Vec<String>,
+    records: Vec<Record>,
 }
 
 impl CompleteCapture {
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// The typed records in provider order, for delivery to the application.
+    pub fn records(&self) -> &[Record] {
+        &self.records
     }
 }
 
@@ -896,6 +917,7 @@ fn complete(plan: &CapturePlan, collected: Collected) -> Result<CompleteCapture>
         environment: plan.environment,
         children: plan.children,
         envelopes: collected.envelopes,
+        records: collected.records,
     })
 }
 

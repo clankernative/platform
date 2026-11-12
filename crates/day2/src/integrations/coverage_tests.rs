@@ -110,6 +110,9 @@ enum Demonstration {
     /// establish — a correct signature over the wrong object is still wrong, and
     /// a presigned URL cannot be recalled once handed to a client.
     LocalAuthorization,
+    /// Releases the application's own held copy of a capture. It reaches no
+    /// provider and must change no provider world; the held pages must be gone.
+    HeldCaptureRelease,
     /// Exercises the executor service's own deterministic manifest/receipt world.
     FreetoolExecutorWorld,
     /// Real scoped synthetic Linear capability admission and committed world.
@@ -177,7 +180,11 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::WorkspaceDirectoryDeliveryPage => Demonstration::NativeAdapterRead,
         // The live capture pipeline against Carta's own wire world, then a
         // local read of the published capture.
-        Action::CartaSnapshot | Action::CartaRecord => Demonstration::AdmittedAdapterRead,
+        Action::CartaSnapshot
+        | Action::CartaRecord
+        | Action::CartaSnapshotDelivery
+        | Action::CartaDeliveryPage => Demonstration::AdmittedAdapterRead,
+        Action::CartaRelease => Demonstration::HeldCaptureRelease,
         Action::FreetoolFingerprint
         | Action::FreetoolStatus
         | Action::FreetoolResultPage
@@ -1190,6 +1197,7 @@ fn check(
         Demonstration::NotificationsAdapter => notifications::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
+        Demonstration::HeldCaptureRelease => carta::check_release(action),
         Demonstration::AdmittedAdapterRead => {
             let first = run(Variant::A)?;
             let second = run(Variant::B)?;
