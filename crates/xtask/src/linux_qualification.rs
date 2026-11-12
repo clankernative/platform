@@ -433,6 +433,7 @@ impl Session {
                 let directory = self.output.join("inputs");
                 fs::create_dir(&directory)?;
                 inputs.materialize(&directory)?;
+                super::verification::linux::admit_capture(&directory.join("platform"))?;
                 fs::create_dir(directory.join("examples"))?;
                 source.materialize(&directory.join("examples/reports"))?;
                 owned.materialize(&directory.join("public-owned"))?;

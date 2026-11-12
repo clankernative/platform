@@ -1217,7 +1217,13 @@ fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, St
         ".github/temporal.sha256",
         ".github/temporal-linux.sha256",
     ] {
-        hashes.insert(pin.into(), digest(&fs::read(root.join(pin))?));
+        hashes.insert(
+            pin.into(),
+            digest(
+                &fs::read(root.join(pin))
+                    .with_context(|| format!("read verification source pin: {pin}"))?,
+            ),
+        );
     }
     let mut sources = vec![
         ("sdk", root.join("sdk")),

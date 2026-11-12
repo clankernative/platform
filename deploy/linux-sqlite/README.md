@@ -168,7 +168,9 @@ changed SDK outputs fail closed instead of rebuilding Platform. Runtime images
 are built from `tooling-build`, which retains the producer toolchain.
 
 `ops/Linux.roc` builds the private `qualification-tests` export from the producer
-and mounts it read-only into the actual consumer container. The same delegation,
+after initial capture admits the complete test source inventory and checksum
+metadata. Missing captured inputs fail before either image build. It then
+mounts the export read-only into the actual consumer container. The same delegation,
 sandbox, worker, HTTP and backup suites execute there without invoking Bazel.
 The bundle admits its complete declared test inventory, source/workflow/toolchain
 identity, native architecture and exact executable bytes, including the SDK's

@@ -72,6 +72,13 @@ fn identity(root: &Path, outputs: BTreeMap<String, File>) -> Result<Prepared> {
     })
 }
 
+/// Admit the materialized SDK closure before spending time building images.
+pub(crate) fn admit_capture(root: &Path) -> Result<()> {
+    targets(root).context("captured native Rust test inventory")?;
+    identity(root, BTreeMap::new()).context("captured native verification source inventory")?;
+    Ok(())
+}
+
 pub(crate) fn prepare(root: &Path) -> Result<()> {
     ensure!(
         cfg!(target_os = "linux"),
@@ -207,6 +214,47 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn native_capture_preserves_complete_linux_test_source_identity() -> Result<()> {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()?;
+        let temp = tempfile::tempdir()?;
+        let toolchains = temp.path().join("toolchains");
+        fs::create_dir(&toolchains)?;
+        // Capture transport needs file identities, not an executed compiler.
+        fs::write(toolchains.join("roc"), b"unexecuted capture fixture")?;
+        if cfg!(target_os = "macos") {
+            fs::create_dir_all(toolchains.join("darwin/usr/lib"))?;
+            fs::write(
+                toolchains.join("darwin/usr/lib/libSystem.tbd"),
+                b"capture fixture",
+            )?;
+        }
+        let inputs = day2_control::build::PlatformInputs::capture(&source, &toolchains)?;
+        let workspace = temp.path().join("workspace");
+        inputs.materialize(&workspace)?;
+        let captured = workspace.join("platform").canonicalize()?;
+        admit_capture(&captured)?;
+        let expected = identity(&source, BTreeMap::new())?.sources;
+        assert_eq!(identity(&captured, BTreeMap::new())?.sources, expected);
+        let pin = captured.join(".github/temporal-linux.sha256");
+        let original = fs::read(&pin)?;
+        fs::set_permissions(&pin, fs::Permissions::from_mode(0o644))?;
+        fs::write(&pin, b"changed checksum metadata")?;
+        assert_ne!(identity(&captured, BTreeMap::new())?.sources, expected);
+        fs::remove_file(&pin)?;
+        let error = admit_capture(&captured)
+            .expect_err("missing checksum pin must fail before image builds");
+        assert!(format!("{error:#}").contains(".github/temporal-linux.sha256"));
+        fs::write(&pin, original)?;
+        let rust_test = captured.join("crates/day2/tests/linux_worker.rs");
+        fs::set_permissions(&rust_test, fs::Permissions::from_mode(0o644))?;
+        fs::write(rust_test, b"changed Rust harness source")?;
+        assert_ne!(identity(&captured, BTreeMap::new())?.sources, expected);
+        Ok(())
+    }
 
     #[test]
     fn linux_test_bundle_rejects_foreign_identity_inventory_paths_and_bytes() -> Result<()> {
