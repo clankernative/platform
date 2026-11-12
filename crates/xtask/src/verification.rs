@@ -12,6 +12,7 @@ use std::{
 };
 
 mod dst;
+pub(super) mod linux;
 mod shards;
 
 const CACHE_FORMAT: u32 = 2;
@@ -1642,15 +1643,11 @@ const REPORT_FILTERS: &[&str] = &[
     "support::",
 ];
 
-fn tests(
+fn suite_targets(
     root: &Path,
     suite: &str,
-    fixtures: &BTreeMap<String, PathBuf>,
-    budget: std::time::Duration,
-) -> Result<()> {
-    let dst = dst::Session::start(root, suite)?;
+) -> Result<(Vec<crate::bazel::Target>, Vec<crate::bazel::Target>)> {
     let selection = test_selection(suite)?;
-    let started = std::time::Instant::now();
     let catalog = crate::bazel::targets(root)?;
     let selected = catalog
         .iter()
@@ -1681,9 +1678,27 @@ fn tests(
             })
             .cloned(),
     );
-    let outputs = crate::bazel::build(root, &compile, budget)?;
-    #[cfg(target_os = "linux")]
-    install_linux_test_programs(root, &outputs)?;
+    Ok((selected, compile))
+}
+
+fn tests(
+    root: &Path,
+    suite: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+    budget: std::time::Duration,
+) -> Result<()> {
+    let dst = dst::Session::start(root, suite)?;
+    let selection = test_selection(suite)?;
+    let started = std::time::Instant::now();
+    let (selected, compile) = suite_targets(root, suite)?;
+    let outputs = if linux::SUITES.contains(&suite) {
+        linux::load(root)?
+    } else {
+        let outputs = crate::bazel::build(root, &compile, budget)?;
+        #[cfg(target_os = "linux")]
+        install_linux_test_programs(root, &outputs)?;
+        outputs
+    };
     let private_build = prepare_private_build_inputs(root, suite)?;
     for target in selected {
         let mut command = Command::new(

@@ -2208,7 +2208,10 @@ pub fn diagnose(
         );
         eprintln!("Linux diagnostic: {key}");
         let evidence = match action {
-            "linux-capture" | "linux-build-tooling" | "linux-build-runtime" => {
+            "linux-capture"
+            | "linux-build-tooling"
+            | "linux-build-runtime"
+            | "linux-prepare-tests" => {
                 ensure!(former.contains(action), "retained build was not completed");
                 let evidence = json!({"status":if action == "linux-build-runtime" && runtime_override.is_some() {"diagnostic-runtime-override"} else {"retained-diagnostic-only"},"source_status":"pre-final",
                     "failed_run":failed,"platform":failure["platform"],"source":failure["source"],
@@ -2217,7 +2220,7 @@ pub fn diagnose(
                 return Ok(evidence);
             }
             "linux-start-tooling" => {
-                ensure!(retained.len() == 3, "retained diagnostic inputs required");
+                ensure!(retained.len() == 4, "retained diagnostic inputs required");
                 let mut arguments = vec![
                     "run".into(),
                     "--detach".into(),
@@ -2245,6 +2248,11 @@ pub fn diagnose(
                     ]);
                 }
                 arguments.extend([
+                    "--mount".into(),
+                    format!(
+                        "type=bind,source={},target=/workspace/platform/build-out/tests,readonly",
+                        failed.join("linux-tests").display()
+                    ),
                     "--mount".into(),
                     format!(
                         "type=bind,source={},target=/workspace/platform/examples/reports,readonly",
@@ -2346,7 +2354,7 @@ pub fn diagnose(
             "linux-receipt" => {
                 ensure!(
                     executed.len() + reused_suites.len() == 15
-                        && retained.len() == 5
+                        && retained.len() == 6
                         && executed.contains_key("linux-stop-tooling"),
                     "diagnostic recipe incomplete"
                 );

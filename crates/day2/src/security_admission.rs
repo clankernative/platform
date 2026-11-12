@@ -15,6 +15,7 @@ const LINUX_CHECKS: &[&str] = &[
     "linux-capture",
     "linux-build-tooling",
     "linux-build-runtime",
+    "linux-prepare-tests",
     "linux-start-tooling",
     "linux-build-check",
     "linux-build-probe",

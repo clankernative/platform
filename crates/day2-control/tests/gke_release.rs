@@ -857,7 +857,7 @@ fn qualified_build_receipt_requires_complete_real_profile_and_exact_worker() -> 
     let artifact = Digest::new(b"native-artifact");
     let mut receipt = json!({"format":1,"status":"passed","scope":"linux_sqlite_single_v1",
         "environment":{"architecture":"x86_64"},"applications":{"stock":{"artifact":artifact,"worker":"worker-one"}},
-        "checks":["linux-build-check","linux-build-delegation","linux-build-delegation-business","linux-build-owned","linux-build-probe","linux-build-runtime","linux-build-tooling","linux-capture","linux-runtime-forced-restart","linux-runtime-graceful-restart","linux-runtime-isolation","linux-runtime-package","linux-runtime-read-write","linux-runtime-restore","linux-runtime-revoke","linux-runtime-start","linux-runtime-stop","linux-start-tooling","linux-stop-tooling","linux-test-delegation","test-backup","test-http","test-sandbox","test-worker"]});
+        "checks":["linux-build-check","linux-build-delegation","linux-build-delegation-business","linux-build-owned","linux-build-probe","linux-build-runtime","linux-build-tooling","linux-prepare-tests","linux-capture","linux-runtime-forced-restart","linux-runtime-graceful-restart","linux-runtime-isolation","linux-runtime-package","linux-runtime-read-write","linux-runtime-restore","linux-runtime-revoke","linux-runtime-start","linux-runtime-stop","linux-start-tooling","linux-stop-tooling","linux-test-delegation","test-backup","test-http","test-sandbox","test-worker"]});
     let check = |value: &Value| {
         day2_control::qualified_release_build::check_receipt(
             value,

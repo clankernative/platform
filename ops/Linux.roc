@@ -8,6 +8,7 @@ Linux :: [].{
 		_ = Capability.call!("linux-capture", "{}", host!)?
 		_ = Capability.call!("linux-build-tooling", "{}", host!)?
 		_ = Capability.call!("linux-build-runtime", "{}", host!)?
+		_ = Capability.call!("linux-prepare-tests", "{}", host!)?
 		_ = Capability.call!("linux-start-tooling", "{}", host!)?
 		_ = Capability.call!("linux-build-check", "{}", host!)?
 		_ = Capability.call!("linux-build-probe", "{}", host!)?
