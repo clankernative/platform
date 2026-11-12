@@ -80,31 +80,28 @@ pub fn journal_bytes(encoded: &str) -> Result<usize> {
     Ok(serde_json::to_string(encoded)?.len())
 }
 
+/// One ordinary rowid table, one row per staged page; every row repeats its
+/// capture's header. Deliberately a single schema object, with no key index,
+/// foreign key or guard trigger: restore's security admission charges each
+/// `sqlite_master` object on every full-schema scan under a fixed budget, and
+/// restore snapshots read every table `ORDER BY rowid`. What a key or trigger
+/// would enforce is enforced here instead: rows are only ever inserted or
+/// deleted (no statement in this module updates one), staging replaces or
+/// refuses a capture inside one write transaction, and every read checks that
+/// the capture's rows form exactly one complete, consistent set.
+const DDL: &str = "CREATE TABLE IF NOT EXISTS day2_capture_deliveries (
+    holder TEXT NOT NULL,
+    id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    kind TEXT NOT NULL,
+    authority TEXT NOT NULL,
+    item_count INTEGER NOT NULL CHECK(item_count >= 0),
+    page_count INTEGER NOT NULL CHECK(page_count BETWEEN 1 AND 10000),
+    page INTEGER NOT NULL CHECK(page >= 0 AND page < page_count),
+    result TEXT NOT NULL
+) STRICT";
+
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS day2_capture_deliveries (
-            holder TEXT NOT NULL,
-            id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
-            kind TEXT NOT NULL,
-            authority TEXT NOT NULL,
-            item_count INTEGER NOT NULL CHECK(item_count >= 0),
-            page_count INTEGER NOT NULL CHECK(page_count BETWEEN 1 AND 10000),
-            bytes INTEGER NOT NULL CHECK(bytes >= 0),
-            PRIMARY KEY(holder,id)
-        ) STRICT;
-        CREATE TABLE IF NOT EXISTS day2_capture_delivery_pages (
-            holder TEXT NOT NULL,
-            id TEXT NOT NULL,
-            page INTEGER NOT NULL CHECK(page >= 0),
-            result TEXT NOT NULL,
-            PRIMARY KEY(holder,id,page),
-            FOREIGN KEY(holder,id) REFERENCES day2_capture_deliveries(holder,id)
-        ) STRICT;
-        CREATE TRIGGER IF NOT EXISTS day2_capture_deliveries_no_update
-            BEFORE UPDATE ON day2_capture_deliveries BEGIN SELECT RAISE(ABORT,'immutable_delivery'); END;
-        CREATE TRIGGER IF NOT EXISTS day2_capture_delivery_pages_no_update
-            BEFORE UPDATE ON day2_capture_delivery_pages BEGIN SELECT RAISE(ABORT,'immutable_delivery'); END;",
-    )?;
+    connection.execute_batch(DDL)?;
     Ok(())
 }
 
@@ -123,7 +120,50 @@ pub enum Staging {
     AlreadyHeld,
 }
 
-/// Stage `staged` for `holder`.
+/// The header every row of one staged capture repeats.
+#[derive(Debug, PartialEq, Eq)]
+struct Header {
+    kind: String,
+    authority: String,
+    item_count: u64,
+    page_count: u64,
+}
+
+/// The single consistent header of `(holder, id)`, or none when it holds no
+/// rows. Refuses a capture whose rows disagree on the header, repeat a page,
+/// or do not cover exactly pages `0..page_count`: the guarantees a key and a
+/// foreign key would otherwise give, checked on every use.
+fn header(connection: &Connection, holder: &str, id: &str) -> Result<Option<Header>> {
+    let mut statement = connection.prepare(
+        "SELECT kind,authority,item_count,page_count,count(*),count(DISTINCT page),min(page),max(page)
+         FROM day2_capture_deliveries WHERE holder=?1 AND id=?2
+         GROUP BY kind,authority,item_count,page_count",
+    )?;
+    let mut rows = statement.query(params![holder, id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let header = Header {
+        kind: row.get(0)?,
+        authority: row.get(1)?,
+        item_count: u64::try_from(row.get::<_, i64>(2)?)?,
+        page_count: u64::try_from(row.get::<_, i64>(3)?)?,
+    };
+    let (rows_held, distinct, first, last): (i64, i64, i64, i64) =
+        (row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?);
+    ensure!(
+        u64::try_from(rows_held)? == header.page_count
+            && distinct == rows_held
+            && first == 0
+            && u64::try_from(last)? + 1 == header.page_count,
+        "capture_delivery_inconsistent"
+    );
+    ensure!(rows.next()?.is_none(), "capture_delivery_inconsistent");
+    Ok(Some(header))
+}
+
+/// Stage `staged` for `holder`. Runs inside the caller's write transaction, so
+/// the checks and the inserts are one atomic step.
 ///
 /// An invocation first sweeps deliveries no invocation can read again, and a
 /// retried attempt replaces its own identical content. The application keeps a
@@ -149,15 +189,11 @@ pub(crate) fn stage(
             && staged.pages.len() <= max_pages,
         "capture_delivery_invalid"
     );
-    let mut bytes = 0i64;
     for page in &staged.pages {
         ensure!(
             journal_bytes(page)? <= MAX_PAGE_JOURNAL_BYTES,
             "capture_delivery_page_too_large"
         );
-        bytes = bytes
-            .checked_add(i64::try_from(page.len())?)
-            .context("capture_delivery_capacity")?;
     }
     ensure!(installed(connection)?, "capture_delivery_unavailable");
     let key = holder.column();
@@ -167,22 +203,15 @@ pub(crate) fn stage(
             release_one(connection, invocation, &staged.id)?;
         }
         Holder::Application => {
-            let held: Option<(String, String)> = connection
-                .query_row(
-                    "SELECT kind,authority FROM day2_capture_deliveries WHERE holder='' AND id=?1",
-                    [&staged.id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            if let Some((kind, authority)) = held {
+            if let Some(held) = header(connection, "", &staged.id)? {
                 ensure!(
-                    kind == staged.kind && authority == staged.authority,
+                    held.kind == staged.kind && held.authority == staged.authority,
                     "capture_delivery_conflict"
                 );
                 return Ok(Staging::AlreadyHeld);
             }
             let unreleased: i64 = connection.query_row(
-                "SELECT count(*) FROM day2_capture_deliveries WHERE holder='' AND kind=?1 AND authority=?2",
+                "SELECT count(DISTINCT id) FROM day2_capture_deliveries WHERE holder='' AND kind=?1 AND authority=?2",
                 params![staged.kind, staged.authority],
                 |row| row.get(0),
             )?;
@@ -192,31 +221,34 @@ pub(crate) fn stage(
             );
         }
     }
-    connection.execute(
-        "INSERT INTO day2_capture_deliveries VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![
-            key,
-            staged.id,
-            staged.kind,
-            staged.authority,
-            i64::try_from(staged.item_count)?,
-            i64::try_from(staged.pages.len())?,
-            bytes,
-        ],
-    )?;
+    let page_count = i64::try_from(staged.pages.len())?;
     for (index, page) in staged.pages.iter().enumerate() {
         connection.execute(
-            "INSERT INTO day2_capture_delivery_pages VALUES(?1,?2,?3,?4)",
-            params![key, staged.id, i64::try_from(index)?, page],
+            "INSERT INTO day2_capture_deliveries VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                key,
+                staged.id,
+                staged.kind,
+                staged.authority,
+                i64::try_from(staged.item_count)?,
+                page_count,
+                i64::try_from(index)?,
+                page,
+            ],
         )?;
     }
+    // The capture just written must read back as one complete set.
+    ensure!(
+        header(connection, key, &staged.id)?.is_some(),
+        "capture_delivery_inconsistent"
+    );
     let (sql, bound) = match holder {
         Holder::Invocation(_) => (
-            "SELECT coalesce(sum(bytes),0) FROM day2_capture_deliveries WHERE holder!=''",
+            "SELECT coalesce(sum(length(CAST(result AS BLOB))),0) FROM day2_capture_deliveries WHERE holder!=''",
             MAX_BUFFER_BYTES,
         ),
         Holder::Application => (
-            "SELECT coalesce(sum(bytes),0) FROM day2_capture_deliveries WHERE holder=''",
+            "SELECT coalesce(sum(length(CAST(result AS BLOB))),0) FROM day2_capture_deliveries WHERE holder=''",
             MAX_HELD_BYTES,
         ),
     };
@@ -234,25 +266,18 @@ pub(crate) fn held(
     id: &str,
 ) -> Result<(u64, u64)> {
     ensure!(installed(connection)?, "capture_delivery_unavailable");
-    let header: Option<(String, String, i64, i64)> = connection
-        .query_row(
-            "SELECT kind,authority,item_count,page_count FROM day2_capture_deliveries WHERE holder=?1 AND id=?2",
-            params![holder.column(), id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    let (saved_kind, saved_authority, items, pages) =
-        header.context("capture_delivery_unavailable")?;
+    let saved = header(connection, holder.column(), id)?.context("capture_delivery_unavailable")?;
     ensure!(
-        saved_kind == kind && saved_authority == authority,
+        saved.kind == kind && saved.authority == authority,
         "capture_delivery_authority_changed"
     );
-    Ok((u64::try_from(items)?, u64::try_from(pages)?))
+    Ok((saved.item_count, saved.page_count))
 }
 
 /// Read one staged page. An invocation-held page answers only its invocation; an
 /// application-held page answers any invocation. Both require the grant's
-/// authority to be exactly the one the capture was staged under.
+/// authority to be exactly the one the capture was staged under, and the
+/// capture's rows to be one complete, consistent set.
 pub(crate) fn page(
     connection: &Connection,
     holder: Holder<'_>,
@@ -265,7 +290,7 @@ pub(crate) fn page(
     ensure!(page < page_count, "capture_delivery_page_invalid");
     connection
         .query_row(
-            "SELECT result FROM day2_capture_delivery_pages WHERE holder=?1 AND id=?2 AND page=?3",
+            "SELECT result FROM day2_capture_deliveries WHERE holder=?1 AND id=?2 AND page=?3",
             params![holder.column(), id, i64::try_from(page)?],
             |row| row.get(0),
         )
@@ -278,10 +303,6 @@ pub(crate) fn release(connection: &Connection, invocation: &str) -> Result<()> {
     if !installed(connection)? || invocation.is_empty() {
         return Ok(());
     }
-    connection.execute(
-        "DELETE FROM day2_capture_delivery_pages WHERE holder=?1",
-        [invocation],
-    )?;
     connection.execute(
         "DELETE FROM day2_capture_deliveries WHERE holder=?1",
         [invocation],
@@ -308,10 +329,6 @@ pub(crate) fn release_held(
 
 fn release_one(connection: &Connection, holder: &str, id: &str) -> Result<()> {
     connection.execute(
-        "DELETE FROM day2_capture_delivery_pages WHERE holder=?1 AND id=?2",
-        params![holder, id],
-    )?;
-    connection.execute(
         "DELETE FROM day2_capture_deliveries WHERE holder=?1 AND id=?2",
         params![holder, id],
     )?;
@@ -337,10 +354,6 @@ fn sweep(connection: &Connection) -> Result<()> {
          LEFT JOIN day2_invocations i ON i.id=d.holder
          WHERE d.holder!='' AND (i.id IS NULL OR i.status!='pending')"
     };
-    connection.execute(
-        &format!("DELETE FROM day2_capture_delivery_pages WHERE holder IN ({stale})"),
-        [],
-    )?;
     connection.execute(
         &format!("DELETE FROM day2_capture_deliveries WHERE holder IN ({stale})"),
         [],
@@ -487,10 +500,9 @@ mod tests {
         stage(&db, Holder::Invocation("pending-a"), &first)?;
         // A retried attempt restages identical content without duplicating it.
         stage(&db, Holder::Invocation("pending-a"), &first)?;
-        assert_eq!(count(&db, "day2_capture_delivery_pages")?, 1);
+        assert_eq!(count(&db, "day2_capture_deliveries")?, 1);
         release(&db, "pending-a")?;
         assert_eq!(count(&db, "day2_capture_deliveries")?, 0);
-        assert_eq!(count(&db, "day2_capture_delivery_pages")?, 0);
 
         // Crash leftovers: a finished invocation, an unknown one and a blocked
         // one are all swept by the next staging, which itself survives.
@@ -514,8 +526,7 @@ mod tests {
             [],
         )?;
         db.execute_batch(
-            "INSERT INTO day2_capture_deliveries VALUES('ghost','sha256:0000000000000000000000000000000000000000000000000000000000000000','workspace_directory.hierarchy','[]',0,1,2);
-             INSERT INTO day2_capture_delivery_pages VALUES('ghost','sha256:0000000000000000000000000000000000000000000000000000000000000000',0,'{}');",
+            "INSERT INTO day2_capture_deliveries VALUES('ghost','sha256:0000000000000000000000000000000000000000000000000000000000000000','workspace_directory.hierarchy','[]',0,1,0,'{}');",
         )?;
         let survivor = staged("survivor", &["{}"]);
         stage(&db, Holder::Invocation("pending-c"), &survivor)?;
@@ -524,12 +535,11 @@ mod tests {
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         assert_eq!(invocations, vec!["pending-c".to_owned()]);
-        assert_eq!(count(&db, "day2_capture_delivery_pages")?, 1);
         Ok(())
     }
 
     #[test]
-    fn staging_fails_closed_on_bounds_and_immutability() -> Result<()> {
+    fn staging_fails_closed_on_bounds_and_reads_refuse_inconsistent_rows() -> Result<()> {
         let db = database()?;
         let too_many: Vec<&str> = vec!["{}"; MAX_PAGES + 1];
         assert_eq!(
@@ -560,15 +570,37 @@ mod tests {
             .to_string(),
             "capture_delivery_page_too_large"
         );
-        stage(&db, Holder::Invocation("pending-a"), &staged("ok", &["{}"]))?;
-        assert!(
-            db.execute("UPDATE day2_capture_delivery_pages SET result='[]'", [])
-                .is_err()
-        );
-        assert!(
-            db.execute("UPDATE day2_capture_deliveries SET authority='[]'", [])
-                .is_err()
-        );
+        // No key or trigger guards the rows; every read checks that a capture's
+        // rows are one complete, consistent set, so an out-of-band edit refuses.
+        let capture = staged("ok", &["{\"page\":0}", "{\"page\":1}"]);
+        let read = |db: &Connection| {
+            page(
+                db,
+                Holder::Invocation("pending-a"),
+                capture.kind,
+                &capture.authority,
+                &capture.id,
+                0,
+            )
+            .map_err(|error| error.to_string())
+        };
+        for tamper in [
+            "UPDATE day2_capture_deliveries SET authority='[]' WHERE page=1",
+            "UPDATE day2_capture_deliveries SET item_count=item_count+1 WHERE page=0",
+            "INSERT INTO day2_capture_deliveries SELECT * FROM day2_capture_deliveries WHERE page=1",
+            "DELETE FROM day2_capture_deliveries WHERE page=1",
+            "UPDATE day2_capture_deliveries SET page=1 WHERE page=0",
+        ] {
+            db.execute("DELETE FROM day2_capture_deliveries", [])?;
+            stage(&db, Holder::Invocation("pending-a"), &capture)?;
+            assert_eq!(read(&db), Ok("{\"page\":0}".to_owned()));
+            db.execute(tamper, [])?;
+            assert_eq!(
+                read(&db),
+                Err("capture_delivery_inconsistent".to_owned()),
+                "{tamper}"
+            );
+        }
         Ok(())
     }
 
@@ -605,6 +637,39 @@ mod tests {
             .to_string(),
             "capture_delivery_capacity"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn the_delivery_schema_is_one_rowid_object() -> Result<()> {
+        // Restore's security admission charges every schema object on every
+        // full-schema scan, and restore snapshots read tables ORDER BY rowid. A
+        // key index, foreign key or trigger here would spend that budget.
+        let db = database()?;
+        let objects: Vec<(String, String)> = db
+            .prepare(
+                "SELECT type,name FROM sqlite_master WHERE tbl_name='day2_capture_deliveries'",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(
+            objects,
+            vec![("table".to_owned(), "day2_capture_deliveries".to_owned())]
+        );
+        let sql: String = db.query_row(
+            "SELECT sql FROM sqlite_master WHERE name='day2_capture_deliveries'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!sql.to_ascii_uppercase().contains("WITHOUT ROWID"));
+        // Upgrading again adds nothing.
+        upgrade(&db)?;
+        let count: i64 = db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE tbl_name='day2_capture_deliveries'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
         Ok(())
     }
 
@@ -746,7 +811,7 @@ mod tests {
             "capture_delivery_unavailable"
         );
         let held: i64 = db.query_row(
-            "SELECT count(*) FROM day2_capture_deliveries WHERE holder=''",
+            "SELECT count(DISTINCT id) FROM day2_capture_deliveries WHERE holder=''",
             [],
             |row| row.get(0),
         )?;

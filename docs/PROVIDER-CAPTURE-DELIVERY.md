@@ -44,7 +44,7 @@ prepare (one invocation)
   hierarchy.v2 ──► provider port (native or simulated), complete validation
                    │  split into pages: ≤256 units, ≤56 KiB journaled, ≤31 pages
                    ▼
-                 app.sqlite: day2_capture_deliveries / _pages  (keyed by invocation)
+                 app.sqlite: day2_capture_deliveries  (one row per page, keyed by holder)
                    │  returns {id, customer_id, org_unit_count, page_count, captured_at}
   page.v2 ×N ───► read this invocation's page (no provider call)  ─► journaled observation
   Decide boundary ─► release this invocation's staged pages
@@ -60,8 +60,9 @@ decide (Tx)
   (`id@revision`) and the validated units. It has no actor and no time, so an
   unchanged hierarchy delivers the same `id`. An app that stored the last
   synced `id` can stop after one observation.
-- **Staging**: pages are written to two `day2_` host tables in the app's own
-  database, keyed by invocation. Rows are immutable. Staging first sweeps
+- **Staging**: pages are written to one `day2_capture_deliveries` host table in
+  the app's own database, one row per page, keyed by holder. See
+  [Schema and restore](#schema-and-restore) for why it is one object. Staging first sweeps
   deliveries whose invocation is finished, unknown, or permanently blocked by
   an authority change. All staged pages in one database are capped at 64 MiB
   (`capture_delivery_capacity`).
@@ -130,6 +131,36 @@ WorkspaceDirectory.delivery_page_with : Resource, Str, U64 -> Observe(DeliveryPa
 `WorkspaceDirectory.roc` is sealed. Its admission pin was refreshed after
 reviewing the added surface: two capability names, two decoders, and no new
 host authority.
+
+## Schema and restore
+
+`day2_capture_deliveries` is one ordinary rowid table: no primary key, no
+autoindex, no foreign key and no trigger. Two restore constraints require this:
+
+- Security admission charges every `sqlite_master` object on each full-schema
+  scan, under the fixed `ADMISSION_ROWS` budget (16,384) in `oauth/schema.rs`.
+- Restore snapshots read every table `ORDER BY rowid`, so `WITHOUT ROWID` is
+  not an option.
+
+Measured against the `restore_staging` suite: the restore fixture has 3 objects
+of headroom over `bd96d438`. A 4th extra object fails 19 tests. This table uses
+1, and the trace-policy table on `journal-trace-policy-dedupe` uses 1. The first
+version of this change (two tables with composite keys plus two no-update
+triggers, about 6 objects) would have exceeded it.
+
+What the schema no longer enforces, code does, inside the same write
+transaction or on every read:
+
+| Was | Now |
+| --- | --- |
+| Primary keys `(holder,id)` and `(holder,id,page)` | Staging deletes or refuses an existing `(holder,id)` before inserting. Every read groups the capture's rows and requires one header, `count = page_count`, distinct pages, and pages `0..page_count`; otherwise `capture_delivery_inconsistent`. |
+| Foreign key from pages to header | Every row repeats the header; the same read check refuses rows that disagree. |
+| `BEFORE UPDATE` triggers | No statement updates a row. An out-of-band edit that breaks consistency is refused on read. A consistent rewrite of every row (for example, changing the authority) is caught as an authority mismatch, as before. |
+
+The triggers never stopped a writer with database access, who could drop them,
+so they did not add tamper resistance against such a writer. What remains is
+consistency checking, now in code. The restore fixture installs this table as
+ordinary initialization does, so `restore_staging` charges it from now on.
 
 ## Home migration
 

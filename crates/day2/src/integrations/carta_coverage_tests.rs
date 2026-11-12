@@ -334,7 +334,7 @@ impl Harness {
 
     fn held(&self) -> Result<i64> {
         Ok(crate::store::open(self.runtime().db())?.query_row(
-            "SELECT count(*) FROM day2_capture_deliveries WHERE holder=''",
+            "SELECT count(DISTINCT id) FROM day2_capture_deliveries WHERE holder=''",
             [],
             |row| row.get(0),
         )?)

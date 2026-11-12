@@ -256,7 +256,7 @@ impl<'a> Invocation<'a> {
 
 fn staged_rows(runtime: &Runtime) -> Result<i64> {
     Ok(open(runtime.db())?.query_row(
-        "SELECT count(*) FROM day2_capture_delivery_pages",
+        "SELECT count(*) FROM day2_capture_deliveries",
         [],
         |row| row.get(0),
     )?)
