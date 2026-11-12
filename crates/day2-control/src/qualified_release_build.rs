@@ -94,6 +94,7 @@ pub fn check_receipt(
         "linux-build-probe",
         "linux-build-runtime",
         "linux-build-tooling",
+        "linux-prepare-tests",
         "linux-capture",
         "linux-runtime-forced-restart",
         "linux-runtime-graceful-restart",

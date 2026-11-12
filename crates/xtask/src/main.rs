@@ -396,6 +396,13 @@ fn main() -> Result<()> {
                 &["day2", "day2-control", "day2-sandbox", "xtask", "day2-ops"],
             )?;
         }
+        "prepare-linux-tests" => {
+            ensure!(
+                args.next().is_none(),
+                "Linux test preparation accepts no overrides"
+            );
+            verification::linux::prepare(&root)?;
+        }
         "build-runtime-image-programs" | "build-enrollment-image-programs" => {
             ensure!(
                 args.next().is_none(),

@@ -3,7 +3,6 @@
 //! macro expansion, and transitive dependency effects still require review.
 
 use anyhow::{Context, Result, bail, ensure};
-use ring::digest::{Context as DigestContext, SHA256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -127,7 +126,7 @@ pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     crate::bazel::admit_clippy_outputs(
         root,
-        &strict_target_dir(root, packages),
+        &strict_target_dir(root),
         &labels,
         true,
         COMPILER_TIMEOUT
@@ -176,7 +175,7 @@ fn clippy_bazel_command(root: &Path) -> Command {
 
 fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> {
     let config = root.join("architecture").canonicalize()?;
-    let target = strict_target_dir(config.parent().context("strict workspace")?, packages);
+    let target = strict_target_dir(config.parent().context("strict workspace")?);
     let catalog = crate::bazel::targets(root)?;
     let mut command = clippy_bazel_command(root);
     command
@@ -207,24 +206,12 @@ fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> 
     Ok(command)
 }
 
-fn strict_target_dir(root: &Path, packages: &[StrictCrate<'_>]) -> PathBuf {
-    // Preserve separate analysis roots for explicit primary selections. Bazel
-    // compilation/action caches remain keyed by the actual inputs and flags.
-    let names: BTreeSet<_> = packages.iter().map(|package| package.name).collect();
-    let mut digest = DigestContext::new(&SHA256);
-    digest.update(b"day2-strict-clippy-selection-v1\0");
-    for name in names {
-        digest.update(&(name.len() as u64).to_le_bytes());
-        digest.update(name.as_bytes());
-    }
-    root.join("build-out").join("strict-clippy").join(
-        digest
-            .finish()
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-    )
+fn strict_target_dir(root: &Path) -> PathBuf {
+    // Bazel keys actions by the selected labels, source and pinned lint flags.
+    // Reuse its existing extracted repositories/toolchain instead of creating
+    // another multi-gigabyte compiler tree for every strict primary selection.
+    // Admission still reads exactly the requested producers' diagnostic files.
+    root.join(".cache/bazel-executor")
 }
 
 fn pin_lint_flags(command: &mut Command) {
@@ -709,34 +696,24 @@ mod tests {
     }
 
     struct ClippyFixture {
-        directory: tempfile::TempDir,
+        root: PathBuf,
+        _directory: tempfile::TempDir,
         closed: bool,
     }
 
     impl ClippyFixture {
         fn path(&self) -> &Path {
-            self.directory.path()
+            &self.root
         }
 
         fn shutdown(&self) -> Result<()> {
-            let partitions = self.path().join("build-out/strict-clippy");
-            if !partitions.exists() {
+            let output = strict_target_dir(self.path());
+            if !output.exists() {
                 return Ok(());
             }
-            let mut result = Ok(());
-            for entry in fs::read_dir(partitions)? {
-                let mut command = clippy_bazel_command(self.path());
-                command
-                    .arg(format!("--output_base={}", entry?.path().display()))
-                    .arg("shutdown")
-                    .current_dir(self.path());
-                if let Err(error) =
-                    crate::run_with_budget(self.path(), &mut command, Duration::from_secs(90))
-                {
-                    result = Err(error);
-                }
-            }
-            result
+            let mut command = clippy_bazel_command(self.path());
+            command.arg("shutdown").current_dir(self.path());
+            crate::run_with_budget(self.path(), &mut command, Duration::from_secs(90))
         }
 
         fn close(mut self) -> Result<()> {
@@ -761,7 +738,8 @@ mod tests {
     fn fixture() -> Result<ClippyFixture> {
         let directory = tempfile::tempdir()?;
         let directory = ClippyFixture {
-            directory,
+            root: directory.path().canonicalize()?,
+            _directory: directory,
             closed: false,
         };
         fs::create_dir(directory.path().join("src"))?;
@@ -926,30 +904,6 @@ mod tests {
         fs::write(&source, pure)?;
         check(fixture.path(), &packages)?;
         fixture.close()
-    }
-
-    #[test]
-    fn strict_target_partition_pins_exact_primary_selection() {
-        let root = Path::new("workspace");
-        let partition = |names: &[&str]| {
-            let packages: Vec<_> = names
-                .iter()
-                .map(|name| StrictCrate {
-                    name,
-                    source: "src/lib.rs",
-                    kernel: false,
-                })
-                .collect();
-            strict_target_dir(root, &packages)
-        };
-        let full = partition(&["boundary-fixture", "boundary-contract"]);
-        assert_eq!(full, partition(&["boundary-contract", "boundary-fixture"]));
-        assert_ne!(full, partition(&["boundary-fixture"]));
-        assert_ne!(full, partition(&["boundary-fixture", "different-contract"]));
-        assert_ne!(partition(&["ab", "c"]), partition(&["a", "bc"]));
-        assert!(full.starts_with(root.join("build-out/strict-clippy")));
-        let digest = full.file_name().unwrap().to_str().unwrap();
-        assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]

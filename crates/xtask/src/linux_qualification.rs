@@ -76,6 +76,7 @@ fn required_steps() -> BTreeSet<String> {
         "linux-capture",
         "linux-build-tooling",
         "linux-build-runtime",
+        "linux-prepare-tests",
         "linux-start-tooling",
         "linux-build-check",
         "linux-build-probe",
@@ -432,6 +433,7 @@ impl Session {
                 let directory = self.output.join("inputs");
                 fs::create_dir(&directory)?;
                 inputs.materialize(&directory)?;
+                super::verification::linux::admit_capture(&directory.join("platform"))?;
                 fs::create_dir(directory.join("examples"))?;
                 source.materialize(&directory.join("examples/reports"))?;
                 owned.materialize(&directory.join("public-owned"))?;
@@ -462,8 +464,40 @@ impl Session {
                 self.build_image("runtime")?;
                 json!({"image":self.runtime_image})
             }
+            "linux-prepare-tests" => {
+                ensure!(
+                    self.runtime_image.is_some(),
+                    "native images required before test preparation"
+                );
+                let input = self.output.join("inputs/platform");
+                let directory = self.output.join("linux-tests");
+                logged(
+                    &self.output,
+                    "prepare-tests",
+                    Command::new("docker")
+                        .args([
+                            "build",
+                            "--platform",
+                            native_platform()?.docker,
+                            "--target",
+                            "qualification-tests",
+                            "--output",
+                        ])
+                        .arg(format!("type=local,dest={}", directory.display()))
+                        .arg("-f")
+                        .arg(input.join("deploy/linux-sqlite/Dockerfile"))
+                        .arg(&input),
+                    3600,
+                )?;
+                let manifest =
+                    day2_assets::read_regular(&directory.join("linux-qualification.json"), 65_536)?;
+                json!({"manifest":digest(&manifest),"published_in_sdk":false})
+            }
             "linux-start-tooling" => {
-                ensure!(self.runtime_image.is_some(), "runtime image required");
+                ensure!(
+                    self.runtime_image.is_some() && self.checks.contains("linux-prepare-tests"),
+                    "runtime image and private test bundle required"
+                );
                 let setup_started = Instant::now();
                 logged(
                     &self.output,
@@ -491,6 +525,11 @@ impl Session {
                         .arg(format!(
                             "type=bind,source={},target=/workspace/platform/fixtures/row-authority-web-conformance,readonly",
                             self.output.join("inputs/public-owned").display()
+                        ))
+                        .arg("--mount")
+                        .arg(format!(
+                            "type=bind,source={},target=/workspace/platform/build-out/tests,readonly",
+                            self.output.join("linux-tests").display()
                         ))
                         .arg("--mount")
                         .arg(format!(
@@ -1276,12 +1315,14 @@ mod tests {
 
     #[test]
     fn actual_linux_recipe_satisfies_receipt_and_security_admission() -> Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()?;
         let runner = workflows::build(&root)?;
         preflight(&runner)?;
         super::super::linux_runtime_qualification::strict_preflight(&runner)?;
         super::super::linux_runtime_qualification::provision_preflight(&runner)?;
-        assert_eq!(required_steps().len(), 24);
+        assert_eq!(required_steps().len(), 25);
         assert!(request_key("linux-test-suite", &json!("sandbox")).is_err());
         assert!(request_key("linux-test-suite", &json!({"suite":"other"})).is_err());
         assert!(request_key("linux-runtime-start", &json!({"image":"override"})).is_err());

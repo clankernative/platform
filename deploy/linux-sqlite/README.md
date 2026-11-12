@@ -153,10 +153,30 @@ test checks a protected query in the exact qualified runtime image, then require
 the same artifact and launcher to deny a different supervisor binary with
 `security_runtime_mismatch`. Its generated fixture login stays inside the native
 harness. It writes `strict-admission.json`; it neither changes the original
-receipt nor contributes checks to the 21-step qualification campaign.
+receipt nor contributes checks to the native qualification campaign.
 
-The tooling image omits development debug symbols and incremental caches to
-reduce image storage; release behavior and the app checks are unchanged.
+The `tooling-build` stage produces the compiled SDK with Rust and Bazel. The
+published `tooling` stage contains its admitted sources, compiler, native archive
+and CLI, with no Rust or Bazel executable or build cache. It uses the exact
+digest-pinned buildpack-deps parent of the Rust producer image for each supported
+architecture, retaining the same Linux linker inputs. Replacing that base with
+an updated distribution can change artifact identities even when app and SDK
+sources are unchanged.
+
+`DAY2_PRECOMPILED_TOOLING=1` remains mandatory in the consumer image: missing or
+changed SDK outputs fail closed instead of rebuilding Platform. Runtime images
+are built from `tooling-build`, which retains the producer toolchain.
+
+`ops/Linux.roc` builds the private `qualification-tests` export from the producer
+after initial capture admits the complete test source inventory and checksum
+metadata. Missing captured inputs fail before either image build. It then
+mounts the export read-only into the actual consumer container. The same delegation,
+sandbox, worker, HTTP and backup suites execute there without invoking Bazel.
+The bundle admits its complete declared test inventory, source/workflow/toolchain
+identity, native architecture and exact executable bytes, including the SDK's
+supporting programs and fixed-sibling launchers. Missing or changed outputs fail;
+qualification never restores compilers to the SDK or skips a suite. The test
+bundle is excluded from the published SDK.
 
 From the platform repository, build the tooling image:
 

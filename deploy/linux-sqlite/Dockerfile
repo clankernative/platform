@@ -7,7 +7,7 @@ ADD --checksum=sha256:615cc2509819047e4930fe6643c5f01ebd705ccadf75e8f0b85f9b83cc
 FROM bazel-${TARGETARCH} AS bazel
 # Platform-owned images. Apps supply no Dockerfile or install/build hooks.
 # The source tooling and runtime use the same pinned Debian/glibc family.
-FROM rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959 AS tooling
+FROM rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959 AS tooling-build
 COPY --from=bazel /bazel /usr/local/bin/bazel
 WORKDIR /workspace/platform
 # The disposable tooling image keeps executable behavior and assertions while
@@ -27,7 +27,30 @@ ENV DAY2_PRECOMPILED_TOOLING=1
 # the runtime, including when provisioning is the volume's first consumer.
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/srv/day2/.state"]
 
-FROM tooling AS runtime-build
+# Qualification compiler outputs are exported privately to the native runner.
+# They never enter the published consumer SDK or its ordinary app build path.
+FROM tooling-build AS qualification-build
+RUN ["build-out/bin/xtask", "prepare-linux-tests"]
+FROM scratch AS qualification-tests
+COPY --from=qualification-build /workspace/platform/build-out/tests/ /
+
+# The Rust image's exact buildpack-deps parents preserve the qualified glibc
+# linker inputs without shipping Rust, Bazel or their build caches to apps.
+FROM buildpack-deps@sha256:5538d976c7bd14a8c1c610d6ee80db0b464b9ae6750af3ce67351678ec304a1b AS tooling-base-amd64
+FROM buildpack-deps@sha256:0e9140c9c9726c1f911bb3e7d3910284519d3aa85dc91b0316ef9c0d27c3b66d AS tooling-base-arm64
+FROM tooling-base-${TARGETARCH} AS tooling
+WORKDIR /workspace/platform
+COPY --from=tooling-build \
+    --exclude=.cache --exclude=target --exclude=artifacts \
+    --exclude=bazel-* --exclude=cli/.cache \
+    --exclude=build-out/tests \
+    /workspace/platform/ /workspace/platform/
+COPY --from=tooling-build /workspace/.toolchains/ /workspace/.toolchains/
+COPY --from=tooling-build /usr/local/lib/day2/ /usr/local/lib/day2/
+ENV DAY2_PRECOMPILED_TOOLING=1
+RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/srv/day2/.state"]
+
+FROM tooling-build AS runtime-build
 # Enrollment reads every executable byte at each observation. Remove linker
 # symbols before selecting Linux runtime digests; keep all fresh identity checks.
 RUN ["build-out/bin/xtask", "build-runtime-image-programs"]
