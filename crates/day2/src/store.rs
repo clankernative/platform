@@ -565,6 +565,8 @@ pub struct Runtime {
     pub(crate) credentials: Option<Arc<dyn crate::managed_credentials::issuance::Authority>>,
     pub(crate) connections: Option<Arc<dyn crate::oauth::usage::Authority>>,
     instance_path: PathBuf,
+    // Exact parsed selection captured at load; never reconstructed from a later file.
+    instance_digest: String,
     // Original published selector DATA, captured before native input path
     // canonicalization. Only native Runtime construction carries it forward.
     restore_registry_selector: Option<PathBuf>,
@@ -986,6 +988,7 @@ impl Runtime {
                 .get(&app)
                 .and_then(|binding| binding.runtime.as_ref())
                 .is_some_and(|profile| profile.rolling()),
+            instance_digest: crate::digest(&serde_json::to_vec(&instance)?),
             restore_registry_selector: None,
             scope: instance.scope(&app)?,
             hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
@@ -1094,6 +1097,10 @@ impl Runtime {
         &self.scope
     }
 
+    pub(crate) fn instance_digest(&self) -> &str {
+        &self.instance_digest
+    }
+
     pub fn artifact(&self) -> &LoadedArtifact {
         &self.artifact
     }
@@ -1199,6 +1206,7 @@ impl Runtime {
             credentials: None,
             connections: None,
             rolling,
+            instance_digest: crate::digest(&serde_json::to_vec(&instance)?),
             restore_registry_selector: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
