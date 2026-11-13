@@ -785,7 +785,7 @@ Jobs kept). Each run:
    run stays Pending and fails at its deadline instead of taking the volume;
 2. runs one container of the StatefulSet's exact app image:
    `/usr/local/bin/day2-backup /srv/day2/instance.json <app_id> /backup/snapshot
-   --upload-gcs <project>-<app>-backups --object-prefix <app_id>`, with the same
+   --operation-lock --upload-gcs <project>-<app>-backups --object-prefix <app_id>`, with the same
    instance ConfigMap (`subPath`), state volume and baked artifact. It takes an
    online SQLite snapshot beside the serving pod without its lock and verifies
    the bundle ([Linux guide](../linux-sqlite/README.md#online-backup-in-the-runtime-image));

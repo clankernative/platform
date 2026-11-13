@@ -20,11 +20,21 @@ Maintain :: [].{
 			_ = Capability.call!("maintenance-begin-preparation", "{}", host!)?
 		}
 		if operation == "activate" {
-			_ = Capability.call!("maintenance-begin-preparation", "{}", host!)?
+			raw = Capability.call!("maintenance-begin-preparation", "{}", host!)?
+			preparation : { source_serving : Bool }
+			preparation = Json.parse(raw).map_err(|_| "invalid activation preparation observation")?
 			# Pull, schedule, size and populate the helper while the source serves.
 			# These steps inspect file sizes, never open the live SQLite stores.
 			_ = Capability.call!("maintenance-measure", "{}", host!)?
 			_ = Capability.call!("maintenance-pod", "{}", host!)?
+			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
+			if preparation.source_serving {
+				_ = backup!(host!)?
+				_ = Capability.call!("maintenance-rehearsal-copy", "{}", host!)?
+				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "plan" }), host!)?
+				_ = Capability.call!("maintenance-admission", "{}", host!)?
+				_ = Capability.call!("maintenance-online-prepared", "{}", host!)?
+			}
 		}
 		_ = Capability.call!("maintenance-stop", "{}", host!)?
 		if operation == "activate" {
@@ -37,6 +47,9 @@ Maintain :: [].{
 		if operation == "rollout" {
 			return rolling!(host!)
 		}
+		if operation != "activate" {
+			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
+		}
 		_ = match operation {
 			"inspect" => workflow!("authority-inspect", host!)?
 			"backup" => backup!(host!)?
@@ -48,6 +61,7 @@ Maintain :: [].{
 			}
 			"activate" => {
 				_ = backup!(host!)?
+				_ = Capability.call!("maintenance-rehearsal-copy", "{}", host!)?
 				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "plan" }), host!)?
 				# Rehearse the target's post-fence maintenance admission with this
 				# request's operator; a refusal stops here with the app restored.
@@ -79,11 +93,15 @@ Maintain :: [].{
 		previous : { resuming : Bool }
 		previous = Json.parse(raw).map_err(|_| "invalid rollout resume observation")?
 		if !previous.resuming {
-			_ = backup!(host!)?
 			_ = Capability.call!("maintenance-offsite-backup", "{}", host!)?
+			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
+			_ = backup!(host!)?
+			_ = Capability.call!("maintenance-rehearsal-copy", "{}", host!)?
 			_ = Capability.call!("maintenance-migration", Json.to_str({ step: "plan" }), host!)?
 			_ = Capability.call!("maintenance-admission", "{}", host!)?
 			_ = Capability.call!("maintenance-confirm", "{}", host!)?
+		} else {
+			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
 		}
 		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "prepare" }), host!)?
 		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "bind" }), host!)?

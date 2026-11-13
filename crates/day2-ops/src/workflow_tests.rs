@@ -1003,7 +1003,7 @@ fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
                 other => other.trim_start_matches("maintenance-").to_owned(),
             };
             effects.push(step);
-            Ok(json!({}))
+            Ok(json!({"source_serving":true}))
         },
     )?;
     assert_eq!(
@@ -1014,10 +1014,18 @@ fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
             "begin-preparation",
             "measure",
             "pod",
+            "operation-claim",
+            "workflow:backup",
+            "copy-backup",
+            "rehearsal-copy",
+            "migration:plan",
+            "admission",
+            "online-prepared",
             "stop",
             "verify-preparation",
             "workflow:backup",
             "copy-backup",
+            "rehearsal-copy",
             "migration:plan",
             "admission",
             "confirm",
@@ -1057,7 +1065,7 @@ fn maintain_mark_activated_reads_the_database_before_it_marks() -> Result<()> {
                 other => other.trim_start_matches("maintenance-").to_owned(),
             };
             effects.push(step);
-            Ok(json!({}))
+            Ok(json!({"source_serving":true}))
         },
     )?;
     assert_eq!(
@@ -1069,6 +1077,7 @@ fn maintain_mark_activated_reads_the_database_before_it_marks() -> Result<()> {
             "stop",
             "measure",
             "pod",
+            "operation-claim",
             "workflow:authority-inspect",
             "mark-activated",
             "finish",
@@ -1083,6 +1092,13 @@ fn activation_preparation_refusal_never_calls_stop() -> Result<()> {
         "maintenance-begin-preparation",
         "maintenance-measure",
         "maintenance-pod",
+        "maintenance-operation-claim",
+        "maintenance-workflow",
+        "maintenance-copy-backup",
+        "maintenance-rehearsal-copy",
+        "maintenance-migration",
+        "maintenance-admission",
+        "maintenance-online-prepared",
     ] {
         let mut effects = Vec::new();
         let result = automation::run(
@@ -1093,7 +1109,7 @@ fn activation_preparation_refusal_never_calls_stop() -> Result<()> {
                 if request.action == refused {
                     bail!("preparation refused");
                 }
-                Ok(json!({}))
+                Ok(json!({"source_serving":true}))
             },
         );
         assert!(result.is_err());
@@ -1121,7 +1137,7 @@ fn activation_recovery_orders_claim_cleanup_and_restore_without_a_new_activation
                 );
             }
             effects.push(request.action.clone());
-            Ok(json!({}))
+            Ok(json!({"source_serving":true}))
         },
     )?;
     assert_eq!(
@@ -1147,7 +1163,7 @@ fn maintain_stops_at_a_refused_store_admission_before_the_confirmation() -> Resu
             if request.action == "maintenance-admission" {
                 bail!("target_store_admission_refused: unsupported credential schema version");
             }
-            Ok(json!({}))
+            Ok(json!({"source_serving":true}))
         },
     );
     assert!(
@@ -1184,7 +1200,7 @@ fn maintain_stops_at_a_refused_confirmation_before_the_fence() -> Result<()> {
             if request.action == "maintenance-confirm" {
                 bail!("not confirmed; nothing was changed");
             }
-            Ok(json!({}))
+            Ok(json!({"source_serving":true}))
         },
     );
     assert!(result.unwrap_err().to_string().contains("not confirmed"));
@@ -1203,7 +1219,7 @@ fn maintain_stops_at_a_refused_confirmation_before_the_fence() -> Result<()> {
         &["platform", "maintain", "inspect", "request.json"],
         |request| {
             inspected.push(request.action.clone());
-            Ok(json!({}))
+            Ok(json!({"source_serving":true}))
         },
     )?;
     assert!(
@@ -1215,7 +1231,7 @@ fn maintain_stops_at_a_refused_confirmation_before_the_fence() -> Result<()> {
         automation::run(
             &automation::runner()?,
             &["platform", "maintain", "restart", "request.json"],
-            |_| Ok(json!({}))
+            |_| Ok(json!({"source_serving":true}))
         )
         .is_err()
     );
@@ -1258,13 +1274,18 @@ fn rolling_release_proves_candidate_before_promotion_without_an_offline_fence() 
         ];
         if !resuming {
             expected.extend([
+                "offsite-backup",
+                "operation-claim",
                 "workflow:backup",
                 "copy-backup",
-                "offsite-backup",
+                "rehearsal-copy",
                 "migration:plan",
                 "admission",
                 "confirm",
             ]);
+        }
+        if resuming {
+            expected.push("operation-claim");
         }
         expected.extend([
             "rollout:prepare",

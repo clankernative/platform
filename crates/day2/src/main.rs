@@ -19,6 +19,24 @@ fn main() -> Result<()> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["operation-guard", state, app, socket, seconds] => {
+            day2::deployment::operation::guard(
+                Path::new(state),
+                app,
+                Path::new(socket),
+                seconds.parse()?,
+            )?;
+            return Ok(());
+        }
+        ["operation-ping", socket] => {
+            day2::deployment::operation::ping(Path::new(socket))?;
+            serde_json::json!({"supervisor":true})
+        }
+        ["operation-claim", state, app] => {
+            let _lease =
+                day2::deployment::operation::OperationLease::acquire(Path::new(state), app)?;
+            serde_json::json!({"claimed":true})
+        }
         ["oauth-setup", instance] => day2::deployment::oauth_setup(Path::new(instance))?,
         ["native-storage-metadata", instance, app] => {
             day2::deployment::native_storage_metadata(Path::new(instance), app)?

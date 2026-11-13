@@ -1073,7 +1073,8 @@ resource "kubernetes_stateful_set_v1" "day2" {
 
 # --- Scheduled off-cluster backup -------------------------------------------
 # Every run is one container of the app's own image running day2-backup: an
-# online snapshot beside the serving pod, without its lock, verified (the same
+# online snapshot beside the serving pod, without its exclusive serving lease,
+# holding the shared backup/release operation lock through verification (the same
 # native backup and verification as `day2 platform backup`), then uploaded file
 # by file to the app-edge backup bucket under <app_id>/<UTC stamp>/ with a
 # COMPLETE marker written last. The uploader identity (Workload Identity via
@@ -1098,7 +1099,7 @@ locals {
   backup_output = "/backup"
   # day2-backup appends /<UTC yyyymmddThhmmssZ> to the object prefix itself.
   backup_args = concat(
-    [local.instance_path, var.app_id, "${local.backup_output}/snapshot"],
+    [local.instance_path, var.app_id, "${local.backup_output}/snapshot", "--operation-lock"],
     flatten([for subpath in local.loopback_state_subpaths : ["--include-state-subpath", subpath]]),
     flatten([for path in local.loopback_sqlite_state : ["--include-state-sqlite", path]]),
     ["--upload-gcs", var.backup_bucket, "--object-prefix", var.app_id],

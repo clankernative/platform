@@ -1,6 +1,6 @@
 //! Online, verified backup of one app, optionally copied to Cloud Storage.
 //!
-//!   day2-backup <instance.json> <app> <output-dir>
+//!   day2-backup <instance.json> <app> <output-dir> --operation-lock
 //!       [--upload-gcs <bucket> --object-prefix <prefix>]
 //!
 //! The same native operations as `day2 platform backup` (ops/Backup.roc), with
@@ -30,7 +30,7 @@ use day2_ops::{backup, offsite};
 use serde_json::{Value, json};
 use std::{ffi::OsString, path::PathBuf, process::ExitCode, time::SystemTime};
 
-const USAGE: &str = "usage: day2-backup INSTANCE_JSON APP OUTPUT_DIR [--include-state-subpath PATH]... [--include-state-sqlite PATH]... [--upload-gcs BUCKET --object-prefix PREFIX]";
+const USAGE: &str = "usage: day2-backup INSTANCE_JSON APP OUTPUT_DIR --operation-lock [--include-state-subpath PATH]... [--include-state-sqlite PATH]... [--upload-gcs BUCKET --object-prefix PREFIX]";
 
 struct Upload {
     bucket: String,
@@ -54,9 +54,12 @@ fn text(value: &OsString, what: &str) -> Result<String> {
 }
 
 fn parse(arguments: &[OsString]) -> Result<BackupOptions> {
-    ensure!(arguments.len() >= 3, "{USAGE}");
+    ensure!(
+        arguments.len() >= 4 && text(&arguments[3], "operation lock option")? == "--operation-lock",
+        "operation_lock_protocol_required: {USAGE}"
+    );
     let (mut upload, mut state_subpaths, mut sqlite_paths) = (None, Vec::new(), Vec::new());
-    let mut index = 3;
+    let mut index = 4;
     while index < arguments.len() {
         match text(&arguments[index], "backup option")?.as_str() {
             "--upload-gcs" if index + 3 < arguments.len() && upload.is_none() => {
@@ -104,12 +107,17 @@ fn run() -> Result<Value> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     // Arguments are checked before any snapshot is taken.
     let options = parse(&arguments)?;
-    let taken = backup::take_with_companion_state(
+    // Retain exclusion through verification and COMPLETE publication, not just
+    // through SQLite copying. A release refuses while upload is still pending.
+    let lease =
+        day2::deployment::operation::OperationLease::for_instance(&options.instance, &options.app)?;
+    let taken = backup::take_with_lease(
         &options.instance,
         &options.app,
         &options.output,
         &options.state_subpaths,
         &options.sqlite_paths,
+        &lease,
     )?;
     let verified = backup::verify(&options.output)?;
     ensure!(
@@ -177,6 +185,7 @@ mod tests {
             "instance.json",
             "reports",
             "/backup/snapshot",
+            "--operation-lock",
             "--include-state-subpath",
             "companions/executor",
             "--include-state-sqlite",
@@ -194,11 +203,23 @@ mod tests {
 
     #[test]
     fn refuses_traversal_duplicate_upload_and_unrecognized_options() {
+        assert!(parse(&args(&["instance.json", "reports", "/backup"])).is_err());
         assert!(
             parse(&args(&[
                 "instance.json",
                 "reports",
                 "/backup",
+                "--operation-lock",
+                "--operation-lock"
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse(&args(&[
+                "instance.json",
+                "reports",
+                "/backup",
+                "--operation-lock",
                 "--include-state-subpath",
                 "companions/../outside",
             ]))
@@ -209,6 +230,7 @@ mod tests {
                 "instance.json",
                 "reports",
                 "/backup",
+                "--operation-lock",
                 "--upload-gcs",
                 "example-backups",
                 "--object-prefix",
@@ -225,6 +247,7 @@ mod tests {
                 "instance.json",
                 "reports",
                 "/backup",
+                "--operation-lock",
                 "--shell",
                 "echo"
             ]))

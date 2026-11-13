@@ -715,9 +715,39 @@ pub fn take_with_companion_state(
     state_subpaths: &[String],
     sqlite_paths: &[String],
 ) -> Result<Manifest> {
+    let lease = day2::deployment::operation::OperationLease::for_instance(instance_path, app)?;
+    take_with_lease(
+        instance_path,
+        app,
+        output,
+        state_subpaths,
+        sqlite_paths,
+        &lease,
+    )
+}
+
+/// The caller retains this exact native lease through verification and upload.
+/// It cannot be replaced by a flag saying that a parent supposedly owns it.
+pub fn take_with_lease(
+    instance_path: &Path,
+    app: &str,
+    output: &Path,
+    state_subpaths: &[String],
+    sqlite_paths: &[String],
+    lease: &day2::deployment::operation::OperationLease,
+) -> Result<Manifest> {
     validate_companion_selection(state_subpaths, sqlite_paths)?;
-    let instance = Instance::load(instance_path)?;
-    let runtime = Runtime::load(instance_path, app)?;
+    let canonical = instance_path.canonicalize()?;
+    lease.check(
+        &canonical
+            .parent()
+            .context("instance directory")?
+            .join(".state"),
+        app,
+    )?;
+    let instance = Instance::load(&canonical)?;
+    let runtime = Runtime::load(&canonical, app)?;
+    lease.check(runtime.db().parent().context("app state directory")?, app)?;
     ensure!(
         runtime.db().is_file(),
         "backup requires an initialized database"

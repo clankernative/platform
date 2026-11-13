@@ -1,9 +1,10 @@
 # Online runtime and SDK upgrades: implementation plan
 
-Status: proposed runtime-pair protocol. The first R0 increment is described in
-[shared activation preparation and recovery](ACTIVATION-RECOVERY.md); it remains
-exclusive activation, with online backup/rehearsal and operation exclusion still
-required before R0 is complete. No runtime-pair upgrade support is implemented.
+Status: proposed runtime-pair protocol. R0 preparation, online preflight rehearsal
+and backup/release operation exclusion are described in
+[shared activation preparation and recovery](ACTIVATION-RECOVERY.md). The final
+checkpoint and repeated rehearsal remain exclusive; preflight never replaces
+the checkpoint of later writes. No runtime-pair upgrade support is implemented.
 Source baseline: `bd96d438b666bddd0c37a13f6f4f8e79ae7f585d`.
 
 The goal is to keep an authenticated, writable application available while its
@@ -15,7 +16,8 @@ protocol and qualification. Same-node overlap provides no node-failure HA.
 ## Current mechanisms
 
 - [Maintain.roc](../ops/Maintain.roc) prepares artifacts and a sized helper while
-  the source serves, then stops and rechecks the storage bound. The final backup
+  the source serves, takes and rehearses an online snapshot under native backup
+  exclusion, then stops and rechecks the storage bound. The final backup
   and admission rehearsal before the *migration fence* still occur after the
   application has stopped.
 - [Session::stop](../crates/day2-ops/src/maintenance.rs) scales non-rolling

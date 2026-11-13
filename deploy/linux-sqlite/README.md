@@ -272,7 +272,7 @@ The runtime image carries `/usr/local/bin/day2-backup`, the one operator
 executable beside `day2-serve`, `day2-health` and `day2-inspect`:
 
 ```text
-day2-backup INSTANCE_JSON APP NEW_OUTPUT_DIRECTORY [--upload-gcs BUCKET --object-prefix PREFIX]
+day2-backup INSTANCE_JSON APP NEW_OUTPUT_DIRECTORY --operation-lock [--upload-gcs BUCKET --object-prefix PREFIX]
 ```
 
 It runs the same native operations as `day2 platform backup`

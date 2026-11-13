@@ -4,7 +4,7 @@ use crate::{
     schema::Kind,
     store::{Runtime, open},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -180,6 +180,10 @@ fn plan_contracts(
 }
 
 pub fn apply(runtime: &Runtime, target: &LoadedArtifact, supplied: &Plan) -> Result<()> {
+    let _exclusion = crate::deployment::migration_exclusion(
+        runtime.db().parent().context("store directory")?,
+        runtime.app(),
+    )?;
     // Never execute SQL supplied by an operator or app. Recompute the checked transition.
     apply_plan(
         runtime.db(),

@@ -1355,7 +1355,7 @@ run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
       length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].init_container) == 0 &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].container[0].image &&
       kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-backup"]) &&
-      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "/backup/snapshot", "--upload-gcs", "example-tools-example-backups", "--object-prefix", "example_app"]) &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "/backup/snapshot", "--operation-lock", "--upload-gcs", "example-tools-example-backups", "--object-prefix", "example_app"]) &&
       length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].env) == 0 &&
       jsonencode([for mount in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].volume_mount : [mount.name, mount.mount_path, mount.sub_path == null ? "" : mount.sub_path, mount.read_only == true]]) == jsonencode([
         ["instance", "/srv/day2/instance.json", "instance.json", true],

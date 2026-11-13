@@ -137,6 +137,8 @@ struct FakeCluster {
     backup_template: Option<Value>,
     backup_receipt: Option<Value>,
     backup_failed: bool,
+    operation_jobs: Option<Value>,
+    operation_pods: Option<Value>,
     fail_on: Option<String>,
     denied_operator: Option<String>,
     drop_on_copy_out: Option<String>,
@@ -170,12 +172,30 @@ impl FakeCluster {
             .get(activation::ANNOTATION)
             .and_then(|raw| serde_json::from_str::<ActivationIntent>(raw).ok())
             .map(|intent| intent.request_digest)
-            .unwrap_or_default();
-        let _ = name;
-        self.observed("helper",json!({"metadata":{"uid":"helper-uid","annotations":{
+            .unwrap_or_else(|| {
+                self.applied
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find_map(|raw| {
+                        if !raw.contains(&format!("  name: {name}\n")) {
+                            return None;
+                        }
+                        raw.lines().find_map(|line| {
+                            line.trim()
+                                .strip_prefix("day2.dev/rollout-request: ")
+                                .map(str::to_owned)
+                        })
+                    })
+                    .unwrap_or_default()
+            });
+        self.observed("helper",json!({"metadata":{"name":name,"uid":"helper-uid","annotations":{
             "day2.dev/rollout-request":digest}},"spec":{"nodeName":"node-a",
-            "containers":[{"image":"registry.test/day2/tooling@sha256:0000000000000000000000000000000000000000000000000000000000000000"}],
-            "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data"}}]},
+            "containers":[{"image":"registry.test/day2/tooling@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "command":[DAY2,"operation-guard",STATE,"example_app","/srv/day2/operation.sock",POD_DEADLINE_SECONDS.to_string()],
+                "env":[{"name":"DAY2_OPERATION_STATE","value":STATE},{"name":"DAY2_OPERATION_SOCKET","value":"/srv/day2/operation.sock"}],
+                "volumeMounts":[{"name":"data","mountPath":STATE},{"name":"work","mountPath":ROOT},{"name":"tmp","mountPath":"/tmp"}]}],
+            "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data"}},{"name":"work","emptyDir":{}},{"name":"tmp","emptyDir":{}}]},
             "status":{"conditions":[{"type":"Ready","status":"True"},
                 {"type":"PodScheduled","status":"False","message":"0/3 nodes are available: 3 Insufficient ephemeral-storage."}]}}))
     }
@@ -224,8 +244,9 @@ impl FakeCluster {
             "spec":{"serviceAccountName":"backup","automountServiceAccountToken":false,"restartPolicy":"Never",
                 "containers":[{"name":"backup","image":self.running_image,
                     "command":["/usr/local/bin/day2-backup"],
-                    "args":["/srv/day2/instance.json","example_app","/backup/snapshot","--upload-gcs",
+                    "args":["/srv/day2/instance.json","example_app","/backup/snapshot","--operation-lock","--upload-gcs",
                         "example-backups","--object-prefix","example_app"],
+                    "volumeMounts":[{"name":"state","mountPath":STATE},{"name":"instance","mountPath":TARGET,"subPath":"instance.json","readOnly":true},{"name":"tmp","mountPath":"/tmp"},{"name":"backup","mountPath":"/backup"}],
                     "securityContext":{"allowPrivilegeEscalation":false,"privileged":false,
                         "readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}}],
                 "volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"data"}},
@@ -306,7 +327,10 @@ impl FakeCluster {
             "backup" => {
                 let output = self.pod_path(&args[3]);
                 fs::create_dir_all(output.join("artifacts"))?;
-                fs::write(output.join("app.sqlite"), self.store)?;
+                fs::write(
+                    output.join("app.sqlite"),
+                    fs::read(self.pod_path("/srv/day2/.state/example_app.sqlite"))?,
+                )?;
                 fs::write(output.join("backup.json"), b"{}")?;
                 fs::write(output.join("artifacts/marker"), b"artifact")?;
                 json!({"verified": true})
@@ -374,6 +398,15 @@ impl Cluster for FakeCluster {
             }
             ["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"] => self.other_sessions.clone(),
             ["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "json"] => json!({"items":[]}).to_string(),
+            ["get", "cronjobs", "-o", "json"] => json!({"items":[{"spec":{"jobTemplate":{"spec":{"template":self.backup_template()}}}}]}).to_string(),
+            ["get", "jobs", "-o", "json"] => json!({"items":self.operation_jobs.clone().unwrap_or_else(|| json!([]))}).to_string(),
+            ["get", "pods", "-o", "json"] => {
+                let mut items = self.operation_pods.as_ref().and_then(Value::as_array).cloned().unwrap_or_default();
+                if self.replicas > 0 { items.push(self.incumbent()); }
+                let helper = self.applied.borrow().iter().rev().find_map(|raw| raw.lines().find_map(|line| line.strip_prefix("  name: ").map(str::to_owned)));
+                if let Some(name) = helper { items.push(self.helper(&name)); }
+                json!({"items":items}).to_string()
+            },
             ["get", "services", "-o", "json"] => json!({"items":[{"spec":{"selector":{"app.kubernetes.io/name":if self.helper_service {"day2-maintenance"} else {STATEFULSET}}}}]}).to_string(),
             ["get", "replicasets", "-o", "json"] => json!({"items":[{"metadata":{"uid":"replicaset-uid","ownerReferences":[{"uid":"controller-uid","controller":true}]}}]}).to_string(),
             ["get", "pvc", "data", "-o", "json"] => self.observed("pvc", json!({"metadata":{"uid":"pvc-uid"},"spec":{"accessModes":["ReadWriteOnce"]},"status":{"phase":"Bound"}})).to_string(),
@@ -397,7 +430,7 @@ impl Cluster for FakeCluster {
                     .find_map(|raw| serde_json::from_str::<Value>(raw).ok().filter(|v| v["kind"] == "Job"))
                     .context("backup job was not created")?;
                 let prefix = format!("{}/20261107T120000Z",
-                    job["spec"]["template"]["spec"]["containers"][0]["args"][6].as_str().unwrap());
+                    job["spec"]["template"]["spec"]["containers"][0]["args"][7].as_str().unwrap());
                 let source: Value = serde_json::from_str(&self.instance)?;
                 let artifact = source["apps"]["example_app"]["artifact"].as_str().unwrap().trim_start_matches("artifacts/");
                 self.backup_receipt.clone().unwrap_or_else(|| json!({"verified":true,"app":"example_app",
@@ -509,6 +542,12 @@ impl Cluster for FakeCluster {
                 ensure!(self.denied_operator.as_deref() != Some(*operator), "Error: maintenance_operator_required");
                 self.admit(instance, app)?
             }
+            ["exec", _, "--", DAY2, "activate-maintenance", instance, app, target, _, operator, _, _] => {
+                ensure!(self.denied_operator.as_deref() != Some(*operator), "Error: maintenance_operator_required");
+                self.selected_artifact(&self.pod_path(instance), app)?;
+                self.selected_artifact(&self.pod_path(target), app)?;
+                json!({"action":"activate","receipt":{"stamp":{"revision":4}}}).to_string()
+            }
             ["exec", _, "--", "find", STATE, "-maxdepth", "1", "-type", "f", "-exec", "stat", "-c", "%s %n", "{}", "+"] => {
                 let mut result: String = self.volume
                     .iter()
@@ -530,6 +569,7 @@ impl Cluster for FakeCluster {
                 String::new()
             }
             ["exec", _, "--", DAY2, "migration-apply", ..] => r#"{"applied":true}"#.into(),
+            ["exec", _, "--", DAY2, "operation-claim", ..] => r#"{"claimed":true}"#.into(),
             ["exec", _, "--", "cat", file] => fs::read_to_string(self.pod_path(file))?,
             other => bail!("unexpected kubectl {other:?}"),
         })
@@ -610,6 +650,8 @@ impl Harness {
             backup_template: None,
             backup_receipt: None,
             backup_failed: false,
+            operation_jobs: None,
+            operation_pods: None,
             released_instance: None,
             helper_service: false,
             fail_on: None,
@@ -728,13 +770,235 @@ fn prepare(session: &mut Session) -> Result<()> {
     if session.operation == Operation::Activate {
         session.measure()?;
         session.start_pod()?;
+        online_preflight(session)?;
         session.stop()?;
         session.verify_preparation()?;
     } else {
         session.stop()?;
         session.measure()?;
         session.start_pod()?;
+        if session.operation != Operation::Rollout {
+            session.claim_operation()?;
+        }
     }
+    Ok(())
+}
+
+fn online_preflight(session: &mut Session) -> Result<()> {
+    session.claim_operation()?;
+    if session.replicas == 1 && !session.state.fenced {
+        session.workflow("backup")?;
+        session.copy_backup()?;
+        session.prepare_rehearsal()?;
+        session.migration("plan")?;
+        session.admission()?;
+        session.online_prepared()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn backup_contention_and_uncoordinated_workloads_refuse_before_source_stop() -> Result<()> {
+    for kind in ["busy", "cronjob", "job", "pod", "standalone-pod", "init"] {
+        let harness = Harness::new();
+        let mut session = harness.open(
+            Operation::Activate,
+            |cluster| {
+                if kind == "busy" {
+                    cluster.fail_on = Some("operation-claim".into());
+                    return;
+                }
+                let mut legacy = cluster.backup_template();
+                legacy["spec"]["containers"][0]["args"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|arg| arg != "--operation-lock");
+                match kind {
+                    "cronjob" => cluster.backup_template = Some(legacy),
+                    "job" => {
+                        cluster.operation_jobs =
+                            Some(json!([{"spec":{"template":legacy},"status":{"active":1}}]))
+                    }
+                    "pod" | "standalone-pod" => {
+                        if kind == "pod" {
+                            legacy["metadata"]["ownerReferences"] = json!([{"kind":"Job"}]);
+                        }
+                        legacy["status"]["phase"] = "Running".into();
+                        cluster.operation_pods = Some(json!([legacy]));
+                    }
+                    "init" => {
+                        let mut template = cluster.backup_template();
+                        template["spec"]["initContainers"] = json!([{"name":"uncoordinated"}]);
+                        cluster.backup_template = Some(template);
+                    }
+                    _ => unreachable!(),
+                }
+            },
+            true,
+        )?;
+        session.artifacts()?;
+        session.begin_preparation()?;
+        session.measure()?;
+        session.start_pod()?;
+        let error = session.claim_operation().unwrap_err().to_string();
+        assert!(
+            error.contains(if kind == "busy" {
+                "injected failure"
+            } else {
+                "uncoordinated_backup_or_job"
+            }),
+            "{kind}: {error}"
+        );
+        assert!(!session.state.operation_claimed && !session.state.stopped);
+        assert!(session.workflow("backup").is_err() && session.stop().is_err());
+        drop(session);
+        assert!(
+            !harness
+                .verbs()
+                .iter()
+                .any(|verb| verb == "scale --replicas=0"),
+            "{kind}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn backup_marker_values_and_other_lock_scopes_are_not_cooperation() {
+    let harness = Harness::new();
+    let mut template = None;
+    let _tools = harness.tools(|cluster| template = Some(cluster.backup_template()), true);
+    let original = template.unwrap();
+    assert!(backup_participant(&original, "example_app", "data"));
+    let mut changed = original.clone();
+    changed["spec"]["containers"][0]["args"] = json!([
+        TARGET,
+        "example_app",
+        "/backup/snapshot",
+        "--upload-gcs",
+        "example-backups",
+        "--object-prefix",
+        "--operation-lock"
+    ]);
+    assert!(!backup_participant(&changed, "example_app", "data"));
+    let mut changed = original.clone();
+    changed["spec"]["containers"][0]["args"][1] = "other_app".into();
+    assert!(!backup_participant(&changed, "example_app", "data"));
+    let mut changed = original.clone();
+    changed["spec"]["containers"][0]["volumeMounts"][0]["subPath"] = "other-state".into();
+    assert!(!backup_participant(&changed, "example_app", "data"));
+    assert!(!backup_participant(
+        &original,
+        "example_app",
+        "replacement-claim"
+    ));
+}
+
+#[test]
+fn changed_helper_supervision_and_state_bindings_cannot_claim_the_operation() -> Result<()> {
+    for (path, value) in [
+        (
+            "helper/spec/containers/0/command",
+            json!([DAY2, "operation-ping", "/srv/day2/operation.sock"]),
+        ),
+        (
+            "helper/spec/containers/0/env/0/value",
+            json!("/other-state"),
+        ),
+        (
+            "helper/spec/volumes/0/persistentVolumeClaim/claimName",
+            json!("replacement-claim"),
+        ),
+        (
+            "helper/spec/containers/0/volumeMounts/0/mountPath",
+            json!("/other-state"),
+        ),
+        ("helper/spec/nodeName", json!("node-b")),
+    ] {
+        let harness = Harness::new();
+        let mut session = harness.open(
+            Operation::Activate,
+            |cluster| cluster.after_prepare = Some((path.into(), value)),
+            true,
+        )?;
+        session.artifacts()?;
+        session.begin_preparation()?;
+        session.measure()?;
+        session.start_pod()?;
+        let error = session.claim_operation().unwrap_err().to_string();
+        assert!(error.contains("operation_helper"), "{path}: {error}");
+        drop(session);
+        assert!(
+            !harness
+                .verbs()
+                .iter()
+                .any(|verb| verb == "scale --replicas=0")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_online_snapshot_never_substitutes_for_the_final_checkpoint() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+    session.artifacts()?;
+    session.begin_preparation()?;
+    session.measure()?;
+    session.start_pod()?;
+    assert!(session.online_prepared().is_err());
+    online_preflight(&mut session)?;
+    let sample = session
+        .backup_root
+        .join(format!("{}-preflight", session.stamp));
+    assert_eq!(fs::read(sample.join("app.sqlite"))?, b"database");
+    assert!(
+        session.state.backup.is_none()
+            && session.state.plan.is_none()
+            && session.state.admission.is_none()
+            && !session.state.rehearsed
+    );
+    assert!(session.confirm().is_err() && session.fence().is_err());
+    assert!(
+        !harness
+            .verbs()
+            .iter()
+            .any(|verb| verb == "scale --replicas=0")
+    );
+    fs::write(
+        harness
+            .directory
+            .path()
+            .join("pod/srv/day2/.state/example_app.sqlite"),
+        b"committed after preflight",
+    )?;
+    session.stop()?;
+    session.verify_preparation()?;
+    assert!(session.confirm().is_err() && session.fence().is_err());
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    let final_copy = session.state.backup.as_ref().unwrap();
+    assert_ne!(final_copy, &sample);
+    assert_eq!(
+        fs::read(final_copy.join("app.sqlite"))?,
+        b"committed after preflight"
+    );
+    assert_eq!(fs::read(sample.join("app.sqlite"))?, b"database");
+    assert!(
+        session.migration("plan").is_err(),
+        "planning requires the isolated final copy"
+    );
+    session.prepare_rehearsal()?;
+    session.migration("plan")?;
+    session.admission()?;
+    session.confirm()?;
+    assert_eq!(
+        *harness.asked.borrow(),
+        1,
+        "preflight never confirms a final mutation"
+    );
+    drop(session);
+    assert!(harness.scaled_up());
     Ok(())
 }
 
@@ -874,7 +1138,14 @@ fn activation_refuses_changed_source_bindings_before_stopping() -> Result<()> {
         }
         session.measure()?;
         session.start_pod()?;
-        assert!(session.stop().is_err(), "{path}");
+        let error = online_preflight(&mut session)
+            .and_then(|_| session.stop())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains("activation_helper_must_be_prepared_before_stop"),
+            "{path}: {error}"
+        );
         drop(session);
         assert!(
             !harness.verbs().iter().any(|verb| verb.starts_with("scale")),
@@ -902,13 +1173,14 @@ fn activation_growth_beyond_reserved_scratch_restores_before_opening_a_store() -
     }
     session.measure()?;
     session.start_pod()?;
+    online_preflight(&mut session)?;
     session.stop()?;
     let error = format!("{:#}", session.verify_preparation().unwrap_err());
     assert!(error.contains("activation_preparation_outgrown"), "{error}");
     assert!(session.workflow("backup").is_err());
     drop(session);
     assert!(harness.scaled_up());
-    assert!(!harness.verbs().iter().any(|verb| verb == "exec day2-host"));
+    assert!(!harness.journal().iter().any(|step| step == "fence"));
     Ok(())
 }
 
@@ -981,6 +1253,7 @@ fn saved_activation_recovers_before_and_after_the_stop_without_original_input_fi
         session.measure()?;
         session.start_pod()?;
         if stopped {
+            online_preflight(&mut session)?;
             session.stop()?;
         }
         let (journal, work) = kill_operator(session);
@@ -1024,6 +1297,11 @@ fn recovery_claim_prevents_the_original_operator_from_opening_the_store() -> Res
     let harness = Harness::new();
     let mut session = harness.open(Operation::Activate, |_| {}, true)?;
     prepare(&mut session)?;
+    let before = harness
+        .verbs()
+        .iter()
+        .filter(|verb| *verb == "exec day2-host")
+        .count();
     let mut recovery = Recovery::open(
         &session.journal,
         harness.tools(|cluster| cluster.replicas = 0, true),
@@ -1033,7 +1311,14 @@ fn recovery_claim_prevents_the_original_operator_from_opening_the_store() -> Res
     recovery.cleanup()?;
     recovery.restore()?;
     drop(session);
-    assert!(!harness.verbs().iter().any(|verb| verb == "exec day2-host"));
+    assert_eq!(
+        harness
+            .verbs()
+            .iter()
+            .filter(|verb| *verb == "exec day2-host")
+            .count(),
+        before
+    );
     Ok(())
 }
 
@@ -1051,6 +1336,7 @@ fn a_lost_fence_response_never_restores_the_old_runtime() -> Result<()> {
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     session.admission()?;
     session.confirm()?;
@@ -1085,6 +1371,7 @@ fn lost_fence_and_approval_responses_resolve_the_exact_committed_transaction() -
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     session.admission()?;
     session.confirm()?;
@@ -1211,6 +1498,7 @@ fn fenced_activation_can_resume_only_the_exact_saved_target() -> Result<()> {
         prepare(&mut session)?;
         session.workflow("backup")?;
         session.copy_backup()?;
+        session.prepare_rehearsal()?;
         session.migration("plan")?;
         session.admission()?;
         session.confirm()?;
@@ -1246,6 +1534,7 @@ fn fenced_activation_can_resume_only_the_exact_saved_target() -> Result<()> {
         assert!(resumed.migration("apply").is_err());
         resumed.workflow("backup")?;
         resumed.copy_backup()?;
+        resumed.prepare_rehearsal()?;
         resumed.migration("plan")?;
         resumed.admission()?;
         resumed.confirm()?;
@@ -1313,6 +1602,7 @@ fn recovery_after_approval_only_cleans_up_even_if_the_target_is_running() -> Res
         prepare(&mut session)?;
         session.workflow("backup")?;
         session.copy_backup()?;
+        session.prepare_rehearsal()?;
         session.migration("plan")?;
         session.admission()?;
         session.confirm()?;
@@ -1438,13 +1728,21 @@ fn a_failure_before_the_fence_removes_the_pod_and_restores_the_app() -> Result<(
         |cluster| cluster.fail_on = Some("migration-plan".into()),
         true,
     )?;
-    prepare(&mut session)?;
-    session.workflow("backup")?;
-    session.copy_backup()?;
-    ensure!(session.migration("plan").is_err(), "injected");
+    assert!(
+        prepare(&mut session)
+            .unwrap_err()
+            .to_string()
+            .contains("migration-plan")
+    );
     ensure!(session.mark_activated().is_err(), "nothing was activated");
     drop(session);
-    assert!(harness.deleted_pod() && harness.scaled_up());
+    assert!(harness.deleted_pod());
+    assert!(
+        !harness
+            .verbs()
+            .iter()
+            .any(|verb| verb == "scale --replicas=0")
+    );
     assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     Ok(())
 }
@@ -1457,11 +1755,7 @@ fn a_store_the_target_refuses_stops_activate_before_the_fence_and_restores_the_a
         |cluster| cluster.store = OLD_CREDENTIAL_STORE,
         true,
     )?;
-    prepare(&mut session)?;
-    session.workflow("backup")?;
-    session.copy_backup()?;
-    session.migration("plan")?;
-    let error = format!("{:#}", session.admission().unwrap_err());
+    let error = format!("{:#}", prepare(&mut session).unwrap_err());
     assert!(
         error.starts_with("target_store_admission_refused")
             && error.contains(&harness.target.artifact_id)
@@ -1476,7 +1770,13 @@ fn a_store_the_target_refuses_stops_activate_before_the_fence_and_restores_the_a
         "a refused store is never confirmed, fenced or migrated"
     );
     drop(session);
-    assert!(harness.deleted_pod() && harness.scaled_up());
+    assert!(harness.deleted_pod());
+    assert!(
+        !harness
+            .verbs()
+            .iter()
+            .any(|verb| verb == "scale --replicas=0")
+    );
     assert_eq!(*harness.asked.borrow(), 0);
     assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     // Only the copy was migrated and activated; the instance over the app's
@@ -1516,11 +1816,7 @@ fn an_unauthorized_maintenance_operator_is_refused_before_the_fence_and_restores
             true,
         ),
     )?;
-    prepare(&mut session)?;
-    session.workflow("backup")?;
-    session.copy_backup()?;
-    session.migration("plan")?;
-    let error = format!("{:#}", session.admission().unwrap_err());
+    let error = format!("{:#}", prepare(&mut session).unwrap_err());
     assert!(
         error.starts_with("target_store_admission_refused")
             && error.contains("maintenance_operator_required"),
@@ -1533,7 +1829,13 @@ fn an_unauthorized_maintenance_operator_is_refused_before_the_fence_and_restores
         "an unauthorized maintenance operator never reaches the fence"
     );
     drop(session);
-    assert!(harness.deleted_pod() && harness.scaled_up());
+    assert!(harness.deleted_pod());
+    assert!(
+        !harness
+            .verbs()
+            .iter()
+            .any(|verb| verb == "scale --replicas=0")
+    );
     assert_eq!(*harness.asked.borrow(), 0);
     assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     let calls: Vec<String> = harness
@@ -1571,6 +1873,7 @@ fn after_the_fence_the_old_image_is_never_restarted() -> Result<()> {
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     session.admission()?;
     session.confirm()?;
@@ -1603,6 +1906,7 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     let admitted = session.admission()?;
     assert_eq!(
@@ -1706,6 +2010,7 @@ fn activate_takes_a_new_image_of_the_running_artifact() -> Result<()> {
     assert_eq!(artifacts, [harness.running.artifact_id.clone()]);
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     let admitted = session.admission()?;
     assert_eq!(
@@ -1761,6 +2066,7 @@ fn a_new_image_of_the_running_artifact_is_marked_only_by_activate() -> Result<()
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     session.admission()?;
     session.confirm()?;
@@ -1888,6 +2194,7 @@ fn activate_sizes_the_pod_from_a_large_store() -> Result<()> {
         ("6657Mi".into(), vec!["6721Mi".into(); 2])
     );
     assert!(applied[1].contains("{ name: SQLITE_TMPDIR, value: /srv/day2 }"));
+    online_preflight(&mut session)?;
     session.stop()?;
     session.verify_preparation()?;
     drop(session);
@@ -1961,6 +2268,7 @@ fn activation_measurement_failure_keeps_the_source_serving() -> Result<()> {
         assert!(
             error.starts_with("maintenance_scratch_unmeasured: the stores of example_app on data")
                 && (error.contains("no example_app.sqlite on the state volume")
+                    || error.contains("undeclared_auxiliary_sqlite_store")
                     || error.contains("injected")),
             "{error}"
         );
@@ -2020,6 +2328,7 @@ fn a_failed_activation_mark_names_the_recovery_command() -> Result<()> {
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     session.admission()?;
     session.confirm()?;
@@ -2179,6 +2488,7 @@ fn the_fence_and_migration_apply_refuse_steps_out_of_order() -> Result<()> {
     );
     ensure!(session.migration("apply").is_err(), "apply needs the fence");
     ensure!(session.admission().is_err(), "admission needs the plan");
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     ensure!(
         session.confirm().is_err(),
@@ -2209,6 +2519,7 @@ fn a_refused_confirmation_changes_nothing_and_restores_the_app() -> Result<()> {
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     session.admission()?;
     ensure!(session.confirm().is_err(), "the operator said no");
@@ -2382,6 +2693,8 @@ fn the_reviewed_pod_template_renders_completely() -> Result<()> {
             "registry.test/day2/tooling@sha256:0000000000000000000000000000000000000000000000000000000000000000",
         ),
         ("DAY2_MAINT_PVC", "data"),
+        ("DAY2_MAINT_APP", "example_app"),
+        ("DAY2_MAINT_EXECUTABLE", DAY2),
         (
             "DAY2_MAINT_SERVICE_LABEL_KEY",
             "platform.example.com/service",
@@ -2447,8 +2760,10 @@ fn rolling_rehearsal_opens_both_artifacts_beside_its_disposable_instance() -> Re
     let harness = Harness::new();
     let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
     prepare(&mut session)?;
+    session.claim_operation()?;
     session.workflow("backup")?;
     session.copy_backup()?;
+    session.prepare_rehearsal()?;
     session.migration("plan")?;
     assert_eq!(
         session.admission()?["artifact"],
@@ -2512,8 +2827,6 @@ fn rolling_offsite_backup_binds_source_identity_and_never_stops_service() -> Res
     let harness = Harness::new();
     let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
     prepare(&mut session)?;
-    session.workflow("backup")?;
-    session.copy_backup()?;
     let receipt = session.offsite_backup()?;
     assert_eq!(receipt["source_image"], harness.running.reference);
     assert_eq!(
@@ -2538,6 +2851,19 @@ fn rolling_offsite_backup_binds_source_identity_and_never_stops_service() -> Res
         .context("backup Job")?;
     assert_eq!(job["spec"]["template"]["spec"]["nodeName"], "node-a");
     assert_eq!(job["spec"]["backoffLimit"], 0);
+    assert_eq!(
+        job["spec"]["template"]["spec"]["containers"][0]["args"],
+        json!([
+            TARGET,
+            "example_app",
+            "/backup/snapshot",
+            "--operation-lock",
+            "--upload-gcs",
+            "example-backups",
+            "--object-prefix",
+            format!("rollouts/{}", &session.request_digest[7..])
+        ])
+    );
     assert_eq!(
         job["spec"]["template"]["spec"]["serviceAccountName"],
         "backup"
@@ -2567,6 +2893,7 @@ fn rolling_backup_template_changes_and_missing_completion_fail_before_preparatio
         "/spec/containers/0/image",
         "/spec/containers/0/command/0",
         "/spec/containers/0/args/4",
+        "/spec/containers/0/volumeMounts/0/mountPath",
         "/spec/volumes/0/persistentVolumeClaim/claimName",
         "/spec/volumes/1/configMap/name",
         "/spec/containers/0/securityContext/readOnlyRootFilesystem",
@@ -2582,8 +2909,6 @@ fn rolling_backup_template_changes_and_missing_completion_fail_before_preparatio
             true,
         )?;
         prepare(&mut session)?;
-        session.workflow("backup")?;
-        session.copy_backup()?;
         assert!(session.offsite_backup().is_err(), "{pointer}");
         session.close()?;
         assert!(!harness.calls.borrow().iter().any(|call| {
@@ -2601,8 +2926,6 @@ fn rolling_backup_template_changes_and_missing_completion_fail_before_preparatio
             true,
         )?;
         prepare(&mut session)?;
-        session.workflow("backup")?;
-        session.copy_backup()?;
         assert!(session.offsite_backup().is_err());
         assert!(session.state.offsite_backup.is_none());
         session.close()?;
@@ -2629,8 +2952,22 @@ fn rolling_prepare_cannot_bypass_the_offsite_gate_and_backup_failure_keeps_incum
             true,
         )?;
         prepare(&mut session)?;
+        if fail {
+            assert!(
+                session
+                    .offsite_backup()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("offsite_backup_job_failed")
+            );
+            assert!(!session.state.operation_claimed);
+            session.close()?;
+            continue;
+        }
+        session.claim_operation()?;
         session.workflow("backup")?;
         session.copy_backup()?;
+        session.prepare_rehearsal()?;
         session.migration("plan")?;
         session.admission()?;
         session.confirm()?;
@@ -2641,15 +2978,6 @@ fn rolling_prepare_cannot_bypass_the_offsite_gate_and_backup_failure_keeps_incum
                 .to_string()
                 .contains("offsite_backup_completion_required")
         );
-        if fail {
-            assert!(
-                session
-                    .offsite_backup()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("offsite_backup_job_failed")
-            );
-        }
         assert!(session.state.offsite_backup.is_none());
         session.close()?;
         assert!(!harness.calls.borrow().iter().any(|call| {
@@ -2734,6 +3062,7 @@ fn resumed_release_requires_exact_target_instance_bytes_before_any_step() -> Res
     // The same request and exact target bytes can resume.
     let mut session = Session::open("rollout", &request, harness.tools(|_| {}, true))?;
     session.state.pod = true;
+    session.state.operation_claimed = true;
     assert_eq!(session.rollout_resume()?["resuming"], true);
     let journal = session.journal.clone();
     drop(session);
@@ -2744,6 +3073,7 @@ fn resumed_release_requires_exact_target_instance_bytes_before_any_step() -> Res
     assert_eq!(fs::read(&request)?, request_bytes);
     let mut session = Session::open("rollout", &request, harness.tools(|_| {}, true))?;
     session.state.pod = true;
+    session.state.operation_claimed = true;
     assert!(
         format!("{:#}", session.rollout_resume().unwrap_err())
             .contains("rollout_target_instance_changed")
@@ -2803,6 +3133,7 @@ fn completed_rollout_resumes_using_its_exact_live_instance_after_bootstrap_recon
         } else {
             prepare(&mut session)?;
             assert_eq!(session.rollout_resume()?["resuming"], true);
+            session.claim_operation()?;
             for step in [
                 "prepare", "bind", "admit", "deploy", "observe", "probe", "promote", "wait",
                 "complete",
@@ -2826,6 +3157,7 @@ fn release_probe_only_publishes_then_observes_the_candidate_result() -> Result<(
     let harness = Harness::new();
     let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
     session.state.pod = true;
+    session.state.operation_claimed = true;
     session.state.resumed = true;
     session.state.candidate_observed = true;
     *harness.release.borrow_mut() = json!({"id":"release-1","phase":"serving",

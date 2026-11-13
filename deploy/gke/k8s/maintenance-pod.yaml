@@ -3,14 +3,17 @@
 # operations (inspect, backup, authority apply/activate, migrations, import)
 # against the stopped app. Rendered and run by `day2 platform maintain`
 # (ops/Maintain.roc, crates/day2-ops/src/maintenance.rs), which stops the app's
-# workload before store operations. Activation prepares the sized helper while
-# the source still serves, then rechecks its size bound after stopping.
+# workload before live mutation. Activation prepares the sized helper, claims
+# backup exclusion and rehearses an online snapshot while the source serves,
+# then takes and rehearses a fresh final checkpoint after stopping.
 # Compatible rolling releases pin this
 # helper to the incumbent node and keep it outside every Service selector.
 #
 # Placeholders (the renderer refuses an unknown or unfilled one):
 #   DAY2_MAINT_NAMESPACE      app namespace (app-<id>)
 #   DAY2_MAINT_POD            pod name
+#   DAY2_MAINT_APP            admitted app identifier
+#   DAY2_MAINT_EXECUTABLE     native day2 in the compiled tooling image
 #   DAY2_MAINT_TOOLING_IMAGE  tooling image of the SAME platform build as the
 #                             app's artifact, pinned by digest
 #   DAY2_MAINT_PVC            the app's state PVC (the contract's PVC_NAME)
@@ -48,9 +51,16 @@ spec:
     - name: maintenance
       image: ${DAY2_MAINT_TOOLING_IMAGE}
       imagePullPolicy: IfNotPresent
-      command: ["sleep", "${DAY2_MAINT_DEADLINE_SECONDS}"]
+      command: ["${DAY2_MAINT_EXECUTABLE}", "operation-guard", "/srv/day2/.state", "${DAY2_MAINT_APP}", "/srv/day2/operation.sock", "${DAY2_MAINT_DEADLINE_SECONDS}"]
+      readinessProbe:
+        exec:
+          command: ["${DAY2_MAINT_EXECUTABLE}", "operation-ping", "/srv/day2/operation.sock"]
+        periodSeconds: 2
+        timeoutSeconds: 3
       workingDir: /srv/day2
       env:
+        - { name: DAY2_OPERATION_STATE, value: /srv/day2/.state }
+        - { name: DAY2_OPERATION_SOCKET, value: /srv/day2/operation.sock }
         # SQLite's temporary files (sorts, index builds, statement journals
         # of a migration) on the sized scratch volume, not the small
         # memory-backed /tmp.
