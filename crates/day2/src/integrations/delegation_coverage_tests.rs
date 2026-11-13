@@ -585,7 +585,7 @@ fn delegated_send_proof_requires_a_pending_origin_and_its_unsettled_effect() -> 
              WHERE id=?3 AND status='pending'",
             rusqlite::params![
                 serde_json::to_string(&outcome)?,
-                serde_json::to_string(&trace)?,
+                crate::journal::store_trace(&db, &trace)?,
                 INVOCATION
             ],
         )?,
