@@ -270,8 +270,14 @@ impl Harness {
     }
 
     fn authorize(&self, action: Action, data: Value) -> Result<capabilities::Authorized> {
+        self.caller
+            .runtime()
+            .accept(operation(action), ACTOR, INVOCATION, &json!({}), 100)?;
+        self.authorize_accepted(action, data)
+    }
+
+    fn authorize_accepted(&self, action: Action, data: Value) -> Result<capabilities::Authorized> {
         let runtime = self.caller.runtime();
-        runtime.accept(operation(action), ACTOR, INVOCATION, &json!({}), 100)?;
         let mut db = crate::store::open(runtime.db())?;
         let tx = crate::write_queue::immediate(&mut db)?;
         let active = crate::authority_state::require_invocation_in(
@@ -467,5 +473,139 @@ fn delegation_cannot_return_to_pending_without_reviewed_debt() -> Result<()> {
     super::validate_provider_coverage(&coverage)?;
     let error = super::validate_pending_debt(&coverage, super::REVIEWED_PENDING_DEBT).unwrap_err();
     assert!(error.to_string().contains("unreviewed pending coverage"));
+    Ok(())
+}
+
+/// `observation IS NULL` on an external effect means "not settled", not
+/// "outcome unknown and still sendable". A send proof is issued only for the
+/// exact unsettled effect of a pending, unblocked origin; a completed origin is
+/// refused before its effect row is read, even if that row never settled.
+#[test]
+fn delegated_send_proof_requires_a_pending_origin_and_its_unsettled_effect() -> Result<()> {
+    let harness = Harness::new(Variant::A)?;
+    let runtime = harness.caller.runtime();
+    let admission = crate::delegation_commands::Admission::query_for_test(
+        "human-root",
+        ACTOR,
+        &crate::digest(b"human-subject"),
+        63,
+    );
+    runtime.accept_delegated(
+        operation(Action::DelegateSend),
+        INVOCATION,
+        &json!({}),
+        100,
+        crate::store::Cause::delegated(ACTOR, "entry", "app:entry").remote(&admission),
+    )?;
+    let data = harness.data(Action::DelegateSend);
+    let call = harness
+        .authorize_accepted(Action::DelegateSend, data.clone())?
+        .delegated_call()
+        .context("send was not admitted")?
+        .clone();
+    let intent = serde_json::to_string(&Instruction {
+        kind: "external".into(),
+        model: Action::DelegateSend.capability().into(),
+        data: data.to_string(),
+        ..Instruction::default()
+    })?;
+    let db = crate::store::open(runtime.db())?;
+    db.execute(
+        "INSERT INTO day2_external_effects VALUES(?1,0,?2,?3,NULL)",
+        rusqlite::params![INVOCATION, STEP, intent],
+    )?;
+    let refusal = |call: &crate::delegation::Call| {
+        crate::delegation::verify_origin(runtime, call)
+            .err()
+            .map(|error| format!("{error:#}"))
+    };
+
+    // Pending and unsettled: the retryable send keeps its proof.
+    let origin = crate::delegation::verify_origin(runtime, &call)?;
+    assert_eq!(origin.root, "human-root");
+    assert_eq!(origin.principal, ACTOR);
+    let mut unrelated = call.clone();
+    unrelated.step = "fx_not_journaled".into();
+    assert!(
+        refusal(&unrelated).is_some(),
+        "a step without an effect row was admitted"
+    );
+
+    // Settled: no second proof for the same effect.
+    db.execute(
+        "UPDATE day2_external_effects SET observation='{}' WHERE identity=?1",
+        [STEP],
+    )?;
+    assert!(
+        refusal(&call).is_some(),
+        "a settled effect issued another send proof"
+    );
+    db.execute(
+        "UPDATE day2_external_effects SET observation=NULL WHERE identity=?1",
+        [STEP],
+    )?;
+    crate::delegation::verify_origin(runtime, &call)?;
+
+    // Completed while the effect row never settled: refused on the origin's
+    // status, and the stored receipt still replays through completed_outcome.
+    let outcome = crate::protocol::Outcome {
+        status: "success".into(),
+        result: json!({"sent":true}),
+        error: String::new(),
+    };
+    let (policy, stamp, context) = {
+        let active = crate::authority_state::current(&db)?;
+        (
+            active.policy()?.clone(),
+            crate::authority_state::invocation_stamp(&db, INVOCATION)?,
+            crate::store::invocation_context(&db, INVOCATION)?,
+        )
+    };
+    let trace = crate::protocol::Trace {
+        format: 2,
+        artifact: runtime.artifact().id().into(),
+        scope: runtime.scope().into(),
+        request: Request {
+            operation: operation(Action::DelegateSend).into(),
+            input: "{}".into(),
+            context,
+            observations: Vec::new(),
+        },
+        outcome: outcome.clone(),
+        guard: Some(crate::protocol::ExecutionGuard {
+            policy,
+            authority: Some(stamp),
+            precondition_row: None,
+            error: String::new(),
+        }),
+    };
+    assert_eq!(
+        db.execute(
+            "UPDATE day2_invocations SET status='success',outcome=?1,trace=?2
+             WHERE id=?3 AND status='pending'",
+            rusqlite::params![
+                serde_json::to_string(&outcome)?,
+                serde_json::to_string(&trace)?,
+                INVOCATION
+            ],
+        )?,
+        1
+    );
+    let unsettled: i64 = db.query_row(
+        "SELECT count(*) FROM day2_external_effects WHERE invocation=?1 AND observation IS NULL",
+        [INVOCATION],
+        |row| row.get(0),
+    )?;
+    assert_eq!(unsettled, 1);
+    let refused = refusal(&call).context("a completed origin issued a send proof")?;
+    assert!(refused.contains("delegated_origin_changed"), "{refused}");
+    assert_eq!(
+        runtime.execute(INVOCATION, crate::store::Fault::None)?,
+        outcome
+    );
+    assert_eq!(
+        runtime.execute(INVOCATION, crate::store::Fault::None)?,
+        outcome
+    );
     Ok(())
 }
