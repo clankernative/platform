@@ -142,6 +142,7 @@ struct FakeCluster {
     drop_on_copy_out: Option<String>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
     replicas: u64,
+    workload_kind: WorkloadKind,
     /// What `authority inspect` reports the database activates.
     active_artifact: String,
     /// The bytes the in-pod backup takes of the app's store.
@@ -150,12 +151,64 @@ struct FakeCluster {
     volume: Vec<(&'static str, u64)>,
     /// Every manifest applied, in order.
     applied: Rc<RefCell<Vec<String>>>,
+    prepared: bool,
+    after_prepare: Option<(String, Value)>,
+    growth_after_stop: u64,
+    lose_fence_reply: bool,
+    hide_fenced_checkpoint: bool,
+    lose_activation_reply: bool,
 }
 
 /// A store whose credential unit predates the target's schema.
 const OLD_CREDENTIAL_STORE: &[u8] = b"day2_credential_schema_version=1";
 
 impl FakeCluster {
+    fn helper(&self, name: &str) -> Value {
+        let digest = self
+            .annotations
+            .borrow()
+            .get(activation::ANNOTATION)
+            .and_then(|raw| serde_json::from_str::<ActivationIntent>(raw).ok())
+            .map(|intent| intent.request_digest)
+            .unwrap_or_default();
+        let _ = name;
+        self.observed("helper",json!({"metadata":{"uid":"helper-uid","annotations":{
+            "day2.dev/rollout-request":digest}},"spec":{"nodeName":"node-a",
+            "containers":[{"image":"registry.test/day2/tooling@sha256:0000000000000000000000000000000000000000000000000000000000000000"}],
+            "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data"}}]},
+            "status":{"conditions":[{"type":"Ready","status":"True"},
+                {"type":"PodScheduled","status":"False","message":"0/3 nodes are available: 3 Insufficient ephemeral-storage."}]}}))
+    }
+
+    fn controller(&self) -> Value {
+        self.observed("controller", json!({
+            "metadata":{"uid":"controller-uid","resourceVersion":"1","annotations":*self.annotations.borrow()},
+            "spec":{"replicas":self.replicas,"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},
+                "template":{"metadata":{"annotations":self.template_annotations()},"spec":{
+                    "containers":[{"name":"day2","image":self.running_image}],
+                    "volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"data"}},
+                        {"name":"instance","configMap":{"name":if self.released_instance.is_some(){"released-instance"}else{"day2-example-instance"}}}]}}}}))
+    }
+
+    fn observed(&self, kind: &str, mut value: Value) -> Value {
+        if self.prepared
+            && let Some((path, replacement)) = &self.after_prepare
+            && let Some(path) = path.strip_prefix(kind)
+        {
+            *value.pointer_mut(path).expect("known test field") = replacement.clone();
+        }
+        value
+    }
+
+    fn incumbent(&self) -> Value {
+        self.observed("pod", json!({"metadata":{"name":"incumbent","uid":"incumbent-uid",
+            "ownerReferences":[{"uid":if self.workload_kind == WorkloadKind::Deployment {
+                "replicaset-uid"} else {"controller-uid"},"controller":true}]},
+            "spec":{"nodeName":"node-a","containers":[{"name":"day2","image":self.running_image}],
+                "volumes":[{"name":"state","persistentVolumeClaim":{"claimName":self.rollout_claim}}]},
+            "status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}))
+    }
+
     fn template_annotations(&self) -> Value {
         self.released_instance.as_ref().map_or_else(|| json!({}), |raw| {
             let instance: Value = serde_json::from_str(raw).unwrap();
@@ -287,6 +340,20 @@ impl Cluster for FakeCluster {
             self.applied.borrow_mut().push(manifest);
         }
         let joined = args.join(" ");
+        if self.hide_fenced_checkpoint
+            && args[2] == "get"
+            && matches!(args[3].as_str(), "statefulset" | "deployment")
+            && self
+                .annotations
+                .borrow()
+                .get(activation::ANNOTATION)
+                .is_some_and(|raw| {
+                    serde_json::from_str::<ActivationIntent>(raw).unwrap().phase
+                        == ActivationPhase::Fenced
+                })
+        {
+            bail!("injected API unavailable after fence response loss");
+        }
         if let Some(fail) = &self.fail_on
             && joined.contains(fail.as_str())
         {
@@ -294,12 +361,10 @@ impl Cluster for FakeCluster {
         }
         let args: Vec<&str> = args[2..].iter().map(String::as_str).collect();
         Ok(match args.as_slice() {
-            ["get", "statefulset" | "deployment", STATEFULSET, "-o", "json"] => json!({
-                "metadata": {"uid":"controller-uid","resourceVersion":"1","annotations": *self.annotations.borrow()},
-                "spec": {"replicas": self.replicas,"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}}, "template": {"metadata":{"annotations":self.template_annotations()},"spec": {"containers": [{"name":"day2","image": self.running_image}],"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":"data"}},
-                    {"name":"instance","configMap":{"name":if self.released_instance.is_some() {"released-instance"} else {"day2-example-instance"}}}]}}}
-            })
-            .to_string(),
+            ["get", kind @ ("statefulset" | "deployment"), STATEFULSET, "-o", "json"] => {
+                self.workload_kind = if *kind == "deployment" {WorkloadKind::Deployment} else {WorkloadKind::Statefulset};
+                self.controller().to_string()
+            },
             ["annotate", "--overwrite", "statefulset" | "deployment", STATEFULSET, annotation] => {
                 let (key, value) = annotation.split_once('=').unwrap();
                 self.annotations
@@ -311,7 +376,7 @@ impl Cluster for FakeCluster {
             ["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "json"] => json!({"items":[]}).to_string(),
             ["get", "services", "-o", "json"] => json!({"items":[{"spec":{"selector":{"app.kubernetes.io/name":if self.helper_service {"day2-maintenance"} else {STATEFULSET}}}}]}).to_string(),
             ["get", "replicasets", "-o", "json"] => json!({"items":[{"metadata":{"uid":"replicaset-uid","ownerReferences":[{"uid":"controller-uid","controller":true}]}}]}).to_string(),
-            ["get", "pvc", "data", "-o", "json"] => json!({"metadata":{"uid":"pvc-uid"},"spec":{"accessModes":["ReadWriteOnce"]},"status":{"phase":"Bound"}}).to_string(),
+            ["get", "pvc", "data", "-o", "json"] => self.observed("pvc", json!({"metadata":{"uid":"pvc-uid"},"spec":{"accessModes":["ReadWriteOnce"]},"status":{"phase":"Bound"}})).to_string(),
             ["get", "job", _, "-o", "json"] => json!({"metadata":{"uid":"backup-job-uid"},
                 "status":{"conditions":[{"type":if self.backup_failed {"Failed"} else {"Complete"},"status":"True"}]}}).to_string(),
             ["get", "pods", "-l", selector, "-o", "json"] if selector.starts_with("batch.kubernetes.io/job-name=") => {
@@ -340,17 +405,56 @@ impl Cluster for FakeCluster {
                     "upload":{"bucket":"example-backups","prefix":prefix,"objects":4,"bytes":4096,
                         "complete":format!("gs://example-backups/{prefix}/COMPLETE")}})).to_string()
             }
-            ["get", "pods", "-l", _, "-o", "json"] => json!({"items":[{"metadata":{"name":"incumbent","ownerReferences":[{"uid":"replicaset-uid","controller":true}]},"spec":{"nodeName":"node-a","containers":[{"name":"day2","image":self.running_image}],"volumes":[{"name":"state","persistentVolumeClaim":{"claimName":self.rollout_claim}}]}}]}).to_string(),
+            ["get", "pods", "-l", _, "-o", "json"] => json!({"items":[self.incumbent()]}).to_string(),
+            ["get", "pod", "incumbent", "-o", "json"] => self.incumbent().to_string(),
+            ["patch", "statefulset" | "deployment", STATEFULSET, "--type=json", "-p", patch] => {
+                let patch: Value = serde_json::from_str(patch)?;
+                let mut current = self.controller();
+                for op in patch.as_array().unwrap() {
+                    let path=op["path"].as_str().unwrap();
+                    match op["op"].as_str().unwrap() {
+                        "test" => ensure!(current.pointer(path) == Some(&op["value"]), "mock JSON patch precondition failed: {path}"),
+                        "add" | "replace" => { *current.pointer_mut(path).expect("mock known patch path")=op["value"].clone(); },
+                        other=>bail!("unsupported mock patch operation {other}"),
+                    }
+                }
+                self.replicas=current["spec"]["replicas"].as_u64().unwrap();
+                *self.annotations.borrow_mut()=serde_json::from_value(current["metadata"]["annotations"].clone())?;
+                if self.lose_fence_reply && self.annotations.borrow().get(activation::ANNOTATION)
+                    .is_some_and(|raw| serde_json::from_str::<ActivationIntent>(raw).unwrap().phase == ActivationPhase::Fenced) {
+                    self.lose_fence_reply = false;
+                    bail!("injected lost fence response after server commit");
+                }
+                if self.lose_activation_reply && self.annotations.borrow().get(activation::ANNOTATION)
+                    .is_some_and(|raw|serde_json::from_str::<ActivationIntent>(raw).unwrap().phase==ActivationPhase::Activated) {
+                    self.lose_activation_reply=false;
+                    bail!("injected lost approval response after server commit");
+                }
+                "{}".into()
+            }
             ["scale", "statefulset" | "deployment", STATEFULSET, replicas] => {
                 self.replicas = replicas.trim_start_matches("--replicas=").parse()?;
                 String::new()
             }
-            ["get", "configmap", name, "-o", "json"] => json!({"data": {"instance.json":
-                if *name == "released-instance" {self.released_instance.as_ref().unwrap()} else {&self.instance}}}).to_string(),
+            ["get", "configmap", name, "-o", "json"] => self.observed("configmap", json!({"data": {"instance.json":
+                if *name == "released-instance" {self.released_instance.as_ref().unwrap()} else {&self.instance}}})).to_string(),
             ["get", "pod", _, "--ignore-not-found", "-o", "name"] => String::new(),
-            ["get", "pod", _, "-o", "json"] => json!({"status": {"conditions": [{"type": "PodScheduled", "status": "False",
-                "message": "0/3 nodes are available: 3 Insufficient ephemeral-storage."}]}})
-            .to_string(),
+            ["get", "pod", name, "--ignore-not-found", "-o", "json"] => {
+                let applied = self.applied.borrow().iter().any(|raw| raw.contains(&format!("  name: {name}\n")));
+                let removed = self.calls.borrow().iter().any(|call| call[2]=="delete"
+                    && ((call[3]=="pod" && call[4]==*name)
+                        || (call[3]=="--raw" && call[4].ends_with(&format!("/pods/{name}")))));
+                if !applied || removed {String::new()} else {
+                    self.helper(name).to_string()
+                }
+            }
+            ["delete", "--raw", path, "-f", "-"] => {
+                assert!(path.starts_with("/api/v1/namespaces/app-example/pods/day2-maintenance-"));
+                let options:Value=serde_json::from_slice(stdin.unwrap())?;
+                ensure!(options["preconditions"]["uid"]=="helper-uid", "mock UID precondition failed");
+                String::new()
+            }
+            ["get", "pod", name, "-o", "json"] => self.helper(name).to_string(),
             ["scale" | "apply" | "create" | "wait" | "delete" | "rollout", ..] => String::new(),
             ["cp", "--retries=5", from, to] => {
                 if let Some((_, remote)) = to.split_once(':') {
@@ -405,15 +509,19 @@ impl Cluster for FakeCluster {
                 ensure!(self.denied_operator.as_deref() != Some(*operator), "Error: maintenance_operator_required");
                 self.admit(instance, app)?
             }
-            ["exec", pod, "--", "find", STATE, "-maxdepth", "1", "-type", "f", "-exec", "stat", "-c", "%s %n", "{}", "+"] => {
-                assert!(pod.ends_with("-measure"), "measured from the probe");
-                self.volume
+            ["exec", _, "--", "find", STATE, "-maxdepth", "1", "-type", "f", "-exec", "stat", "-c", "%s %n", "{}", "+"] => {
+                let mut result: String = self.volume
                     .iter()
                     .map(|(name, size)| format!("{size} {STATE}/{name}\n"))
-                    .collect()
+                    .collect();
+                if self.replicas == 0 && self.growth_after_stop > 0 {
+                    result.push_str(&format!("{} {STATE}/example_app.sqlite-wal\n", self.growth_after_stop));
+                }
+                result
             }
             ["exec", _, "--", "find", root, ..] => self.sums(root)?,
             ["exec", _, "--", "sha256sum", file] => {
+                if *file == TARGET { self.prepared = true; }
                 format!("{}  {file}\n", day2::digest(&fs::read(self.pod_path(file))?).trim_start_matches("sha256:"))
             }
             ["exec", _, "--", HOST, request] => self.host(request)?,
@@ -509,6 +617,7 @@ impl Harness {
             drop_on_copy_out: None,
             annotations: self.annotations.clone(),
             replicas: 1,
+            workload_kind: WorkloadKind::Statefulset,
             active_artifact: "sha256:a".into(),
             store: b"database",
             volume: vec![
@@ -517,8 +626,19 @@ impl Harness {
                 ("unrelated.bin", 1 << 40),
             ],
             applied: self.applied.clone(),
+            prepared: false,
+            after_prepare: None,
+            growth_after_stop: 0,
+            lose_fence_reply: false,
+            hide_fenced_checkpoint: false,
+            lose_activation_reply: false,
         };
         configure(&mut cluster);
+        fs::create_dir_all(cluster.pod_path(STATE)).unwrap();
+        let database = cluster.pod_path(&format!("{STATE}/example_app.sqlite"));
+        if !database.exists() {
+            fs::write(database, cluster.store).unwrap();
+        }
         Tools {
             cluster: Box::new(cluster),
             registry: Box::new(FakeRegistry(blobs)),
@@ -549,6 +669,18 @@ impl Harness {
             .map(|call| match call[2].as_str() {
                 "exec" => format!("exec {}", call[5].rsplit('/').next().unwrap()),
                 "scale" => format!("scale {}", call[5]),
+                "patch" if matches!(call[3].as_str(), "statefulset" | "deployment") => {
+                    let patch: Value = serde_json::from_str(call.last().unwrap()).unwrap();
+                    match patch
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|op| op["path"] == "/spec/replicas" && op["op"] == "replace")
+                    {
+                        Some(op) => format!("scale --replicas={}", op["value"]),
+                        None => "patch".into(),
+                    }
+                }
                 "delete" if call[4].ends_with("-measure") => "delete probe".to_owned(),
                 verb => verb.to_owned(),
             })
@@ -587,9 +719,637 @@ impl Harness {
 
 fn prepare(session: &mut Session) -> Result<()> {
     session.artifacts()?;
-    session.stop()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
+    if session.operation == Operation::Activate {
+        session.measure()?;
+        session.start_pod()?;
+        session.stop()?;
+        session.verify_preparation()?;
+    } else {
+        session.stop()?;
+        session.measure()?;
+        session.start_pod()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn activation_prepares_on_the_incumbent_node_without_opening_a_store() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+    session.artifacts()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
     session.measure()?;
     session.start_pod()?;
+    for workflow in ["backup", "authority-inspect", "authority-activate"] {
+        assert!(session.workflow(workflow).is_err());
+    }
+    assert!(session.migration("plan").is_err());
+    assert!(session.fence().is_err());
+    assert!(session.verify_preparation().is_err());
+    assert!(
+        harness
+            .applied
+            .borrow()
+            .iter()
+            .all(|pod| pod.contains("key: metadata.name")
+                && pod.contains("values: [node-a]")
+                && !pod.contains("nodeName:"))
+    );
+    assert!(
+        !harness
+            .verbs()
+            .iter()
+            .any(|verb| verb.starts_with("scale") || verb == "exec day2-host")
+    );
+    for manifest in harness.applied.borrow().iter() {
+        let init = manifest
+            .split("  initContainers:\n")
+            .nth(1)
+            .unwrap()
+            .split("  containers:\n")
+            .next()
+            .unwrap();
+        assert!(init.contains(&harness.target.reference));
+        assert!(init.contains("day2-health") && init.contains("--help"));
+        assert!(!init.contains("volumeMounts") && !init.contains(STATE));
+    }
+    let journal: Value = serde_json::from_slice(&fs::read(&session.journal)?)?;
+    assert_eq!(journal["format"], 2);
+    assert_eq!(journal["request"], session.request_json);
+    assert_eq!(
+        journal["request_digest"],
+        day2::digest(session.request_json.as_bytes())
+    );
+    assert_eq!(
+        journal["target_instance"],
+        session.target_instance.as_deref().unwrap()
+    );
+    assert_eq!(journal["source_controller_uid"], "controller-uid");
+    assert_eq!(journal["source_pvc_uid"], "pvc-uid");
+    assert_eq!(journal["source_pod"]["metadata"]["uid"], "incumbent-uid");
+    // Simulate process death without its destructor: preparation has never
+    // changed replicas, readiness or the live store, even without cleanup.
+    let work = session.work.path().to_owned();
+    std::mem::forget(session);
+    assert!(!harness.verbs().iter().any(|verb| verb.starts_with("scale")));
+    writable(&work);
+    fs::remove_dir_all(work)?;
+    Ok(())
+}
+
+#[test]
+fn activation_preparation_failures_do_not_stop_or_restart_the_source() -> Result<()> {
+    for point in ["%s %n", "z --timeout=600s", "cp --retries=5", "sha256sum"] {
+        let harness = Harness::new();
+        let mut session = harness.open(
+            Operation::Activate,
+            |cluster| cluster.fail_on = Some(point.into()),
+            true,
+        )?;
+        session.artifacts()?;
+        if matches!(
+            session.operation,
+            Operation::Activate | Operation::MarkActivated
+        ) {
+            session.begin_preparation()?;
+        }
+        let result = session.measure().and_then(|_| session.start_pod());
+        assert!(result.is_err(), "{point}");
+        drop(session);
+        assert!(
+            !harness.verbs().iter().any(|verb| verb.starts_with("scale")),
+            "{point}"
+        );
+        assert!(
+            !harness
+                .journal()
+                .iter()
+                .any(|step| step == "stop" || step == "fence")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn activation_refuses_changed_source_bindings_before_stopping() -> Result<()> {
+    for (path, value) in [
+        ("controller/metadata/uid", json!("replacement-controller")),
+        (
+            "controller/spec/template/spec/containers/0/image",
+            json!("replacement-image"),
+        ),
+        ("controller/spec/replicas", json!(2)),
+        ("pvc/metadata/uid", json!("replacement-claim")),
+        ("configmap/data/instance.json", json!("changed instance")),
+        ("pod/metadata/uid", json!("replacement-pod")),
+        ("helper/metadata/uid", json!("replacement-helper")),
+        ("pod/spec/nodeName", json!("node-b")),
+        ("pod/status/conditions/0/status", json!("False")),
+    ] {
+        let harness = Harness::new();
+        let mut session = harness.open(
+            Operation::Activate,
+            |cluster| {
+                cluster.after_prepare = Some((path.into(), value));
+            },
+            true,
+        )?;
+        session.artifacts()?;
+        if matches!(
+            session.operation,
+            Operation::Activate | Operation::MarkActivated
+        ) {
+            session.begin_preparation()?;
+        }
+        session.measure()?;
+        session.start_pod()?;
+        assert!(session.stop().is_err(), "{path}");
+        drop(session);
+        assert!(
+            !harness.verbs().iter().any(|verb| verb.starts_with("scale")),
+            "{path}"
+        );
+        assert!(!harness.journal().iter().any(|step| step == "stop"));
+    }
+    Ok(())
+}
+
+#[test]
+fn activation_growth_beyond_reserved_scratch_restores_before_opening_a_store() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Activate,
+        |cluster| cluster.growth_after_stop = 4 * SCRATCH_FLOOR,
+        true,
+    )?;
+    session.artifacts()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
+    session.measure()?;
+    session.start_pod()?;
+    session.stop()?;
+    let error = format!("{:#}", session.verify_preparation().unwrap_err());
+    assert!(error.contains("activation_preparation_outgrown"), "{error}");
+    assert!(session.workflow("backup").is_err());
+    drop(session);
+    assert!(harness.scaled_up());
+    assert!(!harness.verbs().iter().any(|verb| verb == "exec day2-host"));
+    Ok(())
+}
+
+#[test]
+fn activation_preparation_and_checked_stop_support_both_controllers() -> Result<()> {
+    for kind in ["statefulset", "deployment"] {
+        let harness = Harness::new();
+        let path = harness.request(Operation::Activate);
+        let mut request: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        request["workload_kind"] = json!(kind);
+        fs::write(&path, serde_json::to_vec(&request)?)?;
+        let mut session = Session::open("activate", &path, harness.tools(|_| {}, true))?;
+        prepare(&mut session)?;
+        drop(session);
+        let calls = harness.calls.borrow();
+        let patches: Vec<Value> = calls
+            .iter()
+            .filter(|call| {
+                call[2] == "patch"
+                    && serde_json::from_str::<Value>(call.last().unwrap())
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|op| op["path"] == "/spec/replicas" && op["op"] == "replace")
+            })
+            .map(|call| {
+                assert_eq!(call[3], kind);
+                serde_json::from_str(call.last().unwrap()).unwrap()
+            })
+            .collect();
+        assert_eq!(patches.len(), 2);
+        for patch in &patches {
+            assert!(patch.as_array().unwrap().iter().any(|op| op["op"] == "test"
+                && op["path"] == "/metadata/uid"
+                && op["value"] == "controller-uid"));
+            assert!(
+                patch
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|op| op["op"] == "test" && op["path"] == "/metadata/resourceVersion")
+            );
+            assert!(
+                patch
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|op| op["op"] == "test" && op["path"] == "/spec/template")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn kill_operator(session: Session) -> (PathBuf, PathBuf) {
+    let paths = (session.journal.clone(), session.work.path().to_owned());
+    std::mem::forget(session);
+    paths
+}
+
+#[test]
+fn saved_activation_recovers_before_and_after_the_stop_without_original_input_files() -> Result<()>
+{
+    for stopped in [false, true] {
+        let harness = Harness::new();
+        let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+        session.artifacts()?;
+        session.begin_preparation()?;
+        session.measure()?;
+        session.start_pod()?;
+        if stopped {
+            session.stop()?;
+        }
+        let (journal, work) = kill_operator(session);
+        fs::remove_file(harness.directory.path().join("request.json"))?;
+        fs::remove_file(harness.directory.path().join("target-instance.json"))?;
+        let mut recovery = Recovery::open(
+            &journal,
+            harness.tools(
+                |cluster| {
+                    cluster.replicas = if stopped { 0 } else { 1 };
+                },
+                true,
+            ),
+        )?;
+        assert!(recovery.restore().is_err());
+        recovery.claim()?;
+        assert!(recovery.restore().is_err());
+        recovery.cleanup()?;
+        let restored = recovery.restore()?;
+        assert_eq!(restored["replicas_restored"], true);
+        assert_eq!(restored["target_only"], false);
+        let before = harness.calls.borrow().len();
+        // Repeating after a lost recovery response cannot stop or republish.
+        let mut repeated = Recovery::open(&journal, harness.tools(|_| {}, true))?;
+        repeated.claim()?;
+        repeated.cleanup()?;
+        repeated.restore()?;
+        assert!(
+            !harness.calls.borrow()[before..]
+                .iter()
+                .any(|call| call[2] == "patch" || call[2] == "delete")
+        );
+        writable(&work);
+        fs::remove_dir_all(work)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_claim_prevents_the_original_operator_from_opening_the_store() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+    prepare(&mut session)?;
+    let mut recovery = Recovery::open(
+        &session.journal,
+        harness.tools(|cluster| cluster.replicas = 0, true),
+    )?;
+    recovery.claim()?;
+    assert!(session.workflow("backup").is_err());
+    recovery.cleanup()?;
+    recovery.restore()?;
+    drop(session);
+    assert!(!harness.verbs().iter().any(|verb| verb == "exec day2-host"));
+    Ok(())
+}
+
+#[test]
+fn a_lost_fence_response_never_restores_the_old_runtime() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Activate,
+        |cluster| {
+            cluster.lose_fence_reply = true;
+            cluster.hide_fenced_checkpoint = true;
+        },
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    session.admission()?;
+    session.confirm()?;
+    let journal = session.journal.clone();
+    assert!(format!("{:#}", session.fence().unwrap_err()).contains("lost fence response"));
+    assert!(session.state.fenced);
+    drop(session);
+    let mut recovery = Recovery::open(
+        &journal,
+        harness.tools(|cluster| cluster.replicas = 0, true),
+    )?;
+    recovery.claim()?;
+    recovery.cleanup()?;
+    let receipt = recovery.restore()?;
+    assert_eq!(receipt["target_only"], true);
+    assert_eq!(receipt["replicas_restored"], false);
+    assert!(!harness.scaled_up());
+    Ok(())
+}
+
+#[test]
+fn lost_fence_and_approval_responses_resolve_the_exact_committed_transaction() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Activate,
+        |cluster| {
+            cluster.lose_fence_reply = true;
+            cluster.lose_activation_reply = true;
+        },
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    session.admission()?;
+    session.confirm()?;
+    session.fence()?;
+    assert!(session.fence().is_err());
+    session.migration("apply")?;
+    session.workflow("authority-inspect")?;
+    session.workflow("authority-activate")?;
+    session.store_admission()?;
+    session.mark_activated()?;
+    session.finish()?;
+    assert!(!harness.scaled_up());
+    assert_eq!(
+        harness.annotations.borrow().get(ACTIVATED),
+        Some(&harness.target.reference)
+    );
+    let intent: ActivationIntent =
+        serde_json::from_str(&harness.annotations.borrow()[activation::ANNOTATION])?;
+    assert_eq!(intent.phase, ActivationPhase::Activated);
+    Ok(())
+}
+
+#[test]
+fn a_fence_winning_before_recovery_claim_refuses_source_restore() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+    prepare(&mut session)?;
+    let (journal, work) = kill_operator(session);
+    let mut recovery = Recovery::open(
+        &journal,
+        harness.tools(|cluster| cluster.replicas = 0, true),
+    )?;
+    let mut intent: ActivationIntent =
+        serde_json::from_str(&harness.annotations.borrow()[activation::ANNOTATION])?;
+    intent.phase = ActivationPhase::Fenced;
+    harness.annotations.borrow_mut().insert(
+        activation::ANNOTATION.into(),
+        serde_json::to_string(&intent)?,
+    );
+    assert!(recovery.claim().is_err());
+    assert!(recovery.restore().is_err());
+    assert!(!harness.scaled_up());
+    writable(&work);
+    fs::remove_dir_all(work)?;
+    Ok(())
+}
+
+#[test]
+fn recovery_refuses_replacement_controller_claim_template_or_instance() -> Result<()> {
+    for (path, value) in [
+        ("controller/metadata/uid", json!("replacement")),
+        (
+            "controller/spec/template/spec/containers/0/image",
+            json!("replacement"),
+        ),
+        ("pvc/metadata/uid", json!("replacement")),
+        ("configmap/data/instance.json", json!("replacement")),
+    ] {
+        let harness = Harness::new();
+        let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+        prepare(&mut session)?;
+        let (journal, work) = kill_operator(session);
+        let before = harness.calls.borrow().len();
+        let result = Recovery::open(
+            &journal,
+            harness.tools(
+                |cluster| {
+                    cluster.replicas = 0;
+                    cluster.prepared = true;
+                    cluster.after_prepare = Some((path.into(), value));
+                },
+                true,
+            ),
+        );
+        assert!(result.is_err(), "{path}");
+        assert!(
+            !harness.calls.borrow()[before..]
+                .iter()
+                .any(|call| call[2] == "patch" || call[2] == "delete")
+        );
+        writable(&work);
+        fs::remove_dir_all(work)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_refuses_a_changed_helper_without_starting_the_source() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+    prepare(&mut session)?;
+    let (journal, work) = kill_operator(session);
+    let mut recovery = Recovery::open(
+        &journal,
+        harness.tools(
+            |cluster| {
+                cluster.replicas = 0;
+                cluster.prepared = true;
+                cluster.after_prepare = Some((
+                    "helper/spec/containers/0/image".into(),
+                    json!("replacement"),
+                ));
+            },
+            true,
+        ),
+    )?;
+    recovery.claim()?;
+    assert!(recovery.cleanup().is_err());
+    assert!(recovery.restore().is_err());
+    assert!(!harness.scaled_up());
+    writable(&work);
+    fs::remove_dir_all(work)?;
+    Ok(())
+}
+
+#[test]
+fn fenced_activation_can_resume_only_the_exact_saved_target() -> Result<()> {
+    for same_artifact in [false, true] {
+        let mut harness = Harness::new();
+        if same_artifact {
+            harness.target = rebased(&harness.running);
+        }
+        let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+        prepare(&mut session)?;
+        session.workflow("backup")?;
+        session.copy_backup()?;
+        session.migration("plan")?;
+        session.admission()?;
+        session.confirm()?;
+        session.fence()?;
+        let (journal, work) = kill_operator(session);
+        let mut recovery = Recovery::open(
+            &journal,
+            harness.tools(|cluster| cluster.replicas = 0, true),
+        )?;
+        recovery.claim()?;
+        recovery.cleanup()?;
+        assert_eq!(recovery.restore()?["target_only"], true);
+        let request = harness.directory.path().join("request.json");
+        let target = harness.directory.path().join("target-instance.json");
+        let original = fs::read(&target)?;
+        fs::write(&target, b"{\"apps\":{}}")?;
+        assert!(
+            Session::open(
+                "activate",
+                &request,
+                harness.tools(|cluster| cluster.replicas = 0, true)
+            )
+            .is_err()
+        );
+        fs::write(&target, original)?;
+        let mut resumed = Session::open(
+            "activate",
+            &request,
+            harness.tools(|cluster| cluster.replicas = 0, true),
+        )?;
+        assert!(resumed.state.fenced);
+        prepare(&mut resumed)?;
+        assert!(resumed.migration("apply").is_err());
+        resumed.workflow("backup")?;
+        resumed.copy_backup()?;
+        resumed.migration("plan")?;
+        resumed.admission()?;
+        resumed.confirm()?;
+        resumed.fence()?;
+        resumed.migration("apply")?;
+        resumed.workflow("authority-inspect")?;
+        resumed.workflow("authority-activate")?;
+        assert!(
+            resumed.mark_activated().is_err(),
+            "live target admission is mandatory"
+        );
+        resumed.store_admission()?;
+        resumed.mark_activated()?;
+        resumed.finish()?;
+        drop(resumed);
+        assert!(!harness.scaled_up());
+        writable(&work);
+        fs::remove_dir_all(work)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_refuses_modified_request_and_target_evidence_before_mutation() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+    prepare(&mut session)?;
+    let (journal, work) = kill_operator(session);
+    let original: Value = serde_json::from_slice(&fs::read(&journal)?)?;
+    for field in [
+        "session",
+        "request",
+        "target_instance",
+        "source_controller_uid",
+        "source_pvc_uid",
+    ] {
+        let mut changed = original.clone();
+        changed[field] = json!("modified");
+        let path = harness
+            .directory
+            .path()
+            .join(format!("changed-{field}.json"));
+        fs::write(&path, serde_json::to_vec(&changed)?)?;
+        let before = harness.calls.borrow().len();
+        assert!(
+            Recovery::open(&path, harness.tools(|cluster| cluster.replicas = 0, true)).is_err(),
+            "{field}"
+        );
+        assert!(
+            !harness.calls.borrow()[before..]
+                .iter()
+                .any(|call| call[2] == "patch" || call[2] == "delete")
+        );
+    }
+    writable(&work);
+    fs::remove_dir_all(work)?;
+    Ok(())
+}
+
+#[test]
+fn recovery_after_approval_only_cleans_up_even_if_the_target_is_running() -> Result<()> {
+    for target_running in [false, true] {
+        let harness = Harness::new();
+        let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+        prepare(&mut session)?;
+        session.workflow("backup")?;
+        session.copy_backup()?;
+        session.migration("plan")?;
+        session.admission()?;
+        session.confirm()?;
+        session.fence()?;
+        session.migration("apply")?;
+        session.workflow("authority-inspect")?;
+        session.workflow("authority-activate")?;
+        session.store_admission()?;
+        session.mark_activated()?;
+        let (journal, work) = kill_operator(session);
+        let before = harness.calls.borrow().len();
+        let mut recovery = Recovery::open(
+            &journal,
+            harness.tools(
+                |cluster| {
+                    cluster.replicas = if target_running { 1 } else { 0 };
+                    if target_running {
+                        cluster.running_image = harness.target.reference.clone();
+                        cluster.instance = Harness::instance(&harness.target.artifact_id);
+                    }
+                },
+                true,
+            ),
+        )?;
+        recovery.claim()?;
+        recovery.cleanup()?;
+        let receipt = recovery.restore()?;
+        assert_eq!(receipt["target_only"], true);
+        assert_eq!(receipt["activation_approved"], true);
+        assert!(
+            !harness.calls.borrow()[before..]
+                .iter()
+                .any(|call| call[2] == "patch" || call[2] == "scale")
+        );
+        writable(&work);
+        fs::remove_dir_all(work)?;
+    }
     Ok(())
 }
 
@@ -685,7 +1445,7 @@ fn a_failure_before_the_fence_removes_the_pod_and_restores_the_app() -> Result<(
     ensure!(session.mark_activated().is_err(), "nothing was activated");
     drop(session);
     assert!(harness.deleted_pod() && harness.scaled_up());
-    assert!(harness.annotations.borrow().is_empty());
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     Ok(())
 }
 
@@ -718,7 +1478,7 @@ fn a_store_the_target_refuses_stops_activate_before_the_fence_and_restores_the_a
     drop(session);
     assert!(harness.deleted_pod() && harness.scaled_up());
     assert_eq!(*harness.asked.borrow(), 0);
-    assert!(harness.annotations.borrow().is_empty());
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     // Only the copy was migrated and activated; the instance over the app's
     // volume was never touched.
     for call in harness.calls.borrow().iter() {
@@ -775,7 +1535,7 @@ fn an_unauthorized_maintenance_operator_is_refused_before_the_fence_and_restores
     drop(session);
     assert!(harness.deleted_pod() && harness.scaled_up());
     assert_eq!(*harness.asked.borrow(), 0);
-    assert!(harness.annotations.borrow().is_empty());
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     let calls: Vec<String> = harness
         .calls
         .borrow()
@@ -828,7 +1588,7 @@ fn after_the_fence_the_old_image_is_never_restarted() -> Result<()> {
     );
     drop(session);
     assert!(harness.deleted_pod());
-    assert!(harness.annotations.borrow().is_empty());
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     assert!(
         !harness.scaled_up(),
         "the old image must not restart after migration"
@@ -863,7 +1623,8 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
         "activate cannot finish before it is marked"
     );
     session.workflow("authority-activate")?;
-    assert!(harness.annotations.borrow().is_empty());
+    session.store_admission()?;
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     session.mark_activated()?;
     ensure!(session.mark_activated().is_err(), "marked once");
     let receipt = session.finish()?;
@@ -902,9 +1663,12 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
         "{scratch:?}"
     );
     assert_eq!(
-        *harness.annotations.borrow(),
-        BTreeMap::from([(ACTIVATED.to_owned(), harness.target.reference.clone())])
+        harness.annotations.borrow().get(ACTIVATED),
+        Some(&harness.target.reference)
     );
+    let intent: ActivationIntent =
+        serde_json::from_str(&harness.annotations.borrow()[activation::ANNOTATION])?;
+    assert_eq!(intent.phase, ActivationPhase::Activated);
     let steps = harness.journal();
     let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
     assert!(
@@ -953,15 +1717,19 @@ fn activate_takes_a_new_image_of_the_running_artifact() -> Result<()> {
     session.migration("apply")?;
     session.workflow("authority-inspect")?;
     session.workflow("authority-activate")?;
+    session.store_admission()?;
     let marked = session.mark_activated()?;
     assert_eq!(marked["activated_image"], harness.target.reference);
     session.finish()?;
     drop(session);
     assert!(harness.deleted_pod() && !harness.scaled_up());
     assert_eq!(
-        *harness.annotations.borrow(),
-        BTreeMap::from([(ACTIVATED.to_owned(), harness.target.reference.clone())])
+        harness.annotations.borrow().get(ACTIVATED),
+        Some(&harness.target.reference)
     );
+    let intent: ActivationIntent =
+        serde_json::from_str(&harness.annotations.borrow()[activation::ANNOTATION])?;
+    assert_eq!(intent.phase, ActivationPhase::Activated);
     Ok(())
 }
 
@@ -987,7 +1755,7 @@ fn a_new_image_of_the_running_artifact_is_marked_only_by_activate() -> Result<()
     assert!(harness.calls.borrow().is_empty(), "refused before kubectl");
     let mut session = harness.open(
         Operation::Activate,
-        |cluster| cluster.fail_on = Some("annotate".into()),
+        |cluster| cluster.fail_on = Some("day2.dev/activated-image".into()),
         true,
     )?;
     prepare(&mut session)?;
@@ -1000,6 +1768,7 @@ fn a_new_image_of_the_running_artifact_is_marked_only_by_activate() -> Result<()
     session.migration("apply")?;
     session.workflow("authority-inspect")?;
     session.workflow("authority-activate")?;
+    session.store_admission()?;
     let error = format!("{:#}", session.mark_activated().unwrap_err());
     let request = harness.directory.path().join("request.json");
     assert!(
@@ -1010,7 +1779,7 @@ fn a_new_image_of_the_running_artifact_is_marked_only_by_activate() -> Result<()
         "{error}"
     );
     drop(session);
-    assert!(harness.annotations.borrow().is_empty() && !harness.scaled_up());
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED) && !harness.scaled_up());
     Ok(())
 }
 
@@ -1030,6 +1799,8 @@ fn sizes(manifest: &str) -> (String, Vec<String>) {
         .find_map(|line| value(line, "sizeLimit:"))
         .unwrap();
     let ephemeral = manifest
+        .rsplit_once("  containers:\n")
+        .map_or(manifest, |(_, main)| main)
         .lines()
         .filter_map(|line| value(line, "ephemeral-storage:"))
         .collect();
@@ -1081,11 +1852,16 @@ fn activate_sizes_the_pod_from_a_large_store() -> Result<()> {
         true,
     )?;
     session.artifacts()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
     ensure!(
-        session.measure().is_err(),
-        "the store is measured once stopped"
+        session.stop().is_err(),
+        "activation cannot stop before preparation"
     );
-    session.stop()?;
     ensure!(session.start_pod().is_err(), "the pod is sized first");
     let sized = session.measure()?;
     ensure!(session.measure().is_err(), "measured once");
@@ -1112,17 +1888,22 @@ fn activate_sizes_the_pod_from_a_large_store() -> Result<()> {
         ("6657Mi".into(), vec!["6721Mi".into(); 2])
     );
     assert!(applied[1].contains("{ name: SQLITE_TMPDIR, value: /srv/day2 }"));
+    session.stop()?;
+    session.verify_preparation()?;
     drop(session);
     let verbs = harness.verbs();
     let at = |verb: &str| verbs.iter().position(|v| v == verb).unwrap();
     let applies: Vec<usize> = (0..verbs.len()).filter(|i| verbs[*i] == "apply").collect();
-    assert!(at("scale --replicas=0") < applies[0]);
+    assert!(applies[1] < at("scale --replicas=0"));
     assert!(applies[0] < at("delete probe") && at("delete probe") < applies[1]);
     assert!(harness.deleted_pod() && harness.scaled_up());
     let steps = harness.journal();
     let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
     assert!(
-        at("stop") < at("measure") && at("measure") < at("scratch") && at("scratch") < at("pod")
+        at("measure") < at("scratch")
+            && at("scratch") < at("pod")
+            && at("pod") < at("stop")
+            && at("stop") < at("preparation-verified")
     );
     Ok(())
 }
@@ -1141,6 +1922,12 @@ fn a_small_store_keeps_the_floor_and_inspect_measures_nothing() -> Result<()> {
     let harness = Harness::new();
     let mut session = harness.open(Operation::Inspect, |_| {}, true)?;
     session.artifacts()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
     session.stop()?;
     let sized = session.measure()?;
     assert_eq!(
@@ -1155,7 +1942,7 @@ fn a_small_store_keeps_the_floor_and_inspect_measures_nothing() -> Result<()> {
 }
 
 #[test]
-fn a_store_that_cannot_be_measured_stops_before_the_pod_and_restores_the_app() -> Result<()> {
+fn activation_measurement_failure_keeps_the_source_serving() -> Result<()> {
     for configure in [
         (|cluster: &mut FakeCluster| cluster.volume = vec![("other_app.sqlite", 8)])
             as fn(&mut FakeCluster),
@@ -1164,7 +1951,12 @@ fn a_store_that_cannot_be_measured_stops_before_the_pod_and_restores_the_app() -
         let harness = Harness::new();
         let mut session = harness.open(Operation::Activate, configure, true)?;
         session.artifacts()?;
-        session.stop()?;
+        if matches!(
+            session.operation,
+            Operation::Activate | Operation::MarkActivated
+        ) {
+            session.begin_preparation()?;
+        }
         let error = format!("{:#}", session.measure().unwrap_err());
         assert!(
             error.starts_with("maintenance_scratch_unmeasured: the stores of example_app on data")
@@ -1177,7 +1969,11 @@ fn a_store_that_cannot_be_measured_stops_before_the_pod_and_restores_the_app() -
         assert_eq!(harness.applied.borrow().len(), 1, "only the probe");
         let verbs = harness.verbs();
         assert!(verbs.iter().filter(|verb| *verb == "delete probe").count() >= 1);
-        assert!(!verbs.iter().any(|verb| verb == "delete") && harness.scaled_up());
+        assert!(
+            !verbs
+                .iter()
+                .any(|verb| verb == "delete" || verb.starts_with("scale"))
+        );
         let steps = harness.journal();
         assert!(!steps.contains(&"scratch".to_owned()) && !steps.contains(&"pod".to_owned()));
         assert_eq!(steps.last().map(String::as_str), Some("aborted"));
@@ -1195,6 +1991,12 @@ fn a_pod_no_node_can_hold_names_its_size_and_the_schedulers_reason() -> Result<(
         true,
     )?;
     session.artifacts()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
     session.stop()?;
     session.measure()?;
     let error = format!("{:#}", session.start_pod().unwrap_err());
@@ -1212,7 +2014,7 @@ fn a_failed_activation_mark_names_the_recovery_command() -> Result<()> {
     let harness = Harness::new();
     let mut session = harness.open(
         Operation::Activate,
-        |cluster| cluster.fail_on = Some("annotate".into()),
+        |cluster| cluster.fail_on = Some("day2.dev/activated-image".into()),
         true,
     )?;
     prepare(&mut session)?;
@@ -1225,6 +2027,7 @@ fn a_failed_activation_mark_names_the_recovery_command() -> Result<()> {
     session.migration("apply")?;
     session.workflow("authority-inspect")?;
     session.workflow("authority-activate")?;
+    session.store_admission()?;
     let error = format!("{:#}", session.mark_activated().unwrap_err());
     let request = harness.directory.path().join("request.json");
     assert!(
@@ -1236,7 +2039,7 @@ fn a_failed_activation_mark_names_the_recovery_command() -> Result<()> {
     );
     drop(session);
     assert!(harness.deleted_pod() && !harness.scaled_up());
-    assert!(harness.annotations.borrow().is_empty());
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     Ok(())
 }
 
@@ -1269,10 +2072,7 @@ fn mark_activated_stamps_the_artifact_the_database_activated() -> Result<()> {
     assert!(harness.deleted_pod() && !harness.scaled_up());
     assert_eq!(*harness.asked.borrow(), 0);
     let value = harness.target.reference.clone();
-    assert_eq!(
-        *harness.annotations.borrow(),
-        BTreeMap::from([(ACTIVATED.to_owned(), value.clone())])
-    );
+    assert_eq!(harness.annotations.borrow().get(ACTIVATED), Some(&value));
     let steps = harness.journal();
     let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
     assert!(
@@ -1295,10 +2095,7 @@ fn mark_activated_stamps_the_artifact_the_database_activated() -> Result<()> {
     session.finish()?;
     drop(session);
     assert!(!rerun.verbs().iter().any(|verb| verb == "annotate"));
-    assert_eq!(
-        *rerun.annotations.borrow(),
-        BTreeMap::from([(ACTIVATED.to_owned(), value)])
-    );
+    assert_eq!(rerun.annotations.borrow().get(ACTIVATED), Some(&value));
     Ok(())
 }
 
@@ -1325,7 +2122,7 @@ fn mark_activated_refuses_another_database_artifact_or_a_changed_workload() -> R
     );
     drop(session);
     assert!(harness.deleted_pod() && !harness.scaled_up());
-    assert!(harness.annotations.borrow().is_empty());
+    assert!(!harness.annotations.borrow().contains_key(ACTIVATED));
     // A running app, another running image or another stamp: refused at open.
     let calls = harness.calls.borrow().len();
     let running = harness
@@ -1620,6 +2417,12 @@ fn rollout_helpers_stay_on_incumbent_node_and_failure_never_scales_it() -> Resul
     let harness = Harness::new();
     let mut session = harness.open(Operation::Rollout, |_| {}, true)?;
     session.artifacts()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
     session.stop()?;
     session.measure()?;
     session.start_pod()?;
@@ -1673,6 +2476,12 @@ fn offline_deployment_maintenance_stops_and_restores_the_selected_controller() -
     fs::write(&path, serde_json::to_vec(&request)?)?;
     let mut session = Session::open("inspect", &path, harness.tools(|_| {}, true))?;
     session.artifacts()?;
+    if matches!(
+        session.operation,
+        Operation::Activate | Operation::MarkActivated
+    ) {
+        session.begin_preparation()?;
+    }
     session.stop()?;
     session.close()?;
     let calls = harness.calls.borrow();

@@ -1,0 +1,21 @@
+  # Pull and execute the exact target runtime without mounting the live claim.
+  # Help only proves the image/binary can start; it is not store admission or
+  # an application readiness observation.
+  initContainers:
+    - name: prepare-runtime-image
+      image: ${DAY2_MAINT_TARGET_IMAGE}
+      imagePullPolicy: IfNotPresent
+      command: ["/usr/local/bin/day2-health", "--help"]
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests: { cpu: 100m, memory: 64Mi, ephemeral-storage: 64Mi }
+        limits: { cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi }

@@ -8,12 +8,32 @@ import Capability
 Maintain :: [].{
 	run! : Str, Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	run! = |operation, request, host!| {
+		if operation == "recover" {
+			_ = Capability.call!("maintenance-recovery-open", Json.to_str({ journal: request }), host!)?
+			_ = Capability.call!("maintenance-recovery-claim", "{}", host!)?
+			_ = Capability.call!("maintenance-recovery-cleanup", "{}", host!)?
+			return Capability.call!("maintenance-recovery-restore", "{}", host!)
+		}
 		_ = Capability.call!("maintenance-open", Json.to_str({ operation, request }), host!)?
 		_ = Capability.call!("maintenance-artifacts", "{}", host!)?
+		if operation == "mark-activated" {
+			_ = Capability.call!("maintenance-begin-preparation", "{}", host!)?
+		}
+		if operation == "activate" {
+			_ = Capability.call!("maintenance-begin-preparation", "{}", host!)?
+			# Pull, schedule, size and populate the helper while the source serves.
+			# These steps inspect file sizes, never open the live SQLite stores.
+			_ = Capability.call!("maintenance-measure", "{}", host!)?
+			_ = Capability.call!("maintenance-pod", "{}", host!)?
+		}
 		_ = Capability.call!("maintenance-stop", "{}", host!)?
-		# The pod's scratch is sized from the store on the stopped volume.
-		_ = Capability.call!("maintenance-measure", "{}", host!)?
-		_ = Capability.call!("maintenance-pod", "{}", host!)?
+		if operation == "activate" {
+			# Preparation sizes are not a checkpoint: bound growth after the stop.
+			_ = Capability.call!("maintenance-verify-preparation", "{}", host!)?
+		} else {
+			_ = Capability.call!("maintenance-measure", "{}", host!)?
+			_ = Capability.call!("maintenance-pod", "{}", host!)?
+		}
 		if operation == "rollout" {
 			return rolling!(host!)
 		}

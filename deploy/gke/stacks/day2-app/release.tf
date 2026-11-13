@@ -20,7 +20,12 @@ data "kubernetes_resources" "workload" {
 
 locals {
   # Null before the first install.
-  live = try(one(data.kubernetes_resources.workload.objects), null)
+  live                      = try(one(data.kubernetes_resources.workload.objects), null)
+  activation_checkpoint_raw = try(local.live.metadata.annotations["day2.dev/activation"], null)
+  activation_checkpoint     = try(jsondecode(local.activation_checkpoint_raw), null)
+  activation_blocked = local.activation_checkpoint_raw != null && !try(
+    local.activation_checkpoint.format == 1 && contains(["restored", "activated"], local.activation_checkpoint.phase),
+  false)
   # The image the live workload runs. An initialized app's day2-serve admits and
   # upgrades its store when it starts, so any other image (a new artifact, or
   # the same artifact over another platform build's runtime) is rolled onto it
@@ -46,10 +51,14 @@ locals {
   # the stack does not declare, so the apply that rolls the workload to the
   # activated image consumes the stamp too. Were it kept, it would equal the
   # live image and be inert.
-  release_annotations = var.release_managed ? merge({ "day2.dev/release-managed" = "true" }, {
-    for key, value in try(local.released.metadata.annotations, {}) : key => value
-    if contains(["day2.dev/release-effect", "day2.dev/release-id", "day2.dev/activated-image", "day2.dev/rollout"], key)
-  }) : {}
+  # Keep the durable checkpoint for managed and direct deployments. An active
+  # checkpoint blocks plans below; a completed one remains recovery evidence.
+  release_annotations = merge(local.activation_checkpoint_raw == null ? {} : {
+    "day2.dev/activation"                                       = local.activation_checkpoint_raw
+    }, var.release_managed ? merge({ "day2.dev/release-managed" = "true" }, {
+      for key, value in try(local.released.metadata.annotations, {}) : key => value
+      if contains(["day2.dev/release-effect", "day2.dev/release-id", "day2.dev/activated-image", "day2.dev/rollout"], key)
+  }) : {})
   release_template_annotations = var.release_managed ? {
     for key, value in local.released.spec.template.metadata.annotations : key => value
     if contains(["day2.dev/artifact", "day2.dev/instance-sha256", "day2.dev/release-id", "day2.dev/credentials-sha256"], key)
@@ -87,6 +96,10 @@ locals {
 resource "terraform_data" "release_admission" {
   depends_on = [terraform_data.native_admission]
   lifecycle {
+    precondition {
+      condition     = !local.activation_blocked
+      error_message = "${var.app_id}: an activation checkpoint is active or unrecognized. Complete or recover the exact saved activation before planning infrastructure for this app; do not remove the checkpoint or restart its old image."
+    }
     # A directly deployed app is rolled by this apply, so it must roll exactly
     # the image `maintain activate` stamped, or wait.
     precondition {

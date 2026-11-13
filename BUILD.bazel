@@ -36,6 +36,7 @@ exports_files([
     "assets/web.css",
     "build-dependencies/clanker-ui.json",
     "deploy/gke/k8s/maintenance-pod.yaml",
+    "deploy/gke/k8s/activation-image-init.yaml",
     "deploy/gke/stacks/day2-app/tests/oauth-instance.json",
     "deploy/gke/stacks/security-shell/tests/oauth-instance.json",
     "fixtures/authority-policies/owned-links.json",

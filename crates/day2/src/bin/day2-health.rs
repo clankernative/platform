@@ -6,8 +6,11 @@ use std::{
     time::Duration,
 };
 
-fn check() -> Result<()> {
-    let arguments: Vec<_> = std::env::args().skip(1).collect();
+fn check(arguments: &[String]) -> Result<()> {
+    if arguments == ["--help"] {
+        println!("usage: day2-health PUBLISHED_PORT [--candidate | --drain-delay]");
+        return Ok(());
+    }
     if arguments.len() == 2 && arguments[1] == "--drain-delay" {
         std::thread::sleep(Duration::from_secs(30));
         return Ok(());
@@ -46,7 +49,20 @@ fn check() -> Result<()> {
 }
 
 fn main() {
-    if check().is_err() {
+    if check(&std::env::args().skip(1).collect::<Vec<_>>()).is_err() {
         std::process::exit(1);
+    }
+}
+
+#[test]
+fn help_does_not_turn_malformed_health_probes_into_success() {
+    assert!(check(&["--help".into()]).is_ok());
+    for arguments in [
+        vec![],
+        vec!["0".into()],
+        vec!["--unknown".into()],
+        vec!["--help".into(), "--candidate".into()],
+    ] {
+        assert!(check(&arguments).is_err());
     }
 }
