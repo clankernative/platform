@@ -12,6 +12,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 | [Check.roc](Check.roc) | Select examples, iterate generated cases, replay, duplicate delivery, invalid inputs, properties and command completion |
 | [LocalDev.roc](LocalDev.roc) | Managed development sessions, seed selection, watch/rebuild, checkpoint/migration, recovery and lifecycle commands |
 | [Backup.roc](Backup.roc) | Take a consistent snapshot → verify the bundle; verify → restore into a new directory |
+| [SecureRestore.roc](SecureRestore.roc) | Planning-only skeleton for protected restore and its refusal campaign; [operator procedure](SECURE-RESTORE.md); execution is unavailable |
 | [UiDependency.roc](UiDependency.roc) | Inspect verified installation → fetch pinned Clanker release → bounded extraction → verify full closure → atomic publication |
 | [Authority.roc](Authority.roc) | Inspect active authority; explicitly activate desired grants or an artifact with an expected stamp and retry identity |
 | [AppSecrets.roc](AppSecrets.roc) | Owner-managed create/rotate/reveal/delete transition table embedded in the runtime; opt-in synthetic provider canaries with guarded cleanup |

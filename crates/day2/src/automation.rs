@@ -105,6 +105,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../../../ops/SecretRetirement.roc"),
     ),
     (
+        "ops/SecureRestore.roc",
+        include_bytes!("../../../ops/SecureRestore.roc"),
+    ),
+    (
         ".github/workflows/ci.yml",
         include_bytes!("../../../.github/workflows/ci.yml"),
     ),

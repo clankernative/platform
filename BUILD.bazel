@@ -72,6 +72,7 @@ exports_files([
     "ops/Release.roc",
     "ops/Runner.roc",
     "ops/SecretRetirement.roc",
+    "ops/SecureRestore.roc",
     "ops/AppSecrets.roc",
     "ops/Simulation.roc",
     "ops/Tooling.roc",
