@@ -3,7 +3,9 @@
 # operations (inspect, backup, authority apply/activate, migrations, import)
 # against the stopped app. Rendered and run by `day2 platform maintain`
 # (ops/Maintain.roc, crates/day2-ops/src/maintenance.rs), which stops the app's
-# workload first for offline maintenance. Compatible rolling releases pin this
+# workload before store operations. Activation prepares the sized helper while
+# the source still serves, then rechecks its size bound after stopping.
+# Compatible rolling releases pin this
 # helper to the incumbent node and keep it outside every Service selector.
 #
 # Placeholders (the renderer refuses an unknown or unfilled one):

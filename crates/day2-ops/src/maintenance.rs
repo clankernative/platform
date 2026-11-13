@@ -4,9 +4,10 @@
 //! recipe can skip:
 //!
 //! - the maintenance pod is removed on every exit;
-//! - its scratch volume and ephemeral-storage request are sized from the
-//!   store measured on the stopped volume, or the session stops, restored,
-//!   before the pod exists;
+//! - activation prepares its helper on the incumbent node while the app serves;
+//!   only filesystem metadata is read, never the live SQLite stores;
+//! - after stopping, activation rechecks the original placement and scratch
+//!   bound before opening a store or taking its final recovery backup;
 //! - before the migration fence, any failure restores the app on its image;
 //! - before the confirmation and the fence, `activate` rehearses the migration
 //!   and activation on a copy of the verified backup and opens the copy with
@@ -30,6 +31,9 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
+mod activation;
+pub use activation::Recovery;
+use activation::{Intent as ActivationIntent, Phase as ActivationPhase};
 use std::{
     collections::BTreeMap,
     fs,
@@ -46,6 +50,8 @@ use std::{
 
 /// The reviewed pod spec. Rust fills a fixed placeholder set and refuses any other.
 const POD_TEMPLATE: &str = include_str!("../../../deploy/gke/k8s/maintenance-pod.yaml");
+const IMAGE_INIT_TEMPLATE: &str =
+    include_str!("../../../deploy/gke/k8s/activation-image-init.yaml");
 const POD_DEADLINE_SECONDS: u32 = 3_600;
 const MAINTENANCE_LABEL: &str = "app.kubernetes.io/name=day2-maintenance";
 const ROOT: &str = "/srv/day2";
@@ -1009,6 +1015,7 @@ struct State {
     artifact_bytes: u64,
     /// The pod's scratch volume in bytes, once the store is measured.
     scratch: Option<u64>,
+    preparation_verified: bool,
     pod: bool,
     pod_backup: bool,
     backup: Option<PathBuf>,
@@ -1022,6 +1029,7 @@ struct State {
     admission: Option<Value>,
     confirmed: bool,
     fenced: bool,
+    fence_entered: bool,
     migrated: bool,
     activated: bool,
     store_admitted: bool,
@@ -1037,6 +1045,7 @@ pub struct Session {
     request: Request,
     /// For the `mark-activated` recovery command an `activate` failure prints.
     request_file: PathBuf,
+    request_json: String,
     request_digest: String,
     operation: Operation,
     stamp: String,
@@ -1050,6 +1059,9 @@ pub struct Session {
     controller: Value,
     online_node: Option<String>,
     pvc_uid: Option<String>,
+    /// The exact serving pod whose node hosts activation's preparation.
+    incumbent: Option<Value>,
+    activation: Option<ActivationIntent>,
     state: State,
 }
 
@@ -1130,6 +1142,7 @@ impl Session {
         if operation == Operation::MarkActivated {
             unmarked(&request, replicas, marked.as_deref())?;
         }
+        let mut incumbent = None;
         let online_node = if operation == Operation::Rollout {
             ensure!(
                 replicas == 1
@@ -1238,10 +1251,102 @@ impl Session {
                 "one_incumbent_node_required"
             );
             Some(nodes[0].clone())
+        } else if operation == Operation::Activate && replicas > 0 {
+            ensure!(replicas == 1, "activation_preparation_requires_one_replica");
+            let pods: Value = serde_json::from_str(&kubectl(&[
+                "get",
+                "pods",
+                "-l",
+                &format!("app.kubernetes.io/name={}", request.statefulset),
+                "-o",
+                "json",
+            ])?)?;
+            let mut owners = vec![statefulset["metadata"]["uid"].clone()];
+            if request.kind(operation) == WorkloadKind::Deployment {
+                let replicasets: Value =
+                    serde_json::from_str(&kubectl(&["get", "replicasets", "-o", "json"])?)?;
+                owners = replicasets["items"]
+                    .as_array()
+                    .context("replicasets")?
+                    .iter()
+                    .filter(|replica| {
+                        replica["metadata"]["ownerReferences"]
+                            .as_array()
+                            .is_some_and(|refs| {
+                                refs.iter().any(|owner| {
+                                    owner["controller"] == true
+                                        && owner["uid"] == statefulset["metadata"]["uid"]
+                                })
+                            })
+                    })
+                    .map(|replica| replica["metadata"]["uid"].clone())
+                    .collect();
+            }
+            let live: Vec<_> = pods["items"]
+                .as_array()
+                .context("pods")?
+                .iter()
+                .filter(|pod| {
+                    !matches!(
+                        pod["status"]["phase"].as_str(),
+                        Some("Succeeded" | "Failed")
+                    )
+                })
+                .collect();
+            ensure!(
+                live.len() == 1,
+                "activation_preparation_requires_one_incumbent"
+            );
+            let pod = live[0];
+            ensure!(
+                pod["metadata"]["deletionTimestamp"].is_null()
+                    && pod["metadata"]["uid"]
+                        .as_str()
+                        .is_some_and(|uid| !uid.is_empty())
+                    && pod["metadata"]["ownerReferences"]
+                        .as_array()
+                        .is_some_and(|refs| {
+                            refs.iter().any(|owner| {
+                                owner["controller"] == true
+                                    && !owner["uid"].is_null()
+                                    && owners.contains(&owner["uid"])
+                            })
+                        })
+                    && pod["spec"]["volumes"].as_array().is_some_and(|volumes| {
+                        volumes.iter().any(|volume| {
+                            volume["name"] == "state"
+                                && volume["persistentVolumeClaim"]["claimName"] == request.pvc
+                        })
+                    })
+                    && pod["spec"]["containers"]
+                        .as_array()
+                        .is_some_and(|containers| {
+                            containers.iter().any(|container| {
+                                container["name"] == "day2"
+                                    && container["image"] == request.app_image
+                            })
+                        })
+                    && pod["status"]["phase"] == "Running"
+                    && pod["status"]["conditions"]
+                        .as_array()
+                        .is_some_and(|conditions| {
+                            conditions.iter().any(|condition| {
+                                condition["type"] == "Ready" && condition["status"] == "True"
+                            })
+                        }),
+                "activation_incumbent_owner_claim_image_or_readiness_changed"
+            );
+            let node = pod["spec"]["nodeName"].as_str().context("incumbent node")?;
+            ensure!(dns_label(node), "invalid_incumbent_node");
+            incumbent = Some(pod.clone());
+            Some(node.to_owned())
         } else {
             None
         };
-        let pvc_uid = if operation == Operation::Rollout {
+        let pvc_uid = if matches!(
+            operation,
+            Operation::Rollout | Operation::Activate | Operation::MarkActivated
+        ) {
             let pvc: Value =
                 serde_json::from_str(&kubectl(&["get", "pvc", &request.pvc, "-o", "json"])?)?;
             ensure!(
@@ -1258,6 +1363,56 @@ impl Session {
         } else {
             None
         };
+        let activation = ActivationIntent::read(&statefulset)?;
+        let recovering_fence = activation.as_ref().is_some_and(|intent| intent.active());
+        if recovering_fence {
+            let intent = activation.as_ref().context("activation checkpoint")?;
+            ensure!(
+                matches!(operation, Operation::Activate | Operation::MarkActivated)
+                    && intent.phase == ActivationPhase::Fenced
+                    && intent.request_digest == request_digest
+                    && target_instance.as_ref().is_some_and(
+                        |text| day2::digest(text.as_bytes()) == intent.target_instance_digest
+                    )
+                    && intent.controller_uid == statefulset["metadata"]["uid"]
+                    && intent.template_digest == activation::template_digest(&statefulset)?
+                    && Some(intent.pvc_uid.as_str()) == pvc_uid.as_deref()
+                    && replicas == 0,
+                "activation_recovery_required: recover the saved activation journal before starting another operation"
+            );
+        }
+        if operation == Operation::Activate {
+            let services: Value =
+                serde_json::from_str(&kubectl(&["get", "services", "-o", "json"])?)?;
+            let labels = serde_json::Map::from_iter([
+                (
+                    "app.kubernetes.io/name".to_owned(),
+                    json!("day2-maintenance"),
+                ),
+                ("app.kubernetes.io/part-of".to_owned(), json!("day2")),
+                (
+                    request.pod_label.key.clone(),
+                    json!(request.pod_label.value),
+                ),
+            ]);
+            ensure!(
+                services["items"]
+                    .as_array()
+                    .context("services")?
+                    .iter()
+                    .all(|service| {
+                        !service["spec"]["selector"]
+                            .as_object()
+                            .is_some_and(|selector| {
+                                !selector.is_empty()
+                                    && selector
+                                        .iter()
+                                        .all(|(key, value)| labels.get(key) == Some(value))
+                            })
+                    }),
+                "maintenance_pod_must_not_match_a_service"
+            );
+        }
         if operation == Operation::Rollout {
             let expected = request
                 .placement
@@ -1296,7 +1451,15 @@ impl Session {
                 others.trim()
             );
         }
-        let stamp = crate::offsite::utc_stamp(SystemTime::now())?;
+        let work = tempfile::Builder::new()
+            .prefix("day2-maintenance-")
+            .tempdir()?;
+        let nonce = day2::digest(work.path().as_os_str().as_encoded_bytes());
+        let stamp = format!(
+            "{}-{}",
+            &nonce[7..23],
+            crate::offsite::utc_stamp(SystemTime::now())?
+        );
         let pod = format!("day2-maintenance-{}", stamp.to_ascii_lowercase());
         let backup_root = match &request.backup_dir {
             Some(directory) => directory.clone(),
@@ -1308,12 +1471,10 @@ impl Session {
         private_directory(&backup_root)?;
         let journal = backup_root.join(format!("{stamp}.session.json"));
         ensure!(!journal.exists(), "session journal already exists");
-        let work = tempfile::Builder::new()
-            .prefix("day2-maintenance-")
-            .tempdir()?;
         let mut session = Self {
             tools,
             request_file: request_file.to_path_buf(),
+            request_json: String::from_utf8(request_bytes)?,
             request_digest,
             operation,
             stamp,
@@ -1327,7 +1488,12 @@ impl Session {
             controller: statefulset,
             online_node,
             pvc_uid,
-            state: State::default(),
+            incumbent,
+            activation,
+            state: State {
+                fenced: recovering_fence,
+                ..State::default()
+            },
             request,
         };
         session.record(
@@ -1364,13 +1530,23 @@ impl Session {
                 .mode(0o600)
                 .open(&temporary)?;
             file.write_all(&serde_json::to_vec_pretty(&json!({
-                "format": 1,
+                "format": 2,
                 "session": self.stamp,
+                "request_digest": self.request_digest,
+                "request": self.request_json,
+                "target_instance": self.target_instance,
+                "source_controller_uid": self.controller["metadata"]["uid"],
+                "source_template": self.controller["spec"]["template"],
+                "source_pvc_uid": self.pvc_uid,
+                "source_pod": self.incumbent,
+                "original_replicas": self.activation.as_ref().filter(|_| self.state.fenced)
+                    .map_or(self.replicas, |intent| intent.replicas),
                 "events": self.events,
             }))?)?;
             file.sync_all()?;
         }
         fs::rename(&temporary, &self.journal)?;
+        fs::File::open(self.journal.parent().context("journal parent")?)?.sync_all()?;
         Ok(())
     }
 
@@ -1488,6 +1664,15 @@ impl Session {
             self.record("incumbent-kept-serving", json!({"node":self.online_node}))?;
             return Ok(json!({"incumbent_running":true}));
         }
+        let prepared_controller = if self.operation == Operation::Activate {
+            ensure!(
+                self.state.pod && self.state.scratch.is_some(),
+                "activation_helper_must_be_prepared_before_stop"
+            );
+            Some(self.prepared_controller()?)
+        } else {
+            None
+        };
         eprintln!(
             "== stopping {} (was {} replica(s))",
             self.request.statefulset, self.replicas
@@ -1496,16 +1681,47 @@ impl Session {
         self.state.stopped = true;
         self.record("stop", json!({"replicas": self.replicas}))?;
         let statefulset = self.request.statefulset.clone();
-        self.kubectl(
-            &[
-                "scale",
-                self.request.kind(self.operation).resource(),
-                &statefulset,
-                "--replicas=0",
-            ],
-            None,
-            Duration::from_secs(60),
-        )?;
+        if let Some(controller) = prepared_controller {
+            // The stop cannot silently adopt a replacement or a concurrent
+            // template edit between revalidation and scaling.
+            let previous = self
+                .activation
+                .clone()
+                .context("activation preparation intent")?;
+            let mut stopped = previous.clone();
+            if !self.state.fenced {
+                stopped.phase = ActivationPhase::Stopped;
+            }
+            self.activation = Some(stopped.clone());
+            activation::replace(
+                self.tools.cluster.as_mut(),
+                &self.request,
+                &controller,
+                Some(&previous),
+                &stopped,
+                Some(0),
+            )?;
+        } else if self.operation == Operation::MarkActivated {
+            let current = self.activation_controller()?;
+            self.require_activation_owner(&current)?;
+            ensure!(
+                current["metadata"]["uid"] == self.controller["metadata"]["uid"]
+                    && current["spec"]["template"] == self.controller["spec"]["template"]
+                    && current["spec"]["replicas"] == 0,
+                "mark_activated_source_changed"
+            );
+        } else {
+            self.kubectl(
+                &[
+                    "scale",
+                    self.request.kind(self.operation).resource(),
+                    &statefulset,
+                    "--replicas=0",
+                ],
+                None,
+                Duration::from_secs(60),
+            )?;
+        }
         if self.request.kind(self.operation) == WorkloadKind::Deployment {
             self.kubectl(
                 &[
@@ -1543,6 +1759,224 @@ impl Session {
         Ok(json!({"stopped": statefulset}))
     }
 
+    /// Recheck every source binding after the potentially slow helper pull and
+    /// copy, while the source is still serving. Never stop a replacement.
+    fn prepared_controller(&mut self) -> Result<Value> {
+        let resource = self.request.kind(self.operation).resource();
+        let name = self.request.statefulset.clone();
+        let controller: Value = serde_json::from_str(&self.kubectl(
+            &["get", resource, &name, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        ensure!(
+            controller["metadata"]["uid"].is_string()
+                && controller["metadata"]["uid"] == self.controller["metadata"]["uid"]
+                && controller["spec"]["template"] == self.controller["spec"]["template"]
+                && controller["spec"]["replicas"] == self.replicas,
+            "activation_source_controller_changed"
+        );
+        self.require_activation_owner(&controller)?;
+        self.require_helper_identity()?;
+        self.source_storage_bindings()?;
+        if let Some(incumbent) = self.incumbent.clone() {
+            let name = incumbent["metadata"]["name"]
+                .as_str()
+                .context("incumbent name")?;
+            let pod: Value = serde_json::from_str(&self.kubectl(
+                &["get", "pod", name, "-o", "json"],
+                None,
+                Duration::from_secs(60),
+            )?)?;
+            ensure!(
+                pod["metadata"]["uid"] == incumbent["metadata"]["uid"]
+                    && pod["metadata"]["deletionTimestamp"].is_null()
+                    && pod["spec"] == incumbent["spec"]
+                    && pod["status"]["conditions"]
+                        .as_array()
+                        .is_some_and(|conditions| {
+                            conditions.iter().any(|condition| {
+                                condition["type"] == "Ready" && condition["status"] == "True"
+                            })
+                        }),
+                "activation_source_pod_changed"
+            );
+        }
+        Ok(controller)
+    }
+
+    fn source_storage_bindings(&mut self) -> Result<()> {
+        let pvc = self.request.pvc.clone();
+        let claim: Value = serde_json::from_str(&self.kubectl(
+            &["get", "pvc", &pvc, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        ensure!(
+            claim["metadata"]["uid"].as_str() == self.pvc_uid.as_deref()
+                && claim["status"]["phase"] == "Bound",
+            "activation_source_claim_changed"
+        );
+        let configmap = self.request.configmap.clone();
+        let config: Value = serde_json::from_str(&self.kubectl(
+            &["get", "configmap", &configmap, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        ensure!(
+            config["data"]["instance.json"].as_str()
+                == Some(
+                    fs::read_to_string(self.work.path().join("current-instance.json"))?.as_str()
+                ),
+            "activation_source_instance_changed"
+        );
+        Ok(())
+    }
+
+    fn require_activation_owner(&self, controller: &Value) -> Result<()> {
+        let intent = self
+            .activation
+            .as_ref()
+            .context("activation preparation intent required")?;
+        ensure!(
+            intent.owner == self.stamp
+                && controller["metadata"]["uid"] == intent.controller_uid
+                && activation::template_digest(controller)? == intent.template_digest
+                && ActivationIntent::read(controller)?.as_ref() == Some(intent),
+            "activation_checkpoint_changed"
+        );
+        Ok(())
+    }
+
+    fn activation_controller(&mut self) -> Result<Value> {
+        let resource = self.request.kind(self.operation).resource();
+        let name = self.request.statefulset.clone();
+        Ok(serde_json::from_str(&self.kubectl(
+            &["get", resource, &name, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?)
+    }
+
+    fn check_activation_owner(&mut self) -> Result<()> {
+        if matches!(
+            self.operation,
+            Operation::Activate | Operation::MarkActivated
+        ) {
+            let live = self.activation_controller()?;
+            self.require_activation_owner(&live)?;
+            if self.state.pod {
+                self.require_helper_identity()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn require_helper_identity(&mut self) -> Result<()> {
+        let expected = self
+            .activation
+            .as_ref()
+            .and_then(|intent| intent.pod_uid.clone())
+            .context("activation_helper_identity_required")?;
+        let name = self.pod.clone();
+        let pod: Value = serde_json::from_str(&self.kubectl(
+            &["get", "pod", &name, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        ensure!(
+            pod["metadata"]["uid"] == expected
+                && pod["metadata"]["deletionTimestamp"].is_null()
+                && pod["status"]["conditions"]
+                    .as_array()
+                    .is_some_and(|conditions| {
+                        conditions.iter().any(|condition| {
+                            condition["type"] == "Ready" && condition["status"] == "True"
+                        })
+                    })
+                && pod["metadata"]["annotations"]["day2.dev/rollout-request"]
+                    == self.request_digest
+                && pod["spec"]["containers"]
+                    .as_array()
+                    .is_some_and(|containers| {
+                        containers.len() == 1
+                            && containers[0]["image"] == self.request.tooling_image
+                    }),
+            "activation_helper_changed"
+        );
+        Ok(())
+    }
+
+    pub fn begin_preparation(&mut self) -> Result<Value> {
+        ensure!(
+            matches!(
+                self.operation,
+                Operation::Activate | Operation::MarkActivated
+            ) && self.state.artifacts
+                && !self.state.pod
+                && !self.state.stopped,
+            "activation_artifacts_required_before_preparation"
+        );
+        let live = self.activation_controller()?;
+        if self.operation == Operation::MarkActivated {
+            ensure!(self.replicas == 0, "mark_activated_must_remain_stopped");
+            self.state.fenced = true;
+        }
+        ensure!(
+            ActivationIntent::read(&live)? == self.activation
+                && live["spec"]["replicas"] == self.replicas
+                && self
+                    .activation
+                    .as_ref()
+                    .is_none_or(|intent| !intent.active()
+                        || (self.state.fenced && intent.phase == ActivationPhase::Fenced)),
+            "another_activation_is_running"
+        );
+        self.source_storage_bindings()?;
+        let instance = fs::read(self.work.path().join("current-instance.json"))?;
+        let intent = ActivationIntent {
+            format: 1,
+            owner: self.stamp.clone(),
+            request_digest: self.request_digest.clone(),
+            target_instance_digest: day2::digest(
+                self.target_instance
+                    .as_ref()
+                    .context("target instance")?
+                    .as_bytes(),
+            ),
+            controller_uid: self.controller["metadata"]["uid"]
+                .as_str()
+                .context("controller UID")?
+                .into(),
+            template_digest: activation::template_digest(&self.controller)?,
+            source_instance_digest: day2::digest(&instance),
+            pvc_uid: self.pvc_uid.clone().context("PVC UID")?,
+            replicas: self
+                .activation
+                .as_ref()
+                .filter(|_| self.state.fenced)
+                .map_or(self.replicas, |intent| intent.replicas),
+            pod: self.pod.clone(),
+            pod_uid: None,
+            phase: if self.state.fenced {
+                ActivationPhase::Fenced
+            } else {
+                ActivationPhase::Prepared
+            },
+        };
+        self.record("preparation-intent", serde_json::to_value(&intent)?)?;
+        activation::replace(
+            self.tools.cluster.as_mut(),
+            &self.request,
+            &live,
+            self.activation.as_ref(),
+            &intent,
+            None,
+        )?;
+        self.activation = Some(intent);
+        Ok(json!({"prepared_intent":true}))
+    }
+
     fn render_pod(&self, pod: &str, scratch: u64) -> Result<String> {
         let deadline = POD_DEADLINE_SECONDS.to_string();
         let (ephemeral, scratch) = (mebibytes(scratch + CONTAINER_EPHEMERAL), mebibytes(scratch));
@@ -1567,16 +2001,47 @@ impl Session {
             ("DAY2_MAINT_EPHEMERAL_STORAGE", ephemeral.as_str()),
         ];
         let rendered = render_template(POD_TEMPLATE, &values)?;
-        if let Some(node) = &self.online_node {
-            ensure!(label_value(node), "invalid_incumbent_node");
-            let rendered = rendered.replacen(
+        let rendered = if matches!(
+            self.operation,
+            Operation::Activate | Operation::MarkActivated
+        ) {
+            let target = self
+                .request
+                .target
+                .as_ref()
+                .context("target runtime image")?;
+            let init = render_template(
+                IMAGE_INIT_TEMPLATE,
+                &[("DAY2_MAINT_TARGET_IMAGE", target.app_image.as_str())],
+            )?;
+            rendered.replacen("  containers:\n", &format!("{init}  containers:\n"), 1)
+        } else {
+            rendered
+        };
+        let rendered = if self.online_node.is_some()
+            || matches!(
+                self.operation,
+                Operation::Activate | Operation::MarkActivated
+            ) {
+            rendered.replacen(
                 "\nmetadata:\n",
                 &format!(
                     "\nmetadata:\n  annotations:\n    day2.dev/rollout-request: {}\n",
                     self.request_digest
                 ),
                 1,
-            );
+            )
+        } else {
+            rendered
+        };
+        if let Some(node) = &self.online_node {
+            ensure!(label_value(node), "invalid_incumbent_node");
+            if self.operation == Operation::Activate {
+                // Use the scheduler, with an exact node-name field constraint:
+                // nodeName would skip its CPU/memory/storage capacity checks.
+                return Ok(rendered.replacen("\nspec:\n", &format!(
+                    "\nspec:\n  affinity:\n    nodeAffinity:\n      requiredDuringSchedulingIgnoredDuringExecution:\n        nodeSelectorTerms:\n          - matchFields:\n              - key: metadata.name\n                operator: In\n                values: [{node}]\n"), 1));
+            }
             return Ok(rendered.replacen(
                 "\nspec:\n",
                 &format!("\nspec:\n  nodeName: {node}\n"),
@@ -1639,23 +2104,28 @@ impl Session {
         Ok(())
     }
 
-    /// Size the pod's scratch volume from the store it will copy. Operations
-    /// that copy none get the floor; the others measure the app's database,
-    /// provider stores and their WALs on the stopped volume, from a
-    /// short-lived pod of the same template (the volume is ReadWriteOnce and
-    /// nothing else may open it), removed before the maintenance pod starts.
+    /// File-size metadata only: activation measures while the incumbent serves,
+    /// on that same node. No SQLite connection or serving lease is opened.
     pub fn measure(&mut self) -> Result<Value> {
         ensure!(
-            self.state.stopped && !self.state.pod && self.state.scratch.is_none(),
-            "the store is measured after the stop, once, before the pod"
+            self.state.artifacts
+                && !self.state.pod
+                && self.state.scratch.is_none()
+                && (if self.operation == Operation::Activate {
+                    !self.state.stopped
+                } else {
+                    self.state.stopped
+                }),
+            "activation measures before the stop; other operations after it, once, before the pod"
         );
         let copies = self.operation.store_copies();
+        self.check_activation_owner()?;
         let stores = if copies == 0 {
             BTreeMap::new()
         } else {
             self.measure_stores().map_err(|error| {
                 anyhow::anyhow!(
-                    "maintenance_scratch_unmeasured: the stores of {} on {} could not be measured, so the maintenance pod cannot be sized; nothing was migrated and {} is restored on its image: {error:#}",
+                    "maintenance_scratch_unmeasured: the stores of {} on {} could not be measured, so the maintenance pod cannot be sized; no migration was attempted for {}: {error:#}",
                     self.request.app,
                     self.request.pvc,
                     self.request.statefulset
@@ -1697,10 +2167,21 @@ impl Session {
         self.state.probe = true;
         self.record("measure", json!({"pod": probe}))?;
         self.run_pod(&probe, &manifest, PROBE_SCRATCH)?;
+        let stores = self.read_store_sizes(&probe)?;
+        self.kubectl(
+            &["delete", "pod", &probe, "--ignore-not-found", "--wait=true"],
+            None,
+            Duration::from_secs(300),
+        )?;
+        self.state.probe = false;
+        Ok(stores)
+    }
+
+    fn read_store_sizes(&mut self, pod: &str) -> Result<BTreeMap<String, u64>> {
         let listing = self.kubectl(
             &[
                 "exec",
-                &probe,
+                pod,
                 "--",
                 "find",
                 STATE,
@@ -1718,20 +2199,53 @@ impl Session {
             None,
             Duration::from_secs(300),
         )?;
-        self.kubectl(
-            &["delete", "pod", &probe, "--ignore-not-found", "--wait=true"],
-            None,
-            Duration::from_secs(300),
-        )?;
-        self.state.probe = false;
         store_sizes(&listing, &self.request.app)
+    }
+
+    /// The live measurement reserves space; it is never the final recovery
+    /// checkpoint. Refuse growth beyond that reservation before opening a DB.
+    pub fn verify_preparation(&mut self) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Activate
+                && self.state.stopped
+                && self.state.pod
+                && !self.state.preparation_verified,
+            "stopped_prepared_activation_required"
+        );
+        self.check_activation_owner()?;
+        let pod = self.pod.clone();
+        let stores = self.read_store_sizes(&pod)?;
+        let needed = scratch_bytes(
+            self.operation.store_copies(),
+            stores.values().sum(),
+            self.state.artifact_bytes,
+        );
+        let reserved = self.state.scratch.context("prepared scratch")?;
+        ensure!(
+            needed <= reserved,
+            "activation_preparation_outgrown: need {}, reserved {}; source will be restored before migration",
+            mebibytes(needed),
+            mebibytes(reserved)
+        );
+        self.record(
+            "preparation-verified",
+            json!({"stores":stores,"reserved":reserved,"required":needed}),
+        )?;
+        self.state.preparation_verified = true;
+        Ok(json!({"prepared":true}))
     }
 
     pub fn start_pod(&mut self) -> Result<Value> {
         ensure!(
-            self.state.stopped && !self.state.pod,
-            "the pod follows the stop, once"
+            !self.state.pod
+                && (if self.operation == Operation::Activate {
+                    !self.state.stopped
+                } else {
+                    self.state.stopped
+                }),
+            "activation prepares its pod before the stop; other operations after it, once"
         );
+        self.check_activation_owner()?;
         let scratch = self
             .state
             .scratch
@@ -1750,6 +2264,38 @@ impl Session {
             json!({"pod": self.pod, "tooling_image": self.request.tooling_image, "scratch": mebibytes(scratch)}),
         )?;
         self.run_pod(&pod, &manifest, scratch)?;
+        if matches!(
+            self.operation,
+            Operation::Activate | Operation::MarkActivated
+        ) {
+            let current: Value = serde_json::from_str(&self.kubectl(
+                &["get", "pod", &pod, "-o", "json"],
+                None,
+                Duration::from_secs(60),
+            )?)?;
+            let uid = current["metadata"]["uid"]
+                .as_str()
+                .context("activation helper UID")?;
+            ensure!(
+                !uid.is_empty() && uid.len() <= 128,
+                "invalid_activation_helper_uid"
+            );
+            let previous = self.activation.clone().context("activation checkpoint")?;
+            let mut bound = previous.clone();
+            bound.pod_uid = Some(uid.into());
+            let live = self.activation_controller()?;
+            self.require_activation_owner(&live)?;
+            activation::replace(
+                self.tools.cluster.as_mut(),
+                &self.request,
+                &live,
+                Some(&previous),
+                &bound,
+                None,
+            )?;
+            self.activation = Some(bound);
+            self.require_helper_identity()?;
+        }
         self.exec(
             &["mkdir", "-p", &format!("{ROOT}/artifacts")],
             Duration::from_secs(60),
@@ -1858,9 +2404,13 @@ impl Session {
 
     pub fn workflow(&mut self, name: &str) -> Result<Value> {
         ensure!(
-            self.state.pod && !self.state.finished,
-            "workflows run in the maintenance pod"
+            self.state.pod
+                && self.state.stopped
+                && !self.state.finished
+                && (self.operation != Operation::Activate || self.state.preparation_verified),
+            "workflows require the stop and, for activation, verified preparation"
         );
+        self.check_activation_owner()?;
         let app = self.request.app.clone();
         let operator = self.request.operator.clone();
         let request_id = self.request.request_id.clone().unwrap_or_default();
@@ -2048,9 +2598,13 @@ impl Session {
 
     pub fn migration(&mut self, step: &str) -> Result<Value> {
         ensure!(
-            matches!(self.operation, Operation::Activate | Operation::Rollout) && self.state.pod,
-            "migrations belong to activate"
+            matches!(self.operation, Operation::Activate | Operation::Rollout)
+                && self.state.pod
+                && self.state.stopped
+                && (self.operation != Operation::Activate || self.state.preparation_verified),
+            "migrations require stopped or rolling admission and verified activation preparation"
         );
+        self.check_activation_owner()?;
         let target = self.request.target.clone().context("target")?;
         let artifact = format!("{ROOT}/artifacts/{}", target.artifact_id);
         let app = self.request.app.clone();
@@ -2097,7 +2651,7 @@ impl Session {
             }
             "apply" => {
                 ensure!(
-                    self.state.fenced && !self.state.migrated,
+                    self.state.fenced && self.state.fence_entered && !self.state.migrated,
                     "migration apply needs the fence, once"
                 );
                 let receipt = self.exec(
@@ -3171,6 +3725,7 @@ impl Session {
     }
 
     pub fn store_admission(&mut self) -> Result<Value> {
+        self.check_activation_owner()?;
         ensure!(
             self.operation == Operation::Activate && self.state.activated && self.state.fenced,
             "activated_offline_store_required"
@@ -3242,12 +3797,29 @@ impl Session {
                 && self.state.plan.is_some()
                 && self.state.admission.is_some()
                 && self.state.confirmed
-                && !self.state.fenced,
+                && !self.state.fence_entered,
             "the fence needs this session's verified backup, migration plan, target store admission and confirmation"
         );
         // Recorded before the flag: a journal that stops here means "maybe migrated".
         self.record("fence", json!({"backup": self.state.backup}))?;
+        self.state.fence_entered = true;
+        let live = self.activation_controller()?;
+        self.require_activation_owner(&live)?;
+        let previous = self.activation.clone().context("activation checkpoint")?;
+        let mut fenced = previous.clone();
+        fenced.phase = ActivationPhase::Fenced;
+        // Fail closed even if the server applies the fence but its response is
+        // lost: Drop must never infer permission to start the old runtime.
         self.state.fenced = true;
+        self.activation = Some(fenced.clone());
+        activation::replace(
+            self.tools.cluster.as_mut(),
+            &self.request,
+            &live,
+            Some(&previous),
+            &fenced,
+            None,
+        )?;
         Ok(json!({"fenced": true}))
     }
 
@@ -3257,6 +3829,7 @@ impl Session {
     /// `mark-activated` the database's active artifact (read by
     /// `authority-inspect`) must already be the target's new artifact.
     pub fn mark_activated(&mut self) -> Result<Value> {
+        self.check_activation_owner()?;
         let target = self.request.target.clone().context("target")?;
         match self.operation {
             Operation::Activate => ensure!(
@@ -3283,9 +3856,7 @@ impl Session {
             _ => bail!("only activate and mark-activated mark the StatefulSet"),
         }
         ensure!(
-            self.operation != Operation::Activate
-                || self.request.kind(self.operation) == WorkloadKind::Statefulset
-                || self.state.store_admitted,
+            self.operation != Operation::Activate || self.state.store_admitted,
             "live_store_admission_required"
         );
         let marked = self.stamp(&target.app_image);
@@ -3356,19 +3927,19 @@ impl Session {
             );
         }
         let already = existing == Some(value);
-        if !already {
-            self.kubectl(
-                &[
-                    "annotate",
-                    "--overwrite",
-                    self.request.kind(self.operation).resource(),
-                    &statefulset,
-                    &format!("{ACTIVATED}={value}"),
-                ],
-                None,
-                Duration::from_secs(60),
-            )?;
-        }
+        self.require_activation_owner(&live)?;
+        let previous = self.activation.clone().context("activation checkpoint")?;
+        let mut activated = previous.clone();
+        activated.phase = ActivationPhase::Activated;
+        activation::activate(
+            self.tools.cluster.as_mut(),
+            &self.request,
+            &live,
+            &previous,
+            &activated,
+            value,
+        )?;
+        self.activation = Some(activated);
         let actual: Value = serde_json::from_str(&self.kubectl(
             &[
                 "get",
@@ -3442,6 +4013,56 @@ impl Session {
         Ok(receipt)
     }
 
+    fn restore_prepared_source(&mut self) -> Result<()> {
+        self.source_storage_bindings()?;
+        let current = self.activation_controller()?;
+        let previous =
+            ActivationIntent::read(&current)?.context("activation checkpoint required")?;
+        let mut expected = previous.clone();
+        expected.phase = self
+            .activation
+            .as_ref()
+            .context("owned activation checkpoint")?
+            .phase
+            .clone();
+        ensure!(
+            previous.owner == self.stamp
+                && matches!(
+                    previous.phase,
+                    ActivationPhase::Prepared | ActivationPhase::Stopped
+                )
+                && Some(&expected) == self.activation.as_ref(),
+            "activation_restore_checkpoint_changed"
+        );
+        let replicas = current["spec"]["replicas"]
+            .as_u64()
+            .context("current replicas")?;
+        ensure!(
+            replicas == 0 || replicas == self.replicas,
+            "activation_restore_replica_count_changed"
+        );
+        let mut restored = previous.clone();
+        restored.phase = ActivationPhase::Restored;
+        self.record(
+            "restore",
+            json!({"controller_uid":restored.controller_uid,"replicas":self.replicas}),
+        )?;
+        activation::replace(
+            self.tools.cluster.as_mut(),
+            &self.request,
+            &current,
+            Some(&previous),
+            &restored,
+            if replicas == self.replicas {
+                None
+            } else {
+                Some(self.replicas)
+            },
+        )?;
+        self.activation = Some(restored);
+        Ok(())
+    }
+
     /// Remove the pod; restore replicas unless the fence was passed.
     fn close(&mut self) -> Result<bool> {
         self.tools.cluster.unstoppable();
@@ -3463,18 +4084,54 @@ impl Session {
             pods.push(self.pod.clone());
         }
         for pod in pods {
-            if let Err(error) = self.kubectl(
-                &["delete", "pod", &pod, "--ignore-not-found", "--wait=true"],
-                None,
-                Duration::from_secs(300),
+            let removed = if matches!(
+                self.operation,
+                Operation::Activate | Operation::MarkActivated
             ) {
+                let uid = self
+                    .activation
+                    .as_ref()
+                    .filter(|intent| intent.pod == pod)
+                    .and_then(|intent| intent.pod_uid.as_deref());
+                activation::remove_helper(
+                    self.tools.cluster.as_mut(),
+                    &self.request,
+                    &pod,
+                    &self.request_digest,
+                    uid,
+                )
+            } else {
+                self.kubectl(
+                    &["delete", "pod", &pod, "--ignore-not-found", "--wait=true"],
+                    None,
+                    Duration::from_secs(300),
+                )
+                .map(|_| ())
+            };
+            if let Err(error) = removed {
                 failures.push(format!("deleting {pod}: {error:#}"));
             }
         }
         let restore = self.operation != Operation::Rollout
             && self.state.stopped
             && !self.state.fenced
-            && self.replicas > 0;
+            && self.replicas > 0
+            && failures.is_empty();
+        if !restore
+            && failures.is_empty()
+            && self.operation == Operation::Activate
+            && !self.state.fenced
+            && self.activation.as_ref().is_some_and(|intent| {
+                intent.owner == self.stamp
+                    && matches!(
+                        intent.phase,
+                        ActivationPhase::Prepared | ActivationPhase::Stopped
+                    )
+            })
+            && let Err(error) = self.restore_prepared_source()
+        {
+            failures.push(format!("closing preparation: {error:#}"));
+        }
         if restore {
             eprintln!(
                 "== restoring {} to {} replica(s)",
@@ -3482,16 +4139,22 @@ impl Session {
             );
             let statefulset = self.request.statefulset.clone();
             let replicas = format!("--replicas={}", self.replicas);
-            match self.kubectl(
-                &[
-                    "scale",
-                    self.request.kind(self.operation).resource(),
-                    &statefulset,
-                    &replicas,
-                ],
-                None,
-                Duration::from_secs(60),
-            ) {
+            let restored = if self.operation == Operation::Activate {
+                self.restore_prepared_source()
+            } else {
+                self.kubectl(
+                    &[
+                        "scale",
+                        self.request.kind(self.operation).resource(),
+                        &statefulset,
+                        &replicas,
+                    ],
+                    None,
+                    Duration::from_secs(60),
+                )
+                .map(|_| ())
+            };
+            match restored {
                 Ok(_) => {
                     if let Err(error) = self.kubectl(
                         &[

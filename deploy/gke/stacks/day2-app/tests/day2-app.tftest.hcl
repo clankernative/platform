@@ -477,6 +477,7 @@ run "infrastructure_preserves_software_after_release_handoff" {
     values = { objects = [{
       metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
         "day2.dev/release-effect"    = "effect-two", "day2.dev/release-id" = "release-two"
+        "day2.dev/activation"        = "{\"format\":1,\"phase\":\"activated\"}"
         "day2.dev/activated-image"   = "registry.example.com/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         "unrelated.example.com/note" = "dropped"
       } }
@@ -498,7 +499,7 @@ run "infrastructure_preserves_software_after_release_handoff" {
     error_message = "An infrastructure plan must keep the released image and artifact guard."
   }
   assert {
-    condition     = kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/activated-image"] == "registry.example.com/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" && !contains(keys(kubernetes_stateful_set_v1.day2[0].metadata[0].annotations), "unrelated.example.com/note")
+    condition     = kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/activated-image"] == "registry.example.com/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" && jsondecode(kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/activation"]).phase == "activated" && !contains(keys(kubernetes_stateful_set_v1.day2[0].metadata[0].annotations), "unrelated.example.com/note")
     error_message = "Infrastructure must keep a maintenance activation stamp until the release consumes it, and only the release-owned annotations."
   }
   # The stamp names another image than the live one: the old image must not
@@ -1909,4 +1910,144 @@ run "rolling_refuses_unadmitted_direct_image_change" {
     values = { objects = [{ spec = { template = { spec = { containers = [{ name = "day2", image = "registry.example/app@sha256:1111111111111111111111111111111111111111111111111111111111111111" }] } } } }] }
   }
   expect_failures = [terraform_data.rolling_admission]
+}
+
+run "active_activation_prepared_refuses_infrastructure_reconciliation" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activation" = "{\"format\":1,\"phase\":\"prepared\"}"
+      } }
+      spec = { replicas = 0, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
+run "active_activation_stopped_refuses_infrastructure_reconciliation" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activation" = "{\"format\":1,\"phase\":\"stopped\"}"
+      } }
+      spec = { replicas = 0, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
+run "active_activation_fenced_refuses_infrastructure_reconciliation" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activation" = "{\"format\":1,\"phase\":\"fenced\"}"
+      } }
+      spec = { replicas = 0, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
+run "active_activation_recovering_refuses_infrastructure_reconciliation" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activation" = "{\"format\":1,\"phase\":\"recovering\"}"
+      } }
+      spec = { replicas = 0, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
+run "active_activation_unknown_refuses_infrastructure_reconciliation" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activation" = "{\"format\":1,\"phase\":\"unknown\"}"
+      } }
+      spec = { replicas = 0, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
+run "completed_activation_restored_retains_its_checkpoint" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activation" = "{\"format\":1,\"phase\":\"restored\"}"
+      } }
+      spec = { replicas = 1, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  assert {
+    condition     = jsondecode(kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/activation"]).phase == "restored"
+    error_message = "Infrastructure retains the closed checkpoint instead of stripping recovery evidence."
+  }
+}
+
+run "completed_activation_activated_retains_its_checkpoint" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activation" = "{\"format\":1,\"phase\":\"activated\"}"
+      } }
+      spec = { replicas = 1, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  assert {
+    condition     = jsondecode(kubernetes_stateful_set_v1.day2[0].metadata[0].annotations["day2.dev/activation"]).phase == "activated"
+    error_message = "Infrastructure retains the closed checkpoint instead of stripping recovery evidence."
+  }
+}
+
+run "malformed_activation_checkpoint_refuses_infrastructure_reconciliation" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = { "day2.dev/activation" = "not-json" } }
+      spec = { replicas = 0, template = {
+        metadata = { annotations = {} }
+        spec     = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] }
+      } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
 }

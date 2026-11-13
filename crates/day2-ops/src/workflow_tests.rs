@@ -1011,9 +1011,11 @@ fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
         [
             "open",
             "artifacts",
-            "stop",
+            "begin-preparation",
             "measure",
             "pod",
+            "stop",
+            "verify-preparation",
             "workflow:backup",
             "copy-backup",
             "migration:plan",
@@ -1063,12 +1065,72 @@ fn maintain_mark_activated_reads_the_database_before_it_marks() -> Result<()> {
         [
             "open",
             "artifacts",
+            "begin-preparation",
             "stop",
             "measure",
             "pod",
             "workflow:authority-inspect",
             "mark-activated",
             "finish",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn activation_preparation_refusal_never_calls_stop() -> Result<()> {
+    for refused in [
+        "maintenance-begin-preparation",
+        "maintenance-measure",
+        "maintenance-pod",
+    ] {
+        let mut effects = Vec::new();
+        let result = automation::run(
+            &automation::runner()?,
+            &["platform", "maintain", "activate", "request.json"],
+            |request| {
+                effects.push(request.action.clone());
+                if request.action == refused {
+                    bail!("preparation refused");
+                }
+                Ok(json!({}))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(effects.last().map(String::as_str), Some(refused));
+        assert!(
+            !effects
+                .iter()
+                .any(|step| step == "maintenance-stop" || step == "maintenance-fence")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn activation_recovery_orders_claim_cleanup_and_restore_without_a_new_activation() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "recover", "private.session.json"],
+        |request| {
+            if request.action == "maintenance-recovery-open" {
+                assert_eq!(
+                    request.decode::<Value>()?,
+                    json!({"journal":"private.session.json"})
+                );
+            }
+            effects.push(request.action.clone());
+            Ok(json!({}))
+        },
+    )?;
+    assert_eq!(
+        effects,
+        [
+            "maintenance-recovery-open",
+            "maintenance-recovery-claim",
+            "maintenance-recovery-cleanup",
+            "maintenance-recovery-restore"
         ]
     );
     Ok(())

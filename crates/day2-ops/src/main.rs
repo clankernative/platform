@@ -30,6 +30,7 @@ struct Operations {
     infrastructure: Option<infra::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
+    maintenance_recovery: Option<maintenance::Recovery>,
 }
 
 impl Operations {
@@ -606,7 +607,7 @@ impl Operations {
                     request: PathBuf,
                 }
                 ensure!(
-                    self.maintenance.is_none(),
+                    self.maintenance.is_none() && self.maintenance_recovery.is_none(),
                     "one maintenance session per workflow"
                 );
                 let parameters: Input = input(&request)?;
@@ -618,10 +619,44 @@ impl Operations {
                 )?);
                 Ok(json!({}))
             }
+            "maintenance-recovery-open" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    journal: PathBuf,
+                }
+                ensure!(
+                    self.maintenance.is_none() && self.maintenance_recovery.is_none(),
+                    "one maintenance session per workflow"
+                );
+                let parameters: Input = input(&request)?;
+                self.maintenance_recovery = Some(maintenance::Recovery::open(
+                    &parameters.journal,
+                    maintenance::Tools::native(maintenance::interrupt_flag())?,
+                )?);
+                Ok(json!({}))
+            }
+            "maintenance-recovery-claim" => self
+                .maintenance_recovery
+                .as_mut()
+                .context("recovery not open")?
+                .claim(),
+            "maintenance-recovery-cleanup" => self
+                .maintenance_recovery
+                .as_mut()
+                .context("recovery not open")?
+                .cleanup(),
+            "maintenance-recovery-restore" => self
+                .maintenance_recovery
+                .as_mut()
+                .context("recovery not open")?
+                .restore(),
             "maintenance-artifacts" => self.maintenance()?.artifacts(),
+            "maintenance-begin-preparation" => self.maintenance()?.begin_preparation(),
             "maintenance-stop" => self.maintenance()?.stop(),
             "maintenance-measure" => self.maintenance()?.measure(),
             "maintenance-pod" => self.maintenance()?.start_pod(),
+            "maintenance-verify-preparation" => self.maintenance()?.verify_preparation(),
             "maintenance-workflow" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -673,6 +708,7 @@ fn run(request: Request) -> Result<Value> {
         infrastructure: None,
         local: None,
         maintenance: None,
+        maintenance_recovery: None,
     };
     if !["workflow", "local-session"].contains(&request.action.as_str()) {
         ensure!(

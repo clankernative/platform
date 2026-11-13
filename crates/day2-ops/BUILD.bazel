@@ -4,6 +4,7 @@ package(default_visibility = ["//visibility:public"])
 
 COMPILE_INPUTS = [
     "//:deploy/gke/k8s/maintenance-pod.yaml",
+    "//:deploy/gke/k8s/activation-image-init.yaml",
     "//:deploy/gke/stacks/day2-app/tests/oauth-instance.json"
 ]
 

@@ -54,6 +54,7 @@ Workflow :: [].{
 		["maintain", "backup", request_file] => Ok(Maintain("backup", request_file))
 		["maintain", "authority-apply", request_file] => Ok(Maintain("authority-apply", request_file))
 		["maintain", "activate", request_file] => Ok(Maintain("activate", request_file))
+		["maintain", "recover", journal_file] => Ok(Maintain("recover", journal_file))
 		["maintain", "rollout", request_file] => Ok(Maintain("rollout", request_file))
 		["maintain", "mark-activated", request_file] => Ok(Maintain("mark-activated", request_file))
 		["backup", instance, app_name, output] => Ok(Backup(instance, app_name, output))
@@ -108,7 +109,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
+			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
 		)
 	}
 
@@ -134,7 +135,7 @@ Workflow :: [].{
 					"resources save|attach|propose|decide|allocate|recover|resolve-overruns INSTANCE APP LOCAL_OPERATOR INPUT_JSON_FILE",
 					"authority apply INSTANCE APP LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
 					"authority activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
-					"maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
+					"maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
 				],
 			}),
 		)
