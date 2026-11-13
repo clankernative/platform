@@ -45,6 +45,19 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Staged capture deliveries live only while this invocation prepares. Write
+/// only when an observation actually staged one; leftovers from a crash at
+/// this point are swept by the next staging in this database.
+fn release_deliveries(runtime: &Runtime, id: &str, observations: &[Observation]) -> Result<()> {
+    if observations
+        .iter()
+        .any(|observation| crate::capture_delivery::staged_by(&observation.instruction.model))
+    {
+        runtime.sql_write(|tx| crate::capture_delivery::release(tx, id))?;
+    }
+    Ok(())
+}
+
 fn recorded(connection: &Connection, id: &str) -> Result<Vec<Observation>> {
     let mut statement = connection.prepare(
         "SELECT ordinal,observation FROM day2_preparation WHERE invocation=?1 ORDER BY ordinal",
@@ -159,6 +172,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         );
         if matches!(reply, Reply::Failed(_)) {
             // The ordinary transaction runner records the typed failure and audit.
+            release_deliveries(runtime, id, &request.observations)?;
             return Ok(request.observations);
         }
         let Reply::Pending(step) = reply else {
@@ -168,6 +182,9 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         let instruction = response.instruction.clone();
         crate::credential_authority::check_step(runtime.artifact().contract(), &operation, step)?;
         if step == Step::Boundary(Boundary::Decide) {
+            // Every page the application read is in the journal (or, for a
+            // query, in this request); the staged delivery is not needed again.
+            release_deliveries(runtime, id, &request.observations)?;
             // This observation belongs to the decision transaction, not the frozen
             // preparation journal. Revalidation may refuse this boundary.
             request.observations.push(Observation {

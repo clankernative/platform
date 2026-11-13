@@ -64,6 +64,29 @@ struct WorkspaceDirectoryPageRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CartaDeliveryPageRequest {
+    handle: String,
+    capture_id: String,
+    page: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CartaReleaseRequest {
+    handle: String,
+    capture_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceDirectoryDeliveryPageRequest {
+    handle: String,
+    capture_id: String,
+    page: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkspaceDirectoryUserPathRequest {
     handle: String,
 }
@@ -142,6 +165,24 @@ enum Action {
     CartaCapture(crate::carta_live::CapturePlan),
     /// A record of a published live capture. Local; reaches no provider.
     CartaRecord(crate::carta_live::RecordRead),
+    /// A complete capture (live when `plan` is present, else the seeded
+    /// synthetic one) held in the application's database until released.
+    CartaDelivery {
+        plan: Option<crate::carta_live::CapturePlan>,
+        issuer_id: String,
+        authority: String,
+    },
+    /// A page of an application-held capture. Local; reaches no provider.
+    CartaDeliveryPage {
+        authority: String,
+        capture_id: String,
+        page: u64,
+    },
+    /// Release an application-held capture. Local and idempotent.
+    CartaRelease {
+        authority: String,
+        capture_id: String,
+    },
     People(crate::people_providers::Action),
     WorkspaceDirectoryCapture(crate::workspace_directory::CapturePlan),
     WorkspaceDirectoryUserPath(crate::workspace_directory::CaptureInput),
@@ -149,6 +190,18 @@ enum Action {
         capture_id: String,
         offset: u64,
         now: i64,
+    },
+    /// A fresh complete hierarchy staged for this invocation only.
+    WorkspaceDirectoryDelivery {
+        input: crate::workspace_directory::CaptureInput,
+        invocation: String,
+    },
+    /// A page of this invocation's staged hierarchy. Local; reaches no provider.
+    WorkspaceDirectoryDeliveryPage {
+        invocation: String,
+        authority: String,
+        capture_id: String,
+        page: u64,
     },
     Recipient(String),
     Latest {
@@ -192,7 +245,7 @@ impl Authorized {
         // stable effect IDs with a committed payload/result ledger. A future
         // live adapter must explicitly supply deduplication/reconciliation
         // before admitting a second attempt after an unknown outcome.
-        matches!(self.action, Action::Send(_))
+        matches!(self.action, Action::Send(_) | Action::CartaRelease { .. })
             || matches!(&self.action, Action::People(action) if action.is_write())
             || matches!(&self.action, Action::Delegate(call) if call.purpose == crate::delegation::Purpose::Send)
             || matches!(&self.action, Action::Freetool(_))
@@ -341,7 +394,9 @@ pub(crate) fn authorized(
         "workspace_directory.capture.v1"
         | "workspace_directory.hierarchy.v1"
         | "workspace_directory.user_path.v1"
-        | "workspace_directory.page.v1" => {
+        | "workspace_directory.page.v1"
+        | "workspace_directory.hierarchy.v2"
+        | "workspace_directory.page.v2" => {
             ensure!(
                 resource.grant.provider == Provider::WorkspaceDirectory
                     && matches!(
@@ -472,6 +527,70 @@ pub(crate) fn authorized(
                     );
                     Action::WorkspaceDirectoryCapture(plan)
                 }
+                "workspace_directory.hierarchy.v2" => {
+                    let input: WorkspaceDirectoryCaptureRequest =
+                        serde_json::from_str(&instruction.data)?;
+                    let ResourceTarget::WorkspaceDirectory { customer_id } = &resource.grant.target
+                    else {
+                        anyhow::bail!(crate::error::Failure::ResourceForbidden)
+                    };
+                    ensure!(
+                        input.handle == resource.handle
+                            && resource.grant.limits.max_response_bytes
+                                >= crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+                            && resource.grant.limits.max_request_bytes
+                                >= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                            && instruction.data.len() as u64
+                                <= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES,
+                        crate::error::Failure::ResourceForbidden
+                    );
+                    // Always a provider read: there is no host cache to reuse.
+                    resource.planned_calls = match resource.grant.live.as_ref() {
+                        Some(LiveConnection::WorkspaceDirectory {
+                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                            ..
+                        }) => 4,
+                        Some(LiveConnection::WorkspaceDirectory { .. }) => 5,
+                        _ => anyhow::bail!(crate::error::Failure::ResourceForbidden),
+                    };
+                    quote.request_bytes = crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES;
+                    quote.response_bytes = crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES;
+                    Action::WorkspaceDirectoryDelivery {
+                        input: crate::workspace_directory::CaptureInput {
+                            customer_id: customer_id.clone(),
+                            connection_id: directory_connection_id(&resource),
+                            actor: resource.actor.clone(),
+                            captured_at: request.context.now,
+                        },
+                        invocation: request.context.invocation_id.clone(),
+                    }
+                }
+                "workspace_directory.page.v2" => {
+                    let input: WorkspaceDirectoryDeliveryPageRequest =
+                        serde_json::from_str(&instruction.data)?;
+                    let ResourceTarget::WorkspaceDirectory { customer_id } = &resource.grant.target
+                    else {
+                        anyhow::bail!(crate::error::Failure::ResourceForbidden)
+                    };
+                    ensure!(
+                        input.handle == resource.handle && input.capture_id.len() == 71,
+                        crate::error::Failure::ResourceForbidden
+                    );
+                    // A local read of this invocation's own staged pages.
+                    quote.request_bytes = 0;
+                    quote.response_bytes = 0;
+                    resource.planned_calls = 0;
+                    Action::WorkspaceDirectoryDeliveryPage {
+                        invocation: request.context.invocation_id.clone(),
+                        authority: crate::workspace_directory::delivery_authority(
+                            customer_id,
+                            &directory_connection_id(&resource),
+                            &resource.actor,
+                        )?,
+                        capture_id: input.capture_id,
+                        page: input.page,
+                    }
+                }
                 _ => {
                     let input: WorkspaceDirectoryPageRequest =
                         serde_json::from_str(&instruction.data)?;
@@ -501,6 +620,104 @@ pub(crate) fn authorized(
             resource.grant.provider,
             &resource.grant.target,
         )?),
+        "carta.snapshot.v2" | "carta.page.v2" | "carta.release.v2" => {
+            ensure!(
+                resource.grant.provider == Provider::Carta,
+                crate::error::Failure::ResourceForbidden
+            );
+            let ResourceTarget::CartaIssuer {
+                issuer_id,
+                children,
+            } = &resource.grant.target
+            else {
+                anyhow::bail!(crate::error::Failure::ResourceForbidden)
+            };
+            // The source and every fact a held capture is bound to are frozen
+            // here, before any reservation, exactly as for v1.
+            let plan = match resource.grant.live.as_ref() {
+                None => None,
+                Some(connection @ LiveConnection::Carta { .. }) => {
+                    Some(crate::carta_live::CapturePlan::authorize(
+                        runtime.scope(),
+                        &resource.grant.connection,
+                        connection,
+                        issuer_id,
+                        *children,
+                        runtime.integrations().uses_simulated_providers(),
+                    )?)
+                }
+                Some(_) => anyhow::bail!(crate::error::Failure::ResourceForbidden),
+            };
+            let authority = match &plan {
+                Some(plan) => plan.delivery_authority()?,
+                None => crate::carta::synthetic_delivery_authority(runtime.scope(), issuer_id)?,
+            };
+            match instruction.model.as_str() {
+                "carta.snapshot.v2" => {
+                    let input: CartaCaptureRequest =
+                        crate::json::decode(instruction.data.as_bytes())?;
+                    ensure!(
+                        input.handle == resource.handle,
+                        crate::error::Failure::ResourceForbidden
+                    );
+                    if let Some(plan) = &plan {
+                        ensure!(
+                            resource.grant.limits.max_request_bytes
+                                >= crate::carta_live::MAX_CAPTURE_REQUEST_BYTES
+                                && resource.grant.limits.max_response_bytes
+                                    >= crate::carta_live::MAX_TOKEN_RESPONSE_BYTES as u64
+                                && instruction.data.len() as u64
+                                    <= crate::carta_live::MAX_CAPTURE_REQUEST_BYTES,
+                            crate::error::Failure::ResourceForbidden
+                        );
+                        quote.request_bytes = crate::carta_live::MAX_CAPTURE_REQUEST_BYTES;
+                        quote.response_bytes = crate::carta_live::MAX_CAPTURE_RESPONSE_BYTES;
+                        resource.planned_calls = plan.planned_calls();
+                    }
+                    Action::CartaDelivery {
+                        plan,
+                        issuer_id: issuer_id.clone(),
+                        authority,
+                    }
+                }
+                "carta.page.v2" => {
+                    let input: CartaDeliveryPageRequest =
+                        crate::json::decode(instruction.data.as_bytes())?;
+                    ensure!(
+                        input.handle == resource.handle,
+                        crate::error::Failure::ResourceForbidden
+                    );
+                    crate::carta::validate_snapshot_id(&input.capture_id)?;
+                    // A local read of the application's own held capture.
+                    quote.request_bytes = 0;
+                    quote.response_bytes = 0;
+                    resource.planned_calls = 0;
+                    Action::CartaDeliveryPage {
+                        authority,
+                        capture_id: input.capture_id,
+                        page: input.page,
+                    }
+                }
+                _ => {
+                    let input: CartaReleaseRequest =
+                        crate::json::decode(instruction.data.as_bytes())?;
+                    ensure!(
+                        input.handle == resource.handle,
+                        crate::error::Failure::ResourceForbidden
+                    );
+                    crate::carta::validate_snapshot_id(&input.capture_id)?;
+                    // Deletes only the application's own held copy: no provider
+                    // call, no traffic.
+                    quote.request_bytes = 0;
+                    quote.response_bytes = 0;
+                    resource.planned_calls = 0;
+                    Action::CartaRelease {
+                        authority,
+                        capture_id: input.capture_id,
+                    }
+                }
+            }
+        }
         "carta.snapshot.v1" | "carta.record.v1" => {
             ensure!(
                 resource.grant.provider == Provider::Carta,
@@ -762,6 +979,14 @@ pub(crate) fn authorized(
     })
 }
 
+/// The reviewed connection identity a Directory capture is bound to.
+fn directory_connection_id(resource: &crate::resources::ResourceUse) -> String {
+    format!(
+        "{}@{}",
+        resource.grant.connection.id, resource.grant.connection.revision
+    )
+}
+
 fn require_native_bearer_fence(action: day2_capabilities::resources::Action) -> Result<()> {
     ensure!(
         !action.returns_external_bearer(),
@@ -872,6 +1097,10 @@ impl ProviderResult {
         plan: &crate::carta_live::CapturePlan,
     ) -> Self {
         let (result, meter) = carta_capture(runtime, resource, plan);
+        Self::carta_metered(result, meter)
+    }
+
+    fn carta_metered(result: Result<String>, meter: crate::carta_live::Meter) -> Self {
         use crate::integrations::{ExchangeCorrelation, ExchangePhase};
         // Only a failure's final exchange is kept: it names the phase, page and
         // status that stopped collection without any provider content.
@@ -956,6 +1185,50 @@ fn workspace_directory_user_path(
     Ok(serde_json::to_string(&observed)?)
 }
 
+/// Collect directly from the provider port, then stage the validated pages in
+/// the application's own database for this invocation only.
+fn workspace_directory_delivery(
+    runtime: &Runtime,
+    resource: &crate::resources::ResourceUse,
+    input: &crate::workspace_directory::CaptureInput,
+    invocation: &str,
+) -> Result<String> {
+    let mut port: Box<dyn crate::workspace_directory::DirectoryReadPort> =
+        if runtime.integrations().uses_simulated_providers() {
+            Box::new(crate::workspace_directory::SimulatedDirectoryPort::new(
+                runtime.db(),
+                runtime.scope(),
+                &input.customer_id,
+                &input.actor,
+                input.captured_at,
+            )?)
+        } else {
+            let connection = resource
+                .grant
+                .live
+                .as_ref()
+                .ok_or(crate::error::Failure::ResourceForbidden)?;
+            let authentication =
+                crate::workspace_directory::AuthenticationPlan::from_connection(connection)?;
+            Box::new(crate::workspace_directory::NativeDirectoryPort::new(
+                authentication,
+                &input.customer_id,
+                input.captured_at,
+                CaptureMode::Hierarchy,
+            )?)
+        };
+    let (delivery, staged) =
+        crate::workspace_directory::deliver_hierarchy(input.clone(), port.as_mut())?;
+    runtime.sql_write(|tx| {
+        crate::capture_delivery::stage(
+            tx,
+            crate::capture_delivery::Holder::Invocation(invocation),
+            &staged,
+        )
+    })?;
+    Ok(serde_json::to_string(&delivery)?)
+}
+
 fn workspace_directory_capture(
     runtime: &Runtime,
     resource: &crate::resources::ResourceUse,
@@ -997,11 +1270,16 @@ fn workspace_directory_capture(
     Ok(serde_json::to_string(complete.metadata())?)
 }
 
-fn carta_capture(
+/// One complete live collection through the simulated or native port, with the
+/// time it started. Nothing is published or staged here.
+fn carta_collect(
     runtime: &Runtime,
     resource: &crate::resources::ResourceUse,
     plan: &crate::carta_live::CapturePlan,
-) -> (Result<String>, crate::carta_live::Meter) {
+) -> (
+    Result<(crate::carta_live::CompleteCapture, i64)>,
+    crate::carta_live::Meter,
+) {
     let started = match runtime.host().now_ms() {
         Ok(now) => now / 1000,
         Err(error) => return (Err(error), Default::default()),
@@ -1025,7 +1303,16 @@ fn carta_capture(
     let page_limit =
         usize::try_from(resource.grant.limits.max_response_bytes).unwrap_or(usize::MAX);
     let (complete, meter) = crate::carta_live::collect_complete(plan, port.as_mut(), page_limit);
-    let result = complete.and_then(|complete| {
+    (complete.map(|complete| (complete, started)), meter)
+}
+
+fn carta_capture(
+    runtime: &Runtime,
+    resource: &crate::resources::ResourceUse,
+    plan: &crate::carta_live::CapturePlan,
+) -> (Result<String>, crate::carta_live::Meter) {
+    let (complete, meter) = carta_collect(runtime, resource, plan);
+    let result = complete.and_then(|(complete, started)| {
         let finished = runtime.host().now_ms()? / 1000;
         crate::carta_live::publish(
             &runtime.db().with_file_name(crate::carta_live::STORE),
@@ -1036,6 +1323,36 @@ fn carta_capture(
         Ok(serde_json::to_string(complete.snapshot())?)
     });
     (result, meter)
+}
+
+/// Collect live, then stage the complete capture for the application. Nothing
+/// is published to the v1 store.
+fn carta_live_delivery(
+    runtime: &Runtime,
+    resource: &crate::resources::ResourceUse,
+    plan: &crate::carta_live::CapturePlan,
+    authority: &str,
+) -> (Result<String>, crate::carta_live::Meter) {
+    let (complete, meter) = carta_collect(runtime, resource, plan);
+    let result = complete.and_then(|(complete, _)| {
+        hold_carta_delivery(runtime, complete.snapshot(), complete.records(), authority)
+    });
+    (result, meter)
+}
+
+/// Stage a complete Carta capture in the application's own database, held
+/// until the application releases it.
+fn hold_carta_delivery(
+    runtime: &Runtime,
+    snapshot: &crate::carta::Snapshot,
+    records: &[crate::carta::Record],
+    authority: &str,
+) -> Result<String> {
+    let (delivery, staged) = crate::carta::delivery(snapshot, records, authority.into())?;
+    runtime.sql_write(|tx| {
+        crate::capture_delivery::stage(tx, crate::capture_delivery::Holder::Application, &staged)
+    })?;
+    Ok(serde_json::to_string(&delivery)?)
 }
 
 /// The native adapter with the connection's mounted client secret. The secret
@@ -1184,9 +1501,99 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
                 request_bytes,
             );
         }
+        Action::WorkspaceDirectoryDelivery { input, invocation } => {
+            let result =
+                workspace_directory_delivery(runtime, &capability.resource, &input, &invocation);
+            // The aggregate provider envelope is reserved and consumed as for a
+            // v1 cold capture, whether staging succeeds or not.
+            return ProviderResult {
+                result,
+                correlation: Vec::new(),
+                pending: false,
+                usage: crate::resources::ProviderUsage {
+                    calls: capability.resource.planned_calls,
+                    request_bytes,
+                    response_bytes: crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES,
+                    cost_microunits: 0,
+                    known: true,
+                    dispatched: true,
+                },
+            };
+        }
+        Action::WorkspaceDirectoryDeliveryPage {
+            invocation,
+            authority,
+            capture_id,
+            page,
+        } => {
+            let result = runtime.sql_read(|db| {
+                crate::capture_delivery::page(
+                    db,
+                    crate::capture_delivery::Holder::Invocation(&invocation),
+                    crate::workspace_directory::DELIVERY_KIND,
+                    &authority,
+                    &capture_id,
+                    page,
+                )
+            });
+            // Read from this invocation's staged pages: no provider call, no traffic.
+            return ProviderResult {
+                result,
+                correlation: Vec::new(),
+                pending: false,
+                usage: crate::resources::ProviderUsage {
+                    known: true,
+                    ..Default::default()
+                },
+            };
+        }
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
         Action::CartaCapture(plan) => {
             return ProviderResult::carta_capture(runtime, &capability.resource, &plan);
+        }
+        Action::CartaDelivery {
+            plan: Some(plan),
+            authority,
+            ..
+        } => {
+            let (result, meter) =
+                carta_live_delivery(runtime, &capability.resource, &plan, &authority);
+            return ProviderResult::carta_metered(result, meter);
+        }
+        Action::CartaDelivery {
+            plan: None,
+            issuer_id,
+            authority,
+        } => {
+            crate::carta::synthetic_capture(runtime, &issuer_id).and_then(|(snapshot, records)| {
+                hold_carta_delivery(runtime, &snapshot, &records, &authority)
+            })
+        }
+        Action::CartaDeliveryPage {
+            authority,
+            capture_id,
+            page,
+        } => {
+            let result = runtime.sql_read(|db| {
+                crate::capture_delivery::page(
+                    db,
+                    crate::capture_delivery::Holder::Application,
+                    crate::carta::DELIVERY_KIND,
+                    &authority,
+                    &capture_id,
+                    page,
+                )
+            });
+            // Read from the application's own held capture: no provider call.
+            return ProviderResult {
+                result,
+                correlation: Vec::new(),
+                pending: false,
+                usage: crate::resources::ProviderUsage {
+                    known: true,
+                    ..Default::default()
+                },
+            };
         }
         Action::CartaRecord(read) => {
             let result = crate::carta_live::read_record(
@@ -1237,6 +1644,31 @@ pub(crate) fn execute(
             return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
         }
         Action::Send(message) => with_world(runtime, |world| world.send(effect_id, message)),
+        Action::CartaRelease {
+            authority,
+            capture_id,
+        } => {
+            let result = runtime
+                .sql_write(|tx| {
+                    crate::capture_delivery::release_held(
+                        tx,
+                        crate::carta::DELIVERY_KIND,
+                        &authority,
+                        &capture_id,
+                    )
+                })
+                .map(|released| json!({"released": released}).to_string());
+            // Local and idempotent: no provider call, no traffic.
+            return ProviderResult {
+                result,
+                correlation: Vec::new(),
+                pending: false,
+                usage: crate::resources::ProviderUsage {
+                    known: true,
+                    ..Default::default()
+                },
+            };
+        }
         // A grant is computed, not dispatched, so it resolves the same way on
         // both paths: downloading authorizes a read, uploading authorizes a write,
         // and neither reaches the network.

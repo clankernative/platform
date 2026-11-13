@@ -38,6 +38,10 @@ mod app_effect_tests;
 mod integration_host_tests;
 
 #[cfg(test)]
+#[path = "capture_delivery_host_tests.rs"]
+mod capture_delivery_host_tests;
+
+#[cfg(test)]
 #[path = "read_coverage_tests.rs"]
 mod read_coverage_tests;
 
@@ -871,6 +875,7 @@ impl SchemaInitialization<'_> {
         crate::resources::upgrade(tx)?;
         crate::budget::upgrade(tx)?;
         crate::preparation::upgrade(tx)?;
+        crate::capture_delivery::upgrade(tx)?;
         crate::execution::upgrade(tx)?;
         upgrade_selection_cursors(tx)?;
         crate::authority_state::upgrade(tx)?;

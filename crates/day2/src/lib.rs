@@ -16,6 +16,7 @@ pub mod branding;
 pub mod budget;
 pub mod build_dependencies;
 pub mod capabilities;
+mod capture_delivery;
 pub mod carta;
 pub mod carta_http;
 pub mod carta_live;

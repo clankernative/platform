@@ -110,6 +110,9 @@ enum Demonstration {
     /// establish — a correct signature over the wrong object is still wrong, and
     /// a presigned URL cannot be recalled once handed to a client.
     LocalAuthorization,
+    /// Releases the application's own held copy of a capture. It reaches no
+    /// provider and must change no provider world; the held pages must be gone.
+    HeldCaptureRelease,
     /// Exercises the executor service's own deterministic manifest/receipt world.
     FreetoolExecutorWorld,
     /// Real scoped synthetic Linear capability admission and committed world.
@@ -172,10 +175,16 @@ fn demonstration(action: Action) -> Demonstration {
         Action::WorkspaceDirectoryCapture
         | Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchy
-        | Action::WorkspaceDirectoryPage => Demonstration::NativeAdapterRead,
+        | Action::WorkspaceDirectoryPage
+        | Action::WorkspaceDirectoryHierarchyDelivery
+        | Action::WorkspaceDirectoryDeliveryPage => Demonstration::NativeAdapterRead,
         // The live capture pipeline against Carta's own wire world, then a
         // local read of the published capture.
-        Action::CartaSnapshot | Action::CartaRecord => Demonstration::AdmittedAdapterRead,
+        Action::CartaSnapshot
+        | Action::CartaRecord
+        | Action::CartaSnapshotDelivery
+        | Action::CartaDeliveryPage => Demonstration::AdmittedAdapterRead,
+        Action::CartaRelease => Demonstration::HeldCaptureRelease,
         Action::FreetoolFingerprint
         | Action::FreetoolStatus
         | Action::FreetoolResultPage
@@ -952,6 +961,8 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
                 | Action::WorkspaceDirectoryUserPath
                 | Action::WorkspaceDirectoryHierarchy
                 | Action::WorkspaceDirectoryPage
+                | Action::WorkspaceDirectoryHierarchyDelivery
+                | Action::WorkspaceDirectoryDeliveryPage
         ),
         "not a Workspace Directory native read"
     );
@@ -977,6 +988,23 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         let result = serde_json::to_string(&crate::workspace_directory::collect_user_path(
             input, &mut port,
         )?)?;
+        let after = worlds(&database)?;
+        return Ok(Observed {
+            result,
+            before,
+            after,
+        });
+    }
+    if matches!(
+        action,
+        Action::WorkspaceDirectoryHierarchyDelivery | Action::WorkspaceDirectoryDeliveryPage
+    ) {
+        let (delivery, staged) = crate::workspace_directory::deliver_hierarchy(input, &mut port)?;
+        let result = if action == Action::WorkspaceDirectoryHierarchyDelivery {
+            serde_json::to_string(&delivery)?
+        } else {
+            staged.pages[0].clone()
+        };
         let after = worlds(&database)?;
         return Ok(Observed {
             result,
@@ -1169,6 +1197,7 @@ fn check(
         Demonstration::NotificationsAdapter => notifications::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
+        Demonstration::HeldCaptureRelease => carta::check_release(action),
         Demonstration::AdmittedAdapterRead => {
             let first = run(Variant::A)?;
             let second = run(Variant::B)?;

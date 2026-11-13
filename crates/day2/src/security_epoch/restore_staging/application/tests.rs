@@ -94,6 +94,9 @@ impl Fixture {
             authority_state::upgrade(&tx)?;
             budget::initialize_in(&tx, &previous.stamp.epoch)?;
             crate::delegation_commands::upgrade(&tx)?;
+            // Ordinary initialization installs provider capture delivery, so a
+            // restored application carries its one schema object.
+            crate::capture_delivery::upgrade(&tx)?;
             authority_state::store_record_in(&tx, &previous, "fixture", "source")?;
             tx.commit()?;
         }
