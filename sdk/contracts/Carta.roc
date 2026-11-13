@@ -1,6 +1,4 @@
 import Observe
-import Effects
-import Api
 import Resource
 import Context
 
@@ -10,8 +8,6 @@ import Context
 # Provider arrays are transported as individual records, preserving their parent
 # external IDs. Applications own validation, import decisions and calculations.
 Carta :: [].{
-	release_effect = Api.external("carta.release.v2")
-
 	OptionalText : [Some(Str), None]
 
 	Snapshot : {
@@ -95,7 +91,7 @@ Carta :: [].{
 	Record : [Stakeholder(Stakeholder), Grant(Grant), VestingEvent(VestingEvent), Exercise(Exercise)]
 
 	# A complete capture held in this application's own database until it calls
-	# `release_with`. Any later invocation can read its pages; nothing expires it.
+	# `release`. Any later invocation can read its records; nothing expires it.
 	Delivery : {
 		id : Str,
 		issuer_id : Str,
@@ -105,11 +101,12 @@ Carta :: [].{
 		vesting_event_count : U64,
 		exercise_count : U64,
 		source_profile : Str,
-		page_count : U64,
 	}
 
-	# At most 256 records, one `Tx.create_many` batch, in provider order.
-	DeliveryPage : { records : List(Record), page : U64, done : Bool }
+	# Records from `from` in provider order: at most the requested limit (1 to
+	# 256, one `Tx.create_many` batch) and possibly fewer. `next` is the record to
+	# read next; `done` once it is the record count.
+	Records : { records : List(Record), next : U64, done : Bool }
 
 	deliver : Context -> Observe(Delivery)
 	deliver = |context| Resource.bind(context, "carta").and_then(deliver_with)
@@ -124,28 +121,38 @@ Carta :: [].{
 			},
 		)
 
-	delivery_page_with : Resource, Str, U64 -> Observe(DeliveryPage)
-	delivery_page_with = |resource, capture_id, page| Observe.capability(
-		"carta.page.v2",
-		Json.to_str({ handle: Resource.token(resource), capture_id, page }),
+	read : Context, Str, U64, U64 -> Observe(Records)
+	read = |context, capture_id, from, limit| Resource.bind(context, "carta").and_then(
+		|resource| read_with(resource, capture_id, from, limit),
+	)
+
+	read_with : Resource, Str, U64, U64 -> Observe(Records)
+	read_with = |resource, capture_id, from, limit| Observe.capability(
+		"carta.records.v2",
+		Json.to_str({ handle: Resource.token(resource), capture_id, from, limit }),
 	).and_then(
 		|raw| {
-			parsed : Try(DeliveryPage, _)
+			parsed : Try(Records, _)
 			parsed = Json.parse(raw)
-			Observe.from_host(parsed.map_err(|_| "invalid_carta_delivery_page"))
+			Observe.from_host(parsed.map_err(|_| "invalid_carta_records"))
 		},
 	)
 
-	# Release a held capture once its records are persisted. Idempotent.
-	release_with : Resource, Str -> Effects({ released : Bool })
-	release_with = |resource, capture_id| Effects.capability(
+	# Release a held capture no later read needs, while preparing. Idempotent;
+	# `released` is false when nothing was held under that id.
+	release : Context, Str -> Observe({ released : Bool })
+	release =
+		|context, capture_id| Resource.bind(context, "carta").and_then(|resource| release_with(resource, capture_id))
+
+	release_with : Resource, Str -> Observe({ released : Bool })
+	release_with = |resource, capture_id| Observe.capability(
 		"carta.release.v2",
 		Json.to_str({ handle: Resource.token(resource), capture_id }),
 	).and_then(
 		|raw| {
 			parsed : Try({ released : Bool }, _)
 			parsed = Json.parse(raw)
-			Effects.from_host(parsed.map_err(|_| "invalid_carta_release"))
+			Observe.from_host(parsed.map_err(|_| "invalid_carta_release"))
 		},
 	)
 

@@ -565,8 +565,11 @@ fn native_carta_delivery_decodes_through_public_sdk() -> Result<()> {
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
     let example = day2::carta::synthetic_example();
-    let pages = day2::carta::delivery_pages(&example.records)?;
-    ensure!(pages.len() == 1, "one page expected");
+    let (pages, starts) = day2::carta::delivery_pages(&example.records)?;
+    ensure!(pages.len() == 1 && starts == [0], "one page expected");
+    let page: serde_json::Value = serde_json::from_str(&pages[0])?;
+    let records =
+        serde_json::json!({"records": page["records"], "next": 8, "done": true}).to_string();
     let delivery = serde_json::to_string(&day2::carta::Delivery {
         id: "carta_fixture".into(),
         issuer_id: example.issuer_id.clone(),
@@ -576,13 +579,11 @@ fn native_carta_delivery_decodes_through_public_sdk() -> Result<()> {
         vesting_event_count: 2,
         exercise_count: 2,
         source_profile: "synthetic".into(),
-        page_count: 1,
     })?;
     let source = r#"app [step] { pf: platform "../sdk/main.roc" }
 import pf.Carta
 import pf.Resource
 import pf.Observe
-import pf.Effects
 import pf.Tx
 step : Str -> Str
 step = |raw| raw
@@ -593,22 +594,28 @@ answer = |program, raw| {
     }
 }
 read_delivery = |raw| answer(Resource.decode("{\"token\":\"fixture-handle\"}").and_then(Carta.deliver_with).program(), raw)
-read_page = |raw| answer(
+read_records = |raw| answer(
     Resource.decode("{\"token\":\"fixture-handle\"}")
-        .and_then(|resource| Carta.delivery_page_with(resource, "carta_fixture", 0))
+        .and_then(|resource| Carta.read_with(resource, "carta_fixture", 0, 256))
         .program(),
     raw,
 )
-release = Resource.decode("{\"token\":\"fixture-handle\"}").program().and_then(
-    |resource| Carta.release_with(resource, "carta_fixture").program(),
+release = |raw| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| Carta.release_with(resource, "carta_fixture"))
+        .program(),
+    raw,
 )
+release_request = Resource.decode("{\"token\":\"fixture-handle\"}")
+    .and_then(|resource| Carta.release_with(resource, "carta_fixture"))
+    .program()
 expect match read_delivery(DELIVERY_JSON) {
     Done(result) => result.value.id == "carta_fixture" and result.value.record_count == 8
-        and result.value.page_count == 1 and result.value.source_profile == "synthetic"
+        and result.value.source_profile == "synthetic"
     _ => Bool.False
 }
-expect match read_page(FIRST_PAGE) {
-    Done(result) => result.value.done and result.value.page == 0 and result.value.records.len() == 8
+expect match read_records(FIRST_RECORDS) {
+    Done(result) => result.value.done and result.value.next == 8 and result.value.records.len() == 8
         and result.value.records.any(|record| match record {
             Stakeholder(value) => value.id == "holder-alice" and value.employee_id == Some("employee-alice")
             _ => Bool.False
@@ -627,13 +634,17 @@ expect match read_page(FIRST_PAGE) {
         })
     _ => Bool.False
 }
-expect match Tx.evaluate(release, []) {
-    Pending(request) => request.instruction.kind == "external" and request.instruction.model == "carta.release.v2"
+expect match Tx.evaluate(release_request, []) {
+    Pending(request) => request.instruction.model == "carta.release.v2"
+    _ => Bool.False
+}
+expect match release("{\"released\":true}") {
+    Done(result) => result.value.released
     _ => Bool.False
 }
 "#
     .replace("DELIVERY_JSON", &serde_json::to_string(&delivery)?)
-    .replace("FIRST_PAGE", &serde_json::to_string(&pages[0])?);
+    .replace("FIRST_RECORDS", &serde_json::to_string(&records)?);
     fs::write(stage.join("app/main.roc"), source)?;
     let output = crate::support::compiler::output(
         day2::sandbox::compiler(
@@ -651,7 +662,7 @@ expect match Tx.evaluate(release, []) {
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (3) tests passed"),
+        output.status.success() && diagnostics.contains("All (4) tests passed"),
         "native Carta delivery contracts ({}): {diagnostics}",
         output.status
     );

@@ -1333,7 +1333,7 @@ pub fn local_resource_fixture(
                     Action::CartaSnapshot,
                     Action::CartaRecord,
                     Action::CartaSnapshotDelivery,
-                    Action::CartaDeliveryPage,
+                    Action::CartaRecords,
                     Action::CartaRelease,
                 ],
             ),

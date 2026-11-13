@@ -923,7 +923,7 @@ pub fn deliver_hierarchy(
         &connection_id,
         &units,
     ))?);
-    let pages = delivery_pages(&units)?;
+    let (pages, starts) = delivery_pages(&units)?;
     let delivery = HierarchyDelivery {
         id: id.clone(),
         customer_id: complete.metadata.customer_id,
@@ -939,13 +939,15 @@ pub fn deliver_hierarchy(
             authority,
             item_count: u64::try_from(units.len())?,
             pages,
+            starts,
         },
     ))
 }
 
 /// Greedy split under both the item and the journaled-byte bound. Each unit's
 /// escaped size is measured once; each finished page is then checked exactly.
-pub fn delivery_pages(units: &[OrgUnit]) -> Result<Vec<String>> {
+/// Returns each page's encoded result and the index of its first item.
+pub fn delivery_pages(units: &[OrgUnit]) -> Result<(Vec<String>, Vec<u64>)> {
     use crate::capture_delivery::{
         MAX_PAGE_ITEMS, MAX_PAGE_JOURNAL_BYTES, MAX_PAGES, journal_bytes,
     };
@@ -980,7 +982,13 @@ pub fn delivery_pages(units: &[OrgUnit]) -> Result<Vec<String>> {
         "workspace_directory_delivery_exceeds_invocation"
     );
     let last = groups.len() - 1;
-    groups
+    let mut starts = Vec::with_capacity(groups.len());
+    let mut start = 0u64;
+    for group in &groups {
+        starts.push(start);
+        start += u64::try_from(group.len())?;
+    }
+    let pages = groups
         .into_iter()
         .enumerate()
         .map(|(index, items)| {
@@ -995,7 +1003,8 @@ pub fn delivery_pages(units: &[OrgUnit]) -> Result<Vec<String>> {
             );
             Ok(encoded)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((pages, starts))
 }
 
 fn validate_org_unit(unit: &OrgUnit) -> Result<()> {

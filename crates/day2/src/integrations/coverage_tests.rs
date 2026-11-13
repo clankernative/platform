@@ -183,7 +183,7 @@ fn demonstration(action: Action) -> Demonstration {
         Action::CartaSnapshot
         | Action::CartaRecord
         | Action::CartaSnapshotDelivery
-        | Action::CartaDeliveryPage => Demonstration::AdmittedAdapterRead,
+        | Action::CartaRecords => Demonstration::AdmittedAdapterRead,
         Action::CartaRelease => Demonstration::HeldCaptureRelease,
         Action::FreetoolFingerprint
         | Action::FreetoolStatus

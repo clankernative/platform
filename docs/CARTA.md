@@ -73,9 +73,10 @@ independently active stores or other processes. The separate business-only
 `Carta.deliver` / `deliver_with` (`carta.snapshot.v2`) collects exactly as
 `begin` does, but hands the complete capture to the application instead of
 publishing it to `carta.sqlite`. The records are staged in the application's own
-database in pages of at most 256 records. Any later invocation reads them with
-`delivery_page_with` (`carta.page.v2`), and the application releases them with
-`release_with` (`carta.release.v2`, an effect). Nothing expires a held capture.
+database in pages of at most 256 records. Any later invocation reads a range of
+them with `read` / `read_with` (`carta.records.v2`), and the application releases
+them with `release` / `release_with` (`carta.release.v2`) while preparing, like
+delivery. Nothing expires a held capture.
 A third unreleased capture per connection authority and issuer is refused, never
 pruned. Held pages are backed up and restored with the application. See
 [provider capture delivery](PROVIDER-CAPTURE-DELIVERY.md). The v1 operations
