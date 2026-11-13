@@ -154,6 +154,11 @@ use std::sync::{
 trait Work: Send + Sync + 'static {
     fn execute(&self, pump: Pump) -> Completion;
 
+    /// Where diagnostic run timing goes, if anywhere. It never gates a run.
+    fn timing(&self) -> Option<crate::request_timing::Output> {
+        None
+    }
+
     // Instance-local evidence only; no global hook or alternate decision path.
     #[cfg(test)]
     fn observe(&self, _event: Event, _state: &State) {}
@@ -163,9 +168,14 @@ struct NativeWork {
     runtime: Runtime,
     clock: Arc<dyn Clock>,
     reported: Mutex<crate::schedules::Refusals>,
+    timing: Option<crate::request_timing::Output>,
 }
 
 impl Work for NativeWork {
+    fn timing(&self) -> Option<crate::request_timing::Output> {
+        self.timing.clone()
+    }
+
     fn execute(&self, pump: Pump) -> Completion {
         let result =
             crate::oauth::native_management::with_runtime_operation(&self.runtime, || match pump {
@@ -210,6 +220,7 @@ impl Work for NativeWork {
             Ok(Some(())) => Completion::Finished,
             Ok(None) => Completion::Refused,
             Err(error) => {
+                crate::request_timing::failure(crate::error::classify(&error).code());
                 let diagnostic = crate::error::diagnostic(&error);
                 match pump {
                     Pump::Commands => eprintln!("command_scheduler_tick_failed {diagnostic}"),
@@ -220,6 +231,25 @@ impl Work for NativeWork {
             }
         }
     }
+}
+
+/// Run one admitted pump, timed as a background run when the instance asked
+/// for timing lines. The recorder is entered around the unchanged run.
+fn execute_timed(work: &dyn Work, pump: Pump) -> Completion {
+    // Declared before the entry guard, so the thread leaves the recorder
+    // before its line is written.
+    let timing = work.timing().map(|output| {
+        crate::request_timing::Recorder::job(
+            output,
+            match pump {
+                Pump::Commands => "commands",
+                Pump::Schedules => "schedules",
+                Pump::Journal => "journal",
+            },
+        )
+    });
+    let _entered = timing.as_ref().map(crate::request_timing::Recorder::enter);
+    work.execute(pump)
 }
 
 fn compact_batches(mut compact: impl FnMut(usize) -> Result<usize>) -> Result<()> {
@@ -237,6 +267,7 @@ pub(crate) async fn run(
     ticks: Arc<dyn LiveTicks>,
     admitting: Arc<AtomicBool>,
     stopped: tokio::sync::watch::Receiver<bool>,
+    timing: Option<crate::request_timing::Output>,
 ) -> Result<()> {
     run_mode(
         runtime,
@@ -245,6 +276,7 @@ pub(crate) async fn run(
         admitting,
         stopped,
         Execution::BlockingPool,
+        timing,
     )
     .await
 }
@@ -255,6 +287,7 @@ pub(crate) async fn run_on_owner(
     ticks: Arc<dyn LiveTicks>,
     admitting: Arc<AtomicBool>,
     stopped: tokio::sync::watch::Receiver<bool>,
+    timing: Option<crate::request_timing::Output>,
 ) -> Result<()> {
     run_mode(
         runtime,
@@ -263,6 +296,7 @@ pub(crate) async fn run_on_owner(
         admitting,
         stopped,
         Execution::OwnerThread,
+        timing,
     )
     .await
 }
@@ -280,6 +314,7 @@ async fn run_mode(
     admitting: Arc<AtomicBool>,
     stopped: tokio::sync::watch::Receiver<bool>,
     execution: Execution,
+    timing: Option<crate::request_timing::Output>,
 ) -> Result<()> {
     let declared = !runtime.artifact().contract().schedules.is_empty();
     drive_mode(
@@ -287,6 +322,7 @@ async fn run_mode(
             runtime,
             clock,
             reported: Mutex::new(crate::schedules::Refusals::default()),
+            timing,
         }),
         ticks,
         admitting,
@@ -370,7 +406,7 @@ async fn drive_mode(
             }
             if execution == Execution::OwnerThread {
                 let completion = if accepts_work(false, admitting.load(Ordering::Acquire)) {
-                    work.execute(pump)
+                    execute_timed(work.as_ref(), pump)
                 } else {
                     Completion::Refused
                 };
@@ -398,7 +434,7 @@ async fn drive_mode(
                 // already admitted here may commit/send/settle after shutdown;
                 // neither abort nor dropping a JoinHandle would interrupt it.
                 if accepts_work(false, admitting.load(Ordering::Acquire)) {
-                    work.execute(pump)
+                    execute_timed(work.as_ref(), pump)
                 } else {
                     Completion::Refused
                 }

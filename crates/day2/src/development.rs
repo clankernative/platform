@@ -3065,6 +3065,8 @@ fn instance_for_artifact(
                 // Journal compaction follows the platform default.
                 journal: None,
                 edge: None,
+                // Development requests stay quiet unless the operator asks.
+                request_timing: None,
                 // A disposable development instance binds every declared schedule
                 // to the development actor, so schedules are exercised here rather
                 // than first discovered in an environment that matters.

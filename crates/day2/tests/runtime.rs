@@ -63,6 +63,7 @@ impl World {
                     readers: BTreeSet::from(["viewer".into()]),
                     writers: BTreeSet::from(["alice".into()]),
                     edge: None,
+                    request_timing: None,
                 },
             )]),
             identity: None,

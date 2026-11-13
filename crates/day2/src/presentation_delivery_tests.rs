@@ -175,6 +175,7 @@ async fn http_delivery_rechecks_revocation_after_render() -> anyhow::Result<()> 
                     entered,
                     resume: Mutex::new(resumed),
                 })),
+                request_timing: false,
             },
         )?;
         let (shutdown, done) = tokio::sync::oneshot::channel();

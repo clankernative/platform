@@ -1053,6 +1053,7 @@ impl NativeDirectoryPort {
         now: i64,
         mode: CaptureMode,
     ) -> Result<Self> {
+        let timing = crate::request_timing::span("provider_client");
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -1062,6 +1063,7 @@ impl NativeDirectoryPort {
             .https_only(false)
             .build()
             .map_err(|_| anyhow::anyhow!("workspace_directory_transport_unavailable"))?;
+        drop(timing);
         let access_token = acquire_access_token(
             &client,
             &plan,
@@ -1132,7 +1134,8 @@ impl NativeDirectoryPort {
         })
     }
 
-    fn get(&self, url: reqwest::Url, max: usize) -> Result<Vec<u8>> {
+    fn get(&self, url: reqwest::Url, max: usize, endpoint: &'static str) -> Result<Vec<u8>> {
+        let mut timing = crate::request_timing::provider("workspace_directory", endpoint);
         let mut authorization =
             reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.access_token))
                 .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
@@ -1144,6 +1147,7 @@ impl NativeDirectoryPort {
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .map_err(|_| anyhow::anyhow!("workspace_directory_provider_unavailable"))?;
+        timing.status(response.status().as_u16());
         bounded_response(response, max)
     }
 }
@@ -1199,11 +1203,13 @@ fn acquire_access_token(
 ) -> Result<String> {
     let metadata_url =
         metadata_origin.join("/computeMetadata/v1/instance/service-accounts/default/token")?;
+    let mut timing = crate::request_timing::provider("workspace_directory", "metadata_token");
     let metadata = client
         .get(metadata_url)
         .header("Metadata-Flavor", "Google")
         .send()
         .map_err(|_| anyhow::anyhow!("workspace_directory_workload_identity_unavailable"))?;
+    timing.status(metadata.status().as_u16());
     ensure!(
         metadata.status().is_success()
             && metadata
@@ -1219,6 +1225,7 @@ fn acquire_access_token(
         token_type: String,
     }
     let body = bounded_response(metadata, 16 * 1024)?;
+    drop(timing);
     let token: MetadataToken = crate::json::decode(&body)
         .map_err(|_| anyhow::anyhow!("workspace_directory_workload_identity_unavailable"))?;
     ensure!(
@@ -1261,6 +1268,14 @@ fn acquire_access_token(
             .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
     iam_auth.set_sensitive(true);
     let request_body = serde_json::to_vec(&payload)?;
+    let mut timing = crate::request_timing::provider(
+        "workspace_directory",
+        if delegated_admin.is_some() {
+            "iam_sign_jwt"
+        } else {
+            "iam_token"
+        },
+    );
     let response = client
         .post(endpoint)
         .header(reqwest::header::AUTHORIZATION, iam_auth)
@@ -1268,7 +1283,9 @@ fn acquire_access_token(
         .body(request_body)
         .send()
         .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
+    timing.status(response.status().as_u16());
     let body = bounded_response(response, 16 * 1024)?;
+    drop(timing);
     let result: IamToken = crate::json::decode(&body)
         .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
     validate_iam_token_shape(&result, delegated_admin.is_some())?;
@@ -1302,6 +1319,7 @@ fn acquire_access_token(
                 >= 64,
             "workspace_directory_authentication_failed"
         );
+        let mut timing = crate::request_timing::provider("workspace_directory", "oauth_token");
         let response = client
             .post(oauth_endpoint)
             .form(&[
@@ -1310,7 +1328,9 @@ fn acquire_access_token(
             ])
             .send()
             .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
+        timing.status(response.status().as_u16());
         let body = bounded_response(response, 16 * 1024)?;
+        drop(timing);
         #[derive(Deserialize)]
         struct OAuthToken {
             access_token: String,
@@ -1347,7 +1367,7 @@ impl DirectoryReadPort for NativeDirectoryPort {
             .append_pair("projection", "full")
             .append_pair("viewType", "admin_view")
             .append_pair("fields", "customerId,orgUnitPath");
-        let body = self.get(url, MAX_USER_RESPONSE_BYTES)?;
+        let body = self.get(url, MAX_USER_RESPONSE_BYTES, "directory_user")?;
         parse_user_path(&body, &self.customer_id)
     }
 
@@ -1369,7 +1389,7 @@ impl DirectoryReadPort for NativeDirectoryPort {
                 "fields",
                 "organizationUnits(orgUnitId,name,orgUnitPath,parentOrgUnitId,parentOrgUnitPath)",
             );
-        let body = self.get(url, MAX_RESPONSE_BYTES)?;
+        let body = self.get(url, MAX_RESPONSE_BYTES, "directory_orgunits")?;
         let response_bytes = body.len();
         Ok(ProviderPage {
             units: parse_org_unit_response(&body)?,
@@ -2549,6 +2569,107 @@ mod tests {
         assert!(
             parse_user_path(br#"{"customerId":"other","orgUnitPath":"/"}"#, "customer-1").is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_timing_names_each_exchange_without_tokens_accounts_or_payloads() -> Result<()> {
+        use std::{net::TcpListener, thread};
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        let server = thread::spawn(move || -> Result<()> {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept()?;
+                let request = http_request(&mut stream)?;
+                let (body, metadata) = if request.starts_with("GET /computeMetadata/") {
+                    (
+                        r#"{"access_token":"metadata-secret-token","token_type":"Bearer"}"#
+                            .to_owned(),
+                        true,
+                    )
+                } else if request.contains(":generateAccessToken ") {
+                    (
+                        r#"{"accessToken":"directory-secret-token","expireTime":"2030-01-01T00:00:00Z"}"#
+                            .to_owned(),
+                        false,
+                    )
+                } else if request.contains("/users/") {
+                    (
+                        r#"{"customerId":"customer-1","orgUnitPath":"/Secret Engineering"}"#
+                            .to_owned(),
+                        false,
+                    )
+                } else {
+                    anyhow::bail!(
+                        "unexpected request: {}",
+                        request.lines().next().unwrap_or("missing")
+                    )
+                };
+                fixture_response(&mut stream, &body, metadata)?;
+            }
+            Ok(())
+        });
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = crate::request_timing::Recorder::request(
+            crate::request_timing::Output::Capture(captured.clone()),
+            crate::request_timing::now(),
+        );
+        let observed = {
+            let _entered = recorder.enter();
+            let mut port = NativeDirectoryPort::transport_fixture(
+                AuthenticationPlan::DirectServiceAccount {
+                    service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                },
+                "customer-1",
+                100,
+                CaptureMode::UserPath,
+                [origin.as_str(); 4],
+            )?;
+            collect_user_path(capture_input("alice@example.test"), &mut port)
+        };
+        server.join().expect("fixture server panicked")?;
+        assert_eq!(observed?.user_path, "/Secret Engineering");
+        drop(recorder);
+        let raw = captured.lock().unwrap().clone();
+        assert_eq!(raw.len(), 1);
+        let line: serde_json::Value = serde_json::from_str(&raw[0])?;
+        let calls: Vec<_> = line["phases"]
+            .as_array()
+            .context("phases")?
+            .iter()
+            .filter(|phase| phase["phase"] == "provider")
+            .map(|phase| {
+                assert!(phase["ms"].as_f64().is_some_and(|ms| ms >= 0.0));
+                (
+                    phase["capability"].as_str().unwrap_or_default().to_owned(),
+                    phase["endpoint"].as_str().unwrap_or_default().to_owned(),
+                    phase["status"].as_u64().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let expected =
+            |endpoint: &str| ("workspace_directory".to_owned(), endpoint.to_owned(), 200);
+        assert_eq!(
+            calls,
+            [
+                expected("metadata_token"),
+                expected("iam_token"),
+                expected("directory_user")
+            ]
+        );
+        assert_eq!(line["totals"]["provider_calls"], 3);
+        for secret in [
+            "metadata-secret-token",
+            "directory-secret-token",
+            "alice",
+            "example.test",
+            "Secret Engineering",
+            "customer-1",
+            "directory-reader",
+            "127.0.0.1",
+        ] {
+            assert!(!raw[0].contains(secret), "{secret} leaked: {}", raw[0]);
+        }
         Ok(())
     }
 }

@@ -61,3 +61,9 @@ variable "journal_trace_hours" {
     error_message = "journal_trace_hours must be a whole number of hours between 1 and 8784."
   }
 }
+
+variable "request_timing" {
+  description = "Whether the app writes one JSON timing line per HTTP request to stdout (instance request_timing). Null keeps day2's default for edge serving (on); false turns the lines off."
+  type        = bool
+  default     = null
+}

@@ -250,6 +250,8 @@ impl Drop for Turn {
 pub struct WriteTransaction<'connection> {
     transaction: Option<Transaction<'connection>>,
     _turn: Turn,
+    // Last: the hold ends after rollback and turn release.
+    _timing: crate::request_timing::WriterHold,
 }
 
 impl<'connection> WriteTransaction<'connection> {
@@ -297,11 +299,14 @@ fn immediate_within(
     connection: &mut dyn ConnectionOwner,
     wait: Duration,
 ) -> rusqlite::Result<WriteTransaction<'_>> {
+    let mut timing = crate::request_timing::writer_wait();
     let turn = Turn::take(connection.connection().path(), wait)?;
+    timing.turned();
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     Ok(WriteTransaction {
         transaction: Some(transaction),
         _turn: turn,
+        _timing: timing.began(),
     })
 }
 

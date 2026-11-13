@@ -79,6 +79,7 @@ pub mod protocol;
 pub mod public_downloads;
 pub mod redirects;
 pub mod registry;
+mod request_timing;
 pub mod resource_admin;
 mod resource_catalog_history;
 mod resources;

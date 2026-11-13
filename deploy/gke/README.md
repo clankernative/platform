@@ -1181,6 +1181,12 @@ and its scratch volume holds a full copy: as the database grows, keep
 and artifact together, and `backup_active_deadline_seconds` above the copy,
 integrity checks and upload.
 
+Each HTTP request writes one JSON timing line to stdout, which Cloud Logging
+keeps as `jsonPayload.event="day2_request"`: its phases, preparation commands,
+provider calls, writer waits and trace bytes. Set `request_timing = false` to
+turn the lines off. The fields are described in
+[request timing lines](../../docs/REQUEST-TIMING.md).
+
 `app-edge.public_download_paths` optionally routes exact
 `/downloads/<filename>.crx` and `.xml` URLs through a separate backend without
 IAP. Use it for Chrome Enterprise update XML and CRX downloads, whose updater

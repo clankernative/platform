@@ -154,6 +154,8 @@ pub(crate) struct Host {
     live_capacity: Arc<Semaphore>,
     admitting: Arc<AtomicBool>,
     health_endpoints: bool,
+    /// Per-request phase timing lines; `None` when the instance turned them off.
+    request_timing: Option<crate::request_timing::Output>,
 }
 pub struct LocalServer {
     listener: TcpListener,
@@ -172,6 +174,7 @@ struct ListenerOptions {
     concurrency: usize,
     health_endpoints: bool,
     presentation: PresentationSource,
+    request_timing: bool,
 }
 
 pub(crate) struct Admission(Arc<AtomicBool>);
@@ -479,6 +482,8 @@ impl LocalServer {
         verifier: crate::iap::Verifier,
         concurrency: usize,
     ) -> Result<Self> {
+        // Production serving: on unless the instance turns it off.
+        let request_timing = request_timing_setting(&runtime).unwrap_or(true);
         Self::bind_listener(
             runtime,
             listener,
@@ -489,6 +494,7 @@ impl LocalServer {
                 concurrency,
                 health_endpoints: true,
                 presentation: PresentationSource::Environment,
+                request_timing,
             },
         )
     }
@@ -513,6 +519,8 @@ impl LocalServer {
         let origin = format!("http://{authority}");
         let inputs = runtime.inputs();
         let (grant, token) = Grant::issue(actor, inputs.entropy.as_ref(), inputs.clock.as_ref())?;
+        // Local development: off unless the instance turns it on.
+        let request_timing = request_timing_setting(&runtime).unwrap_or(false);
         let mut server = Self::bind_listener(
             runtime,
             listener,
@@ -523,6 +531,7 @@ impl LocalServer {
                 concurrency,
                 health_endpoints,
                 presentation: PresentationSource::Environment,
+                request_timing,
             },
         )?;
         server.login_url = format!("{origin}/login?token={token}");
@@ -614,6 +623,9 @@ impl LocalServer {
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
             health_endpoints: options.health_endpoints,
+            request_timing: options
+                .request_timing
+                .then_some(crate::request_timing::Output::Stdout),
         });
         observed.complete();
         Ok(Self {
@@ -626,6 +638,16 @@ impl LocalServer {
 
     pub(crate) fn admission(&self) -> Admission {
         Admission(self.host.admitting.clone())
+    }
+
+    /// Tests read the timing lines this server writes instead of stdout.
+    #[cfg(test)]
+    pub(crate) fn capture_request_timing(&mut self) -> Result<Arc<Mutex<Vec<String>>>> {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        Arc::get_mut(&mut self.host)
+            .context("listener host already shared")?
+            .request_timing = Some(crate::request_timing::Output::Capture(lines.clone()));
+        Ok(lines)
     }
 
     /// Trusted host injection for an explicitly selected secret provider.
@@ -674,6 +696,7 @@ impl LocalServer {
                 self.host.live_ticks.clone(),
                 self.host.admitting.clone(),
                 stopped,
+                self.host.request_timing.clone(),
             )))
         } else {
             None
@@ -851,6 +874,7 @@ pub(crate) async fn native_pump(
         host.live_ticks.clone(),
         host.admitting.clone(),
         stopped,
+        host.request_timing.clone(),
     )
     .await
 }
@@ -872,6 +896,7 @@ pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeRe
                 && matches!(request.uri().path(), "/health/ready" | "/health/candidate")
                 && host.runtime.rolling()
             {
+                suppress_timing(&request);
                 let candidate_probe = request.uri().path() == "/health/candidate";
                 let runtime = host.runtime.clone();
                 let ready = tokio::task::spawn_blocking(move || {
@@ -885,6 +910,7 @@ pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeRe
                 );
             }
             if let Some(response) = native_literal_health(&host, &request) {
+                suppress_timing(&request);
                 return response;
             }
             NativeResponse::application(handle_inner(host, request).await)
@@ -892,11 +918,111 @@ pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeRe
         .await
 }
 
-async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
+/// The instance's explicit request timing choice for this app, if any. Startup
+/// already loaded and validated this instance; a file that cannot be read here
+/// leaves the serving mode's default.
+fn request_timing_setting(runtime: &Runtime) -> Option<bool> {
+    crate::artifact::Instance::load(runtime.instance_path())
+        .ok()?
+        .apps
+        .get(runtime.app())?
+        .request_timing
+}
+
+/// Health probes are not requests worth a timing line.
+fn suppress_timing(request: &Request) {
+    if let Some(timing) = request
+        .extensions()
+        .get::<crate::request_timing::Recorder>()
+    {
+        timing.suppress();
+    }
+}
+
+impl Host {
+    pub(crate) fn request_timing_output(&self) -> Option<crate::request_timing::Output> {
+        self.request_timing.clone()
+    }
+
+    /// A stable keyed hash of an actor: correlates one person's requests in
+    /// logs without writing their address. Domain-separated from every other
+    /// use of the session secret.
+    fn actor_digest(&self, actor: &str) -> Option<String> {
+        let mut value = b"day2-request-timing-actor\0".to_vec();
+        value.extend_from_slice(actor.as_bytes());
+        let signed = security::sign(&self.secret, &value).ok()?;
+        Some(format!("a:{}", signed.get(..16)?))
+    }
+}
+
+/// The load balancer's trace id, to join this line with its request log.
+/// Only the hexadecimal id is kept; anything else is dropped.
+fn cloud_trace(headers: &HeaderMap) -> Option<String> {
+    let mut values = headers.get_all("x-cloud-trace-context").iter();
+    let (Some(value), None) = (values.next(), values.next()) else {
+        return None;
+    };
+    let id = value.to_str().ok()?.split('/').next()?;
+    (!id.is_empty() && id.len() <= 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| id.to_owned())
+}
+
+async fn handle_inner(host: Arc<Host>, mut request: Request) -> Response {
+    let timing = request
+        .extensions_mut()
+        .remove::<crate::request_timing::Recorder>()
+        .or_else(|| {
+            host.request_timing.clone().map(|output| {
+                crate::request_timing::Recorder::request(output, crate::request_timing::now())
+            })
+        });
+    let _handler = timing
+        .as_ref()
+        .map(crate::request_timing::Recorder::handler);
+    if let Some(timing) = &timing {
+        let method = request.method();
+        let standard = [
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ];
+        timing.attribute(
+            "method",
+            serde_json::json!(if standard.contains(method) {
+                method.as_str()
+            } else {
+                "OTHER"
+            }),
+        );
+        timing.attribute("trace", serde_json::json!(cloud_trace(request.headers())));
+    }
+    let response = handle_timed(host, request, timing.as_ref()).await;
+    if let Some(timing) = &timing {
+        timing.respond(response.status().as_u16(), "complete");
+    }
+    response
+}
+
+async fn handle_timed(
+    host: Arc<Host>,
+    request: Request,
+    timing: Option<&crate::request_timing::Recorder>,
+) -> Response {
     if !host.admitting.load(Ordering::Acquire) {
+        if let Some(timing) = timing {
+            timing.respond(StatusCode::SERVICE_UNAVAILABLE.as_u16(), "not_admitting");
+        }
         return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
     }
     if request.uri().path().starts_with("/_platform/app-") {
+        if let Some(timing) = timing {
+            timing.attribute("category", serde_json::json!("app_call"));
+        }
+        let _span = timing.map(|timing| timing.span("app_call"));
         return handle_app_call(host, request).await;
     }
     let json = crate::web_api::is_json(request.uri().path())
@@ -919,26 +1045,51 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
     } else {
         QUEUE_WAIT
     };
+    let mut admission = timing.map(|timing| timing.span("admission"));
     let permit = match host.capacity.clone().try_acquire_owned() {
         Ok(permit) => permit,
-        Err(_) if live_request => return secure(live::retry_response()),
-        Err(_) => match queued_permit(&host, wait).await {
-            Some(permit) => permit,
-            None => {
-                let mut response = transport_error(
-                    json,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Server is busy. Retry this request.",
-                );
-                response.headers_mut().insert(
-                    header::RETRY_AFTER,
-                    axum::http::HeaderValue::from_static("1"),
-                );
-                return secure(response);
+        Err(_) if live_request => {
+            if let Some(timing) = timing {
+                timing.respond(StatusCode::SERVICE_UNAVAILABLE.as_u16(), "busy");
             }
-        },
+            return secure(live::retry_response());
+        }
+        Err(_) => {
+            if let Some(admission) = &mut admission {
+                admission.number(
+                    "queued",
+                    host.queued
+                        .load(Ordering::Acquire)
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                );
+            }
+            match queued_permit(&host, wait).await {
+                Some(permit) => permit,
+                None => {
+                    if let Some(timing) = timing {
+                        timing.respond(StatusCode::SERVICE_UNAVAILABLE.as_u16(), "busy");
+                    }
+                    let mut response = transport_error(
+                        json,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Server is busy. Retry this request.",
+                    );
+                    response.headers_mut().insert(
+                        header::RETRY_AFTER,
+                        axum::http::HeaderValue::from_static("1"),
+                    );
+                    return secure(response);
+                }
+            }
+        }
     };
+    drop(admission);
     if request.uri().path().starts_with("/_day2/oauth/") {
+        if let Some(timing) = timing {
+            timing.attribute("category", serde_json::json!("oauth"));
+        }
+        let _span = timing.map(|timing| timing.span("oauth"));
         return match &host.oauth {
             Some(receiver) => {
                 receiver
@@ -959,6 +1110,7 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
     } else {
         65_536
     };
+    let reading = timing.map(|timing| timing.span("body_read"));
     let body = match crate::managed_credentials::effects::timeout(
         Duration::from_secs(3),
         to_bytes(body, maximum_body),
@@ -969,9 +1121,25 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
         Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
         Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
     };
+    drop(reading);
+    if let (Some(timing), Err(status)) = (timing, &body) {
+        timing.failure(if *status == StatusCode::REQUEST_TIMEOUT {
+            "request_body_timeout"
+        } else {
+            "request_body_too_large"
+        });
+    }
     let native = host.oauth.is_some();
+    let dispatch_timing = timing.cloned();
+    let queued_at = crate::request_timing::now();
     let dispatch = move || {
         let _permit = permit;
+        let _entered = dispatch_timing.as_ref().map(|timing| {
+            if !native {
+                timing.completed("dispatch_queue", queued_at, crate::request_timing::now());
+            }
+            timing.enter()
+        });
         let at = if parts
             .uri
             .path()
@@ -998,11 +1166,24 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             "/docs" => "api_docs",
             _ => "page",
         };
-        let admitted = host.admit(&parts.headers, parts.uri.path(), at);
+        if let Some(timing) = &dispatch_timing {
+            timing.attribute("category", serde_json::json!(category));
+        }
+        let admitted = {
+            let _span = crate::request_timing::span("authenticate");
+            host.admit(&parts.headers, parts.uri.path(), at)
+        };
         let (session, issued) = match &admitted {
             Ok((session, issued)) => (session.clone(), issued.clone()),
             Err(_) => (None, None),
         };
+        if let (Some(timing), Some(session)) = (&dispatch_timing, &session) {
+            timing.attribute(
+                "actor",
+                serde_json::json!(host.actor_digest(&session.actor)),
+            );
+        }
+        let access_log = crate::request_timing::span("access_log");
         // Record admission before running any business action. These events do
         // not contain query strings, request bodies, credentials or tickets.
         host.runtime.web_event(
@@ -1011,16 +1192,23 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             category,
             102,
         )?;
+        drop(access_log);
         let response = match (admitted, body) {
-            (Err(error), _) => Ok(edge_refusal(json, &error)),
-            (Ok(_), Ok(body)) => host.dispatch(
-                &parts.method,
-                &parts.uri,
-                &parts.headers,
-                &body,
-                session.as_ref(),
-                at,
-            ),
+            (Err(error), _) => {
+                crate::request_timing::failure(crate::error::classify(&error).code());
+                Ok(edge_refusal(json, &error))
+            }
+            (Ok(_), Ok(body)) => {
+                let _span = crate::request_timing::span("dispatch");
+                host.dispatch(
+                    &parts.method,
+                    &parts.uri,
+                    &parts.headers,
+                    &body,
+                    session.as_ref(),
+                    at,
+                )
+            }
             (Ok(_), Err(status)) => Ok(transport_error(
                 json,
                 status,
@@ -1028,6 +1216,7 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             )),
         }
         .unwrap_or_else(|error| {
+            crate::request_timing::failure(crate::error::classify(&error).code());
             if json {
                 crate::web_api::failure(&error)
             } else {
@@ -1044,12 +1233,14 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
                 .headers_mut()
                 .insert(header::CACHE_CONTROL, "no-store".parse()?);
         }
+        let access_log = crate::request_timing::span("access_log");
         host.runtime.web_event(
             at,
             session.as_ref().map(|s| s.actor.as_str()),
             category,
             response.status().as_u16(),
         )?;
+        drop(access_log);
         Ok::<_, anyhow::Error>(response)
     };
     let response = if native {
@@ -2119,6 +2310,7 @@ impl Host {
             proof.is_empty() || (proof.len() == 1 && proof[0] == "true"),
             crate::error::Failure::InvalidInput
         );
+        crate::request_timing::route(name);
         let page = self.runtime.artifact().page(name)?;
         if page.preparation.is_empty() {
             return self.with_query_cache_proof(
@@ -2153,6 +2345,7 @@ impl Host {
         input_record.validate_input(input)?;
         // Admission is an all-or-nothing preflight: no preparation command may
         // run until every operation needed by this page is authorized.
+        let authorizing = crate::request_timing::span("authorize");
         let expected = self.runtime.sql_read(|tx| {
             std::iter::once(&page.operation)
                 .chain(page.preparation.iter())
@@ -2171,6 +2364,7 @@ impl Host {
                 })
                 .collect::<Result<Vec<_>>>()
         })?;
+        drop(authorizing);
         let primary = &expected[0].1;
         self.check_preparation_authority(&expected, &session.actor)?;
 
@@ -2180,6 +2374,8 @@ impl Host {
                 "page-prepare-{index}-{}",
                 security::random(self.entropy.as_ref())?
             );
+            let mut timing = crate::request_timing::invocation("preparation", operation);
+            timing.identifier("invocation", &id);
             let result = self.runtime.invoke_verified(
                 operation,
                 crate::store::RequestIdentity {
@@ -2191,6 +2387,8 @@ impl Host {
                 at,
                 Fault::None,
             );
+            timing.outcome(&result);
+            drop(timing);
             let failure = match result {
                 Ok(outcome) if outcome.status == "success" => None,
                 Ok(outcome) => {
@@ -2211,6 +2409,8 @@ impl Host {
                     self.check_preparation_authority(&expected, &session.actor)?;
                     let fallback = &page.prepare_failure_operation;
                     let id = format!("page-fallback-{}", security::random(self.entropy.as_ref())?);
+                    let mut timing = crate::request_timing::invocation("fallback", fallback);
+                    timing.identifier("invocation", &id);
                     let fallback_result = self.runtime.invoke_verified(
                         fallback,
                         crate::store::RequestIdentity {
@@ -2222,6 +2422,8 @@ impl Host {
                         at,
                         Fault::None,
                     );
+                    timing.outcome(&fallback_result);
+                    drop(timing);
                     let outcome = fallback_result?;
                     if outcome.status != "success" {
                         return Ok(error_page(
@@ -2341,10 +2543,15 @@ impl Host {
         // the command and its durable receipt are never repeated here.
         let outcome = match supplied_outcome {
             Some(outcome) => outcome,
-            None => fresh_page_query(self.entropy.as_ref(), |id| {
-                self.runtime
-                    .render_page(name, &session.actor, id, input, at)
-            })?,
+            None => {
+                let mut timing = crate::request_timing::invocation("page_query", &page.operation);
+                let result = fresh_page_query(self.entropy.as_ref(), |id| {
+                    self.runtime
+                        .render_page(name, &session.actor, id, input, at)
+                });
+                timing.outcome(&result);
+                result?
+            }
         };
         if outcome.status != "success" {
             if let Some(rejection) = declared_page_rejection(&self.runtime, name, &outcome.error) {
@@ -2368,6 +2575,7 @@ impl Host {
             now: at,
             submitted,
         };
+        let rendering = crate::request_timing::span("render");
         let content = if page.template.is_empty() {
             renderer.render(&outcome.result)?
         } else {
@@ -2412,6 +2620,7 @@ impl Host {
             };
             crate::web_forms::bind(&renderer, &markup)?
         };
+        drop(rendering);
         // Presentation execution may take seconds. Do not return a formerly
         // authorized query after revocation or an A -> B -> A policy change.
         if let Some(authority) = presentation_authority {
@@ -2449,6 +2658,7 @@ impl Host {
                 .context(crate::error::Failure::InvalidTicket)?,
         )?)?;
         ticket.verify(&self.runtime, session, at)?;
+        crate::request_timing::route(&ticket.operation);
         let record = &self.runtime.artifact().contract().schema.inputs[&self
             .runtime
             .artifact()
@@ -2610,6 +2820,7 @@ impl Host {
                 "Check the values and try again.",
             )
         } else {
+            let mut timing = crate::request_timing::invocation("command", &ticket.operation);
             let outcome = self.runtime.invoke_verified(
                 &ticket.operation,
                 crate::store::RequestIdentity {
@@ -2620,7 +2831,10 @@ impl Host {
                 &input,
                 at,
                 Fault::None,
-            )?;
+            );
+            timing.outcome(&outcome);
+            drop(timing);
+            let outcome = outcome?;
             if outcome.status == "success" {
                 (StatusCode::OK, "Saved.")
             } else if outcome.status == "pending" {
