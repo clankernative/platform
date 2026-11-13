@@ -317,7 +317,7 @@ impl Fixture {
         let identity = format!("effect-{id}-{ordinal}");
         tx.execute(
             "INSERT OR IGNORE INTO day2_execution VALUES(?1,'effects',?2)",
-            params![id, serde_json::to_string(&trace)?],
+            params![id, crate::journal::store_trace(&tx, &trace)?],
         )?;
         tx.execute(
             "INSERT INTO day2_external_effects VALUES(?1,?2,?3,?4,NULL)",

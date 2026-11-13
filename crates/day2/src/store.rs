@@ -2403,9 +2403,7 @@ impl Runtime {
                 |r| r.get(0),
             )?;
             // Completed invocations keep only a receipt once the journal window passes.
-            Ok(serde_json::from_str(
-                &raw.context("invocation_trace_compacted")?,
-            )?)
+            crate::journal::load_trace(connection, &raw.context("invocation_trace_compacted")?)
         })
     }
     pub fn render_page(
@@ -2656,8 +2654,10 @@ pub(crate) fn completed_outcome(
     {
         return compacted_outcome(connection, id, outcome, policy, &receipt);
     }
-    let trace: Trace =
-        serde_json::from_str(&raw.context(crate::error::Failure::ReceiptAuthorityUnavailable)?)?;
+    let trace = crate::journal::load_trace(
+        connection,
+        &raw.context(crate::error::Failure::ReceiptAuthorityUnavailable)?,
+    )?;
     ensure!(
         trace.format == 2,
         crate::error::Failure::ReceiptAuthorityUnavailable
@@ -2706,7 +2706,7 @@ fn compacted_outcome(
 
 fn complete(connection: &Transaction<'_>, id: &str, trace: &Trace) -> Result<()> {
     ensure!(connection.execute("UPDATE day2_invocations SET status=?1,outcome=?2,trace=?3 WHERE id=?4 AND status='pending'",
-        params![trace.outcome.status,serde_json::to_string(&trace.outcome)?,serde_json::to_string(trace)?,id])? == 1, "invocation_completion_conflict");
+        params![trace.outcome.status,serde_json::to_string(&trace.outcome)?,crate::journal::store_trace(connection, trace)?,id])? == 1, "invocation_completion_conflict");
     connection.execute(
         "INSERT INTO day2_audit VALUES(?1,?2,?3,?4,?5)",
         params![

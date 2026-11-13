@@ -197,15 +197,25 @@ store provider does not have yet.
 Every invocation keeps its accepted input and a full trace: each storage
 observation, the authority policy it ran under and its outcome. A pending
 command needs all of it to resume by replay. A completed one needs almost
-none of it, and at roughly seventeen kilobytes per command the traces soon
-outweigh the business data by two orders of magnitude.
+none of it, and the traces soon outweigh the business data by two orders of
+magnitude.
 
-So the host compacts them. Once a completed invocation is older than the
+The policy is stored once. It is the whole access policy, the same for every
+invocation under one authority revision, and was most of every trace. A stored
+trace names it by digest; `day2_trace_policies` holds each distinct policy
+once. Reading a trace resolves the digest and checks the bytes
+against it, so `day2 trace`, replay and receipts see the full policy, and a
+changed or missing policy row fails closed.
+
+The host also compacts traces. Once a completed invocation is older than the
 window, a background pass that runs about once a minute replaces its input
 and trace with a receipt: a digest of the input and a digest of the policy it
 ran under. The outcome column is kept as it was. An effectful command's
-completion copy of the trace goes too. Invocations that are still pending,
-including blocked ones, are never touched.
+completion copy of the trace goes too, and the provider response each of its
+external effects and attempts recorded is replaced by its digest. The effect
+and attempt rows stay settled: an effect without a recorded response is one
+whose outcome is unknown, and that is never what compaction leaves.
+Invocations that are still pending, including blocked ones, are never touched.
 
 What keeps working:
 

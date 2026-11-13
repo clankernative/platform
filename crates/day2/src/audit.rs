@@ -27,7 +27,7 @@ pub(crate) fn upgrade(db: &Connection) -> Result<()> {
     );
     if let Some(version) = &version {
         ensure!(
-            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"].contains(&version.as_str()),
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"].contains(&version.as_str()),
             "unknown_host_schema"
         );
     }
@@ -265,6 +265,16 @@ pub(crate) fn upgrade(db: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // Schema 11 stores each trace's authority policy once, by digest, instead of
+    // a full copy in every trace, and compacts the provider responses of
+    // invocations whose traces were already compacted. See `crate::journal`.
+    if at < 11 {
+        crate::journal::upgrade(db)?;
+        db.execute(
+            "UPDATE day2_meta SET value='11' WHERE key='host_schema'",
+            [],
+        )?;
+    }
     for (name, sql) in APPEND_TRIGGERS
         .iter()
         .chain(RECEIPT_TRIGGERS)
@@ -467,7 +477,7 @@ pub(crate) fn require_current_schema(db: &Connection) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    ensure!(version.as_deref() == Some("10"), "unsupported_host_schema");
+    ensure!(version.as_deref() == Some("11"), "unsupported_host_schema");
     validate_event_stream(db)?;
     for (name, sql) in APPEND_TRIGGERS
         .iter()

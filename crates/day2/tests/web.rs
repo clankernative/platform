@@ -2822,7 +2822,7 @@ fn current_host_reopen_is_repeatable_and_does_not_invent_event_metadata() -> Res
             [],
             |row| row.get::<_, String>(0)
         )?,
-        "10"
+        "11"
     );
     world.seed("new-receipt")?;
     assert_eq!(world.count("day2_audit_events")?, before + 2);
