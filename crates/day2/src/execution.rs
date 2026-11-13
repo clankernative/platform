@@ -59,7 +59,12 @@ pub(crate) fn load(connection: &Connection, id: &str) -> Result<Option<(Phase, T
         )
         .optional()?;
     value
-        .map(|(phase, trace)| Ok((Phase::persisted(&phase)?, serde_json::from_str(&trace)?)))
+        .map(|(phase, trace)| {
+            Ok((
+                Phase::persisted(&phase)?,
+                crate::journal::load_trace(connection, &trace)?,
+            ))
+        })
         .transpose()
 }
 
@@ -76,7 +81,7 @@ pub(crate) fn begin(runtime: &Runtime, connection: &Transaction<'_>, trace: &Tra
         "INSERT INTO day2_execution VALUES(?1,'effects',?2)",
         params![
             trace.request.context.invocation_id,
-            serde_json::to_string(trace)?
+            crate::journal::store_trace(connection, trace)?
         ],
     )?;
     let cause: String = connection
@@ -143,7 +148,7 @@ fn save(
     }
     // A competing executor may already have advanced. The next iteration reloads
     // the winner's transcript; it never overwrites a more advanced execution.
-    tx.execute("UPDATE day2_execution SET phase=?1,trace=?2 WHERE invocation=?3 AND phase='effects' AND trace=?4", params![phase, serde_json::to_string(next)?, next.request.context.invocation_id, serde_json::to_string(previous)?])?;
+    tx.execute("UPDATE day2_execution SET phase=?1,trace=?2 WHERE invocation=?3 AND phase='effects' AND trace=?4", params![phase, crate::journal::store_trace(tx, next)?, next.request.context.invocation_id, crate::journal::store_trace(tx, previous)?])?;
     Ok(())
     })
 }

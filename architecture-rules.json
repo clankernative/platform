@@ -245,6 +245,7 @@
     "crates/day2/src/integrations/transport.rs",
     "crates/day2/src/invocations.rs",
     "crates/day2/src/journal.rs",
+    "crates/day2/src/journal_tests.rs",
     "crates/day2/src/json.rs",
     "crates/day2/src/lib.rs",
     "crates/day2/src/live.rs",

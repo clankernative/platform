@@ -119,7 +119,7 @@ impl Callee {
             "UPDATE day2_invocations SET status='success',outcome=?1,trace=?2 WHERE id=?3",
             params![
                 serde_json::to_string(&outcome)?,
-                serde_json::to_string(&trace)?,
+                crate::journal::store_trace(&connection, &trace)?,
                 id
             ],
         )?;

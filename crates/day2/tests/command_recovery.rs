@@ -329,6 +329,31 @@ fn compacted_journal_keeps_receipts_and_never_touches_unfinished_work() -> Resul
         (0, attempts, 0),
         "a compacted invocation keeps its attempt rows but no preparation or observation payloads"
     );
+    // The notification's provider response is a digest now, but the effect and
+    // its attempt still read as settled rather than unknown.
+    let effects = |id: &str| -> Result<(i64, i64, i64)> {
+        Ok(db.query_row(
+            "SELECT count(*),
+                    count(json_extract(e.observation,'$.compacted')),
+                    (SELECT count(json_extract(a.observation,'$.compacted'))
+                     FROM day2_external_attempts a JOIN day2_external_effects f ON f.identity=a.effect
+                     WHERE f.invocation=?1)
+             FROM day2_external_effects e WHERE e.invocation=?1 AND e.observation IS NOT NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    };
+    assert_eq!(
+        effects(&notify)?,
+        (1, 1, 1),
+        "a compacted invocation keeps settled effects but not provider responses"
+    );
+    // Every trace this app stored named the same policy, which is stored once.
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM day2_trace_policies", [], |r| r
+            .get::<_, i64>(0))?,
+        1
+    );
     assert_eq!(compact()?, 0, "compaction is idempotent");
     assert_eq!(
         db.query_row(
