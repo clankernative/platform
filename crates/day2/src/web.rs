@@ -944,15 +944,21 @@ impl Host {
         self.request_timing.clone()
     }
 
-    /// A stable keyed hash of an actor: correlates one person's requests in
-    /// logs without writing their address. Domain-separated from every other
-    /// use of the session secret.
     fn actor_digest(&self, actor: &str) -> Option<String> {
-        let mut value = b"day2-request-timing-actor\0".to_vec();
-        value.extend_from_slice(actor.as_bytes());
-        let signed = security::sign(&self.secret, &value).ok()?;
-        Some(format!("a:{}", signed.get(..16)?))
+        actor_digest(&self.secret, actor)
     }
+}
+
+/// A stable keyed hash of an actor: correlates one person's requests in logs
+/// without writing their address. Domain-separated from every other use of the
+/// session secret. `sign` returns `payload.tag`; only the HMAC tag is kept, as
+/// the payload is the input itself.
+fn actor_digest(secret: &[u8], actor: &str) -> Option<String> {
+    let mut value = b"day2-request-timing-actor\0".to_vec();
+    value.extend_from_slice(actor.as_bytes());
+    let signed = security::sign(secret, &value).ok()?;
+    let (_, tag) = signed.rsplit_once('.')?;
+    Some(format!("a:{}", tag.get(..16)?))
 }
 
 /// The load balancer's trace id, to join this line with its request log.
@@ -3590,6 +3596,28 @@ mod deployment_health_tests {
         Admission(accepting.clone()).stop();
         assert!(!accepting.load(Ordering::Acquire));
         Ok(())
+    }
+
+    #[test]
+    fn timing_actor_digests_are_keyed_distinct_and_never_carry_the_address() {
+        let secret = [7u8; 32];
+        let ada = actor_digest(&secret, "ada@exampleco.test").unwrap();
+        let grace = actor_digest(&secret, "grace@exampleco.test").unwrap();
+        assert_eq!(ada, actor_digest(&secret, "ada@exampleco.test").unwrap());
+        assert_ne!(ada, grace, "different people never share a digest");
+        assert_ne!(ada, actor_digest(&[8u8; 32], "ada@exampleco.test").unwrap());
+        assert!(ada.starts_with("a:") && ada.len() == 18);
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        for digest in [&ada, &grace] {
+            for leaked in [
+                "ada",
+                "exampleco",
+                &URL_SAFE_NO_PAD.encode("day2-request")[..8],
+                &URL_SAFE_NO_PAD.encode("ada@exampleco.test")[..8],
+            ] {
+                assert!(!digest.contains(leaked), "{digest} carries {leaked}");
+            }
+        }
     }
 
     #[tokio::test]

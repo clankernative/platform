@@ -655,6 +655,11 @@ mod edge {
         assert_eq!(admitted["trace"], TRACE);
         let actor = admitted["actor"].as_str().context("actor digest")?;
         assert!(actor.starts_with("a:") && actor.len() == 18, "{actor}");
+        // The digest is the keyed tag, never an encoding of its input.
+        assert!(
+            !actor.contains(&URL_SAFE_NO_PAD.encode("day2-request")[..8]),
+            "{actor}"
+        );
         for name in [
             "admission",
             "body_read",
