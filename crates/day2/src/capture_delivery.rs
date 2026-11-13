@@ -72,6 +72,9 @@ pub struct Staged {
     pub item_count: u64,
     /// Each page's complete result bytes, as returned to the application.
     pub pages: Vec<String>,
+    /// The index of each page's first item: 0 first, non-decreasing, at most
+    /// `item_count`. Lets a reader address the capture by item.
+    pub starts: Vec<u64>,
 }
 
 /// The bytes `encoded` occupies once it is embedded in a journaled observation
@@ -97,6 +100,7 @@ const DDL: &str = "CREATE TABLE IF NOT EXISTS day2_capture_deliveries (
     item_count INTEGER NOT NULL CHECK(item_count >= 0),
     page_count INTEGER NOT NULL CHECK(page_count BETWEEN 1 AND 10000),
     page INTEGER NOT NULL CHECK(page >= 0 AND page < page_count),
+    first_item INTEGER NOT NULL CHECK(first_item >= 0 AND first_item <= item_count),
     result TEXT NOT NULL
 ) STRICT";
 
@@ -189,6 +193,16 @@ pub(crate) fn stage(
             && staged.pages.len() <= max_pages,
         "capture_delivery_invalid"
     );
+    ensure!(
+        staged.starts.len() == staged.pages.len()
+            && staged.starts.first() == Some(&0)
+            && staged.starts.windows(2).all(|pair| pair[0] <= pair[1])
+            && staged
+                .starts
+                .iter()
+                .all(|start| *start <= staged.item_count),
+        "capture_delivery_invalid"
+    );
     for page in &staged.pages {
         ensure!(
             journal_bytes(page)? <= MAX_PAGE_JOURNAL_BYTES,
@@ -224,7 +238,7 @@ pub(crate) fn stage(
     let page_count = i64::try_from(staged.pages.len())?;
     for (index, page) in staged.pages.iter().enumerate() {
         connection.execute(
-            "INSERT INTO day2_capture_deliveries VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT INTO day2_capture_deliveries VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 key,
                 staged.id,
@@ -233,6 +247,7 @@ pub(crate) fn stage(
                 i64::try_from(staged.item_count)?,
                 page_count,
                 i64::try_from(index)?,
+                i64::try_from(staged.starts[index])?,
                 page,
             ],
         )?;
@@ -296,6 +311,41 @@ pub(crate) fn page(
         )
         .optional()?
         .context("capture_delivery_incomplete")
+}
+
+/// The staged page holding item `item`, with that page's first item index and
+/// the capture's item count. `None` when `item` is the item count itself (the
+/// end). The capture must be one complete, consistent set whose first page
+/// starts at item 0; a page that does not start at or before `item` refuses.
+pub(crate) fn page_at(
+    connection: &Connection,
+    holder: Holder<'_>,
+    kind: &str,
+    authority: &str,
+    id: &str,
+    item: u64,
+) -> Result<(u64, Option<(String, u64)>)> {
+    let (item_count, _) = held(connection, holder, kind, authority, id)?;
+    ensure!(item <= item_count, "capture_delivery_item_invalid");
+    let first: i64 = connection.query_row(
+        "SELECT first_item FROM day2_capture_deliveries WHERE holder=?1 AND id=?2 AND page=0",
+        params![holder.column(), id],
+        |row| row.get(0),
+    )?;
+    ensure!(first == 0, "capture_delivery_inconsistent");
+    if item == item_count {
+        return Ok((item_count, None));
+    }
+    let (result, start): (String, i64) = connection
+        .query_row(
+            "SELECT result,first_item FROM day2_capture_deliveries
+             WHERE holder=?1 AND id=?2 AND first_item<=?3 ORDER BY first_item DESC,page DESC LIMIT 1",
+            params![holder.column(), id, i64::try_from(item)?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .context("capture_delivery_inconsistent")?;
+    Ok((item_count, Some((result, u64::try_from(start)?))))
 }
 
 /// Release everything `invocation` staged. Called when its preparation ends.
@@ -390,6 +440,7 @@ mod tests {
             authority: "[\"C1\",\"directory@1\",\"reader@example.test\"]".into(),
             item_count: u64::try_from(pages.len()).unwrap(),
             pages: pages.iter().map(|page| (*page).to_owned()).collect(),
+            starts: (0..pages.len()).map(|index| index as u64).collect(),
         }
     }
 
@@ -526,7 +577,7 @@ mod tests {
             [],
         )?;
         db.execute_batch(
-            "INSERT INTO day2_capture_deliveries VALUES('ghost','sha256:0000000000000000000000000000000000000000000000000000000000000000','workspace_directory.hierarchy','[]',0,1,0,'{}');",
+            "INSERT INTO day2_capture_deliveries VALUES('ghost','sha256:0000000000000000000000000000000000000000000000000000000000000000','workspace_directory.hierarchy','[]',0,1,0,0,'{}');",
         )?;
         let survivor = staged("survivor", &["{}"]);
         stage(&db, Holder::Invocation("pending-c"), &survivor)?;
@@ -700,6 +751,7 @@ mod tests {
             authority: authority.into(),
             item_count: 2,
             pages: vec!["{\"page\":0}".into(), "{\"page\":1}".into()],
+            starts: vec![0, 1],
         }
     }
 
@@ -835,6 +887,7 @@ mod tests {
                 authority: format!("issuer-{index}"),
                 item_count: per_capture,
                 pages: vec![page.clone(); per_capture as usize],
+                starts: (0..per_capture).collect(),
             };
             match stage(&db, Holder::Application, &capture) {
                 Ok(_) => index += 1,

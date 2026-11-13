@@ -25,7 +25,7 @@ const GRANTED: [Action; 5] = [
     Action::CartaSnapshot,
     Action::CartaRecord,
     Action::CartaSnapshotDelivery,
-    Action::CartaDeliveryPage,
+    Action::CartaRecords,
     Action::CartaRelease,
 ];
 
@@ -313,12 +313,16 @@ impl Harness {
         )?)
     }
 
-    fn page(&self, id: &str, page: u64) -> Result<Value> {
+    fn page(&self, id: &str, from: u64) -> Result<Value> {
+        self.read(id, from, crate::carta::MAX_READ_RECORDS)
+    }
+
+    fn read(&self, id: &str, from: u64, limit: u64) -> Result<Value> {
         Ok(serde_json::from_str(
             &self
                 .dispatch(
-                    Action::CartaDeliveryPage,
-                    json!({"capture_id":id,"page":page}),
+                    Action::CartaRecords,
+                    json!({"capture_id":id,"from":from,"limit":limit}),
                 )?
                 .result,
         )?)
@@ -359,9 +363,12 @@ pub(super) fn observe(action: Action, variant: Variant) -> Result<Observed> {
             harness.dispatch(action, json!({"snapshot_id":snapshot.id,"cursor":0}))
         }
         Action::CartaSnapshotDelivery => harness.dispatch(action, json!({})),
-        Action::CartaDeliveryPage => {
+        Action::CartaRecords => {
             let delivery = harness.deliver()?;
-            harness.dispatch(action, json!({"capture_id":delivery.id,"page":0}))
+            harness.dispatch(
+                action,
+                json!({"capture_id":delivery.id,"from":0,"limit":256}),
+            )
         }
         _ => anyhow::bail!("not a Carta coverage action"),
     }
@@ -615,9 +622,8 @@ fn carta_delivery_holds_the_complete_capture_in_the_app_database_until_released(
                 delivery.grant_count,
                 delivery.vesting_event_count,
                 delivery.exercise_count,
-                delivery.page_count,
             ),
-            (3, 2, 1, 0, 0, 1)
+            (3, 2, 1, 0, 0)
         );
         assert!(delivery.id.starts_with("carta_"));
         assert_eq!(harness.provider()?.calls.len(), 4);
@@ -634,13 +640,32 @@ fn carta_delivery_holds_the_complete_capture_in_the_app_database_until_released(
             .iter()
             .map(tagged)
             .collect::<Result<Vec<_>>>()?;
-        assert_eq!(page, json!({"records":expected,"page":0,"done":true}));
+        assert_eq!(page, json!({"records":expected,"next":3,"done":true}));
+        // A range starts at any record, never crosses the end, and the end
+        // itself answers an empty, final result.
+        assert_eq!(
+            harness.read(&delivery.id, 1, 1)?,
+            json!({"records":[expected[1]],"next":2,"done":false})
+        );
+        assert_eq!(
+            harness.read(&delivery.id, 2, 5)?,
+            json!({"records":[expected[2]],"next":3,"done":true})
+        );
+        assert_eq!(
+            harness.page(&delivery.id, 3)?,
+            json!({"records":[],"next":3,"done":true})
+        );
+        for (from, limit) in [(4, 1), (u64::MAX, 1), (0, 0), (0, 257)] {
+            assert!(
+                harness.read(&delivery.id, from, limit).is_err(),
+                "{from} {limit}"
+            );
+        }
         assert_eq!(
             harness.provider()?.calls.len(),
             4,
-            "pages make no provider call"
+            "record reads make no provider call"
         );
-        assert!(harness.page(&delivery.id, 1).is_err());
 
         // A later invocation of the same app reads the held capture: the
         // harness reuses the invocation, so read it from the store directly too.
@@ -654,8 +679,8 @@ fn carta_delivery_holds_the_complete_capture_in_the_app_database_until_released(
         for binding in ["other_connection", "other_issuer"] {
             for (action, input) in [
                 (
-                    Action::CartaDeliveryPage,
-                    json!({"capture_id":delivery.id,"page":0}),
+                    Action::CartaRecords,
+                    json!({"capture_id":delivery.id,"from":0,"limit":256}),
                 ),
                 (Action::CartaRelease, json!({"capture_id":delivery.id})),
             ] {
@@ -740,21 +765,20 @@ fn synthetic_carta_delivery_holds_the_seeded_capture() -> Result<()> {
     assert_eq!(delivery.id, seeded.id);
     assert_eq!(delivery.source_profile, "synthetic");
     assert_eq!(delivery.record_count, 8);
-    assert_eq!(delivery.page_count, 1);
     let page: Value = serde_json::from_str(&observe(
-        Action::CartaDeliveryPage,
-        json!({"capture_id":delivery.id,"page":0}),
+        Action::CartaRecords,
+        json!({"capture_id":delivery.id,"from":0,"limit":256}),
     )?)?;
     let expected = example
         .records
         .iter()
         .map(tagged)
         .collect::<Result<Vec<_>>>()?;
-    assert_eq!(page, json!({"records":expected,"page":0,"done":true}));
+    assert_eq!(page, json!({"records":expected,"next":8,"done":true}));
     // The live binding of the same app cannot read the synthetic capture.
     let authorized = harness.authorize(
-        Action::CartaDeliveryPage,
-        json!({"capture_id":delivery.id,"page":0}),
+        Action::CartaRecords,
+        json!({"capture_id":delivery.id,"from":0,"limit":256}),
         "carta",
         ACTOR,
     )?;

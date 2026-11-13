@@ -7,7 +7,7 @@ application in a sibling store with a platform-chosen expiry.
 
 Status: both paths are implemented beside the unchanged v1 capabilities.
 Workspace Directory (`workspace_directory.hierarchy.v2`, `page.v2`) uses an
-invocation-held delivery. Carta (`carta.snapshot.v2`, `page.v2`,
+invocation-held delivery. Carta (`carta.snapshot.v2`, `records.v2`,
 `release.v2`) uses an application-held delivery, the option chosen in
 [Carta](#carta-application-held-delivery).
 
@@ -221,14 +221,18 @@ cannot both hold for Carta under the current budgets. The options were:
   synthetic capture is bound to the scope and issuer. Any other grant, including
   another connection revision or a live binding reading a synthetic capture, gets
   `capture_delivery_authority_changed`.
-- **`carta.page.v2 {capture_id, page}`** (observation): a local read with no
-  calls or bytes. Any invocation of the app can read it while the authority
-  matches. Pages encode records as SDK tags:
-  `{"records":[{"Stakeholder":{...}},{"Grant":{...}},…],"page":0,"done":true}`.
-- **`carta.release.v2 {capture_id}`** (effect): deletes the app's held copy and
-  returns `{"released": bool}`. It is idempotent, so it is classified for safe
-  retry. It is a write because it changes state the app relies on. It is not
-  destroying: it removes a recapturable copy, never an app row or provider data.
+- **`carta.records.v2 {capture_id, from, limit}`** (observation): a local read
+  with no calls or bytes of up to `limit` (1–256) records starting at record
+  `from`, never crossing a staged page. Any invocation of the app can read while
+  the authority matches. An importer keeps one record cursor, so no app model
+  needs page bookkeeping (an installed app can only add optional text fields).
+  Records use SDK tags:
+  `{"records":[{"Stakeholder":{...}},{"Grant":{...}},…],"next":3,"done":true}`.
+- **`carta.release.v2 {capture_id}`** (observation): deletes the app's held copy
+  and returns `{"released": bool}`. Like delivery, it changes only host-held
+  capture rows, never an app row or provider data, so it is a preparation step:
+  a reader releases what no later read needs before it holds a new capture. It
+  is idempotent, so re-preparation is safe.
 - **Bounds**: at most two unreleased captures per authority. A third snapshot
   fails with `capture_delivery_release_required` and discards nothing. All held
   captures in one app database are capped at 128 MiB
@@ -238,21 +242,25 @@ cannot both hold for Carta under the current budgets. The options were:
 
 ### Equity migration
 
-1. `CaptureImport.prepare`: `Carta.deliver(context)`. Store `delivery.id` and
-   `page_count` on the import run in place of the v1 `capture_id` and record
-   count. If an earlier run already persisted this `id`, release it and skip.
-2. `AdvanceImport.prepare`: read pages from the saved page cursor with
-   `Carta.delivery_page_with(resource, id, page)`, as many as the invocation's
-   budget allows (up to about 31). `decide` maps `DeliveryPage.records` into
-   Equity's models with one `create_many` per page and advances the page cursor.
-   This replaces one invocation per record with one per batch of pages.
-3. At completion (`PruneImport`, or the final `AdvanceImport`), deliver
-   `Carta.release_with(resource, id)` from an effects handler, and declare
-   `Carta.release_effect` in its execution bounds.
-4. Operators add `carta.snapshot.v2`, `carta.page.v2` and `carta.release.v2` to
-   Equity's Carta slot. `release.v2` must be in the operation's effects.
-5. Verification campaigns keep working: disposable verification grants the v2
-   actions from the declarations, and the synthetic seed backs `snapshot.v2`.
+As implemented on Equity's `carta-delivery-v2` branch:
+
+- While preparing, `capture_import` releases the held captures of the
+  catalog's finished runs, newest first and at most sixteen, then calls
+  `Carta.deliver_with`; its run fields keep their meaning. A capture an earlier
+  preparation kept belonged to a run then in flight, which is newer than every
+  run released before it. Capture identity is content, so a capture that a
+  pending or importing run of the catalog records is kept.
+- `advance_import` reads up to eight records from its cursor with `Carta.read`
+  and stages them in one transaction, carrying the run's counters in memory and
+  saving them once. Eight records at no more than five steps each, plus the
+  reads and the continuation, stay inside the 64-step budget. A rejected record
+  saves the progress made before it and then fails the run, so pruning stays
+  accounted.
+- Operators grant `carta_snapshot_delivery` and `carta_release` to
+  `capture_import`, and `carta_records` to `advance_import`, all as
+  observations.
+- Verification campaigns use the synthetic seed through `snapshot.v2`, and
+  disposable verification grants the v2 actions from the declarations.
 
 ## Notifications
 
@@ -293,7 +301,7 @@ provider's history. This is not implemented.
   invocation-held deliveries at the decision boundary or on failure.
 - SDK: `WorkspaceDirectory.roc` and `Carta.roc` (both sealed; pins refreshed).
 - Registry actions, disposable-verification bindings and coverage
-  demonstrations (`HeldCaptureRelease` for the release effect).
+  demonstrations (`HeldCaptureRelease` for the release).
 - Tests:
   - `capture_delivery::tests`: bounds, isolation, sweep, app holder, cap and
     release.

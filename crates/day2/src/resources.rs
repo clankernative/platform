@@ -645,7 +645,7 @@ pub(crate) fn record_use(
                 Action::WorkspaceDirectoryHierarchy
                     | Action::WorkspaceDirectoryDeliveryPage
                     | Action::CartaRecord
-                    | Action::CartaDeliveryPage
+                    | Action::CartaRecords
                     | Action::CartaRelease
             ))
             && u64::try_from(count)?

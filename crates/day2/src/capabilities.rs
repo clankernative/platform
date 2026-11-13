@@ -64,10 +64,11 @@ struct WorkspaceDirectoryPageRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CartaDeliveryPageRequest {
+struct CartaRecordsRequest {
     handle: String,
     capture_id: String,
-    page: u64,
+    from: u64,
+    limit: u64,
 }
 
 #[derive(Deserialize)]
@@ -172,11 +173,12 @@ enum Action {
         issuer_id: String,
         authority: String,
     },
-    /// A page of an application-held capture. Local; reaches no provider.
-    CartaDeliveryPage {
+    /// A range of an application-held capture's records. Local; reaches no provider.
+    CartaRecords {
         authority: String,
         capture_id: String,
-        page: u64,
+        from: u64,
+        limit: u64,
     },
     /// Release an application-held capture. Local and idempotent.
     CartaRelease {
@@ -245,7 +247,7 @@ impl Authorized {
         // stable effect IDs with a committed payload/result ledger. A future
         // live adapter must explicitly supply deduplication/reconciliation
         // before admitting a second attempt after an unknown outcome.
-        matches!(self.action, Action::Send(_) | Action::CartaRelease { .. })
+        matches!(self.action, Action::Send(_))
             || matches!(&self.action, Action::People(action) if action.is_write())
             || matches!(&self.action, Action::Delegate(call) if call.purpose == crate::delegation::Purpose::Send)
             || matches!(&self.action, Action::Freetool(_))
@@ -620,7 +622,7 @@ pub(crate) fn authorized(
             resource.grant.provider,
             &resource.grant.target,
         )?),
-        "carta.snapshot.v2" | "carta.page.v2" | "carta.release.v2" => {
+        "carta.snapshot.v2" | "carta.records.v2" | "carta.release.v2" => {
             ensure!(
                 resource.grant.provider == Provider::Carta,
                 crate::error::Failure::ResourceForbidden
@@ -680,22 +682,27 @@ pub(crate) fn authorized(
                         authority,
                     }
                 }
-                "carta.page.v2" => {
-                    let input: CartaDeliveryPageRequest =
+                "carta.records.v2" => {
+                    let input: CartaRecordsRequest =
                         crate::json::decode(instruction.data.as_bytes())?;
                     ensure!(
                         input.handle == resource.handle,
                         crate::error::Failure::ResourceForbidden
                     );
                     crate::carta::validate_snapshot_id(&input.capture_id)?;
+                    ensure!(
+                        (1..=crate::carta::MAX_READ_RECORDS).contains(&input.limit),
+                        "carta_read_limit_invalid"
+                    );
                     // A local read of the application's own held capture.
                     quote.request_bytes = 0;
                     quote.response_bytes = 0;
                     resource.planned_calls = 0;
-                    Action::CartaDeliveryPage {
+                    Action::CartaRecords {
                         authority,
                         capture_id: input.capture_id,
-                        page: input.page,
+                        from: input.from,
+                        limit: input.limit,
                     }
                 }
                 _ => {
@@ -1569,22 +1576,42 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
                 hold_carta_delivery(runtime, &snapshot, &records, &authority)
             })
         }
-        Action::CartaDeliveryPage {
+        Action::CartaRecords {
             authority,
             capture_id,
-            page,
+            from,
+            limit,
         } => {
-            let result = runtime.sql_read(|db| {
-                crate::capture_delivery::page(
-                    db,
-                    crate::capture_delivery::Holder::Application,
-                    crate::carta::DELIVERY_KIND,
-                    &authority,
-                    &capture_id,
-                    page,
-                )
-            });
+            let result = runtime
+                .sql_read(|db| crate::carta::records(db, &authority, &capture_id, from, limit));
             // Read from the application's own held capture: no provider call.
+            return ProviderResult {
+                result,
+                correlation: Vec::new(),
+                pending: false,
+                usage: crate::resources::ProviderUsage {
+                    known: true,
+                    ..Default::default()
+                },
+            };
+        }
+        Action::CartaRelease {
+            authority,
+            capture_id,
+        } => {
+            let result = runtime
+                .sql_write(|tx| {
+                    crate::capture_delivery::release_held(
+                        tx,
+                        crate::carta::DELIVERY_KIND,
+                        &authority,
+                        &capture_id,
+                    )
+                })
+                .map(|released| json!({"released": released}).to_string());
+            // Local and idempotent: no provider call, no traffic. A preparation
+            // step like delivery, so a reader releases what it no longer reads
+            // before holding a new capture.
             return ProviderResult {
                 result,
                 correlation: Vec::new(),
@@ -1644,31 +1671,6 @@ pub(crate) fn execute(
             return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
         }
         Action::Send(message) => with_world(runtime, |world| world.send(effect_id, message)),
-        Action::CartaRelease {
-            authority,
-            capture_id,
-        } => {
-            let result = runtime
-                .sql_write(|tx| {
-                    crate::capture_delivery::release_held(
-                        tx,
-                        crate::carta::DELIVERY_KIND,
-                        &authority,
-                        &capture_id,
-                    )
-                })
-                .map(|released| json!({"released": released}).to_string());
-            // Local and idempotent: no provider call, no traffic.
-            return ProviderResult {
-                result,
-                correlation: Vec::new(),
-                pending: false,
-                usage: crate::resources::ProviderUsage {
-                    known: true,
-                    ..Default::default()
-                },
-            };
-        }
         // A grant is computed, not dispatched, so it resolves the same way on
         // both paths: downloading authorizes a read, uploading authorizes a write,
         // and neither reaches the network.
