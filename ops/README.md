@@ -193,6 +193,8 @@ prints IDs and changes neither cache contents nor billing/storage limits.
 The [online runtime/SDK upgrade plan](../docs/ONLINE-RUNTIME-UPGRADES.md)
 describes proposed runtime-pair admission, recovery and qualification. Existing
 `maintain activate` remains exclusive; this document does not enable the proposal.
-Its first R0 increment, [shared activation preparation and recovery](../docs/ACTIVATION-RECOVERY.md),
-prepares the helper/images before stopping and recovers a saved private journal
-with `day2 platform maintain recover SESSION_JOURNAL_FILE`.
+[Shared activation preparation and recovery](../docs/ACTIVATION-RECOVERY.md)
+prepares the helper/images, claims native backup exclusion and rehearses an
+online snapshot before stopping. A fresh final checkpoint and rehearsal remain
+exclusive. Recover a saved private journal with
+`day2 platform maintain recover SESSION_JOURNAL_FILE`.

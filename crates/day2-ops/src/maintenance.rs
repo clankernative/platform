@@ -4,10 +4,10 @@
 //! recipe can skip:
 //!
 //! - the maintenance pod is removed on every exit;
-//! - activation prepares its helper on the incumbent node while the app serves;
-//!   only filesystem metadata is read, never the live SQLite stores;
+//! - activation prepares its helper and rehearses an online SQLite snapshot
+//!   while the incumbent serves, under native backup/release exclusion;
 //! - after stopping, activation rechecks the original placement and scratch
-//!   bound before opening a store or taking its final recovery backup;
+//!   bound before taking its fresh final recovery backup;
 //! - before the migration fence, any failure restores the app on its image;
 //! - before the confirmation and the fence, `activate` rehearses the migration
 //!   and activation on a copy of the verified backup and opens the copy with
@@ -176,8 +176,15 @@ fn store_sizes(listing: &str, app: &str) -> Result<BTreeMap<String, u64>> {
             .strip_prefix(STATE)
             .and_then(|name| name.strip_prefix('/'))
             .context("stat path outside the state volume")?;
-        let store = name.strip_suffix("-wal").unwrap_or(name);
-        if wanted.iter().any(|wanted| wanted == store) {
+        let store = name
+            .strip_suffix("-wal")
+            .or_else(|| name.strip_suffix("-shm"))
+            .unwrap_or(name);
+        ensure!(
+            !store.ends_with(".sqlite") || wanted.iter().any(|wanted| wanted == store),
+            "undeclared_auxiliary_sqlite_store: {name}"
+        );
+        if !name.ends_with("-shm") && wanted.iter().any(|wanted| wanted == store) {
             sizes.insert(name.to_owned(), size.parse::<u64>().context("stat size")?);
         }
     }
@@ -186,6 +193,74 @@ fn store_sizes(listing: &str, app: &str) -> Result<BTreeMap<String, u64>> {
         "no {database} on the state volume"
     );
     Ok(sizes)
+}
+
+/// The marker must be the first option, not an upload value an older binary
+/// would accept. The app and physical state root must share our exact lock key.
+fn backup_participant(template: &Value, app: &str, pvc: &str) -> bool {
+    let spec = &template["spec"];
+    if !spec["initContainers"].as_array().is_none_or(Vec::is_empty)
+        || !spec["ephemeralContainers"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    {
+        return false;
+    }
+    let Some(containers) = spec["containers"]
+        .as_array()
+        .filter(|items| items.len() == 1)
+    else {
+        return false;
+    };
+    let container = &containers[0];
+    let Some(args) = container["args"].as_array().filter(|args| args.len() >= 4) else {
+        return false;
+    };
+    if container["command"] != json!(["/usr/local/bin/day2-backup"])
+        || args[0] != TARGET
+        || args[1] != app
+        || args[2] != "/backup/snapshot"
+        || args[3] != "--operation-lock"
+    {
+        return false;
+    }
+    let Some(volumes) = spec["volumes"].as_array().filter(|items| items.len() == 4) else {
+        return false;
+    };
+    if !volumes.iter().all(|volume| match volume["name"].as_str() {
+        Some("state") => {
+            volume["persistentVolumeClaim"]["claimName"] == pvc
+                && volume["persistentVolumeClaim"]["readOnly"] != true
+        }
+        Some("instance") => volume["configMap"].is_object(),
+        Some("tmp" | "backup") => volume["emptyDir"].is_object(),
+        _ => false,
+    }) {
+        return false;
+    }
+    let Some(mounts) = container["volumeMounts"]
+        .as_array()
+        .filter(|items| items.len() == 4)
+    else {
+        return false;
+    };
+    mounts.iter().all(|mount| match mount["name"].as_str() {
+        Some("state") => {
+            mount["mountPath"] == STATE
+                && mount["readOnly"] != true
+                && mount["subPath"].is_null()
+                && mount["subPathExpr"].is_null()
+        }
+        Some("instance") => {
+            mount["mountPath"] == TARGET
+                && mount["subPath"] == "instance.json"
+                && mount["readOnly"] == true
+                && mount["subPathExpr"].is_null()
+        }
+        Some("tmp") => mount["mountPath"] == "/tmp" && mount["subPath"].is_null(),
+        Some("backup") => mount["mountPath"] == "/backup" && mount["subPath"].is_null(),
+        _ => false,
+    })
 }
 
 fn mebibytes(bytes: u64) -> String {
@@ -1002,6 +1077,9 @@ fn private(path: &Path) -> Result<()> {
 
 #[derive(Default)]
 struct State {
+    operation_claimed: bool,
+    preflight_done: bool,
+    rehearsal_prepared: bool,
     offsite_backup: Option<Value>,
     backup_job: Option<String>,
     resumed: bool,
@@ -1017,10 +1095,12 @@ struct State {
     scratch: Option<u64>,
     preparation_verified: bool,
     pod: bool,
+    helper_uid: Option<String>,
     pod_backup: bool,
     backup: Option<PathBuf>,
     /// Local provider stores the in-pod backup holds beside app.sqlite.
     providers: Vec<String>,
+    artifact_store: bool,
     stamp: Option<Value>,
     plan: Option<Value>,
     /// The rehearsal runs once per session, refused or not.
@@ -1666,9 +1746,13 @@ impl Session {
         }
         let prepared_controller = if self.operation == Operation::Activate {
             ensure!(
-                self.state.pod && self.state.scratch.is_some(),
+                self.state.pod
+                    && self.state.scratch.is_some()
+                    && self.state.operation_claimed
+                    && (self.replicas == 0 || self.state.fenced || self.state.preflight_done),
                 "activation_helper_must_be_prepared_before_stop"
             );
+            self.claim_operation()?;
             Some(self.prepared_controller()?)
         } else {
             None
@@ -1974,7 +2058,289 @@ impl Session {
             None,
         )?;
         self.activation = Some(intent);
-        Ok(json!({"prepared_intent":true}))
+        Ok(
+            json!({"prepared_intent":true,"source_serving":self.replicas == 1 && !self.state.fenced}),
+        )
+    }
+
+    pub fn claim_operation(&mut self) -> Result<Value> {
+        ensure!(
+            self.state.pod && !self.state.finished,
+            "operation_helper_required"
+        );
+        self.check_activation_owner()?;
+        if self.operation == Operation::Activate {
+            self.require_helper_identity()?;
+        }
+        self.require_operation_helper()?;
+        self.require_coordinated_backups()?;
+        let app = self.request.app.clone();
+        let raw = self.exec(
+            &[DAY2, "operation-claim", "/srv/day2/.state", &app],
+            Duration::from_secs(60),
+        )?;
+        let claimed: Value = day2::json::decode(raw.trim().as_bytes())?;
+        ensure!(
+            claimed["claimed"] == true
+                && claimed.as_object().is_some_and(|record| record.len() == 1),
+            "operation_lease_refused"
+        );
+        self.state.operation_claimed = true;
+        self.record("operation-claimed", json!({"pod":self.pod,"app":app}))?;
+        Ok(claimed)
+    }
+
+    fn require_operation_helper(&mut self) -> Result<()> {
+        let name = self.pod.clone();
+        let pod: Value = serde_json::from_str(&self.kubectl(
+            &["get", "pod", &name, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        let containers = pod["spec"]["containers"]
+            .as_array()
+            .context("operation helper containers")?;
+        ensure!(
+            containers.len() == 1
+                && self
+                    .state
+                    .helper_uid
+                    .as_ref()
+                    .is_some_and(|uid| pod["metadata"]["uid"] == *uid)
+                && containers[0]["image"] == self.request.tooling_image
+                && containers[0]["command"]
+                    == json!([
+                        DAY2,
+                        "operation-guard",
+                        STATE,
+                        self.request.app,
+                        "/srv/day2/operation.sock",
+                        POD_DEADLINE_SECONDS.to_string()
+                    ])
+                && containers[0]["args"].as_array().is_none_or(Vec::is_empty)
+                && pod["spec"]["hostPID"] != true
+                && pod["spec"]["shareProcessNamespace"] != true,
+            "operation_helper_supervisor_required"
+        );
+        ensure!(
+            self.online_node
+                .as_ref()
+                .is_none_or(|node| pod["spec"]["nodeName"] == *node),
+            "operation_helper_node_changed"
+        );
+        let volumes = pod["spec"]["volumes"]
+            .as_array()
+            .context("operation helper volumes")?;
+        ensure!(
+            volumes.len() == 3
+                && volumes.iter().all(|volume| match volume["name"].as_str() {
+                    Some("data") =>
+                        volume["persistentVolumeClaim"]["claimName"] == self.request.pvc
+                            && volume["persistentVolumeClaim"]["readOnly"] != true,
+                    Some("work" | "tmp") => volume["emptyDir"].is_object(),
+                    _ => false,
+                }),
+            "operation_helper_claim_changed"
+        );
+        let mounts = containers[0]["volumeMounts"]
+            .as_array()
+            .context("operation helper mounts")?;
+        ensure!(
+            mounts.len() == 3
+                && mounts.iter().all(|mount| {
+                    let correct = match mount["name"].as_str() {
+                        Some("data") => mount["mountPath"] == STATE,
+                        Some("work") => mount["mountPath"] == ROOT,
+                        Some("tmp") => mount["mountPath"] == "/tmp",
+                        _ => false,
+                    };
+                    correct
+                        && mount["readOnly"] != true
+                        && mount["subPath"].is_null()
+                        && mount["subPathExpr"].is_null()
+                }),
+            "operation_helper_mount_changed"
+        );
+        let variables = containers[0]["env"]
+            .as_array()
+            .context("operation helper environment")?;
+        for (name, value) in [
+            ("DAY2_OPERATION_STATE", STATE),
+            ("DAY2_OPERATION_SOCKET", "/srv/day2/operation.sock"),
+        ] {
+            let matching: Vec<_> = variables
+                .iter()
+                .filter(|entry| entry["name"] == name)
+                .collect();
+            ensure!(
+                matching.len() == 1
+                    && matching[0]["value"] == value
+                    && matching[0]["valueFrom"].is_null(),
+                "operation_helper_binding_changed"
+            );
+        }
+        Ok(())
+    }
+
+    /// An old backup rejects the required marker during argument parsing,
+    /// before opening any store. All scheduled templates and unsettled Jobs
+    /// sharing this claim must use that contract. Historical completed Jobs
+    /// are harmless; their still-running Pods and standalone Pods are checked
+    /// independently. The app's exact controller and our own helper are exempt.
+    fn require_coordinated_backups(&mut self) -> Result<()> {
+        let mut app_owners = vec![self.controller["metadata"]["uid"].clone()];
+        if self.request.kind(self.operation) == WorkloadKind::Deployment {
+            let replicas: Value = serde_json::from_str(&self.kubectl(
+                &["get", "replicasets", "-o", "json"],
+                None,
+                Duration::from_secs(60),
+            )?)?;
+            let replicas = replicas["items"]
+                .as_array()
+                .context("operation replicasets")?;
+            ensure!(
+                replicas.len() <= 1024,
+                "operation_replicaset_inventory_bound"
+            );
+            for replica in replicas {
+                if replica["metadata"]["ownerReferences"]
+                    .as_array()
+                    .is_some_and(|owners| {
+                        owners.iter().any(|owner| {
+                            owner["controller"] == true
+                                && owner["uid"] == self.controller["metadata"]["uid"]
+                        })
+                    })
+                {
+                    ensure!(
+                        replica["metadata"]["uid"]
+                            .as_str()
+                            .is_some_and(|uid| !uid.is_empty()),
+                        "operation_replicaset_uid_required"
+                    );
+                    app_owners.push(replica["metadata"]["uid"].clone());
+                }
+            }
+        }
+        for resource in ["cronjobs", "jobs", "pods"] {
+            let list: Value = serde_json::from_str(&self.kubectl(
+                &["get", resource, "-o", "json"],
+                None,
+                Duration::from_secs(60),
+            )?)?;
+            let items = list["items"]
+                .as_array()
+                .context("operation workload list")?;
+            ensure!(items.len() <= 1024, "operation_workload_inventory_bound");
+            for item in items {
+                let template = match resource {
+                    "cronjobs" => &item["spec"]["jobTemplate"]["spec"]["template"],
+                    "jobs" => {
+                        if item["status"]["conditions"]
+                            .as_array()
+                            .is_some_and(|conditions| {
+                                conditions.iter().any(|condition| {
+                                    (condition["type"] == "Complete"
+                                        || condition["type"] == "Failed")
+                                        && condition["status"] == "True"
+                                })
+                            })
+                        {
+                            continue;
+                        }
+                        &item["spec"]["template"]
+                    }
+                    "pods" => {
+                        if item["status"]["phase"] == "Succeeded"
+                            || item["status"]["phase"] == "Failed"
+                        {
+                            continue;
+                        }
+                        if item["metadata"]["ownerReferences"]
+                            .as_array()
+                            .is_some_and(|owners| {
+                                owners.iter().any(|owner| {
+                                    owner["controller"] == true
+                                        && !owner["uid"].is_null()
+                                        && app_owners.contains(&owner["uid"])
+                                })
+                            })
+                        {
+                            continue;
+                        }
+                        if item["metadata"]["name"] == self.pod
+                            || item["metadata"]["name"] == self.probe()
+                        {
+                            ensure!(
+                                item["metadata"]["annotations"]["day2.dev/rollout-request"]
+                                    == self.request_digest
+                                    && item["spec"]["containers"][0]["image"]
+                                        == self.request.tooling_image,
+                                "operation_helper_identity_changed"
+                            );
+                            continue;
+                        }
+                        item
+                    }
+                    _ => unreachable!(),
+                };
+                if !template["spec"]["volumes"]
+                    .as_array()
+                    .is_some_and(|volumes| {
+                        volumes.iter().any(|volume| {
+                            volume["persistentVolumeClaim"]["claimName"] == self.request.pvc
+                        })
+                    })
+                {
+                    continue;
+                }
+                ensure!(
+                    backup_participant(template, &self.request.app, &self.request.pvc),
+                    "uncoordinated_backup_or_job_uses_app_claim"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn preparing_online(&self) -> bool {
+        self.operation == Operation::Activate
+            && !self.state.stopped
+            && !self.state.fenced
+            && self.state.operation_claimed
+            && !self.state.preflight_done
+    }
+
+    fn backup_name(&self) -> String {
+        if self.preparing_online() {
+            format!("{}-preflight", self.stamp)
+        } else {
+            self.stamp.clone()
+        }
+    }
+
+    /// Retain the online evidence, but reset every final-checkpoint guard. The
+    /// final backup/rehearsal must observe writes and authority after this copy.
+    pub fn online_prepared(&mut self) -> Result<Value> {
+        ensure!(
+            self.preparing_online()
+                && self.state.rehearsed
+                && self.state.admission.is_some()
+                && self.state.backup.is_some()
+                && !self.state.confirmed,
+            "online_rehearsal_required"
+        );
+        self.record("online-prepared", json!({"backup":self.state.backup,"plan":self.state.plan,"admission":self.state.admission}))?;
+        self.state.preflight_done = true;
+        self.state.pod_backup = false;
+        self.state.backup = None;
+        self.state.plan = None;
+        self.state.rehearsed = false;
+        self.state.rehearsal_prepared = false;
+        self.state.admission = None;
+        self.state.providers.clear();
+        self.state.artifact_store = false;
+        Ok(json!({"online_prepared":true}))
     }
 
     fn render_pod(&self, pod: &str, scratch: u64) -> Result<String> {
@@ -1983,6 +2349,8 @@ impl Session {
         let values = [
             ("DAY2_MAINT_NAMESPACE", self.request.namespace.as_str()),
             ("DAY2_MAINT_POD", pod),
+            ("DAY2_MAINT_APP", self.request.app.as_str()),
+            ("DAY2_MAINT_EXECUTABLE", DAY2),
             (
                 "DAY2_MAINT_TOOLING_IMAGE",
                 self.request.tooling_image.as_str(),
@@ -2018,22 +2386,14 @@ impl Session {
         } else {
             rendered
         };
-        let rendered = if self.online_node.is_some()
-            || matches!(
-                self.operation,
-                Operation::Activate | Operation::MarkActivated
-            ) {
-            rendered.replacen(
-                "\nmetadata:\n",
-                &format!(
-                    "\nmetadata:\n  annotations:\n    day2.dev/rollout-request: {}\n",
-                    self.request_digest
-                ),
-                1,
-            )
-        } else {
-            rendered
-        };
+        let rendered = rendered.replacen(
+            "\nmetadata:\n",
+            &format!(
+                "\nmetadata:\n  annotations:\n    day2.dev/rollout-request: {}\n",
+                self.request_digest
+            ),
+            1,
+        );
         if let Some(node) = &self.online_node {
             ensure!(label_value(node), "invalid_incumbent_node");
             if self.operation == Operation::Activate {
@@ -2264,22 +2624,23 @@ impl Session {
             json!({"pod": self.pod, "tooling_image": self.request.tooling_image, "scratch": mebibytes(scratch)}),
         )?;
         self.run_pod(&pod, &manifest, scratch)?;
+        let current: Value = serde_json::from_str(&self.kubectl(
+            &["get", "pod", &pod, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        let uid = current["metadata"]["uid"]
+            .as_str()
+            .context("maintenance helper UID")?;
+        ensure!(
+            !uid.is_empty() && uid.len() <= 128,
+            "invalid_maintenance_helper_uid"
+        );
+        self.state.helper_uid = Some(uid.into());
         if matches!(
             self.operation,
             Operation::Activate | Operation::MarkActivated
         ) {
-            let current: Value = serde_json::from_str(&self.kubectl(
-                &["get", "pod", &pod, "-o", "json"],
-                None,
-                Duration::from_secs(60),
-            )?)?;
-            let uid = current["metadata"]["uid"]
-                .as_str()
-                .context("activation helper UID")?;
-            ensure!(
-                !uid.is_empty() && uid.len() <= 128,
-                "invalid_activation_helper_uid"
-            );
             let previous = self.activation.clone().context("activation checkpoint")?;
             let mut bound = previous.clone();
             bound.pod_uid = Some(uid.into());
@@ -2405,9 +2766,12 @@ impl Session {
     pub fn workflow(&mut self, name: &str) -> Result<Value> {
         ensure!(
             self.state.pod
-                && self.state.stopped
+                && self.state.operation_claimed
+                && (self.state.stopped || (name == "backup" && self.preparing_online()))
                 && !self.state.finished
-                && (self.operation != Operation::Activate || self.state.preparation_verified),
+                && (self.operation != Operation::Activate
+                    || self.state.preparation_verified
+                    || self.preparing_online()),
             "workflows require the stop and, for activation, verified preparation"
         );
         self.check_activation_owner()?;
@@ -2427,7 +2791,7 @@ impl Session {
                     "one backup per session, not for inspect or mark-activated"
                 );
                 eprintln!("== backup (current instance)");
-                let output = format!("{ROOT}/backup-{}", self.stamp);
+                let output = format!("{ROOT}/backup-{}", self.backup_name());
                 let receipt = self.host_workflow(&["backup", CURRENT, &app, &output])?;
                 self.state.pod_backup = true;
                 self.record("backup", receipt.clone())?;
@@ -2539,8 +2903,8 @@ impl Session {
             self.state.pod_backup && self.state.backup.is_none(),
             "copy follows the in-pod backup, once"
         );
-        let remote = format!("{ROOT}/backup-{}", self.stamp);
-        let destination = self.backup_root.join(&self.stamp);
+        let remote = format!("{ROOT}/backup-{}", self.backup_name());
+        let destination = self.backup_root.join(self.backup_name());
         ensure!(
             !destination.exists(),
             "{} already exists",
@@ -2588,6 +2952,7 @@ impl Session {
             .filter_map(|path| path.strip_prefix("providers/"))
             .map(str::to_owned)
             .collect();
+        self.state.artifact_store = ours.contains_key("rollout-artifacts.sqlite");
         self.state.backup = Some(destination.clone());
         self.record(
             "backup-copied",
@@ -2600,8 +2965,10 @@ impl Session {
         ensure!(
             matches!(self.operation, Operation::Activate | Operation::Rollout)
                 && self.state.pod
-                && self.state.stopped
-                && (self.operation != Operation::Activate || self.state.preparation_verified),
+                && (self.state.stopped || (step == "plan" && self.preparing_online()))
+                && (self.operation != Operation::Activate
+                    || self.state.preparation_verified
+                    || self.preparing_online()),
             "migrations require stopped or rolling admission and verified activation preparation"
         );
         self.check_activation_owner()?;
@@ -2615,15 +2982,15 @@ impl Session {
                     "plan follows the verified backup, once"
                 );
                 eprintln!("== migration plan to {}", target.artifact_id);
+                ensure!(
+                    self.state.rehearsal_prepared,
+                    "isolated_rehearsal_required_before_plan"
+                );
                 self.exec(
                     &[
                         DAY2,
                         "migration-plan",
-                        if self.request.kind(self.operation) == WorkloadKind::Deployment {
-                            CURRENT
-                        } else {
-                            TARGET
-                        },
+                        ADMISSION_INSTANCE,
                         &app,
                         &artifact,
                         PLAN,
@@ -2716,7 +3083,7 @@ impl Session {
                 let cause = format!("{error:#}");
                 self.record("target-admission-refused", json!({"error": cause}))?;
                 bail!(
-                    "target_store_admission_refused: artifact {} would not open the store of {}; nothing was migrated or activated and {} is restored on its image: {cause}",
+                    "target_store_admission_refused: artifact {} would not open the isolated store of {}; no live migration or activation was attempted for {}: {cause}",
                     target.artifact_id,
                     self.request.app,
                     self.request.statefulset
@@ -2725,12 +3092,18 @@ impl Session {
         }
     }
 
-    fn rehearse(&mut self, target: &Target) -> Result<Value> {
+    pub fn prepare_rehearsal(&mut self) -> Result<Value> {
+        ensure!(
+            matches!(self.operation, Operation::Activate | Operation::Rollout)
+                && self.state.operation_claimed
+                && self.state.backup.is_some()
+                && !self.state.confirmed
+                && !self.state.rehearsal_prepared,
+            "verified_checkpoint_and_operation_lease_required_for_copy"
+        );
+        self.check_activation_owner()?;
         let app = self.request.app.clone();
-        let operator = self.request.operator.clone();
-        let request_id = self.request.request_id.clone().unwrap_or_default();
-        let artifact = format!("{ROOT}/artifacts/{}", target.artifact_id);
-        let backup = format!("{ROOT}/backup-{}", self.stamp);
+        let backup = format!("{ROOT}/backup-{}", self.backup_name());
         let state = format!("{ADMISSION}/.state");
         // No -p: a leftover copy is refused, never reused.
         self.exec(&["mkdir", ADMISSION, &state], Duration::from_secs(60))?;
@@ -2759,6 +3132,12 @@ impl Session {
             Duration::from_secs(60),
         )?;
         let mut stores = vec![("app.sqlite".to_owned(), format!("{app}.sqlite"))];
+        if self.state.artifact_store {
+            stores.push((
+                "rollout-artifacts.sqlite".into(),
+                format!("{app}.artifacts.sqlite"),
+            ));
+        }
         for name in self.state.providers.clone() {
             ensure!(
                 day2::capabilities::LOCAL_PROVIDER_DATABASES.contains(&name.as_str()),
@@ -2775,6 +3154,18 @@ impl Session {
                 Duration::from_secs(60),
             )?;
         }
+        self.state.rehearsal_prepared = true;
+        self.record("rehearsal-copy", json!({"checkpoint":self.state.backup,"copy":ADMISSION,"online":self.preparing_online()}))?;
+        Ok(json!({"copied":true}))
+    }
+
+    fn rehearse(&mut self, target: &Target) -> Result<Value> {
+        let app = self.request.app.clone();
+        let operator = self.request.operator.clone();
+        let request_id = self.request.request_id.clone().unwrap_or_default();
+        let artifact = format!("{ROOT}/artifacts/{}", target.artifact_id);
+        let backup = format!("{ROOT}/backup-{}", self.backup_name());
+        ensure!(self.state.rehearsal_prepared, "isolated_rehearsal_required");
         if self.operation == Operation::Rollout {
             let source_image = self.request.app_image.clone();
             self.exec(
@@ -2959,7 +3350,7 @@ impl Session {
         ensure!(
             self.operation == Operation::Rollout
                 && self.state.pod
-                && self.state.backup.is_some()
+                && !self.state.operation_claimed
                 && !self.state.resumed
                 && self.state.offsite_backup.is_none(),
             "rolling_backup_preconditions_required"
@@ -2987,6 +3378,7 @@ impl Session {
                         "/srv/day2/instance.json",
                         self.request.app,
                         "/backup/snapshot",
+                        "--operation-lock",
                         "--upload-gcs",
                         backup.bucket,
                         "--object-prefix",
@@ -3010,7 +3402,8 @@ impl Session {
         );
         let volumes = spec["volumes"].as_array().context("backup volumes")?;
         ensure!(
-            volumes.len() == 4
+            backup_participant(&template, &self.request.app, &self.request.pvc)
+                && volumes.len() == 4
                 && volumes.iter().any(|v| v["name"] == "state"
                     && v["persistentVolumeClaim"]["claimName"] == self.request.pvc)
                 && volumes
@@ -3047,7 +3440,7 @@ impl Session {
             "backup_pod_must_not_match_a_service"
         );
         let prefix = format!("rollouts/{}", &self.request_digest[7..]);
-        template["spec"]["containers"][0]["args"][6] = json!(prefix);
+        template["spec"]["containers"][0]["args"][7] = json!(prefix);
         template["spec"]["nodeName"] = json!(self.online_node);
         template["metadata"]["annotations"] =
             json!({"day2.dev/rollout-request":self.request_digest});
@@ -3231,6 +3624,7 @@ impl Session {
         ensure!(
             self.operation == Operation::Rollout
                 && self.state.pod
+                && self.state.operation_claimed
                 && ((self.state.admission.is_some() && self.state.confirmed) || self.state.resumed),
             "rollout_preparation_required"
         );
@@ -3750,7 +4144,9 @@ impl Session {
         let (question, word) = match self.operation {
             Operation::Activate | Operation::Rollout => {
                 ensure!(
-                    self.state.plan.is_some() && self.state.admission.is_some(),
+                    self.state.stopped
+                        && self.state.plan.is_some()
+                        && self.state.admission.is_some(),
                     "confirm the migration plan after it is shown and the target admitted the store"
                 );
                 let target = self.request.target.as_ref().context("target")?;
@@ -4084,30 +4480,16 @@ impl Session {
             pods.push(self.pod.clone());
         }
         for pod in pods {
-            let removed = if matches!(
-                self.operation,
-                Operation::Activate | Operation::MarkActivated
-            ) {
-                let uid = self
-                    .activation
-                    .as_ref()
-                    .filter(|intent| intent.pod == pod)
-                    .and_then(|intent| intent.pod_uid.as_deref());
-                activation::remove_helper(
-                    self.tools.cluster.as_mut(),
-                    &self.request,
-                    &pod,
-                    &self.request_digest,
-                    uid,
-                )
-            } else {
-                self.kubectl(
-                    &["delete", "pod", &pod, "--ignore-not-found", "--wait=true"],
-                    None,
-                    Duration::from_secs(300),
-                )
-                .map(|_| ())
-            };
+            let uid = (pod == self.pod)
+                .then_some(self.state.helper_uid.as_deref())
+                .flatten();
+            let removed = activation::remove_helper(
+                self.tools.cluster.as_mut(),
+                &self.request,
+                &pod,
+                &self.request_digest,
+                uid,
+            );
             if let Err(error) = removed {
                 failures.push(format!("deleting {pod}: {error:#}"));
             }

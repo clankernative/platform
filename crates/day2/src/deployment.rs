@@ -17,6 +17,7 @@ use std::{
 
 mod terminal;
 pub use terminal::NativeTerminalHold;
+pub mod operation;
 
 /// Container-entrypoint cleanup, after its readiness runtime has stopped.
 /// Success means every retained native HTTP owner has actually exited. The
@@ -584,6 +585,22 @@ pub fn admit_store(runtime: &Runtime) -> Result<Option<crate::security_admission
 pub(crate) struct StoreMaintenanceLease {
     database: PathBuf,
     _file: File,
+    _operation: operation::OperationLease,
+}
+
+/// Physical exclusion for schema changes, without granting maintenance
+/// initialization or authority. Readiness/replica observations alone cannot
+/// prove that a draining server released its store.
+pub(crate) struct MigrationExclusion {
+    _operation: operation::OperationLease,
+    _serving: File,
+}
+
+pub(crate) fn migration_exclusion(state: &Path, app: &str) -> Result<MigrationExclusion> {
+    Ok(MigrationExclusion {
+        _operation: operation::OperationLease::acquire(state, app)?,
+        _serving: serving_lock(state, app, false)?,
+    })
 }
 
 impl StoreMaintenanceLease {
@@ -599,6 +616,10 @@ fn maintenance_lease(
     runtime: &Runtime,
     operator: &crate::authority_state::LocalOperator,
 ) -> Result<StoreMaintenanceLease> {
+    let operation = operation::OperationLease::acquire(
+        runtime.db().parent().context("store directory")?,
+        runtime.app(),
+    )?;
     ensure!(
         !runtime.uses_native_storage()
             && Instance::load(runtime.instance_path())?
@@ -616,6 +637,7 @@ fn maintenance_lease(
     );
     Ok(StoreMaintenanceLease {
         database: runtime.db().to_path_buf(),
+        _operation: operation,
         _file: serving_lock(
             runtime.db().parent().context("store directory")?,
             runtime.app(),

@@ -1156,6 +1156,7 @@ impl RuntimeSession {
             INSTANCE.into(),
             APP.into(),
             "/evidence/runtime-backup".into(),
+            "--operation-lock".into(),
         ]);
         self.helpers.insert(name.clone());
         let output = self.docker(&args)?;

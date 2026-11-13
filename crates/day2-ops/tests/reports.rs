@@ -491,8 +491,18 @@ fn online_backup_cli_snapshots_a_serving_instance_into_a_verified_bundle() -> Re
             .arg(instance)
             .arg(app)
             .arg(output)
+            .arg("--operation-lock")
             .output()
     };
+    // Snapshot refusal precedes output creation, without taking the serving
+    // lease or changing business state. This is the scheduled-backup path.
+    let operation =
+        day2::deployment::operation::OperationLease::for_instance(runtime.instance_path(), "app")?;
+    let blocked_path = scratch.path().join("blocked-by-release");
+    let blocked = run(runtime.instance_path(), "app", &blocked_path)?;
+    assert!(!blocked.status.success() && blocked.stdout.is_empty());
+    assert!(!blocked_path.exists());
+    drop(operation);
     let result = run(runtime.instance_path(), "app", &output)?;
     assert!(
         result.status.success(),
@@ -557,6 +567,7 @@ fn online_backup_cli_snapshots_a_serving_instance_into_a_verified_bundle() -> Re
             .arg(runtime.instance_path())
             .arg("app")
             .arg(&refused)
+            .arg("--operation-lock")
             .args(options)
             .output()?;
         assert!(!result.status.success() && result.stdout.is_empty());
