@@ -359,7 +359,10 @@ impl World {
     fn new(seed: u64) -> Result<Self> {
         let mut fixture = Fixture::selected(false, true)?;
         fixture.port.entropy.store(seed.wrapping_add(1), SeqCst);
-        fixture.manager.runtime.connections = Some(fixture.manager.authority.clone());
+        let authority = fixture.manager.authority.clone();
+        Arc::get_mut(&mut fixture.manager.runtime)
+            .context("fixture Runtime escaped before configuration")?
+            .connections = Some(authority);
         static DOMAIN: AtomicU64 = AtomicU64::new(600_000);
         let port = Arc::new(Port {
             original: fixture.port.clone(),

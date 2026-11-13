@@ -48,6 +48,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("native_management", ""),
     ("native_management.rs", include_str!("native_management.rs")),
     (
+        "native_management/consumer_context.rs",
+        include_str!("native_management/consumer_context.rs"),
+    ),
+    (
         "native_management/request.rs",
         include_str!("native_management/request.rs"),
     ),
@@ -455,6 +459,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         (
             "native_management",
             &[
+                "consumer_context.rs",
                 "request.rs",
                 "response.rs",
                 "response_tickets",

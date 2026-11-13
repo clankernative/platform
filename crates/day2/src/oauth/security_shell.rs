@@ -4821,7 +4821,7 @@ mod tests {
 
     fn credential_navigation_and_lookup_metadata_cannot_supply_a_native_sql_owner() -> Result<()> {
         let world = browser_world(10)?;
-        let native = crate::store::Runtime::from_artifact_for_tests(
+        let native = crate::store::Runtime::from_native_metadata_for_tests(
             world.runtime.instance_path().to_owned(),
             world.runtime.app().into(),
             PathBuf::from("/state/day2-native/day2-initial.sqlite"),

@@ -10,7 +10,13 @@ use day2_capabilities::Digest;
 use serde::Serialize;
 use std::rc::Rc;
 
+mod restored;
 mod shell;
+
+pub(crate) use restored::{
+    CapturedRestoredServingRequest, RestoredAppServingOwner, RestoredResponseCurrent,
+    RestoredRuntimeCurrent, RestoredServingScope,
+};
 
 /// Purpose selection DATA, not execution permission. Each later irreversible
 /// phase needs its own genuine same-stage serving fence.
@@ -132,9 +138,23 @@ pub(crate) enum RuntimeServingUse {
 }
 
 #[derive(Clone, Copy, Serialize)]
-pub(super) enum ScopePurpose {
+pub(crate) enum ScopePurpose {
     Human(ServingUse),
     Runtime(RuntimeServingUse),
+}
+
+/// Closed SQL selection DATA. It neither arms a scope nor opens a database.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeSqlUse {
+    Read,
+    Write,
+}
+
+/// Closed native provider selection DATA, checked against the retained context.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeProviderUse {
+    Read,
+    Refresh,
 }
 
 // Historical DATA only. These capped private log records are never parsed as
@@ -407,7 +427,7 @@ impl ServingParticipant {
     pub(crate) fn admin_read(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-        operation: &Digest,
+        operation: &super::native_enrollment::AdminReadAction,
         cohort: &mut crate::oauth::native_management::AppAuthorityStop<'_>,
     ) -> Result<()> {
         let ParticipantOwner::App(app) = &mut self.native else {

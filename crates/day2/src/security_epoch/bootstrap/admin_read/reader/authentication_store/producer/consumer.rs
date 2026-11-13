@@ -17,10 +17,14 @@ use day2_capabilities::Digest;
 use std::time::Duration;
 
 mod stop;
-pub(crate) use stop::FencedReadUnit;
 pub(in crate::security_epoch) use stop::{
-    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, RestoreWriteLoan,
+    ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, ReservationRegistryLoan,
+    ReservationSourceLoan, RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
+    RestoreWriterActivationLoan, RestoreWriterConfirmation, RestoreWriterExchangeContext,
+    RestoreWriterReleaseLoan, TargetSettlementSourceLoan, WriterConfirmationSourceLoan,
+    WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
+pub(crate) use stop::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
 
 const EXECUTION_CHALLENGE_SECONDS: i64 = 300;
 

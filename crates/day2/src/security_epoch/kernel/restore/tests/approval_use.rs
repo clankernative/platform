@@ -261,3 +261,73 @@ fn signed_target_archive_custody_and_executor_are_compared_as_complete_values() 
     }
     Ok(())
 }
+
+#[test]
+fn retained_staging_input_matches_the_whole_saved_intent_and_exact_namespace() -> Result<()> {
+    for seed in 0..8 {
+        let (selected, before) = initial();
+        let (_, saved) = plan(&selected, &before, seed)?;
+        let intent = &saved.reservation.receipt.request.intent;
+        let namespace = day2_capabilities::credentials::Namespace {
+            installation: selected.scope.installation.clone(),
+            environment: selected.scope.environment.clone(),
+            app: selected.scope.app.clone(),
+            binding_generation: saved
+                .reservation
+                .receipt
+                .request
+                .authorization
+                .grant
+                .approval
+                .target
+                .binding_generation,
+        };
+        saved.require_staging_input_data(&selected, intent, &namespace)?;
+        for cut in 0..5 {
+            let mut changed = namespace.clone();
+            match cut {
+                0 => changed.installation = "foreign".to_owned().try_into()?,
+                1 => changed.environment = "foreign".to_owned().try_into()?,
+                2 => changed.app = "foreign".to_owned().try_into()?,
+                3 => changed.binding_generation += 1,
+                _ => changed.binding_generation = 0,
+            }
+            assert!(
+                saved
+                    .require_staging_input_data(&selected, intent, &changed)
+                    .is_err(),
+                "namespace cut={cut}"
+            );
+        }
+        for cut in 0..11 {
+            let mut changed = intent.clone();
+            match cut {
+                0 => changed.operation = Digest::new(b"other-operation"),
+                1 => changed.target_incarnation = Digest::new(b"other-target"),
+                2 => changed.archive.full_archive_digest = Digest::new(b"other-archive"),
+                3 => changed.archive.image = Digest::new(b"other-image"),
+                4 => changed.archive.schema = Digest::new(b"other-schema"),
+                5 => changed.archive.artifact = Digest::new(b"other-artifact"),
+                6 => changed.archive.key_set = Digest::new(b"other-key-set"),
+                7 => changed.archive.source_incarnation = Digest::new(b"other-source"),
+                8 => changed.archive.security_epoch += 1,
+                9 => changed.archive.scope.environment = "foreign".to_owned().try_into()?,
+                _ => changed.archive.required_keys.clear(),
+            }
+            assert!(
+                saved
+                    .require_staging_input_data(&selected, &changed, &namespace)
+                    .is_err(),
+                "intent cut={cut}"
+            );
+        }
+        let mut foreign_selection = selected.clone();
+        foreign_selection.key_set = Digest::new(b"substituted-selection");
+        assert!(
+            saved
+                .require_staging_input_data(&foreign_selection, intent, &namespace)
+                .is_err()
+        );
+    }
+    Ok(())
+}

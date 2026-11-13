@@ -249,6 +249,9 @@ impl Request {
     }
 }
 
+// Copying preserves exact historical DATA; actual native owners and their
+// one-shot dispatch/original/postchecks remain separate and non-cloneable.
+#[derive(Clone)]
 pub(in crate::security_epoch) struct Plan {
     pub before: Versions,
     pub root: AuthorityRecord,

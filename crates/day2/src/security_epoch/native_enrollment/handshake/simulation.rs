@@ -1202,6 +1202,107 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
 }
 
 #[test]
+fn restore_stop_uses_the_common_independent_handshake_model_without_a_new_original() -> Result<()> {
+    use super::Step;
+    for actor in [Actor::App, Actor::Controller] {
+        for cut in 0..=5 {
+            let mut actual = Transcript::new(Protocol::InitialStorage, actor);
+            let mut expected = model::Model::new(Protocol::InitialStorage, actor);
+            let first = Observation {
+                domain: Digest::new(b"initial"),
+                origin: Duration::ZERO,
+                deadline: Duration::from_secs(10),
+                now: Duration::from_secs(1),
+            };
+            let original = Observation {
+                domain: Digest::new(b"one-stop-original"),
+                origin: Duration::from_secs(20),
+                deadline: Duration::from_secs(25),
+                now: Duration::from_secs(21),
+            };
+            let drive = |actual: &mut Transcript,
+                         expected: &mut model::Model,
+                         sender: Actor,
+                         frame: Frame,
+                         clock: &Observation|
+             -> Result<()> {
+                let direction = if actor == sender {
+                    Direction::Send
+                } else {
+                    Direction::Receive
+                };
+                let begun = actual.begin(direction, clock.clone()).is_ok();
+                ensure!(
+                    begun == expected.begin(direction, clock.clone()).is_ok(),
+                    "stop model begin"
+                );
+                if begun {
+                    ensure!(
+                        actual.delivered(frame, clock.clone()).is_ok()
+                            == expected.delivered(frame, clock.clone()).is_ok(),
+                        "stop model delivery"
+                    );
+                }
+                ensure!(
+                    actual.snapshot() == expected.snapshot(),
+                    "stop model snapshot"
+                );
+                Ok(())
+            };
+            for (sender, frame) in model::contract(Protocol::InitialStorage, 0) {
+                drive(&mut actual, &mut expected, sender, frame, &first)?;
+            }
+            actual.begin_current(1, StagePurpose::CurrentRole)?;
+            expected.current(1, StagePurpose::CurrentRole)?;
+            for (sender, frame) in model::contract(Protocol::CurrentStorage, 1)
+                .into_iter()
+                .take(5)
+            {
+                drive(&mut actual, &mut expected, sender, frame, &original)?;
+            }
+            let tail = [
+                (Actor::Controller, Step::Frozen),
+                (Actor::App, Step::Drained),
+                (Actor::Controller, Step::Fenced),
+                (Actor::App, Step::FenceConfirmed),
+                (Actor::Controller, Step::StopReleased),
+            ];
+            for (index, (sender, step)) in tail.into_iter().enumerate() {
+                let step = if index == cut { Step::Released } else { step };
+                drive(
+                    &mut actual,
+                    &mut expected,
+                    sender,
+                    Frame {
+                        protocol: Protocol::CurrentStorage,
+                        step,
+                        sequence: None,
+                    },
+                    &original,
+                )?;
+                ensure!(
+                    actual.complete() == (cut == 5 && index == 4),
+                    "stop model completion"
+                );
+            }
+            ensure!(
+                actual.begin_current(2, StagePurpose::CurrentRole).is_err(),
+                "stopped channel renewed"
+            );
+            ensure!(
+                expected.current(2, StagePurpose::CurrentRole).is_err(),
+                "model stopped channel renewed"
+            );
+            ensure!(
+                actual.snapshot() == expected.snapshot(),
+                "stop model terminal snapshot"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn exact_deadlines_spent_time_and_ambiguous_sends_never_become_remote_acceptance() -> Result<()> {
     for (protocol, sender, seconds) in [
         (Protocol::Enrollment, 0, 5),

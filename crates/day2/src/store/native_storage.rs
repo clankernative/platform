@@ -19,6 +19,30 @@ use std::{
 };
 
 const DATABASE: &str = "/state/day2-native/day2-initial.sqlite";
+const NATIVE_DIRECTORY: &str = "/state/day2-native";
+
+/// Selected location DATA, constructed only inside this fixed owning child.
+/// It does not contain a keeper or grant Current/SQL authority. Every open
+/// still requires the actual SqlOwner and its original/physical postchecks.
+#[derive(Clone)]
+pub(super) struct NativeDatabaseSelection {
+    path: PathBuf,
+}
+
+impl NativeDatabaseSelection {
+    #[cfg(test)]
+    pub(super) fn metadata_fixture(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn require_path(&self, selected: &Path) -> Result<&Path> {
+        ensure!(
+            self.path == selected,
+            "native_runtime_database_selection_changed"
+        );
+        Ok(&self.path)
+    }
+}
 
 mod authentication_store;
 pub(crate) use authentication_store::{check_authentication_sqlite, open_authentication_sqlite};
@@ -35,12 +59,148 @@ pub(crate) use keeper::require_unopened as require_unopened_native_sqlite;
 /// Only load_native_storage constructs this resource, before any SQL activation.
 pub(crate) struct NativeSqliteKeeper {
     connection: Connection,
+    layout: SqliteKeeperLayout,
     files: Option<opened_files::Handles>,
     refused: bool,
     local: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
+/// Fixed mechanical filenames only. This DATA cannot construct an App,
+/// keeper, native file, writer or restore activation. Native factories choose
+/// their own layout; no operator path or flag supplies it.
+#[derive(Clone, Copy)]
+pub(crate) enum SqliteKeeperLayout {
+    Initial,
+    Restored,
+}
+
+impl NativeSqliteKeeper {
+    /// Fixed existing-only birth under the actual nonescaping App loan. The
+    /// first connection is owned before ANY configuration/schema/WAL work.
+    pub(crate) fn create_restored(
+        birth: &mut crate::security_epoch::native_enrollment::RestoredKeeperBirth<'_>,
+        path: &Path,
+        artifact: &crate::artifact::LoadedArtifact,
+        scope: &str,
+    ) -> Result<Self> {
+        birth.before_open(path, artifact, scope)?;
+        let mut keeper = Self {
+            connection: open_existing(path)?,
+            layout: SqliteKeeperLayout::Restored,
+            files: None,
+            refused: false,
+            local: std::marker::PhantomData,
+        };
+        birth.require_opened(&keeper.connection)?;
+        let configured = configure_connection(&mut keeper.connection);
+        let checked = birth.check_database(&keeper.connection);
+        configured?;
+        checked?;
+        birth.admit_database(&mut keeper.connection)?;
+        // Every validation SQL unit is closed before this provider read.
+        // No business transaction spans provider work or future transport.
+        birth.reobserve_database(&keeper.connection)?;
+        let wal = keeper.connection.pragma_update(None, "journal_mode", "WAL");
+        let checked = birth.check_database(&keeper.connection);
+        wal?;
+        checked?;
+        let captured = keeper.capture_created_files();
+        let checked = birth.check_database(&keeper.connection);
+        captured?;
+        checked?;
+        birth.reobserve_database(&keeper.connection)?;
+        birth.require_keeper(&mut keeper)?;
+        Ok(keeper)
+    }
+}
+
+/// Existing validators only. This never initializes or repairs schema, and
+/// desired private OAuth units come from the ACTUAL authenticated Instance
+/// binding, never from declaration inference or a caller boolean.
+pub(crate) fn admit_restored_snapshot(
+    connection: &mut Connection,
+    artifact: &crate::artifact::LoadedArtifact,
+    scope: &str,
+    instance: &crate::artifact::Instance,
+    app: &str,
+) -> Result<()> {
+    ensure!(
+        connection.is_autocommit(),
+        "restore_keeper_sql_unit_still_open"
+    );
+    super::validate_storage_snapshot(connection, artifact, scope)?;
+    let active = crate::authority_state::current(connection)?;
+    ensure!(
+        active.artifact_id == artifact.id(),
+        "restore_keeper_authority_artifact_changed"
+    );
+    active.document.validate(artifact)?;
+    if let Some(requirements) = &active.document.security {
+        requirements.validate(artifact)?;
+        requirements.require_runtime()?;
+    }
+    let binding = instance
+        .apps
+        .get(app)
+        .context("restore_keeper_app_missing")?;
+    if !binding.oauth_connections.is_empty() {
+        require_existing_oauth_schema(connection)?;
+    }
+    ensure!(
+        connection.is_autocommit(),
+        "restore_keeper_sql_unit_still_open"
+    );
+    Ok(())
+}
+
 impl Runtime {
+    /// Build Runtime metadata for the SAME restored keeper. The borrow is
+    /// genuine and opaque, and no SQLite open, initializer, repair or serving
+    /// completion occurs. Its result stays private in the pending installation.
+    pub(crate) fn load_restored_storage(
+        birth: &mut crate::security_epoch::native_enrollment::RestoredRuntimeBirth<'_>,
+    ) -> Result<Self> {
+        birth.check()?;
+        let requested = (|| {
+            let (path, selector, db, app, scope, artifact, desired) =
+                birth.runtime_inputs_data()?;
+            let metadata =
+                InitialStoreMetadata::admit(path, selector, &app, desired.clone(), artifact)?;
+            ensure!(metadata.scope == scope, "restore_runtime_scope_changed");
+            let integrations = Arc::new(crate::integration_host::Host::local(
+                &metadata.instance_path,
+            )?);
+            let inputs = crate::host_inputs::Inputs::default();
+            Ok(Self {
+                integrations,
+                app_calls: None,
+                credentials: None,
+                connections: None,
+                rolling: false,
+                scope,
+                hosted_domain: desired.hosted_domain().map(str::to_owned),
+                instance_path: metadata.instance_path,
+                restore_registry_selector: Some(metadata.instance_selector),
+                app,
+                db: db.clone(),
+                native_database: Some(NativeDatabaseSelection { path: db }),
+                artifact: Arc::new(metadata.artifact),
+                host: Arc::new(crate::host::System(inputs.clone())),
+                inputs,
+            })
+        })();
+        // Even failed metadata construction takes a fresh writer read and
+        // full native/keeper posts before the Runtime enters Pending. The first
+        // connection is autocommit and never replaced or reopened here.
+        let checked = birth.reobserve();
+        if requested.is_err() || checked.is_err() {
+            birth.refuse();
+        }
+        let runtime = requested?;
+        checked?;
+        Ok(runtime)
+    }
+
     /// The sealed native scope is retained before SQLite open/recovery and
     /// through the actual result and physical/provider postchecks. No pathname
     /// argument, CREATE flag, initializer or activated-path fallback exists.
@@ -58,6 +218,7 @@ impl Runtime {
             // inspection or WAL activation. It is never closed and readopted.
             let mut keeper = NativeSqliteKeeper {
                 connection: open_existing(Path::new(DATABASE))?,
+                layout: SqliteKeeperLayout::Initial,
                 files: None,
                 refused: false,
                 local: std::marker::PhantomData,
@@ -114,6 +275,9 @@ impl Runtime {
                 restore_registry_selector: Some(metadata.instance_selector),
                 app: metadata.app,
                 db: PathBuf::from(DATABASE),
+                native_database: Some(NativeDatabaseSelection {
+                    path: PathBuf::from(DATABASE),
+                }),
                 artifact: Arc::new(metadata.artifact),
                 host: Arc::new(crate::host::System(inputs.clone())),
                 inputs,
@@ -171,8 +335,38 @@ fn open_existing(path: &Path) -> Result<Connection> {
 
 // Adapter selection DATA only: the fixed Runtime constructor and actual
 // retained native scope remain mandatory. No permission is derived from this.
-pub(super) fn is_native_database(path: &Path) -> bool {
-    path == Path::new(DATABASE)
+pub(super) fn is_native_database_path(path: &Path) -> Result<bool> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    native_database_path_data(&absolute)
+}
+
+fn native_database_path_data(absolute: &Path) -> Result<bool> {
+    use std::path::Component;
+    ensure!(
+        absolute.is_absolute(),
+        "database_absolute_location_required"
+    );
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) => anyhow::bail!("database_path_prefix_unsupported"),
+        }
+    }
+    // Negative lexical classification, including normalized traversal names.
+    // This is not a physical/symlink-alias proof and never selects native
+    // execution. The closed native open still joins the actual original,
+    // role, keeper and held file identity independently of pathname DATA.
+    Ok(normalized.starts_with(Path::new(NATIVE_DIRECTORY)))
 }
 
 /// A deliberate business rollback is a known result only after SQLite confirms
@@ -204,9 +398,10 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
             owner.refuse();
             return Err(error);
         }
-        let opened = if runtime.uses_native_storage() {
+        let opened = if let Some(selected) = &runtime.native_database {
             (|| {
-                let mut connection = open_existing(Path::new(DATABASE))?;
+                let path = selected.require_path(runtime.db())?;
+                let mut connection = open_existing(path)?;
                 configure_connection(&mut connection)?;
                 Ok(connection)
             })()
@@ -819,6 +1014,73 @@ fn allowed_sql(action: AuthAction<'_>, mode: SqlMode) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn raw_open_refuses_initial_restored_and_traversal_native_paths_before_sqlite() -> Result<()> {
+        for path in [
+            "/state/day2-native/day2-initial.sqlite",
+            "/state/day2-native/component/app.sqlite",
+            "/state/../state/day2-native/component/app.sqlite",
+            "/state/day2-native/./component/../component/app.sqlite",
+            "/../../state/day2-native/component/app.sqlite",
+        ] {
+            let path = Path::new(path);
+            assert!(is_native_database_path(path)?);
+            assert_eq!(
+                super::super::require_ordinary_database(path)
+                    .unwrap_err()
+                    .to_string(),
+                "native_runtime_sql_owner_required"
+            );
+            assert_eq!(
+                super::super::open(path).unwrap_err().to_string(),
+                "native_runtime_sql_owner_required"
+            );
+        }
+        for path in [
+            "/state/day2-native-lookalike/app.sqlite",
+            "/state/day2-native/../ordinary/app.sqlite",
+            "/tmp/ordinary.sqlite",
+        ] {
+            assert!(!native_database_path_data(Path::new(path))?);
+        }
+        assert!(native_database_path_data(Path::new("relative.sqlite")).is_err());
+        let mut relative = PathBuf::new();
+        for _ in std::env::current_dir()?.components() {
+            relative.push("..");
+        }
+        relative.push("state/day2-native/component/app.sqlite");
+        assert!(is_native_database_path(&relative)?);
+        assert_eq!(
+            super::super::open(&relative).unwrap_err().to_string(),
+            "native_runtime_sql_owner_required"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_database_metadata_never_substitutes_another_path() -> Result<()> {
+        // DATA/mechanical selection only, no native role, keeper or Current.
+        let selection = NativeDatabaseSelection::metadata_fixture(PathBuf::from(
+            "/state/day2-native/component/app.sqlite",
+        ));
+        assert_eq!(
+            selection.require_path(Path::new("/state/day2-native/component/app.sqlite"))?,
+            Path::new("/state/day2-native/component/app.sqlite")
+        );
+        assert!(selection.require_path(Path::new(DATABASE)).is_err());
+        assert!(
+            selection
+                .require_path(Path::new("/state/day2-native/another/app.sqlite"))
+                .is_err()
+        );
+        assert!(
+            selection
+                .require_path(Path::new("/tmp/ordinary.sqlite"))
+                .is_err()
+        );
+        Ok(())
+    }
 
     fn budget_database() -> Result<Connection> {
         let mut db = Connection::open_in_memory()?;

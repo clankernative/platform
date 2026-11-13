@@ -36,11 +36,14 @@ use syn::{
 const POLICY: &str = "architecture-proofs.json";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 // The reviewed registry aggregates owners; candidate requests stay separately bounded.
-const MAX_POLICY_PROOFS: usize = 256;
+const MAX_POLICY_PROOFS: usize = 320;
 const MAX_CANDIDATE_PROOFS: usize = 128;
-const MAX_TRAIT_SOURCES: usize = 32;
+const MAX_TRAIT_SOURCES: usize = 64;
 const MAX_BUFFER_DESTRUCTORS: usize = 128;
 const MAX_OWNING_CHILDREN: usize = 8;
+// Closed owning-child families can expose more uses than inherent methods.
+// Every entry remains individually reviewed and compared with the exact AST.
+const MAX_MATERIAL_USES: usize = 128;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -332,7 +335,7 @@ fn validate_policy(policy: &Policy) -> Result<()> {
         ensure!(
             proof.methods.len() <= 32
                 && proof.factories.len() <= 32
-                && proof.material_uses.len() <= 32
+                && proof.material_uses.len() <= MAX_MATERIAL_USES
                 && proof.proof_uses.len() <= 32,
             "proof API budget"
         );
@@ -1338,9 +1341,8 @@ pub fn candidate_inventory(root: &Path, descriptor: &Path) -> Result<ProofInvent
                 .chain(&declarations[0].attrs)
                 .all(|attribute| !path_is_ident(attribute.path(), "cfg")
                     && !path_is_ident(attribute.path(), "cfg_attr"))
-                && declarations[0].generics.params.is_empty()
-                && declarations[0].generics.where_clause.is_none(),
-            "candidate destructor definition must be unconditional and nongeneric"
+                && destructor_lifetime_arity(declarations[0]).is_ok(),
+            "candidate destructor requires an unconditional lifetime-only definition"
         );
         let fingerprint = destructor_source_fingerprint(&selected.type_name, &syntax.items)?
             .context("candidate destructor missing from selected owning type")?;
@@ -1809,12 +1811,65 @@ fn destructor_fingerprint(proof: &Proof, items: &[Item]) -> Result<Option<String
     destructor_source_fingerprint(&proof.type_name, items)
 }
 
+/// A borrowed negative-only owner can name simple lifetimes without admitting
+/// a type/const-generic destructor or a specialized trait implementation.
+fn destructor_lifetime_arity(definition: &syn::ItemStruct) -> Result<usize> {
+    ensure!(
+        definition
+            .attrs
+            .iter()
+            .all(|attribute| !path_is_ident(attribute.path(), "cfg")
+                && !path_is_ident(attribute.path(), "cfg_attr"))
+            && definition.generics.where_clause.is_none()
+            && definition
+                .generics
+                .params
+                .iter()
+                .all(|parameter| matches!(parameter,
+                syn::GenericParam::Lifetime(lifetime)
+                    if lifetime.attrs.is_empty() && lifetime.bounds.is_empty()
+                        && lifetime.lifetime.ident != "static" && lifetime.lifetime.ident != "_")),
+        "proof destructor owner must have only unconditional unbounded lifetime parameters"
+    );
+    Ok(definition.generics.params.len())
+}
+
+fn direct_destructor_target(selected: &str, ty: &Type, lifetime_arity: usize) -> bool {
+    let Type::Path(ty) = ty else {
+        return false;
+    };
+    if ty.qself.is_some() || ty.path.leading_colon.is_some() || ty.path.segments.len() != 1 {
+        return false;
+    }
+    let part = &ty.path.segments[0];
+    if !ident_is(&part.ident, selected) {
+        return false;
+    }
+    match (&part.arguments, lifetime_arity) {
+        (syn::PathArguments::None, 0) => true,
+        (syn::PathArguments::AngleBracketed(arguments), count) if count > 0 => {
+            arguments.colon2_token.is_none()
+                && arguments.args.len() == count
+                && arguments.args.iter().all(|argument| {
+                    matches!(argument,
+                    syn::GenericArgument::Lifetime(lifetime) if lifetime.ident == "_")
+                })
+        }
+        _ => false,
+    }
+}
+
 fn destructor_source_fingerprint(
     type_name_selected: &str,
     items: &[Item],
 ) -> Result<Option<String>> {
     let mut implementations = Vec::new();
     proof_trait_impls(type_name_selected, items, true, &mut implementations)?;
+    if implementations.is_empty() {
+        return Ok(None);
+    }
+    let definition = proof_definition(type_name_selected, items)?;
+    let lifetime_arity = destructor_lifetime_arity(definition)?;
     let mut fingerprint = None;
     for implementation in implementations {
         let (polarity, path, _) = implementation.trait_.as_ref().context("proof trait impl")?;
@@ -1850,10 +1905,13 @@ fn destructor_source_fingerprint(
                 && implementation.unsafety.is_none()
                 && implementation.generics.params.is_empty()
                 && implementation.generics.where_clause.is_none()
-                && matches!(implementation.self_ty.as_ref(), Type::Path(ty)
-                    if ty.qself.is_none() && path_is_ident(&ty.path, type_name_selected))
+                && direct_destructor_target(
+                    type_name_selected,
+                    &implementation.self_ty,
+                    lifetime_arity
+                )
                 && implementation.items.len() == 1,
-            "proof destructor must be direct, unconditional and nongeneric"
+            "proof destructor must be direct, unconditional and lifetime-erased"
         );
         let syn::ImplItem::Fn(destructor) = &implementation.items[0] else {
             anyhow::bail!("proof destructor requires exactly fn drop(&mut self)");
@@ -2653,18 +2711,18 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_proof_catalog_has_a_finite_256_entry_budget() -> Result<()> {
-        for count in [130, 256] {
+    fn reviewed_proof_catalog_has_a_finite_320_entry_budget() -> Result<()> {
+        for count in [130, 256, 263, 320] {
             validate_policy(&serde_json::from_value(proof_catalog(count))?)?;
         }
-        for count in [0, 257] {
+        for count in [0, 321] {
             let error = validate_policy(&serde_json::from_value(proof_catalog(count))?)
                 .err()
                 .context("out-of-budget proof catalog admitted")?;
             ensure!(error.to_string() == "proof policy entry budget");
         }
-        let mut duplicate = proof_catalog(256);
-        duplicate["proofs"][255] = duplicate["proofs"][0].clone();
+        let mut duplicate = proof_catalog(320);
+        duplicate["proofs"][319] = duplicate["proofs"][0].clone();
         ensure!(
             validate_policy(&serde_json::from_value(duplicate)?)
                 .err()
@@ -2672,8 +2730,8 @@ mod tests {
                 .to_string()
                 == "duplicate proof policy entry"
         );
-        let mut reordered = proof_catalog(256);
-        reordered["proofs"].as_array_mut().unwrap().swap(254, 255);
+        let mut reordered = proof_catalog(320);
+        reordered["proofs"].as_array_mut().unwrap().swap(318, 319);
         ensure!(
             validate_policy(&serde_json::from_value(reordered)?)
                 .err()
@@ -2688,7 +2746,7 @@ mod tests {
     fn expanded_catalog_enforces_actual_source_after_the_former_limit() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path().canonicalize()?;
-        let policy = proof_catalog(130);
+        let policy = proof_catalog(320);
         fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
         let source =
             "struct Claim; pub struct Permit { claim: Claim } impl Permit { pub fn send(self) {} }";
@@ -2698,14 +2756,14 @@ mod tests {
             fs::write(&path, source)?;
         }
         check(&root)?;
-        let last = root.join(policy["proofs"][129]["source"].as_str().unwrap());
+        let last = root.join(policy["proofs"][319]["source"].as_str().unwrap());
         fs::write(
             &last,
             format!("{source} impl Permit {{ pub fn raw(&self) {{}} }}"),
         )?;
         let error = check(&root)
             .err()
-            .context("unreviewed API in the 130th source was not enforced")?;
+            .context("unreviewed API in the 320th source was not enforced")?;
         ensure!(format!("{error:#}").contains("unreviewed proof method"));
         Ok(())
     }
@@ -3438,9 +3496,9 @@ mod tests {
 
     fn drop_proof() -> Proof {
         let mut reviewed = proof(Kind::Consuming);
+        let source = format!("{DROP_BASE} {REVIEWED_DROP}");
         reviewed.destructor =
-            destructor_fingerprint(&reviewed, &syn::parse_file(REVIEWED_DROP).unwrap().items)
-                .unwrap();
+            destructor_fingerprint(&reviewed, &syn::parse_file(&source).unwrap().items).unwrap();
         reviewed
     }
 
@@ -3543,6 +3601,145 @@ mod tests {
             ensure!(
                 destructor_fingerprint(&reviewed, &source.items).is_err(),
                 "accepted {alias}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lifetime_only_negative_drop_keeps_exact_source_pins_and_candidate_facts() -> Result<()> {
+        for (definition, destructor) in [
+            (
+                "pub(crate) struct Permit { loan: Vec<u8> }",
+                "impl Drop for Permit { fn drop(&mut self) { self.loan.fill(0); } }",
+            ),
+            (
+                "pub(crate) struct Permit<'a> { loan: &'a mut Vec<u8> }",
+                "impl Drop for Permit<'_> { fn drop(&mut self) { self.loan.fill(0); } }",
+            ),
+            (
+                "pub(crate) struct Permit<'a,'b> { loan: &'a mut Vec<u8>, other: &'b mut Vec<u8> }",
+                "impl Drop for Permit<'_,'_> { fn drop(&mut self) { self.loan.fill(0); self.other.fill(0); } }",
+            ),
+        ] {
+            let fixture = tempfile::tempdir()?;
+            let root = fixture.path();
+            let owner = root.join("crates/example/src");
+            fs::create_dir_all(&owner)?;
+            let source = format!("{definition} {destructor}");
+            let implementation: syn::ItemImpl = syn::parse_str(destructor)?;
+            let pin = day2::digest(implementation.to_token_stream().to_string().as_bytes());
+            let mut reviewed = private_material();
+            reviewed.destructor = Some(pin.clone());
+            inspect(&reviewed, &syn::parse_file(&source)?.items)?;
+            fs::write(owner.join("proofs.rs"), &source)?;
+            let path = root.join("candidate.json");
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "version":1,"trait_checks":[],"destructors":[{"source":"crates/example/src/proofs.rs","type_name":"Permit"}]
+                }))?,
+            )?;
+            let facts = candidate_inventory(root, &path)?;
+            ensure!(facts.destructors.len() == 1 && facts.destructors[0].fingerprint == pin);
+            let changed = source.replace("fill(0)", "fill(1)");
+            ensure!(
+                inspect(&reviewed, &syn::parse_file(&changed)?.items).is_err(),
+                "changed borrowed Drop body accepted"
+            );
+            fs::write(owner.join("proofs.rs"), changed)?;
+            ensure!(
+                candidate_inventory(root, &path)?.destructors[0].fingerprint != pin,
+                "candidate repeated stale pin"
+            );
+            if definition.contains("<'a") {
+                fs::write(owner.join("proofs.rs"), source)?;
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&serde_json::json!({
+                        "version":1,"trait_checks":[],"destructors":[],"buffer_destructors":[{"source":"crates/example/src/proofs.rs","type_name":"Permit"}]
+                    }))?,
+                )?;
+                ensure!(
+                    candidate_inventory(root, &path).is_err(),
+                    "parsed-buffer definition must remain nongeneric"
+                );
+            }
+        }
+        let unrelated = syn::parse_file("pub(crate) struct Permit<T> { loan:T }")?;
+        ensure!(
+            destructor_source_fingerprint("Permit", &unrelated.items)?.is_none(),
+            "no-Drop owners must not acquire a new generic restriction"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_drop_rejects_specialization_aliases_bounds_and_hidden_parameters() -> Result<()> {
+        let definition = "pub(crate) struct Permit<'a> { loan: &'a mut Vec<u8> }";
+        let destructor = "impl Drop for Permit<'_> { fn drop(&mut self) { self.loan.fill(0); } }";
+        let base = format!("{definition} {destructor}");
+        let implementation: syn::ItemImpl = syn::parse_str(destructor)?;
+        let mut reviewed = private_material();
+        reviewed.destructor = Some(day2::digest(
+            implementation.to_token_stream().to_string().as_bytes(),
+        ));
+        let mut changed = Vec::new();
+        for target in [
+            "Permit",
+            "Permit<'_,'_>",
+            "Permit<'static>",
+            "Permit<'a>",
+            "Permit<u8>",
+            "Permit<1>",
+            "Permit<'_,u8>",
+            "self::Permit<'_>",
+            "::Permit<'_>",
+            "Permit::<'_>",
+        ] {
+            changed.push(base.replace("for Permit<'_>", &format!("for {target}")));
+        }
+        for owner in [
+            "pub(crate) struct Permit<'a: 'static> { loan: &'a mut Vec<u8> }",
+            "pub(crate) struct Permit<'a> where 'a: 'static { loan: &'a mut Vec<u8> }",
+            "pub(crate) struct Permit<#[cfg(unix)] 'a> { loan: &'a mut Vec<u8> }",
+            "pub(crate) struct Permit<#[allow(unused)] 'a> { loan: &'a mut Vec<u8> }",
+            "pub(crate) struct Permit<#[cfg_attr(unix,allow(unused))] 'a> { loan: &'a mut Vec<u8> }",
+            "pub(crate) struct Permit<'a,T=u8> { loan: &'a mut Vec<u8>, marker: std::marker::PhantomData<T> }",
+            "pub(crate) struct Permit<'a,const N:usize> { loan: &'a mut Vec<u8> }",
+        ] {
+            changed.push(base.replace(definition, owner));
+        }
+        changed.push(base.replace("impl Drop for Permit<'_>", "impl<'a> Drop for Permit<'a>"));
+        changed.push(base.replace(
+            "impl Drop for Permit<'_>",
+            "impl Drop for Permit<'_> where Self:Sized",
+        ));
+        changed.push(format!("trait Drop {{fn drop(&mut self);}} {base}"));
+        changed.push(base.replace("impl Drop", "#[cfg(unix)] impl Drop"));
+        changed.push(base.replace(definition, &format!("#[cfg(unix)] {definition}")));
+        changed.push(base.replace("impl Drop", "unsafe impl Drop"));
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path();
+        let owner = root.join("crates/example/src");
+        fs::create_dir_all(&owner)?;
+        let path = root.join("candidate.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version":1,"trait_checks":[],"destructors":[{"source":"crates/example/src/proofs.rs","type_name":"Permit"}]
+            }))?,
+        )?;
+        for source in changed {
+            let parsed = syn::parse_file(&source)?;
+            ensure!(
+                inspect(&reviewed, &parsed.items).is_err(),
+                "invalid borrowed Drop admitted: {source}"
+            );
+            fs::write(owner.join("proofs.rs"), &source)?;
+            ensure!(
+                candidate_inventory(root, &path).is_err(),
+                "invalid candidate borrowed Drop admitted: {source}"
             );
         }
         Ok(())
@@ -3809,6 +4006,115 @@ mod tests {
             )
             .is_err(),
             "asynchronous consumption must remain forbidden"
+        );
+        Ok(())
+    }
+
+    fn material_use_catalog(count: usize) -> (Proof, String) {
+        let mut reviewed = private_material();
+        let mut source = PRIVATE_MATERIAL.to_owned();
+        for index in 0..count {
+            let signature = format!("fn unit_{index:03}(value: &mut Permit)");
+            source.push_str(&format!(" {signature} {{}}"));
+            reviewed.material_uses.push(Factory {
+                owner: None,
+                signature,
+            });
+        }
+        (reviewed, source)
+    }
+
+    #[test]
+    fn private_material_catalog_is_bounded_at_128_exact_uses() -> Result<()> {
+        for count in [33, 73, 128] {
+            let (reviewed, source) = material_use_catalog(count);
+            inspect(&reviewed, &syn::parse_file(&source)?.items)?;
+            validate_policy(&Policy {
+                version: 1,
+                proofs: vec![reviewed],
+                trait_checks: vec![],
+                buffer_destructors: vec![],
+            })?;
+        }
+        let (reviewed, _) = material_use_catalog(129);
+        let error = validate_policy(&Policy {
+            version: 1,
+            proofs: vec![reviewed],
+            trait_checks: vec![],
+            buffer_destructors: vec![],
+        })
+        .err()
+        .context("overflow material-use catalog accepted")?;
+        ensure!(error.to_string() == "proof API budget");
+        // Other independently bounded API lists retain their smaller budget.
+        for field in ["methods", "factories", "proof_uses"] {
+            let (mut reviewed, _) = material_use_catalog(33);
+            match field {
+                "methods" => {
+                    reviewed.methods = (0..33)
+                        .map(|i| format!("fn method_{i:03}(&self)"))
+                        .collect()
+                }
+                "factories" => {
+                    reviewed.factories = (0..33)
+                        .map(|i| Factory {
+                            owner: None,
+                            signature: format!("fn factory_{i:03}() -> Permit"),
+                        })
+                        .collect()
+                }
+                _ => {
+                    reviewed.proof_uses = (0..33)
+                        .map(|i| Factory {
+                            owner: None,
+                            signature: format!("fn proof_{i:03}(value: Permit)"),
+                        })
+                        .collect()
+                }
+            }
+            let error = validate_policy(&Policy {
+                version: 1,
+                proofs: vec![reviewed],
+                trait_checks: vec![],
+                buffer_destructors: vec![],
+            })
+            .err()
+            .context("another API budget expanded")?;
+            ensure!(error.to_string() == "proof API budget", "{field}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn material_uses_above_32_keep_drift_missing_and_duplicate_refusals() -> Result<()> {
+        let (reviewed, source) = material_use_catalog(73);
+        let last = "fn unit_072(value: &mut Permit) {}";
+        ensure!(source.matches(last).count() == 1);
+        for changed in [
+            source.replace("fn unit_072", "pub fn unit_072"),
+            source.replace("fn unit_072", "fn foreign_unit"),
+            source.replace(last, ""),
+            format!("{source} {last}"),
+        ] {
+            ensure!(
+                inspect(&reviewed, &syn::parse_file(&changed)?.items).is_err(),
+                "material drift/missing/duplicate admitted beyond index32"
+            );
+        }
+        let (mut duplicate, _) = material_use_catalog(73);
+        duplicate.material_uses.push(Factory {
+            owner: None,
+            signature: "fn unit_072(value: &mut Permit)".into(),
+        });
+        ensure!(
+            validate_policy(&Policy {
+                version: 1,
+                proofs: vec![duplicate],
+                trait_checks: vec![],
+                buffer_destructors: vec![],
+            })
+            .is_err(),
+            "duplicate reviewed use admitted"
         );
         Ok(())
     }
@@ -4693,11 +4999,11 @@ mod tests {
     }
 
     #[test]
-    fn candidate_descriptors_keep_existing_32_source_and_128_destructor_bounds() -> Result<()> {
+    fn candidate_descriptors_keep_64_source_and_128_destructor_bounds() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path().canonicalize()?;
         let path = root.join("candidate.json");
-        let traits = (0..32).map(|index| serde_json::json!({
+        let traits = (0..64).map(|index| serde_json::json!({
             "source": format!("crates/example/src/assertions_{index}.rs"), "scope": "const", "registration": null
         })).collect::<Vec<_>>();
         let destructors = (0..128)
@@ -4712,13 +5018,13 @@ mod tests {
         validate_candidate(&serde_json::from_value(at_limit.clone())?)?;
         let mut overflow = at_limit.clone();
         overflow["trait_checks"].as_array_mut().context("fixture trait descriptors")?.push(serde_json::json!({
-            "source": "crates/example/src/assertions_32.rs", "scope": "const", "registration": null
+            "source": "crates/example/src/assertions_64.rs", "scope": "const", "registration": null
         }));
         fs::write(&path, serde_json::to_vec(&overflow)?)?;
         ensure!(
             candidate_inventory(&root, &path)
                 .err()
-                .context("33 candidate trait sources accepted")?
+                .context("65 candidate trait sources accepted")?
                 .to_string()
                 == "trait check catalog budget",
             "candidate source bound changed"
@@ -4887,19 +5193,19 @@ mod tests {
     }
 
     #[test]
-    fn production_trait_catalog_admits_exactly_32_reviewed_sources() -> Result<()> {
+    fn production_trait_catalog_admits_exactly_64_reviewed_sources() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path().canonicalize()?;
-        let policy = trait_catalog_policy(&root, 32)?;
+        let policy = trait_catalog_policy(&root, 64)?;
         fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
         check(&root)?;
         ensure!(
-            trait_check_inventory(&root)?.trait_checks.len() == 32,
+            trait_check_inventory(&root)?.trait_checks.len() == 64,
             "inventory must retain every admitted assertion source"
         );
         // At the capacity boundary each source still has its own exact pin.
         fs::write(
-            root.join("crates/example/src/assertions_31.rs"),
+            root.join("crates/example/src/assertions_63.rs"),
             "const _: () = {};",
         )?;
         ensure!(
@@ -4910,14 +5216,14 @@ mod tests {
     }
 
     #[test]
-    fn production_trait_catalog_rejects_33_reviewed_sources() -> Result<()> {
+    fn production_trait_catalog_rejects_65_reviewed_sources() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path().canonicalize()?;
-        let policy = trait_catalog_policy(&root, 33)?;
+        let policy = trait_catalog_policy(&root, 65)?;
         fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
         ensure!(
             check(&root).unwrap_err().to_string() == "trait check catalog budget",
-            "the 33rd otherwise valid assertion source must exceed admission capacity"
+            "the 65th otherwise valid assertion source must exceed admission capacity"
         );
         ensure!(
             trait_check_inventory(&root)
@@ -4927,6 +5233,41 @@ mod tests {
                 == "trait check catalog budget",
             "inventory and mandatory checking must share the source bound"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn trait_sources_above_32_keep_exact_missing_drift_conditional_and_duplicate_refusals()
+    -> Result<()> {
+        for case in ["missing", "drift", "conditional", "duplicate"] {
+            let fixture = tempfile::tempdir()?;
+            let root = fixture.path().canonicalize()?;
+            let mut policy = trait_catalog_policy(&root, 64)?;
+            let sources = policy["trait_checks"]
+                .as_array_mut()
+                .context("fixture sources")?;
+            let selected = sources
+                .iter()
+                .position(|source| source["source"] == "crates/example/src/assertions_63.rs")
+                .context("late source")?;
+            ensure!(selected > 32);
+            let path = root.join("crates/example/src/assertions_63.rs");
+            match case {
+                "missing" => fs::remove_file(&path)?,
+                "drift" => fs::write(
+                    &path,
+                    fs::read_to_string(&path)?
+                        .replace("assert_not_impl!();", "assert_not_impl!(changed);"),
+                )?,
+                "conditional" => fs::write(
+                    &path,
+                    format!("#[cfg(unix)] {}", fs::read_to_string(&path)?),
+                )?,
+                _ => sources[selected] = sources[0].clone(),
+            }
+            fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
+            ensure!(check(&root).is_err(), "late source {case} admitted");
+        }
         Ok(())
     }
 

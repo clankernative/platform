@@ -46,8 +46,8 @@ impl Channel {
             net::connect(&socket, &net::SocketAddrUnix::new(PATH)?)?;
             stage.check_serving_acquisition(acquisition)?;
             Ok(Self {
-                socket: File::from(socket),
-                refused: false,
+                socket: Rc::new(File::from(socket)),
+                refused: Rc::new(std::cell::Cell::new(false)),
                 unprivileged_sender: None,
                 transcript: Some(Transcript::new(Protocol::InitialServing, Actor::Shell)),
                 local: PhantomData,
@@ -65,7 +65,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "serving_peer_channel_refused");
+            ensure!(!self.refused.get(), "serving_peer_channel_refused");
             stage.check_serving_acquisition(acquisition)?;
             require_connected(&self.socket, acquisition)?;
             stage.check_serving_acquisition(acquisition)
@@ -84,7 +84,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "serving_peer_channel_refused");
+            ensure!(!self.refused.get(), "serving_peer_channel_refused");
             self.check_serving_open(stage, acquisition)?;
             let bytes = serde_json::to_vec(message)?;
             ensure!(
@@ -128,7 +128,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<(Message, ServingSender)> {
         let result = (|| {
-            ensure!(!self.refused, "serving_peer_channel_refused");
+            ensure!(!self.refused.get(), "serving_peer_channel_refused");
             self.check_serving_open(stage, acquisition)?;
             let expected_code = stage.serving_peer_code()?;
             let mut bytes = [0_u8; MAX_PACKET];
@@ -245,8 +245,8 @@ impl ServingListener {
             self.check_name()?;
             stage.check_serving_acquisition(acquisition)?;
             Ok(Channel {
-                socket: File::from(socket),
-                refused: false,
+                socket: Rc::new(File::from(socket)),
+                refused: Rc::new(std::cell::Cell::new(false)),
                 unprivileged_sender: None,
                 transcript: Some(Transcript::new(Protocol::InitialServing, Actor::Controller)),
                 local: PhantomData,
@@ -298,7 +298,7 @@ impl Channel {
     /// Idle observation cannot create a role or make an old stage current.
     pub(in crate::security_epoch::native_enrollment) fn pending_serving(&mut self) -> Result<bool> {
         let result = (|| {
-            ensure!(!self.refused, "serving_peer_channel_refused");
+            ensure!(!self.refused.get(), "serving_peer_channel_refused");
             let mut acquisition = NativeAcquisition::begin(5)?;
             require_connected(&self.socket, &mut acquisition)?;
             let ready = pending(&self.socket, &mut acquisition)?;

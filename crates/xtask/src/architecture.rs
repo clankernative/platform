@@ -275,7 +275,7 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
         // and refuses native callback entry before SQL or hook mutation.
         // No module-name exemption: any byte change requires explicit review.
         "crates/day2/src/store/native_storage.rs" => {
-            Some("sha256:c5d9b7c1bc08956f3a1f661136f27f85cda289447081c609e4c8b21a8da18e18")
+            Some("sha256:f4f6fd0dde5718fbc160028a46c221456ea257a1504a27a97cfc3ca5ddd4e07f")
         }
         "crates/day2/src/oauth/schema.rs" => {
             Some("sha256:9f4251d0cde25134e6292d94677169c1d16ad4d856dc39773a3438dc3ba3af26")

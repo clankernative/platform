@@ -3,6 +3,7 @@
 //! A successful exchange alone is neither provider P3 nor a serving writer.
 
 mod continuation;
+pub(in crate::security_epoch) use continuation::RestoredPeerConnection;
 pub(crate) use continuation::{
     AppHolderPeerContinuity, ControllerCurrentRendezvous, ControllerHolderPeerContinuity,
     CurrentStoragePeerPhase, PendingAppCurrentPeer, QueuedAppCurrentPeer,

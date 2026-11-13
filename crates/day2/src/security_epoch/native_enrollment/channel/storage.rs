@@ -26,7 +26,7 @@ impl Channel {
     /// role stage issued or clock/holder authority created while idle.
     pub(in crate::security_epoch::native_enrollment) fn storage_pending(&mut self) -> Result<bool> {
         let result = (|| {
-            ensure!(!self.refused, "storage_peer_channel_refused");
+            ensure!(!self.refused.get(), "storage_peer_channel_refused");
             let mut fds = [PollFd::new(&self.socket, PollFlags::IN | PollFlags::RDHUP)];
             rustix::event::poll(
                 &mut fds,
@@ -70,8 +70,8 @@ impl Channel {
             net::connect(&socket, &net::SocketAddrUnix::new(PATH)?)?;
             stage.storage()?.check_storage_acquisition(acquisition)?;
             Ok(Self {
-                socket: File::from(socket),
-                refused: false,
+                socket: Rc::new(File::from(socket)),
+                refused: Rc::new(std::cell::Cell::new(false)),
                 unprivileged_sender: None,
                 transcript: Some(Transcript::new(Protocol::InitialStorage, Actor::App)),
                 local: PhantomData,
@@ -89,7 +89,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "storage_peer_channel_refused");
+            ensure!(!self.refused.get(), "storage_peer_channel_refused");
             stage.storage()?.check_storage_acquisition(acquisition)?;
             require_connected(&self.socket, acquisition)?;
             stage.storage()?.check_storage_acquisition(acquisition)
@@ -108,7 +108,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "storage_peer_channel_refused");
+            ensure!(!self.refused.get(), "storage_peer_channel_refused");
             self.check_storage_open(stage, acquisition)?;
             let bytes = serde_json::to_vec(message)?;
             ensure!(
@@ -152,7 +152,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<(Message, StorageSender)> {
         let result = (|| {
-            ensure!(!self.refused, "storage_peer_channel_refused");
+            ensure!(!self.refused.get(), "storage_peer_channel_refused");
             self.check_storage_open(stage, acquisition)?;
             let expected_code = stage.storage()?.storage_peer_code()?;
             let mut bytes = [0_u8; MAX_PACKET];
@@ -270,8 +270,8 @@ impl StorageListener {
             self.directory.check(&self.root)?;
             stage.storage()?.check_storage_acquisition(acquisition)?;
             Ok(Channel {
-                socket: File::from(socket),
-                refused: false,
+                socket: Rc::new(File::from(socket)),
+                refused: Rc::new(std::cell::Cell::new(false)),
                 unprivileged_sender: None,
                 transcript: Some(Transcript::new(Protocol::InitialStorage, Actor::Controller)),
                 local: PhantomData,
@@ -459,6 +459,41 @@ impl ControllerReceipt {
         result
     }
 
+    /// A new actual Current packet may join the retained restored receipt only
+    /// as identity. The old original is never sampled; the new native stage
+    /// and this packet's own kernel handle/signature still require admission.
+    pub(in crate::security_epoch::native_enrollment) fn bind_restored(
+        &mut self,
+        statement: &StageStatement,
+        original: &mut crate::security_epoch::native_enrollment::restored::RestoredControllerReceipt,
+        admitted: &StageStatement,
+        stage: &mut EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = (|| {
+            original.check_current_anchor(admitted, stage, acquisition)?;
+            self.check_received(acquisition)?;
+            ensure!(
+                self.kernel_process == admitted.stage.data.process.process
+                    && statement.same_enrollment(admitted),
+                "storage_peer_restored_controller_changed"
+            );
+            self.bind(statement, stage, acquisition)
+        })();
+        let checked = original.check_current_anchor(admitted, stage, acquisition);
+        let tail = stage
+            .storage()
+            .and_then(|mut storage| storage.check_storage_acquisition(acquisition));
+        if requested.is_err() || checked.is_err() || tail.is_err() {
+            self.valid = false;
+            acquisition.refuse();
+            stage.refuse_serving();
+        }
+        requested?;
+        checked?;
+        tail
+    }
+
     /// Identity/liveness continuity only. A fresh request must separately
     /// verify its signed interval, purpose and nonce exchange.
     pub(in crate::security_epoch::native_enrollment) fn check_continuity(
@@ -514,7 +549,10 @@ impl ControllerReceipt {
 
 /// No successful buffered final reply survives peer close/exec. This is a
 /// socket-liveness primitive, not an enrollment or storage-permission factory.
-fn require_connected(socket: &File, acquisition: &mut NativeAcquisition) -> Result<()> {
+pub(in crate::security_epoch::native_enrollment) fn require_connected(
+    socket: &File,
+    acquisition: &mut NativeAcquisition,
+) -> Result<()> {
     let result = (|| {
         loop {
             acquisition.remaining()?;

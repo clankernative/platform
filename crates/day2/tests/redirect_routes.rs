@@ -156,8 +156,13 @@ impl Server {
                 .block_on(async move {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                     let address = listener.local_addr()?;
-                    let server =
-                        LocalServer::bind_edge_listener(served, listener, &edge, verifier, 4)?;
+                    let server = LocalServer::bind_edge_listener(
+                        std::sync::Arc::new(served),
+                        listener,
+                        &edge,
+                        verifier,
+                        4,
+                    )?;
                     send.send(format!("http://{address}"))?;
                     server
                         .serve(async {

@@ -89,3 +89,51 @@ source/target and creation-parent pathname swaps and actual process
 loss followed by reopen. Reopen is an oracle observation; it never adopts an
 existing target. Local process-loss tests make no power-loss, Linux, hostile
 filesystem containment or live-provider qualification claim.
+
+## Owned native archive input
+
+The bounded capture component consumes the actual authenticated executor before
+reading the archive. It retains that executor through capture and preparation;
+a failed or unwound capture drops its real original, source and file owners.
+Chunk reads use the same original and retained local checks. Complete current
+checks remain at capture entry and exit and at each worker launch and contract
+exchange. Each exchange computes its timeout from a fresh observation of that
+same original, capped by the existing three-second worker limit. A failed
+postcheck discards its result and closes the owned child. A synchronous OS call
+can return late; late return never publishes a successful admission.
+
+The first native profile handles exactly backup.json, app.sqlite and the one
+current bundled artifact. It refuses provider stores, rollout and companion
+state, sidecars and unlisted members, including empty unhandled directories.
+The manifest is at most one MiB, the SQLite image sixteen MiB, and the artifact
+at most 256 MiB with sixty-four MiB per file, 4,096 total entries and depth eight.
+Reads use no-follow directory-relative descriptors, identity checks and retained
+captured bytes. The shared artifact validator sees only an owned private copy,
+with its file and directory descriptors and complete inventory retained.
+
+The native full-capture commitment uses the domain
+`day2-native-restore-archive-v1` and profile `sqlite-current-artifact-only`.
+It commits the separate semantic manifest commitment and the sorted complete
+member map. File entries contain kind, byte length, SHA-256 and observed source
+permission bits; directory entries contain kind and source permission bits.
+The empty path denotes the archive root. Raw manifest bytes, the database and
+every artifact member are included. UID, inode, timestamps and absolute paths
+remain native ownership checks and are not portable approval identity. Changing
+JSON formatting, a file mode or an empty directory changes this full commitment.
+The signed approval must match this actual commitment before worker admission
+or staging-state construction. Metadata-only operator inspection does not
+produce it; the actual approval-side capture producer remains separate work.
+
+The exact captured SQLite bytes become a Linux sealed memfd before the private
+staging entry. Write, growth and shrink seals are mandatory, with no accepting
+fallback. Staging takes that actual owned descriptor and never reopens the
+archive pathname. Its complete schema, storage, authority, artifact, namespace,
+custody and denial checks remain in place. The SQL authority epoch string is
+not interpreted as the native security epoch. A fresh application authority
+identity and qualified delegation cutoff are prepared outside the reset SQL.
+
+This component does not establish the remaining artifact installation,
+receiving App admission, P3, writer activation or keeper handoff, nor does it
+supply an operational restore command or native qualification. The prepared
+owner can enter only the actual private fenced writer, preserving the same
+executor and retained capture; decoded inventory or a digest cannot enter it.

@@ -941,7 +941,7 @@ mod tests {
         let fixture = Fixture::new()?;
         let mut contract = fixture.runtime.artifact().contract().clone();
         contract.operations[0].kind = "command".into();
-        let runtime = Runtime::from_artifact_for_tests(
+        let runtime = Runtime::from_native_metadata_for_tests(
             fixture.runtime.instance_path().to_owned(),
             fixture.runtime.app().into(),
             "/state/day2-native/day2-initial.sqlite".into(),
@@ -1001,7 +1001,7 @@ mod tests {
     #[test]
     fn immutable_query_only_declarations_exclude_command_pump_without_storage() -> Result<()> {
         let fixture = Fixture::new()?;
-        let runtime = Runtime::from_artifact_for_tests(
+        let runtime = Runtime::from_native_metadata_for_tests(
             fixture.runtime.instance_path().to_owned(),
             fixture.runtime.app().into(),
             "/state/day2-native/day2-initial.sqlite".into(),

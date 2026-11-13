@@ -160,7 +160,7 @@ trait Work: Send + Sync + 'static {
 }
 
 struct NativeWork {
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     clock: Arc<dyn Clock>,
     reported: Mutex<crate::schedules::Refusals>,
 }
@@ -232,7 +232,7 @@ fn compact_batches(mut compact: impl FnMut(usize) -> Result<usize>) -> Result<()
 }
 
 pub(crate) async fn run(
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     clock: Arc<dyn Clock>,
     ticks: Arc<dyn LiveTicks>,
     admitting: Arc<AtomicBool>,
@@ -250,7 +250,7 @@ pub(crate) async fn run(
 }
 
 pub(crate) async fn run_on_owner(
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     clock: Arc<dyn Clock>,
     ticks: Arc<dyn LiveTicks>,
     admitting: Arc<AtomicBool>,
@@ -274,7 +274,7 @@ enum Execution {
 }
 
 async fn run_mode(
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     clock: Arc<dyn Clock>,
     ticks: Arc<dyn LiveTicks>,
     admitting: Arc<AtomicBool>,

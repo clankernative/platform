@@ -33,6 +33,9 @@ use tokio::{net::TcpListener, sync::Semaphore};
 mod freetool_credentials;
 #[path = "web_live.rs"]
 pub(crate) mod live;
+#[path = "web_restored_listener.rs"]
+mod restored_listener;
+pub(crate) use restored_listener::BoundRestoredListener;
 
 struct Grant {
     hash: String,
@@ -129,7 +132,7 @@ pub(crate) struct Host {
     clock: Arc<dyn Clock>,
     live_ticks: Arc<dyn LiveTicks>,
     oauth: Option<Arc<crate::oauth::shell_transport::AppApprovalReceiver>>,
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     credential_effects: crate::managed_credentials::effects::Captured,
     routes: Option<crate::routing::Catalog>,
     redirects: crate::redirects::Catalog,
@@ -420,13 +423,50 @@ pub(crate) fn validate_listener_snapshot(
     Ok(())
 }
 
+// One listener builder, with an explicit source for its two existing SQL
+// units. The restored path never re-enters OWNERS or ordinary initialization.
+enum ListenerSql<'owner, 'stage, 'role> {
+    Existing,
+    Restored(&'owner mut crate::oauth::native_management::RuntimeConsumer<'stage, 'role>),
+}
+
+impl ListenerSql<'_, '_, '_> {
+    fn admit(&mut self, runtime: &Runtime) -> Result<()> {
+        match self {
+            Self::Existing => admit_listener_storage(runtime),
+            Self::Restored(current) => {
+                current.require_restored_startup_sql(runtime)?;
+                current.sql_read(runtime, |db| validate_listener_snapshot(runtime, db))
+            }
+        }
+    }
+
+    fn secret(
+        &mut self,
+        runtime: &Runtime,
+        entropy: &dyn crate::host_inputs::Entropy,
+    ) -> Result<Vec<u8>> {
+        match self {
+            Self::Existing => security::secret(runtime, entropy),
+            Self::Restored(current) => {
+                current.require_restored_startup_sql(runtime)?;
+                current.sql_write(runtime, |db| {
+                    Ok(crate::store::SqlDecision::Commit(security::secret_in(
+                        db, entropy,
+                    )?))
+                })
+            }
+        }
+    }
+}
+
 impl LocalServer {
     /// Deliberately not a production authentication adapter. This API cannot bind
     /// a public address or trust identity headers from a caller/reverse proxy.
     pub async fn bind(runtime: Runtime, actor: &str, port: u16) -> Result<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
         let authority = listener.local_addr()?.to_string();
-        Self::bind_development(runtime, actor, listener, authority, 4, false)
+        Self::bind_development(Arc::new(runtime), actor, listener, authority, 4, false)
     }
 
     /// The container profile is explicitly development-only. Its launcher must
@@ -440,7 +480,7 @@ impl LocalServer {
         ensure!((1..=32).contains(&concurrency), "invalid HTTP concurrency");
         let listener = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 8080)).await?;
         Self::bind_development(
-            runtime,
+            Arc::new(runtime),
             actor,
             listener,
             format!("127.0.0.1:{published_port}"),
@@ -466,14 +506,14 @@ impl LocalServer {
             Box::new(crate::iap::GoogleKeys),
         )?;
         let listener = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 8080)).await?;
-        Self::bind_edge_listener(runtime, listener, edge, verifier, concurrency)
+        Self::bind_edge_listener(Arc::new(runtime), listener, edge, verifier, concurrency)
     }
 
     /// The edge server on a listener the caller bound, verifying against the
     /// given keys. `bind_edge` is this with Google's keys on port 8080; tests
     /// use it to present assertions signed by keys they hold.
     pub fn bind_edge_listener(
-        runtime: Runtime,
+        runtime: Arc<Runtime>,
         listener: TcpListener,
         edge: &crate::artifact::Edge,
         verifier: crate::iap::Verifier,
@@ -493,8 +533,28 @@ impl LocalServer {
         )
     }
 
+    pub(crate) fn bind_restored_edge_listener(
+        runtime: Arc<Runtime>,
+        listener: TcpListener,
+        edge: &crate::artifact::Edge,
+        verifier: crate::iap::Verifier,
+        receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
+        concurrency: usize,
+        current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
+    ) -> Result<BoundRestoredListener> {
+        restored_listener::bind(
+            runtime,
+            listener,
+            edge,
+            verifier,
+            receiver,
+            concurrency,
+            current,
+        )
+    }
+
     fn bind_development(
-        runtime: Runtime,
+        runtime: Arc<Runtime>,
         actor: &str,
         listener: TcpListener,
         authority: String,
@@ -530,12 +590,32 @@ impl LocalServer {
     }
 
     fn bind_listener(
-        runtime: Runtime,
+        runtime: Arc<Runtime>,
         listener: TcpListener,
         authority: String,
         origin: String,
         sign_in: SignIn,
         options: ListenerOptions,
+    ) -> Result<Self> {
+        Self::bind_listener_with_sql(
+            runtime,
+            listener,
+            authority,
+            origin,
+            sign_in,
+            options,
+            ListenerSql::Existing,
+        )
+    }
+
+    fn bind_listener_with_sql(
+        runtime: Arc<Runtime>,
+        listener: TcpListener,
+        authority: String,
+        origin: String,
+        sign_in: SignIn,
+        options: ListenerOptions,
+        mut sql: ListenerSql<'_, '_, '_>,
     ) -> Result<Self> {
         let mut observed = NativeStartupObservation::new(
             runtime.uses_native_storage(),
@@ -544,7 +624,7 @@ impl LocalServer {
         runtime.artifact().require_current_api()?;
         let api = crate::openapi::Catalog::from_artifact(runtime.artifact().contract())?;
         observed.enter(NativeStartupStep::ListenerStore);
-        admit_listener_storage(&runtime)?;
+        sql.admit(&runtime)?;
         observed.enter(NativeStartupStep::Ingress);
         validate_ingress_credentials(&runtime)?;
         // `__Host-` makes the browser refuse the cookie unless it is Secure,
@@ -594,7 +674,7 @@ impl LocalServer {
             },
             secret: {
                 observed.enter(NativeStartupStep::SessionSecret);
-                security::secret(&runtime, entropy.as_ref())?
+                sql.secret(&runtime, entropy.as_ref())?
             },
             cookie_name: format!(
                 "{prefix}day2_{}_{}",
@@ -3163,6 +3243,37 @@ fn patch(markup: Markup) -> Response {
     ([(header::CONTENT_TYPE, "text/event-stream")], event).into_response()
 }
 
+/// Test-only access to the actual private listener adapter. It cannot construct
+/// a RuntimeConsumer, native owner or fixture; the owning module supplies them.
+#[cfg(test)]
+pub(crate) fn assert_restored_listener_refusals_for_tests(
+    runtime: &Runtime,
+    metadata: &Runtime,
+    current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
+) {
+    let mut sql = ListenerSql::Restored(current);
+    assert_eq!(
+        sql.admit(runtime).unwrap_err().to_string(),
+        "restored startup SQL owner required"
+    );
+    assert_eq!(
+        sql.secret(runtime, runtime.inputs().entropy.as_ref())
+            .unwrap_err()
+            .to_string(),
+        "restored startup SQL owner required"
+    );
+    assert_eq!(
+        sql.admit(metadata).unwrap_err().to_string(),
+        "native runtime consumer selection changed"
+    );
+    assert_eq!(
+        sql.secret(metadata, runtime.inputs().entropy.as_ref())
+            .unwrap_err()
+            .to_string(),
+        "native runtime consumer selection changed"
+    );
+}
+
 #[cfg(test)]
 mod page_failure_tests {
     use super::*;
@@ -3493,7 +3604,7 @@ mod native_startup_tests {
         let binder = source.items.iter().find_map(|item| match item {
             syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("LocalServer")) => {
                 item.items.iter().find_map(|item| match item {
-                    syn::ImplItem::Fn(item) if item.sig.ident == "bind_listener" => Some(&item.block),
+                    syn::ImplItem::Fn(item) if item.sig.ident == "bind_listener_with_sql" => Some(&item.block),
                     _ => None,
                 })
             }, _ => None,
@@ -3506,14 +3617,12 @@ mod native_startup_tests {
                 initializer: usize,
             }
             impl<'ast> Visit<'ast> for Calls {
-                fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))
+                fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                    if call.method == "admit"
+                        && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("sql"))
                     {
                         self.admission += 1;
                     }
-                    syn::visit::visit_expr_call(self, call);
-                }
-                fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
                     if call.method == "initialize" {
                         self.initializer += 1;
                     }
@@ -3524,8 +3633,8 @@ mod native_startup_tests {
             calls.visit_block(body);
             let direct: Vec<_> = body.stmts.iter().enumerate().filter_map(|(index, statement)| {
                 let syn::Stmt::Expr(syn::Expr::Try(propagated), _) = statement else { return None; };
-                let syn::Expr::Call(call) = &*propagated.expr else { return None; };
-                (matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))
+                let syn::Expr::MethodCall(call) = &*propagated.expr else { return None; };
+                (call.method == "admit" && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("sql"))
                     && call.args.len() == 1
                     && matches!(&call.args[0], syn::Expr::Reference(reference)
                         if reference.mutability.is_none()
@@ -3547,13 +3656,13 @@ mod native_startup_tests {
         assert!(!calls_admission(&restored));
         let position = binder.stmts.iter().position(|statement| matches!(statement,
             syn::Stmt::Expr(syn::Expr::Try(tried), _)
-                if matches!(&*tried.expr, syn::Expr::Call(call)
-                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))))).unwrap();
+                if matches!(&*tried.expr, syn::Expr::MethodCall(call)
+                    if call.method == "admit" && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("sql"))))).unwrap();
         for replacement in [
             syn::parse_quote!(if false {
-                admit_listener_storage(&runtime)?;
+                sql.admit(&runtime)?;
             }),
-            syn::parse_quote!(let _ = admit_listener_storage(&runtime);),
+            syn::parse_quote!(let _ = sql.admit(&runtime);),
         ] {
             let mut skipped = binder.clone();
             skipped.stmts[position] = replacement;
@@ -3563,6 +3672,164 @@ mod native_startup_tests {
         let admission = late.stmts.remove(position);
         late.stmts.push(admission);
         assert!(!calls_admission(&late));
+    }
+
+    #[test]
+    fn actual_listener_entries_choose_one_explicit_sql_source_before_the_common_builder() {
+        use quote::ToTokens;
+        let file = syn::parse_file(include_str!("web.rs")).unwrap();
+        let method = |name: &str| {
+            file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("LocalServer")) { return None; }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            })
+        }).unwrap()
+        };
+        let existing = method("bind_listener");
+        let expected: syn::Block = syn::parse_quote!({
+            Self::bind_listener_with_sql(
+                runtime,
+                listener,
+                authority,
+                origin,
+                sign_in,
+                options,
+                ListenerSql::Existing,
+            )
+        });
+        assert_eq!(
+            existing.block.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        let restored = method("bind_restored_edge_listener");
+        let expected: syn::Block = syn::parse_quote!({
+            restored_listener::bind(
+                runtime,
+                listener,
+                edge,
+                verifier,
+                receiver,
+                concurrency,
+                current,
+            )
+        });
+        assert_eq!(
+            restored.block.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        let child = syn::parse_file(include_str!("web_restored_listener.rs")).unwrap();
+        let restored = child
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "bind" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let first: syn::Stmt = syn::parse_quote!(current.require_restored_startup_sql(&runtime)?;);
+        assert_eq!(
+            restored.block.stmts[0].to_token_stream().to_string(),
+            first.to_token_stream().to_string()
+        );
+        let syn::Stmt::Local(server) = &restored.block.stmts[1] else {
+            panic!("common builder");
+        };
+        let syn::Expr::Try(built) = &*server.init.as_ref().unwrap().expr else {
+            panic!("guarded common builder");
+        };
+        let syn::Expr::Call(call) = &*built.expr else {
+            panic!("actual common builder");
+        };
+        assert!(
+            matches!(&*call.func, syn::Expr::Path(path) if path.path.segments.last().unwrap().ident == "bind_listener_with_sql")
+        );
+        let source: syn::Expr = syn::parse_quote!(ListenerSql::Restored(current));
+        assert_eq!(
+            call.args.last().unwrap().to_token_stream().to_string(),
+            source.to_token_stream().to_string()
+        );
+    }
+
+    #[test]
+    fn actual_restored_listener_sql_keeps_the_snapshot_predicates_and_real_secret_write() {
+        use quote::ToTokens;
+        let file = syn::parse_file(include_str!("web.rs")).unwrap();
+        for (name, expected) in [
+            (
+                "admit",
+                syn::parse_quote!({
+                    current.require_restored_startup_sql(runtime)?;
+                    current.sql_read(runtime, |db| validate_listener_snapshot(runtime, db))
+                }),
+            ),
+            (
+                "secret",
+                syn::parse_quote!({
+                    current.require_restored_startup_sql(runtime)?;
+                    current.sql_write(runtime, |db| {
+                        Ok(crate::store::SqlDecision::Commit(security::secret_in(
+                            db, entropy,
+                        )?))
+                    })
+                }),
+            ),
+        ] {
+            let expected: syn::Expr = expected;
+            let method = file.items.iter().find_map(|item| {
+                let syn::Item::Impl(item) = item else { return None; };
+                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().unwrap().ident == "ListenerSql") { return None; }
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                    _ => None,
+                })
+            }).unwrap();
+            let syn::Stmt::Expr(syn::Expr::Match(selected), _) = &method.block.stmts[0] else {
+                panic!("actual SQL source");
+            };
+            let actual = selected.arms.iter().find(|arm| matches!(&arm.pat,
+                syn::Pat::TupleStruct(pattern) if pattern.path.segments.last().unwrap().ident == "Restored")).unwrap();
+            let guarded = |body: &syn::Expr| {
+                body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+            };
+            assert!(guarded(&actual.body));
+            let substitutions: Vec<syn::Expr> = if name == "admit" {
+                vec![
+                    syn::parse_quote!({
+                        current.require_restored_startup_sql(runtime)?;
+                        Ok(())
+                    }),
+                    syn::parse_quote!({
+                        current.require_restored_startup_sql(runtime)?;
+                        current.sql_read(runtime, |_| Ok(()))
+                    }),
+                    syn::parse_quote!({
+                        current.require_restored_startup_sql(runtime)?;
+                        runtime.initialize()
+                    }),
+                    syn::parse_quote!({
+                        current.require_restored_startup_sql(runtime)?;
+                        admit_listener_storage(runtime)
+                    }),
+                ]
+            } else {
+                vec![
+                    syn::parse_quote!({
+                        current.require_restored_startup_sql(runtime)?;
+                        Ok(vec![0; 32])
+                    }),
+                    syn::parse_quote!({
+                        current.require_restored_startup_sql(runtime)?;
+                        security::secret(runtime, entropy)
+                    }),
+                ]
+            };
+            for bypass in substitutions {
+                assert!(!guarded(&bypass));
+            }
+        }
     }
 
     #[test]

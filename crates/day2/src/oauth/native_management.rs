@@ -10,7 +10,8 @@ use crate::security_epoch::native_enrollment::{
     EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeRole,
 };
 use crate::security_epoch::serving::{
-    CurrentServingPhase, ResponseIdentity, ServingParticipant, ServingUse,
+    CurrentServingPhase, NativeProviderUse, NativeSqlUse, ResponseIdentity, RestoredRuntimeCurrent,
+    ServingParticipant, ServingUse,
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
@@ -24,9 +25,13 @@ use std::{
     time::Duration,
 };
 
+mod consumer_context;
 mod request;
 mod response;
 mod response_tickets;
+pub(crate) use consumer_context::{
+    NativeConsumerAffinity, NativeConsumerContext, NativeRequestFinalContext,
+};
 pub(crate) use response_tickets::AppAuthorityStop;
 
 type Role = response::Role<EnrolledProcessRoleOwner>;
@@ -1063,9 +1068,105 @@ enum RuntimeSource<'a, 'role> {
         current: &'a mut dyn CurrentServingPhase,
         stage: &'a mut EnrolledRoleStage<'role>,
     },
+    Restored(&'a mut dyn RestoredRuntimeCurrent),
     Ordinary,
     #[cfg(test)]
     Simulated(&'a mut RoleStage<'role>),
+}
+
+impl<'a, 'role> RuntimeConsumer<'a, 'role> {
+    // Only the actual fixed driver can call this, with an already borrowed
+    // genuine scope. Sealing alone is insufficient: the native scope must
+    // require this exact Runtime and an actual matching Runtime context,
+    // never a Human/Captured/response context relabelled by the caller.
+    fn from_restored<'scope, 'request, 'original>(
+        runtime: &'a crate::store::Runtime,
+        phase: RuntimePhase,
+        current: &'a mut crate::security_epoch::serving::RestoredServingScope<
+            'scope,
+            'request,
+            'original,
+        >,
+    ) -> Result<Self> {
+        let purpose = runtime_serving_use(phase)?;
+        let current = current.borrow_runtime(runtime, purpose)?;
+        Ok(Self {
+            source: RuntimeSource::Restored(current),
+            runtime: Some(runtime),
+            phase: Some(phase),
+        })
+    }
+}
+
+/// Prepared resources stay opaque alongside the whole native parent. There is
+/// no server/Runtime/native getter or run method: the final-executor installer
+/// remains closed until ordinary request consumers are joined in place.
+pub(crate) struct PreparedRestoredListener {
+    server: crate::web::BoundRestoredListener,
+    parent: crate::security_epoch::serving::RestoredAppServingOwner,
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <PreparedRestoredListener as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
+
+/// Fixed startup operation, not a callback port or an executor installation.
+/// The genuine capture predates configuration. Both its borrowed SQL unit and
+/// its distinct enclosing native request settle before the server can escape.
+/// The returned opaque resource owns the whole parent; this publishes no owners.
+pub(crate) fn prepare_restored_listener(
+    configured: crate::deployment::ConfiguredRestoredHost,
+    runtime: std::sync::Arc<crate::store::Runtime>,
+    mut parent: crate::security_epoch::serving::RestoredAppServingOwner,
+    captured: crate::security_epoch::serving::CapturedRestoredServingRequest,
+) -> Result<PreparedRestoredListener> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let request =
+            request::StartupRequest::from_capture(sql_runtime_scope(&runtime)?, captured)?;
+        // Resolve the actual captured origin while it is still in the slot;
+        // taking the lease moves that same capture rather than recapturing it.
+        let context = NativeConsumerContext::startup_sql(&runtime, &request)?;
+        let mut lease = request.take()?;
+        let server = {
+            let mut scope = lease.begin_current(&mut parent, context)?;
+            let server =
+                RuntimeConsumer::from_restored(&runtime, RuntimePhase::SqlWrite, &mut scope)?.run(
+                    |current| configured.bind_listener(std::sync::Arc::clone(&runtime), current),
+                )?;
+            scope.finish()?;
+            server
+        };
+        let context = NativeRequestFinalContext::startup(&runtime, &lease)?;
+        lease.finish(&mut parent, context)?;
+        Ok(server)
+    }));
+    match result {
+        Ok(Ok(server)) => Ok(PreparedRestoredListener { server, parent }),
+        Ok(Err(error)) => {
+            parent.refuse();
+            Err(error)
+        }
+        Err(payload) => {
+            parent.refuse();
+            std::panic::resume_unwind(payload)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1224,6 +1325,7 @@ impl RuntimeConsumer<'_, '_> {
                 ensure!(runtime.uses_native_storage(), "native SQL file changed");
                 stage.check_for(&sql_runtime_scope(runtime)?, NativeRole::AppHost)?;
             }
+            RuntimeSource::Restored(current) => current.prepare_sql(runtime, NativeSqlUse::Read)?,
             RuntimeSource::Ordinary => {
                 ensure!(!runtime.uses_native_storage(), "native SQL owner missing");
             }
@@ -1250,6 +1352,12 @@ impl RuntimeConsumer<'_, '_> {
             ),
             "native SQL write purpose refused"
         );
+        if let RuntimeSource::Restored(current) = &mut self.source {
+            current.prepare_sql(
+                self.runtime.context("native_authority_runtime_missing")?,
+                NativeSqlUse::Write,
+            )?;
+        }
         Ok(())
     }
 }
@@ -1344,6 +1452,22 @@ pub(crate) fn with_runtime_sql<T>(
 }
 
 impl RuntimeConsumer<'_, '_> {
+    /// Fixed restored startup only. Native/ordinary metadata or an initial
+    /// owner cannot choose this source, and no human/provider purpose is lent.
+    pub(crate) fn require_restored_startup_sql(
+        &mut self,
+        runtime: &crate::store::Runtime,
+    ) -> Result<()> {
+        self.require_runtime(runtime)?;
+        if !matches!(&self.source, RuntimeSource::Restored(_))
+            || !matches!(self.phase, Some(RuntimePhase::SqlWrite))
+        {
+            self.refuse();
+            anyhow::bail!("restored startup SQL owner required");
+        }
+        self.check()
+    }
+
     pub(crate) fn sql_read<T>(
         &mut self,
         runtime: &crate::store::Runtime,
@@ -1366,17 +1490,28 @@ impl RuntimeConsumer<'_, '_> {
         })
     }
 
-    pub(super) fn require_runtime(&self, runtime: &crate::store::Runtime) -> Result<()> {
-        ensure!(
-            self.runtime
-                .is_some_and(|selected| std::ptr::eq(selected, runtime)),
-            "native runtime consumer selection changed"
-        );
+    pub(super) fn require_runtime(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        if !self
+            .runtime
+            .is_some_and(|selected| std::ptr::eq(selected, runtime))
+        {
+            if matches!(
+                &self.source,
+                RuntimeSource::Native { .. } | RuntimeSource::Restored(_)
+            ) {
+                self.refuse();
+            }
+            anyhow::bail!("native runtime consumer selection changed");
+        }
+        if let RuntimeSource::Restored(current) = &mut self.source {
+            current.require_runtime(runtime)?;
+        }
         Ok(())
     }
     pub(super) fn check(&mut self) -> Result<()> {
         match &mut self.source {
             RuntimeSource::Native { current, stage } => current.check(stage),
+            RuntimeSource::Restored(current) => current.check(),
             RuntimeSource::Ordinary => Ok(()),
             #[cfg(test)]
             RuntimeSource::Simulated(stage) => stage.check(),
@@ -1419,6 +1554,12 @@ impl RuntimeConsumer<'_, '_> {
                 let runtime = self.runtime.context("native_authority_runtime_missing")?;
                 record_unfenced_runtime(runtime)?;
             }
+            if let RuntimeSource::Restored(current) = &mut self.source {
+                let runtime = self.runtime.context("native_authority_runtime_missing")?;
+                let purpose = runtime_provider_use(self.phase)?;
+                current.prepare_provider(runtime, purpose)?;
+                record_unfenced_runtime(runtime)?;
+            }
             let value = operation()?;
             self.check()?;
             Ok(value)
@@ -1439,6 +1580,9 @@ impl RuntimeConsumer<'_, '_> {
         if let RuntimeSource::Native { current, .. } = &mut self.source {
             current.refuse();
         }
+        if let RuntimeSource::Restored(current) = &mut self.source {
+            current.refuse();
+        }
     }
 
     fn run<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -1448,11 +1592,25 @@ impl RuntimeConsumer<'_, '_> {
             // access occurs before this real scope is armed.
             current.arm(stage)?;
         }
+        if let RuntimeSource::Restored(current) = &mut self.source {
+            current.arm()?;
+        }
         let result = (|| {
+            if matches!(&self.source, RuntimeSource::Restored(_))
+                && !matches!(
+                    self.phase,
+                    Some(RuntimePhase::SqlRead | RuntimePhase::SqlWrite)
+                )
+            {
+                record_unfenced_runtime(self.runtime.context("native_authority_runtime_missing")?)?;
+            }
             let value = operation(self)?;
             self.check()?;
             if let RuntimeSource::Native { current, stage } = &mut self.source {
                 current.finish_known(stage)?;
+            }
+            if let RuntimeSource::Restored(current) = &mut self.source {
+                current.finish_known()?;
             }
             self.check()?;
             Ok(value)
@@ -1478,7 +1636,7 @@ pub(crate) fn record_unfenced_runtime(runtime: &crate::store::Runtime) -> Result
 /// business callback or ordinary SQL facade is lent while OWNERS is borrowed.
 pub(crate) fn await_controller_admin_read(
     runtime: &crate::store::Runtime,
-    operation: &day2_capabilities::Digest,
+    operation: &crate::security_epoch::native_enrollment::AdminReadAction,
 ) -> Result<()> {
     ensure!(
         runtime.uses_native_storage(),
@@ -1531,12 +1689,389 @@ pub(crate) fn await_controller_admin_read(
     })
 }
 
-pub(super) fn with_runtime_consumer<T>(
-    runtime: &crate::store::Runtime,
+fn runtime_provider_use(phase: Option<RuntimePhase>) -> Result<NativeProviderUse> {
+    match phase {
+        Some(RuntimePhase::Read) => Ok(NativeProviderUse::Read),
+        Some(RuntimePhase::Refresh) => Ok(NativeProviderUse::Refresh),
+        _ => anyhow::bail!("native restored provider purpose refused"),
+    }
+}
+
+#[cfg(test)]
+mod restored_runtime_source_tests {
+    use super::*;
+    use quote::ToTokens;
+    use syn::visit::Visit;
+
+    #[test]
+    fn fixed_startup_listener_settles_the_same_scope_and_final_request_before_return() {
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let actual = file
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "prepare_restored_listener" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        assert!(actual.sig.generics.params.is_empty());
+        fn attempt(block: &mut syn::Block) -> &mut syn::Block {
+            let syn::Stmt::Local(result) = &mut block.stmts[0] else {
+                panic!("actual result");
+            };
+            let syn::Expr::Call(catch) = result.init.as_mut().unwrap().expr.as_mut() else {
+                panic!("actual unwind boundary");
+            };
+            let syn::Expr::Call(safe) = &mut catch.args[0] else {
+                panic!("actual same-owner closure");
+            };
+            let syn::Expr::Closure(operation) = &mut safe.args[0] else {
+                panic!("actual fixed operation");
+            };
+            let syn::Expr::Block(operation) = operation.body.as_mut() else {
+                panic!("actual fixed body");
+            };
+            &mut operation.block
+        }
+        let expected: syn::Block = syn::parse_quote!({
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let request =
+                    request::StartupRequest::from_capture(sql_runtime_scope(&runtime)?, captured)?;
+                let context = NativeConsumerContext::startup_sql(&runtime, &request)?;
+                let mut lease = request.take()?;
+                let server = {
+                    let mut scope = lease.begin_current(&mut parent, context)?;
+                    let server = RuntimeConsumer::from_restored(
+                        &runtime,
+                        RuntimePhase::SqlWrite,
+                        &mut scope,
+                    )?
+                    .run(|current| {
+                        configured.bind_listener(std::sync::Arc::clone(&runtime), current)
+                    })?;
+                    scope.finish()?;
+                    server
+                };
+                let context = NativeRequestFinalContext::startup(&runtime, &lease)?;
+                lease.finish(&mut parent, context)?;
+                Ok(server)
+            }));
+            match result {
+                Ok(Ok(server)) => Ok(PreparedRestoredListener { server, parent }),
+                Ok(Err(error)) => {
+                    parent.refuse();
+                    Err(error)
+                }
+                Err(payload) => {
+                    parent.refuse();
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        });
+        fn normalized(stream: proc_macro2::TokenStream) -> String {
+            let mut tokens = stream.into_iter().collect::<Vec<_>>();
+            if matches!(tokens.last(), Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == ',')
+            {
+                tokens.pop();
+            }
+            tokens
+                .into_iter()
+                .map(|token| match token {
+                    proc_macro2::TokenTree::Group(group) => {
+                        format!("{:?}[{}]", group.delimiter(), normalized(group.stream()))
+                    }
+                    token => token.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        fn startup_callback(body: &mut syn::Block) -> Option<&mut syn::ExprClosure> {
+            let syn::Stmt::Local(result) = body.stmts.first_mut()? else {
+                return None;
+            };
+            let syn::Expr::Call(catch) = result.init.as_mut()?.expr.as_mut() else {
+                return None;
+            };
+            let syn::Expr::Call(safe) = catch.args.first_mut()? else {
+                return None;
+            };
+            let syn::Expr::Closure(operation) = safe.args.first_mut()? else {
+                return None;
+            };
+            let syn::Expr::Block(operation) = operation.body.as_mut() else {
+                return None;
+            };
+            let syn::Stmt::Local(server) = operation.block.stmts.get_mut(3)? else {
+                return None;
+            };
+            let syn::Expr::Block(scope) = server.init.as_mut()?.expr.as_mut() else {
+                return None;
+            };
+            let syn::Stmt::Local(server) = scope.block.stmts.get_mut(1)? else {
+                return None;
+            };
+            let syn::Expr::Try(run) = server.init.as_mut()?.expr.as_mut() else {
+                return None;
+            };
+            let syn::Expr::MethodCall(run) = run.expr.as_mut() else {
+                return None;
+            };
+            if run.method != "run" || run.args.len() != 1 {
+                return None;
+            }
+            let syn::Expr::Closure(callback) = run.args.first_mut()? else {
+                return None;
+            };
+            Some(callback)
+        }
+        fn canonical(mut body: syn::Block) -> Option<String> {
+            let callback = startup_callback(&mut body)?;
+            // Only the actual fixed run callback's empty-attribute, unlabelled
+            // one-expression block is equivalent to its expression body. Never
+            // discard a statement, semicolon, call, argument or other block.
+            if let syn::Expr::Block(block) = &*callback.body
+                && block.attrs.is_empty()
+                && block.label.is_none()
+                && block.block.stmts.len() == 1
+                && let syn::Stmt::Expr(expression, None) = &block.block.stmts[0]
+            {
+                *callback.body = expression.clone();
+            }
+            Some(normalized(body.to_token_stream()))
+        }
+        let expected = canonical(expected).expect("actual expected callback");
+        let guarded = |body: &syn::Block| canonical(body.clone()).as_ref() == Some(&expected);
+        assert!(guarded(&actual.block));
+        let mut with_block = (*actual.block).clone();
+        let callback = startup_callback(&mut with_block).unwrap();
+        let expression = callback.body.clone();
+        *callback.body = syn::parse_quote!({ #expression });
+        assert!(
+            guarded(&with_block),
+            "only an expression-only callback block is equivalent"
+        );
+        let mut extra_work = with_block.clone();
+        let syn::Expr::Block(block) = startup_callback(&mut extra_work).unwrap().body.as_mut()
+        else {
+            panic!("actual callback block");
+        };
+        block.block.stmts.insert(0, syn::parse_quote!(unrelated();));
+        assert!(!guarded(&extra_work));
+        let mut discarded_result = with_block;
+        let syn::Expr::Block(block) = startup_callback(&mut discarded_result)
+            .unwrap()
+            .body
+            .as_mut()
+        else {
+            panic!("actual callback block");
+        };
+        let syn::Stmt::Expr(_, semicolon) = &mut block.block.stmts[0] else {
+            panic!("actual expression");
+        };
+        *semicolon = Some(Default::default());
+        assert!(!guarded(&discarded_result));
+        for cut in 0..attempt(&mut actual.block.clone()).stmts.len() {
+            let mut changed = (*actual.block).clone();
+            attempt(&mut changed).stmts.remove(cut);
+            assert!(!guarded(&changed), "startup step {cut}");
+        }
+        let mut before_capture = (*actual.block).clone();
+        attempt(&mut before_capture).stmts.swap(1, 2);
+        assert!(!guarded(&before_capture));
+        let mut no_scope = (*actual.block).clone();
+        let syn::Stmt::Local(server) = &mut attempt(&mut no_scope).stmts[3] else {
+            panic!("actual server");
+        };
+        let syn::Expr::Block(scope) = server.init.as_mut().unwrap().expr.as_mut() else {
+            panic!("actual native scope");
+        };
+        scope.block.stmts.remove(2);
+        assert!(!guarded(&no_scope));
+        let mut reclassified = (*actual.block).clone();
+        attempt(&mut reclassified).stmts[1] = syn::parse_quote!(let context = NativeConsumerContext::startup_sql(&other_runtime, &request)?;);
+        assert!(!guarded(&reclassified));
+    }
+
+    #[test]
+    fn actual_startup_sql_guard_requires_pointer_restored_source_and_exact_sql_write_before_use() {
+        let actual = method("require_restored_startup_sql");
+        let expected: syn::Block = syn::parse_quote!({
+            self.require_runtime(runtime)?;
+            if !matches!(&self.source, RuntimeSource::Restored(_))
+                || !matches!(self.phase, Some(RuntimePhase::SqlWrite))
+            {
+                self.refuse();
+                anyhow::bail!("restored startup SQL owner required");
+            }
+            self.check()
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let mut no_pointer = actual.block.clone();
+        no_pointer.stmts.remove(0);
+        assert!(!guarded(&no_pointer));
+        let mut no_source = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::If(selected), _) = &mut no_source.stmts[1] else {
+            panic!("actual source");
+        };
+        *selected.cond = syn::parse_quote!(!matches!(self.phase, Some(RuntimePhase::SqlWrite)));
+        assert!(!guarded(&no_source));
+        let mut no_phase = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::If(selected), _) = &mut no_phase.stmts[1] else {
+            panic!("actual phase");
+        };
+        *selected.cond = syn::parse_quote!(!matches!(&self.source, RuntimeSource::Restored(_)));
+        assert!(!guarded(&no_phase));
+    }
+
+    fn method(name: &str) -> syn::ImplItemFn {
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let methods = file
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty, syn::Type::Path(path)
+                if path.path.segments.len() == 1 && path.path.segments[0].ident == "RuntimeConsumer") =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .flat_map(|item| item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(methods.len(), 1);
+        methods.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn actual_restored_runtime_constructor_requires_matching_context_before_constructing_a_borrow()
+    {
+        let actual = method("from_restored");
+        let expected: syn::Block = syn::parse_quote!({
+            let purpose = runtime_serving_use(phase)?;
+            let current = current.borrow_runtime(runtime, purpose)?;
+            Ok(Self {
+                source: RuntimeSource::Restored(current),
+                runtime: Some(runtime),
+                phase: Some(phase),
+            })
+        });
+        let guarded = |block: &syn::Block| {
+            block.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let syn::FnArg::Typed(current) = &actual.sig.inputs[2] else {
+            panic!("actual concrete scope");
+        };
+        assert!(matches!(&*current.ty, syn::Type::Reference(reference)
+            if matches!(&*reference.elem, syn::Type::Path(path)
+                if path.path.segments.last().unwrap().ident == "RestoredServingScope")));
+        let mut bypass = actual.block.clone();
+        bypass.stmts.remove(1);
+        assert!(!guarded(&bypass));
+        let mut ordinary = actual.block.clone();
+        ordinary.stmts[1] = syn::parse_quote!(current.check()?;);
+        assert!(!guarded(&ordinary));
+        assert!(matches!(actual.vis, syn::Visibility::Inherited));
+    }
+
+    #[test]
+    fn restored_provider_selection_is_closed_to_the_exact_actual_runtime_phase() {
+        for (phase, expected) in [
+            (RuntimePhase::InitialStorage, None),
+            (RuntimePhase::Registration, None),
+            (RuntimePhase::Read, Some(NativeProviderUse::Read)),
+            (RuntimePhase::Refresh, Some(NativeProviderUse::Refresh)),
+            (RuntimePhase::SqlRead, None),
+            (RuntimePhase::SqlWrite, None),
+        ] {
+            assert!(runtime_provider_use(Some(phase)).ok() == expected);
+        }
+        assert!(runtime_provider_use(None).is_err());
+    }
+
+    fn provider_guard(method: &syn::ImplItemFn) -> bool {
+        struct Guard {
+            selected: usize,
+            valid: bool,
+        }
+        impl<'ast> Visit<'ast> for Guard {
+            fn visit_expr_if(&mut self, selected: &'ast syn::ExprIf) {
+                let pat = selected.cond.to_token_stream().to_string();
+                let expected_pat: syn::Expr =
+                    syn::parse_quote!(let RuntimeSource::Restored(current) = &mut self.source);
+                if pat == expected_pat.to_token_stream().to_string() {
+                    self.selected += 1;
+                    let expected: syn::Block = syn::parse_quote!({
+                        let runtime = self.runtime.context("native_authority_runtime_missing")?;
+                        let purpose = runtime_provider_use(self.phase)?;
+                        current.prepare_provider(runtime, purpose)?;
+                        record_unfenced_runtime(runtime)?;
+                    });
+                    self.valid &= selected.then_branch.to_token_stream().to_string()
+                        == expected.to_token_stream().to_string();
+                }
+                syn::visit::visit_expr_if(self, selected);
+            }
+        }
+        let mut guarded = Guard {
+            selected: 0,
+            valid: true,
+        };
+        guarded.visit_block(&method.block);
+        guarded.selected == 1 && guarded.valid
+    }
+
+    #[test]
+    fn actual_provider_send_requires_the_retained_scope_and_debt_before_external_work() {
+        let actual = method("send");
+        assert!(provider_guard(&actual));
+        let mut bypass = actual.clone();
+        let syn::Stmt::Local(result) = &mut bypass.block.stmts[0] else {
+            panic!("actual result");
+        };
+        let syn::Expr::Call(call) = &mut *result.init.as_mut().unwrap().expr else {
+            panic!("result call");
+        };
+        let syn::Expr::Paren(group) = &mut *call.func else {
+            panic!("result group");
+        };
+        let syn::Expr::Closure(closure) = &mut *group.expr else {
+            panic!("result closure");
+        };
+        let syn::Expr::Block(body) = &mut *closure.body else {
+            panic!("result body");
+        };
+        let expected_pat: syn::Expr =
+            syn::parse_quote!(let RuntimeSource::Restored(current) = &mut self.source);
+        let mut changed = 0;
+        for statement in &mut body.block.stmts {
+            if let syn::Stmt::Expr(syn::Expr::If(selected), _) = statement
+                && selected.cond.to_token_stream().to_string()
+                    == expected_pat.to_token_stream().to_string()
+            {
+                selected.then_branch.stmts.remove(2);
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 1, "one actual provider preparation mutation");
+        assert!(!provider_guard(&bypass));
+        // The existing callback/debt source guard additionally pins the whole
+        // production closure, including this branch before operation().
+    }
+}
+
+fn runtime_serving_use(
     phase: RuntimePhase,
-    operation: impl FnOnce(&mut RuntimeConsumer<'_, '_>) -> Result<T>,
-) -> Result<T> {
-    let purpose = match phase {
+) -> Result<crate::security_epoch::serving::RuntimeServingUse> {
+    Ok(match phase {
         RuntimePhase::Registration => {
             crate::security_epoch::serving::RuntimeServingUse::Registration
         }
@@ -1547,7 +2082,15 @@ pub(super) fn with_runtime_consumer<T>(
         RuntimePhase::InitialStorage => {
             anyhow::bail!("native initial admission requires its dedicated factory")
         }
-    };
+    })
+}
+
+pub(super) fn with_runtime_consumer<T>(
+    runtime: &crate::store::Runtime,
+    phase: RuntimePhase,
+    operation: impl FnOnce(&mut RuntimeConsumer<'_, '_>) -> Result<T>,
+) -> Result<T> {
+    let purpose = runtime_serving_use(phase)?;
     if !runtime.uses_native_storage() {
         #[cfg(test)]
         if let Some(scope) = fixtures::runtime_scope(runtime)? {
@@ -2876,6 +3419,23 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn restored_listener_sql_never_accepts_an_ordinary_or_metadata_only_runtime_owner() -> Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let (runtime, _, _) = super::super::admission::tests::management_fixture(directory.path())?;
+        let metadata = crate::store::Runtime::from_native_metadata_for_tests(
+            runtime.instance_path().to_owned(),
+            runtime.app().into(),
+            std::path::PathBuf::from("/state/day2-native/closed-startup-adapter/app.sqlite"),
+            runtime.artifact().clone(),
+        )?;
+        with_runtime_consumer(&runtime, RuntimePhase::SqlWrite, |current| {
+            crate::web::assert_restored_listener_refusals_for_tests(&runtime, &metadata, current);
+            Ok(())
+        })
+    }
     use super::*;
 
     #[test]
@@ -2945,12 +3505,56 @@ mod tests {
     }
 
     #[test]
+    fn restored_database_selection_metadata_cannot_supply_a_current_sql_owner() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (ordinary, _, _) =
+            super::super::admission::tests::management_fixture(directory.path())?;
+        let path = std::path::PathBuf::from("/state/day2-native/restored-component/app.sqlite");
+        let selected = crate::store::Runtime::from_native_metadata_for_tests(
+            ordinary.instance_path().to_owned(),
+            ordinary.app().into(),
+            path.clone(),
+            ordinary.artifact().clone(),
+        )?;
+        assert!(selected.uses_native_storage());
+        let entered = std::cell::Cell::new(false);
+        let result = selected.sql_read(|_| {
+            entered.set(true);
+            Ok(())
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "native runtime executor missing"
+        );
+        assert!(!entered.get());
+        // The ordinary test factory selects no native branch from a pathname;
+        // the raw opener independently refuses that reserved tree before SQL.
+        let unselected = crate::store::Runtime::from_artifact_for_tests(
+            ordinary.instance_path().to_owned(),
+            ordinary.app().into(),
+            path,
+            ordinary.artifact().clone(),
+        )?;
+        assert!(!unselected.uses_native_storage());
+        let result = unselected.sql_read(|_| {
+            entered.set(true);
+            Ok(())
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "native_runtime_sql_owner_required"
+        );
+        assert!(!entered.get());
+        Ok(())
+    }
+
+    #[test]
     fn native_runtime_metadata_and_scripted_role_cannot_supply_runtime_or_response_permission()
     -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (ordinary, _, _) =
             super::super::admission::tests::management_fixture(directory.path())?;
-        let metadata_only = crate::store::Runtime::from_artifact_for_tests(
+        let metadata_only = crate::store::Runtime::from_native_metadata_for_tests(
             ordinary.instance_path().to_owned(),
             ordinary.app().into(),
             std::path::PathBuf::from("/state/day2-native/day2-initial.sqlite"),
@@ -3410,14 +4014,15 @@ mod tests {
             email: "alice@example.com".into(),
             subject: "accounts.google.com:alice".into(),
         };
-        let Reply::Pending { view } = Manager::new(runtime, authority).dispatch(
-            Call::Capture {
-                registration: "calendar".into(),
-                operation: super::super::management::Action::Connect,
-            },
-            &identity,
-            100,
-        )?
+        let Reply::Pending { view } = Manager::new(std::sync::Arc::new(runtime), authority)
+            .dispatch(
+                Call::Capture {
+                    registration: "calendar".into(),
+                    operation: super::super::management::Action::Connect,
+                },
+                &identity,
+                100,
+            )?
         else {
             anyhow::bail!("management fixture did not commit Pending")
         };
@@ -4813,8 +5418,8 @@ pub(crate) mod fixtures {
                         email: "alice@example.com".into(),
                         subject: "accounts.google.com:alice".into(),
                     };
-                    let Reply::Pending { view } = Manager::new(runtime.clone(), authority)
-                        .dispatch(
+                    let Reply::Pending { view } =
+                        Manager::new(std::sync::Arc::new(runtime.clone()), authority).dispatch(
                             Call::Capture {
                                 registration: "calendar".into(),
                                 operation: super::super::super::management::Action::Connect,

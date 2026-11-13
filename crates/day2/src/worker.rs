@@ -25,7 +25,7 @@ mod child_milestones;
 #[cfg(target_os = "macos")]
 mod mac_lifetime;
 
-const MAX_FRAME: usize = 1_048_576;
+pub(crate) const MAX_FRAME: usize = 1_048_576;
 pub(crate) const PROPERTY_MAX_FRAME: usize = 6 * 32 * 1024 * 1024 + 65_536;
 const NO_ERRNO: i64 = i64::MIN;
 

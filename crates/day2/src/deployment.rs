@@ -684,6 +684,411 @@ pub(crate) struct NativeAppStartup {
     replicas: u8,
 }
 
+/// Fixed restored Host setup input. It holds no Runtime, native owner, original,
+/// configure callback, initial-store source or positive readiness witness.
+/// Only the genuine consuming native supplier can join it to the retained
+/// restored Runtime and install the resulting Host on its actual executor.
+/// Construction and installation are intentionally unavailable until those
+/// real closed consumer operations are wired in place.
+pub(crate) struct NativeRestoredHostInputs {
+    listener: tokio::net::TcpListener,
+    declared: Instance,
+    providers: crate::oauth::host::Providers,
+    concurrency: usize,
+    admission: Arc<AtomicBool>,
+}
+
+/// Owned setup resources, not a native admission/readiness witness. In
+/// particular the listener, verifier and receiver are real service resources;
+/// the Weak Runtime join records identity only and grants no authority.
+pub(crate) struct ConfiguredRestoredHost {
+    runtime: std::sync::Weak<Runtime>,
+    listener: tokio::net::TcpListener,
+    declared: Instance,
+    receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
+    verifier: crate::iap::Verifier,
+    concurrency: usize,
+    admission: Arc<AtomicBool>,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+/// The accepting installation is closed until the actual startup SQL and
+/// final-executor publication supplier are joined. No DATA can create this
+/// value and no method can expose a Runtime, native owner or callback.
+pub(crate) struct RestoredHostInstallation {
+    _unavailable: std::convert::Infallible,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl NativeRestoredHostInputs {
+    /// Fixed setup only, under the native supplier's already captured request
+    /// and negative guard. Reads the actual Instance but performs no serving
+    /// SQL, native acquisition, owner publication or ready transition.
+    pub(crate) fn configure(self, runtime: &mut Arc<Runtime>) -> Result<ConfiguredRestoredHost> {
+        ensure!(
+            self.admission.load(Ordering::Acquire),
+            "restored host setup closed"
+        );
+        let pointer = Arc::as_ptr(runtime);
+        let actual =
+            Arc::get_mut(runtime).context("restored Runtime escaped before configuration")?;
+        ensure!(
+            actual.uses_native_storage(),
+            "restored native Runtime required"
+        );
+        let desired = day2_capabilities::Digest::of(&self.declared)?;
+        let current = Instance::load(actual.instance_path())?;
+        ensure!(
+            day2_capabilities::Digest::of(&current)? == desired,
+            "restored host Instance changed before configuration"
+        );
+        let receiver = crate::oauth::host::app_receiver(runtime, &self.providers)?;
+        ensure!(
+            std::ptr::eq(pointer, Arc::as_ptr(runtime)),
+            "restored Runtime allocation changed"
+        );
+        let (identity, edge) = self.declared.edge(runtime.app())?;
+        let verifier = crate::iap::Verifier::new(
+            &edge.iap_audience,
+            &identity.hosted_domain,
+            Box::new(crate::iap::GoogleKeys),
+        )?;
+        let current = Instance::load(runtime.instance_path())?;
+        ensure!(
+            day2_capabilities::Digest::of(&current)? == desired,
+            "restored host Instance changed during configuration"
+        );
+        ensure!(
+            self.admission.load(Ordering::Acquire),
+            "restored host setup closed"
+        );
+        Ok(ConfiguredRestoredHost {
+            runtime: Arc::downgrade(runtime),
+            listener: self.listener,
+            declared: self.declared,
+            receiver,
+            verifier,
+            concurrency: self.concurrency,
+            admission: self.admission,
+            local: std::marker::PhantomData,
+        })
+    }
+}
+
+impl ConfiguredRestoredHost {
+    /// Build the concrete listener under the genuine startup SQL borrow. The
+    /// shared allocation is identity only; it cannot supply that borrow. This
+    /// neither installs an executor nor publishes ready/OWNERS/LIVE state.
+    pub(crate) fn bind_listener(
+        self,
+        runtime: Arc<Runtime>,
+        current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
+    ) -> Result<crate::web::BoundRestoredListener> {
+        ensure!(
+            self.runtime
+                .upgrade()
+                .is_some_and(|actual| Arc::ptr_eq(&actual, &runtime)),
+            "restored configured Runtime changed"
+        );
+        current.require_restored_startup_sql(&runtime)?;
+        ensure!(
+            self.admission.load(Ordering::Acquire),
+            "restored host setup closed"
+        );
+        let (_, edge) = self.declared.edge(runtime.app())?;
+        let server = LocalServer::bind_restored_edge_listener(
+            runtime,
+            self.listener,
+            edge,
+            self.verifier,
+            self.receiver,
+            self.concurrency,
+            current,
+        )?;
+        ensure!(
+            self.admission.load(Ordering::Acquire),
+            "restored host setup closed"
+        );
+        Ok(server)
+    }
+
+    /// Closed consuming bridge agreed with the native supplier. It never
+    /// delegates to initial-store admission, a fresh enrollment or an ordinary
+    /// Host constructor. The real startup Current/SQL port replaces this
+    /// refusal in place before any Endpoint/LIVE/pump publication can succeed.
+    pub(crate) fn install(
+        self,
+        runtime: Arc<Runtime>,
+        mut parent: crate::security_epoch::serving::RestoredAppServingOwner,
+        mut captured: crate::security_epoch::serving::CapturedRestoredServingRequest,
+    ) -> Result<RestoredHostInstallation> {
+        let selected = self
+            .runtime
+            .upgrade()
+            .is_some_and(|actual| Arc::ptr_eq(&actual, &runtime));
+        captured.refuse();
+        parent.refuse();
+        ensure!(selected, "restored configured Runtime changed");
+        anyhow::bail!("restored startup SQL and final-executor installation not wired")
+    }
+}
+
+#[cfg(test)]
+mod restored_host_setup_source_tests {
+    use quote::ToTokens;
+    use syn::{parse::Parser, visit::Visit};
+
+    #[test]
+    fn configured_listener_keeps_the_actual_runtime_and_owned_sql_before_mounting_receiver() {
+        let actual = method("ConfiguredRestoredHost", "bind_listener");
+        let expected: syn::Block = syn::parse_quote!({
+            ensure!(
+                self.runtime
+                    .upgrade()
+                    .is_some_and(|actual| Arc::ptr_eq(&actual, &runtime)),
+                "restored configured Runtime changed"
+            );
+            current.require_restored_startup_sql(&runtime)?;
+            ensure!(
+                self.admission.load(Ordering::Acquire),
+                "restored host setup closed"
+            );
+            let (_, edge) = self.declared.edge(runtime.app())?;
+            let server = LocalServer::bind_restored_edge_listener(
+                runtime,
+                self.listener,
+                edge,
+                self.verifier,
+                self.receiver,
+                self.concurrency,
+                current,
+            )?;
+            ensure!(
+                self.admission.load(Ordering::Acquire),
+                "restored host setup closed"
+            );
+            Ok(server)
+        });
+        fn normalized(stream: proc_macro2::TokenStream) -> String {
+            let mut tokens = stream.into_iter().collect::<Vec<_>>();
+            if matches!(tokens.last(), Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == ',')
+            {
+                tokens.pop();
+            }
+            tokens
+                .into_iter()
+                .map(|token| match token {
+                    proc_macro2::TokenTree::Group(group) => {
+                        format!("{:?}[{}]", group.delimiter(), normalized(group.stream()))
+                    }
+                    token => token.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        let normalize = |block: &syn::Block| normalized(block.to_token_stream());
+        let guarded = |block: &syn::Block| normalize(block) == normalize(&expected);
+        assert!(guarded(&actual.block));
+        for cut in 0..expected.stmts.len() - 1 {
+            let mut changed = actual.block.clone();
+            changed.stmts.remove(cut);
+            assert!(!guarded(&changed), "configured listener step {cut}");
+        }
+        let mut ordinary = actual.block.clone();
+        ordinary.stmts[4] = syn::parse_quote!(let mut server = LocalServer::bind_edge_listener(runtime, self.listener, edge, self.verifier, self.concurrency)?;);
+        assert!(!guarded(&ordinary));
+        let mut early = actual.block.clone();
+        early.stmts.swap(5, 6);
+        assert!(!guarded(&early));
+    }
+
+    fn method(owner: &str, name: &str) -> syn::ImplItemFn {
+        syn::parse_file(include_str!("deployment.rs"))
+            .unwrap()
+            .items
+            .into_iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident(owner)) {
+                    return None;
+                }
+                item.items.into_iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                    _ => None,
+                })
+            })
+            .unwrap()
+    }
+
+    fn configured_in_place(body: &syn::Block) -> bool {
+        configured_with_order(body, true)
+    }
+
+    fn configured_with_order(body: &syn::Block, check_order: bool) -> bool {
+        #[derive(Default)]
+        struct Calls {
+            calls: Vec<String>,
+            forbidden: bool,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                self.calls
+                    .push(call.func.to_token_stream().to_string().replace(' ', ""));
+                syn::visit::visit_expr_call(self, call);
+            }
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                self.forbidden |= matches!(
+                    call.method.to_string().as_str(),
+                    "clone"
+                        | "initialize"
+                        | "sql_read"
+                        | "sql_write"
+                        | "begin_current_stage"
+                        | "begin_current_request"
+                        | "into_native_parts"
+                );
+                syn::visit::visit_expr_method_call(self, call);
+            }
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                if let Ok(args) =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                        .parse2(mac.tokens.clone())
+                {
+                    for arg in &args {
+                        self.visit_expr(arg);
+                    }
+                } else {
+                    self.forbidden = true;
+                }
+            }
+        }
+        let mut actual = Calls::default();
+        actual.visit_block(body);
+        let positions = |name: &str| {
+            actual
+                .calls
+                .iter()
+                .enumerate()
+                .filter_map(|(i, call)| (call == name).then_some(i))
+                .collect::<Vec<_>>()
+        };
+        let unique = positions("Arc::get_mut");
+        let reads = positions("Instance::load");
+        let receiver = positions("crate::oauth::host::app_receiver");
+        let weak = positions("Arc::downgrade");
+        !actual.forbidden
+            && unique.len() == 1
+            && reads.len() == 2
+            && receiver.len() == 1
+            && weak.len() == 1
+            && (!check_order
+                || (unique[0] < reads[0]
+                    && reads[0] < receiver[0]
+                    && receiver[0] < reads[1]
+                    && reads[1] < weak[0]))
+            && !actual
+                .calls
+                .iter()
+                .any(|call| matches!(call.as_str(), "Arc::make_mut" | "Arc::new" | "Arc::clone"))
+    }
+
+    #[test]
+    fn actual_setup_refuses_aliases_before_instance_io_and_creates_no_early_shared_runtime() {
+        fn has_call(statement: &syn::Stmt, name: &str) -> bool {
+            struct Find<'name> {
+                name: &'name str,
+                found: bool,
+            }
+            impl<'ast> Visit<'ast> for Find<'_> {
+                fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                    self.found |=
+                        call.func.to_token_stream().to_string().replace(' ', "") == self.name;
+                    syn::visit::visit_expr_call(self, call);
+                }
+            }
+            let mut find = Find { name, found: false };
+            find.visit_stmt(statement);
+            find.found
+        }
+        let actual = method("NativeRestoredHostInputs", "configure");
+        assert!(configured_in_place(&actual.block));
+        let mut read_before_unique = actual.block.clone();
+        let read = read_before_unique
+            .stmts
+            .iter()
+            .position(|stmt| has_call(stmt, "Instance::load"))
+            .unwrap();
+        let unique = read_before_unique
+            .stmts
+            .iter()
+            .position(|stmt| has_call(stmt, "Arc::get_mut"))
+            .unwrap();
+        let first_read = read_before_unique.stmts.remove(read);
+        read_before_unique.stmts.insert(unique, first_read);
+        assert!(!configured_in_place(&read_before_unique));
+        assert!(
+            configured_with_order(&read_before_unique, false),
+            "only the ordering guard rejects this same-count mutation"
+        );
+        let mut clone_fallback = actual.block.clone();
+        clone_fallback
+            .stmts
+            .insert(0, syn::parse_quote!(Arc::make_mut(runtime);));
+        assert!(!configured_in_place(&clone_fallback));
+        let mut early_weak = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::Call(returned), _) = early_weak.stmts.last_mut().unwrap()
+        else {
+            panic!("actual returned setup");
+        };
+        let syn::Expr::Struct(configured) = &mut returned.args[0] else {
+            panic!("actual configured resources");
+        };
+        let field = configured
+            .fields
+            .iter_mut()
+            .find(|field| matches!(&field.member, syn::Member::Named(name) if name == "runtime"))
+            .unwrap();
+        let actual_weak = std::mem::replace(&mut field.expr, syn::parse_quote!(early_weak));
+        early_weak
+            .stmts
+            .insert(0, syn::parse_quote!(let early_weak = #actual_weak;));
+        assert!(!configured_in_place(&early_weak));
+        assert!(
+            configured_with_order(&early_weak, false),
+            "only the ordering guard rejects the relocated sole weak reference"
+        );
+    }
+
+    #[test]
+    fn unwired_startup_installation_refuses_both_actual_owners_without_initial_fallback() {
+        let actual = method("ConfiguredRestoredHost", "install");
+        let expected: syn::Block = syn::parse_quote!({
+            let selected = self
+                .runtime
+                .upgrade()
+                .is_some_and(|actual| Arc::ptr_eq(&actual, &runtime));
+            captured.refuse();
+            parent.refuse();
+            ensure!(selected, "restored configured Runtime changed");
+            anyhow::bail!("restored startup SQL and final-executor installation not wired")
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for index in [1, 2] {
+            let mut missing = actual.block.clone();
+            missing.stmts.remove(index);
+            assert!(!guarded(&missing));
+        }
+        let mut fallback = actual.block.clone();
+        *fallback.stmts.last_mut().unwrap() = syn::Stmt::Expr(syn::parse_quote!(Ok(())), None);
+        assert!(!guarded(&fallback));
+    }
+}
+
 enum AppStartupRuntime {
     Ordinary(Box<Runtime>),
     Initial(Box<crate::store::InitialStoreMetadata>),
@@ -781,7 +1186,8 @@ impl NativeAppStartup {
                 None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
             };
             observed.enter(NativeStartupStep::Receiver);
-            let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
+            let mut runtime = Arc::new(runtime);
+            let receiver = crate::oauth::host::app_receiver(&mut runtime, &providers)?;
             ensure!(
                 admission.load(Ordering::Acquire),
                 "native App startup admission closed"

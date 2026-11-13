@@ -204,7 +204,7 @@ fn read(
                 roots.push(entry);
             }
         }
-        let root = decode_snapshot(&selected.names, roots)?;
+        let root = decode_snapshot(selected.names.snapshot_names(), roots)?;
         budget.remaining_decoding(port)?;
         Ok(Observed {
             root,

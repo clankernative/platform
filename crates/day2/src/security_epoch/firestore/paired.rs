@@ -290,7 +290,10 @@ fn read_once(
                 });
             }
         }
-        Ok((decode_snapshot(names, counter_entries)?, slot))
+        Ok((
+            decode_snapshot(names.snapshot_names(), counter_entries)?,
+            slot,
+        ))
     })();
     match result {
         Ok((snapshot, slot)) => Ok((snapshot, slot, transaction)),
