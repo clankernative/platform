@@ -97,6 +97,7 @@ impl Session {
         host: Arc<dyn Host>,
         phase: Phase,
     ) -> Result<Self> {
+        let _timing = crate::request_timing::worker_start();
         let executable = artifact.materialize_worker()?;
         let worker = Worker::start(&executable)?;
         let started = host.monotonic();
@@ -110,6 +111,7 @@ impl Session {
     }
 
     pub(crate) fn exchange(&mut self, request: &Request) -> Result<Response> {
+        let timing = crate::request_timing::worker_exchange();
         let result = (|| {
             self.host.deadline(self.phase, self.started)?;
             match self.host.worker_action(self.phase, request)? {
@@ -120,6 +122,7 @@ impl Session {
                 WorkerAction::Crash => Err(Failure::WorkerCrashed.into()),
             }
         })();
+        drop(timing);
         self.host
             .record_exchange(self.phase, request, &result)
             .context("record worker observation")?;

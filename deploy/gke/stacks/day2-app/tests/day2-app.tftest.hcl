@@ -1647,6 +1647,25 @@ run "omits_journal_policy_by_default" {
   }
 }
 
+run "renders_request_timing_only_when_set" {
+  command = plan
+  variables {
+    request_timing = false
+  }
+  assert {
+    condition     = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.request_timing == false
+    error_message = "request_timing must render as the app's request timing choice."
+  }
+}
+
+run "omits_request_timing_by_default" {
+  command = plan
+  assert {
+    condition     = !can(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.request_timing)
+    error_message = "Without request_timing the app keeps day2's edge default."
+  }
+}
+
 run "refuses_fractional_trace_retention" {
   command = plan
   variables {

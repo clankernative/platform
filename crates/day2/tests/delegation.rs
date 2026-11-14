@@ -51,6 +51,7 @@ impl Pair {
             readers: BTreeSet::from(["alice".into()]),
             writers: BTreeSet::from(["alice".into()]),
             edge: None,
+            request_timing: None,
         };
         let instance = Instance {
             installation: "delegationco".into(),

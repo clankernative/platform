@@ -357,7 +357,10 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 reservation,
                 identity,
             } => {
+                let mut timing = crate::request_timing::span("observe");
+                timing.name("capability", &instruction.model);
                 let completed = crate::capabilities::observe(runtime, *capability, &identity);
+                drop(timing);
                 admitted_attempt = Some((
                     ordinal,
                     attempt,

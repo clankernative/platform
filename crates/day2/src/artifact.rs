@@ -1330,6 +1330,11 @@ pub struct AppBinding {
     /// identity provider. Absent means the app is not served at an edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
+    /// One timing line per HTTP request on stdout (see `crate::request_timing`).
+    /// Absent means on when served at the edge and off in local development;
+    /// `false` turns it off, `true` turns it on in development too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timing: Option<bool>,
 }
 
 /// An app binding as files and snapshots written before owners read the audit
@@ -1372,6 +1377,8 @@ struct StoredBinding {
     journal: Option<crate::journal::Policy>,
     #[serde(default)]
     edge: Option<Edge>,
+    #[serde(default)]
+    request_timing: Option<bool>,
 }
 
 impl From<StoredBinding> for AppBinding {
@@ -1392,6 +1399,7 @@ impl From<StoredBinding> for AppBinding {
             retention: stored.retention,
             journal: stored.journal,
             edge: stored.edge,
+            request_timing: stored.request_timing,
         }
     }
 }

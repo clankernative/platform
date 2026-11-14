@@ -90,6 +90,7 @@ locals {
         length(var.schedules) == 0 ? {} : { schedules = var.schedules },
         length(var.ingress) == 0 ? {} : { ingress = var.ingress },
         local.managed_secret_binding,
+        var.request_timing == null ? {} : { request_timing = var.request_timing },
       var.journal_trace_hours == null ? {} : { journal = { trace_hours = var.journal_trace_hours } })
     }
     }, var.resource_catalog == null ? {} : { resources = var.resource_catalog }, var.security_shell_contract == null ? {} : {

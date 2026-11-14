@@ -387,6 +387,7 @@ impl RequestContext<'_> {
             return Ok(response);
         }
         let operation = &endpoint.operation;
+        crate::request_timing::route(&operation.name);
         let record = &self.runtime.artifact().contract().schema.inputs[&operation.input_type];
         let (input, invocation) = if method == Method::GET {
             ensure!(body.is_empty(), crate::error::Failure::InvalidInput);
@@ -451,6 +452,7 @@ impl RequestContext<'_> {
                 json!({"invocation_id":invocation,"status":"awaiting_confirmation","confirmation_url":confirmation_url}),
             ));
         }
+        let mut timing = crate::request_timing::invocation("api_invocation", &operation.name);
         self.runtime.accept_on_behalf_of_verified(
             &operation.name,
             ActingAs {
@@ -472,8 +474,11 @@ impl RequestContext<'_> {
                 error: String::new(),
             }
         } else {
-            self.runtime.execute(&invocation, Fault::None)?
+            let executed = self.runtime.execute(&invocation, Fault::None);
+            timing.outcome(&executed);
+            executed?
         };
+        drop(timing);
         let mut response = if outcome.status == "success" {
             json_response(StatusCode::OK, outcome.result)
         } else if outcome.status == "pending" {

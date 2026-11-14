@@ -292,6 +292,14 @@ impl Endpoint {
         Ok(None)
     }
 
+    /// Where an App endpoint writes per-request timing lines, if anywhere.
+    fn request_timing(&self) -> Option<crate::request_timing::Output> {
+        match self {
+            Self::App(host) => host.request_timing_output(),
+            _ => None,
+        }
+    }
+
     fn prepare_response(
         &self,
         sink: &super::native_management::Sink,
@@ -492,6 +500,12 @@ async fn run(
             _ = connections.next(), if !connections.is_empty() => {}
             accepted = futures_util::future::poll_fn(|cx| timer(|| listener.poll_accept(cx))), if !draining && connections.len() < capacity => {
                 let (stream, _) = accepted?;
+                // Timing starts at accept: while one native operation runs, the
+                // others wait on this owner thread, and that wait is theirs.
+                let accepted_at = crate::request_timing::now();
+                let inflight = connections.len();
+                let timing_output = endpoint.request_timing();
+                let timing = std::rc::Rc::new(RefCell::new(None::<crate::request_timing::Recorder>));
                 let sink = super::native_management::Sink::new();
                 let driver = std::rc::Rc::new(RefCell::new(None));
                 let connection_io = OwnerIo { inner: std::rc::Rc::new(RefCell::new(TokioIo::new(stream))), owner, sink: sink.clone(), driver: driver.clone(),
@@ -510,14 +524,20 @@ async fn run(
                         }
                     }
                     let mut completion = Completion { sink: sink.clone(), known: false };
+                    let service_timing = timing.clone();
                     let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                         let admitted = admitted.clone();
                         let sink = sink.clone();
                         let captured = endpoint.capture_request(&sink, &request);
+                        let timing_output = timing_output.clone();
+                        let service_timing = service_timing.clone();
                         async move {
                             let response = match captured {
                                 Ok(Some(literal)) => literal,
-                                Ok(None) => sink.scope(endpoint.handle(request.map(Body::new), admitted)).await,
+                                Ok(None) => {
+                                    let request = timed_request(request.map(Body::new), timing_output, accepted_at, inflight, &service_timing);
+                                    sink.scope(endpoint.handle(request, admitted)).await
+                                }
                                 Err(_) => {
                                     sink.abort();
                                     return Err(io::Error::other("native request authority unavailable"));
@@ -543,7 +563,9 @@ async fn run(
                         .timer(OwnerTimer)
                         .header_read_timeout(std::time::Duration::from_secs(3))
                         .serve_connection(connection_io, service);
-                    if let Ok(Ok(())) = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await {
+                    let served = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await;
+                    let timed_out = served.is_err();
+                    if let Ok(Ok(())) = served {
                         // Known local transport completion only. This is not
                         // evidence that a browser/human received the bytes.
                         // Hyper may already have dropped OwnerIo. The retained
@@ -561,10 +583,40 @@ async fn run(
                         // Missing output is never a known delivery receipt.
                         driver.report();
                     }
+                    let recorded = timing.borrow_mut().take();
+                    if let Some(recorder) = recorded {
+                        recorder.delivered(if completion.known {
+                            "delivered"
+                        } else if timed_out {
+                            "connection_timeout"
+                        } else {
+                            "failed"
+                        });
+                    }
                 });
             }
         }
     }
+}
+
+/// Start a captured App request's timing record at its connection's accept,
+/// when the App endpoint writes timing lines. The handler finds it in the
+/// request's extensions; the connection keeps a clone to report delivery.
+fn timed_request(
+    mut request: Request,
+    output: Option<crate::request_timing::Output>,
+    accepted_at: std::time::Instant,
+    inflight: usize,
+    slot: &RefCell<Option<crate::request_timing::Recorder>>,
+) -> Request {
+    if let Some(output) = output {
+        let recorder = crate::request_timing::Recorder::request(output, accepted_at);
+        recorder.completed("accept_wait", accepted_at, crate::request_timing::now());
+        recorder.attribute("inflight", serde_json::json!(inflight));
+        request.extensions_mut().insert(recorder.clone());
+        slot.borrow_mut().replace(recorder);
+    }
+    request
 }
 
 /// This wraps the socket, not just Body::poll_frame: response headers, buffered

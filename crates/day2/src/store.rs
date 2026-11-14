@@ -1059,6 +1059,7 @@ impl Runtime {
         &self,
         operation: impl for<'sql> FnOnce(&'sql Connection) -> Result<T>,
     ) -> Result<T> {
+        let _timing = crate::request_timing::sql_read();
         crate::oauth::native_management::with_runtime_sql(
             self,
             crate::oauth::native_management::RuntimePhase::SqlRead,
@@ -1072,6 +1073,7 @@ impl Runtime {
         &self,
         operation: impl for<'sql> FnOnce(&'sql Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
+        let _timing = crate::request_timing::sql_write();
         crate::oauth::native_management::with_runtime_sql(
             self,
             crate::oauth::native_management::RuntimePhase::SqlWrite,
@@ -1083,6 +1085,7 @@ impl Runtime {
         &self,
         operation: impl for<'sql> FnOnce(&'sql Transaction<'_>) -> Result<SqlDecision<T>>,
     ) -> Result<T> {
+        let _timing = crate::request_timing::sql_write();
         crate::oauth::native_management::with_runtime_sql(
             self,
             crate::oauth::native_management::RuntimePhase::SqlWrite,
@@ -1930,10 +1933,14 @@ impl Runtime {
         {
             return Ok(outcome);
         }
-        let continuing = crate::execution::advance(self, id, fault)?;
+        let continuing = {
+            let _timing = crate::request_timing::span("effects");
+            crate::execution::advance(self, id, fault)?
+        };
         let prepared = if continuing {
             Vec::new()
         } else {
+            let _timing = crate::request_timing::span("prepare");
             crate::preparation::prepare(self, id)?
         };
         if fault == Fault::AfterPrepare {
@@ -1944,6 +1951,7 @@ impl Runtime {
             Committed(Outcome),
             Rejected(Box<Trace>, Policy),
         }
+        let decide_timing = crate::request_timing::span("decide");
         let decision = self.sql_decide(|tx| {
         self.check_binding(tx)?;
         let (operation, actor, input, artifact, status, completed): (String,String,String,String,String,Option<String>) =
@@ -2111,6 +2119,7 @@ impl Runtime {
         }
         Ok(SqlDecision::Commit(Decision::Committed(outcome)))
         })?;
+        drop(decide_timing);
         match decision {
             Decision::Existing(outcome) => Ok(outcome),
             Decision::Committed(outcome) => {
@@ -2705,8 +2714,11 @@ fn compacted_outcome(
 }
 
 fn complete(connection: &Transaction<'_>, id: &str, trace: &Trace) -> Result<()> {
+    let mut timing = crate::request_timing::trace_write();
+    let encoded = crate::journal::store_trace(connection, trace)?;
+    timing.bytes(encoded.len());
     ensure!(connection.execute("UPDATE day2_invocations SET status=?1,outcome=?2,trace=?3 WHERE id=?4 AND status='pending'",
-        params![trace.outcome.status,serde_json::to_string(&trace.outcome)?,crate::journal::store_trace(connection, trace)?,id])? == 1, "invocation_completion_conflict");
+        params![trace.outcome.status,serde_json::to_string(&trace.outcome)?,encoded,id])? == 1, "invocation_completion_conflict");
     connection.execute(
         "INSERT INTO day2_audit VALUES(?1,?2,?3,?4,?5)",
         params![
