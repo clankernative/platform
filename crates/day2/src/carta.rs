@@ -547,8 +547,9 @@ pub fn fail_reads(runtime: &Runtime, snapshot_id: &str, cursor: u64, count: u32)
 /// The delivery kind for application-held Carta captures.
 pub const DELIVERY_KIND: &str = "carta.issuer";
 
-/// What `carta.snapshot.v2` returns: the capture's facts and how many pages
-/// the application holds until it releases them with `carta.release.v2`.
+/// What `carta.snapshot.v2` returns: the facts of the capture the application
+/// now holds, read with `carta.records.v2`, until it releases it with
+/// `carta.release.v2`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Delivery {
@@ -560,7 +561,6 @@ pub struct Delivery {
     pub vesting_event_count: u64,
     pub exercise_count: u64,
     pub source_profile: String,
-    pub page_count: u64,
 }
 
 /// One record on a delivered page, in the SDK's tag encoding.
@@ -601,7 +601,7 @@ pub(crate) fn delivery(
         u64::try_from(records.len())? == snapshot.record_count,
         "carta_record_count_budget"
     );
-    let pages = delivery_pages(records)?;
+    let (pages, starts) = delivery_pages(records)?;
     Ok((
         Delivery {
             id: snapshot.id.clone(),
@@ -612,7 +612,6 @@ pub(crate) fn delivery(
             vesting_event_count: snapshot.vesting_event_count,
             exercise_count: snapshot.exercise_count,
             source_profile: snapshot.source_profile.clone(),
-            page_count: u64::try_from(pages.len())?,
         },
         crate::capture_delivery::Staged {
             id: snapshot.id.clone(),
@@ -620,13 +619,15 @@ pub(crate) fn delivery(
             authority,
             item_count: snapshot.record_count,
             pages,
+            starts,
         },
     ))
 }
 
 /// Greedy split under the item and journaled-byte bounds: each page is at most
 /// one `Tx.create_many` batch and fits one observation.
-pub fn delivery_pages(records: &[Record]) -> Result<Vec<String>> {
+/// Returns each page's encoded result and the index of its first item.
+pub fn delivery_pages(records: &[Record]) -> Result<(Vec<String>, Vec<u64>)> {
     use crate::capture_delivery::{
         MAX_HELD_PAGES, MAX_PAGE_ITEMS, MAX_PAGE_JOURNAL_BYTES, journal_bytes,
     };
@@ -654,7 +655,13 @@ pub fn delivery_pages(records: &[Record]) -> Result<Vec<String>> {
     groups.push(current);
     ensure!(groups.len() <= MAX_HELD_PAGES, "carta_capture_byte_budget");
     let last = groups.len() - 1;
-    groups
+    let mut starts = Vec::with_capacity(groups.len());
+    let mut start = 0u64;
+    for group in &groups {
+        starts.push(start);
+        start += u64::try_from(group.len())?;
+    }
+    let pages = groups
         .into_iter()
         .enumerate()
         .map(|(index, group)| {
@@ -669,7 +676,57 @@ pub fn delivery_pages(records: &[Record]) -> Result<Vec<String>> {
             );
             Ok(encoded)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((pages, starts))
+}
+
+/// The most records one `carta.records.v2` read returns: one `Tx.create_many`.
+pub const MAX_READ_RECORDS: u64 = 256;
+
+/// Read up to `limit` records of a held capture starting at record `from`,
+/// without crossing a staged page, so the answer fits one observation. Reading
+/// at the record count answers an empty, final result.
+pub(crate) fn records(
+    connection: &Connection,
+    authority: &str,
+    id: &str,
+    from: u64,
+    limit: u64,
+) -> Result<String> {
+    ensure!(
+        (1..=MAX_READ_RECORDS).contains(&limit),
+        "carta_read_limit_invalid"
+    );
+    let (count, page) = crate::capture_delivery::page_at(
+        connection,
+        crate::capture_delivery::Holder::Application,
+        DELIVERY_KIND,
+        authority,
+        id,
+        from,
+    )
+    .map_err(|error| match error.to_string().as_str() {
+        "capture_delivery_item_invalid" => anyhow::anyhow!("invalid_carta_cursor"),
+        _ => error,
+    })?;
+    let records = match page {
+        None => Vec::new(),
+        Some((result, start)) => {
+            let page: serde_json::Value = crate::json::decode(result.as_bytes())?;
+            let held = page["records"]
+                .as_array()
+                .context("capture_delivery_inconsistent")?;
+            let offset = usize::try_from(from - start)?;
+            ensure!(offset < held.len(), "capture_delivery_inconsistent");
+            held.iter()
+                .skip(offset)
+                .take(usize::try_from(limit)?)
+                .cloned()
+                .collect()
+        }
+    };
+    let next = from + u64::try_from(records.len())?;
+    Ok(json!({"records": records, "next": next, "done": next == count}).to_string())
 }
 
 /// The authority a synthetic delivery is bound to: the runtime scope and issuer.

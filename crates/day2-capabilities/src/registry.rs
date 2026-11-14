@@ -143,9 +143,11 @@ providers! {
             // A complete capture held in the reading application's own database
             // until that application releases it; no host store or pruning.
             CartaSnapshotDelivery => "carta.snapshot.v2" (read, data),
-            CartaDeliveryPage => "carta.page.v2" (read, data),
+            CartaRecords => "carta.records.v2" (read, data),
             // Local: releases the application's own held copy, never provider data.
-            CartaRelease => "carta.release.v2" (write, data),
+            // Like delivery, it changes only host-held capture rows, so a reader
+            // calls it while preparing, before it holds a new capture.
+            CartaRelease => "carta.release.v2" (read, data),
         },
     },
     SyntheticGoogleDirectory {
