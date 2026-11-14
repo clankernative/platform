@@ -87,6 +87,7 @@ pub mod retention;
 pub mod rollout;
 pub mod rollup;
 pub mod routing;
+pub mod runtime_pair;
 pub mod sandbox;
 pub mod schedules;
 pub mod schema;

@@ -30,6 +30,16 @@ const DDL: &str = "CREATE TABLE IF NOT EXISTS day2_rollout(
     id TEXT PRIMARY KEY, scope TEXT NOT NULL, epoch TEXT NOT NULL, contract TEXT NOT NULL, admission_id TEXT NOT NULL, retired_ms INTEGER
 );";
 
+const ARTIFACT_DDL: &str = "CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,digest TEXT NOT NULL,bundle BLOB NOT NULL);
+    CREATE TABLE IF NOT EXISTS artifact_files(artifact TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(artifact,path))";
+
+pub(crate) fn catalog_shape() -> Result<Vec<(String, String, String)>> {
+    let db = Connection::open_in_memory()?;
+    db.execute_batch(ARTIFACT_DDL)?;
+    catalog_storage_shape(&db)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -45,16 +55,34 @@ pub enum Phase {
 pub struct Release {
     pub id: String,
     pub scope: String,
-    pub source: String,
-    pub target: String,
-    pub source_image: String,
-    pub target_image: String,
+    pub source: Generation,
+    pub target: Generation,
+    pub kind: ReleaseKind,
     pub target_instance_digest: String,
     pub probe: Option<Probe>,
     pub authority: AuthorityStamp,
     pub target_security: Option<crate::security_admission::Requirements>,
     pub placement: Option<Placement>,
     pub phase: Phase,
+}
+
+/// Artifact identity alone cannot identify the executor of a runtime-only release.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Generation {
+    pub artifact: String,
+    pub runtime: crate::runtime_pair::RuntimeIdentity,
+    pub instance_digest: String,
+    pub image: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReleaseKind {
+    AppArtifact,
+    RuntimePair {
+        admission: Box<crate::runtime_pair::Admission>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,20 +168,37 @@ pub(crate) fn authority_for(
     db: &Connection,
 ) -> Result<authority_state::ActiveAuthority> {
     let mut active = authority_state::current(db)?;
+    if let Some(release) = if runtime.rolling() { state(db)? } else { None }
+        && let ReleaseKind::RuntimePair { admission } = &release.kind
+        && release.phase == Phase::Prepared
+    {
+        let requirements = active
+            .document
+            .security
+            .as_ref()
+            .context("runtime_pair_source_security_required")?;
+        admission.require_source(&crate::runtime_pair::RuntimeIdentity::from_artifact(
+            runtime.artifact(),
+            Some(requirements),
+        )?)?;
+        // Metadata equality is insufficient: the business executor must
+        // still be the actual measured source supervisor/launcher.
+        requirements.require_runtime()?;
+    }
     if active.artifact_id != runtime.artifact().id() {
         ensure!(
             admitted(db, runtime.artifact().id(), runtime.scope())?,
             crate::error::Failure::ArtifactBindingChanged
         );
         let release = state(db)?.context("rollout_not_prepared")?;
-        if runtime.artifact().id() == release.target {
+        if runtime.artifact().id() == release.target.artifact {
             active.document.security = release.target_security;
         }
     }
     Ok(active)
 }
 
-fn state(connection: &Connection) -> Result<Option<Release>> {
+pub(crate) fn state(connection: &Connection) -> Result<Option<Release>> {
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='day2_rollout')",
         [],
@@ -162,7 +207,7 @@ fn state(connection: &Connection) -> Result<Option<Release>> {
     if !exists {
         return Ok(None);
     }
-    connection
+    let release: Option<Release> = connection
         .query_row(
             "SELECT release FROM day2_rollout WHERE singleton=1",
             [],
@@ -170,7 +215,20 @@ fn state(connection: &Connection) -> Result<Option<Release>> {
         )
         .optional()?
         .map(|raw| crate::json::decode(raw.as_bytes()))
-        .transpose()
+        .transpose()?;
+    if let Some(release) = &release
+        && let ReleaseKind::RuntimePair { admission } = &release.kind
+    {
+        ensure!(
+            matches!(release.phase, Phase::Prepared | Phase::Aborted)
+                && release.source.artifact == release.target.artifact
+                && release.source.instance_digest == release.target.instance_digest
+                && release.source.runtime == admission.receipt.source.runtime
+                && release.target.runtime == admission.receipt.target.runtime,
+            "runtime_pair_journal_invalid"
+        );
+    }
+    Ok(release)
 }
 
 pub fn inspect(runtime: &Runtime) -> Result<Option<Release>> {
@@ -217,6 +275,9 @@ pub(crate) fn authority_changed(
     let Some(mut release) = state(connection)? else {
         return Ok(());
     };
+    if matches!(release.kind, ReleaseKind::RuntimePair { .. }) {
+        return invalidate(connection);
+    }
     let preserves_binding = previous.is_some_and(|previous| {
         previous.stamp == release.authority
             && previous.stamp.epoch == next.stamp.epoch
@@ -228,7 +289,7 @@ pub(crate) fn authority_changed(
     }
     release.authority = next.stamp.clone();
     release.target_security = next.document.security.clone().map(|mut requirements| {
-        requirements.artifact = release.target.clone();
+        requirements.artifact = release.target.artifact.clone();
         requirements
     });
     write(connection, &release)
@@ -284,7 +345,7 @@ pub(crate) fn run_probe(runtime: &Runtime) -> Result<()> {
     let Some(probe) = &release.probe else {
         return Ok(());
     };
-    if release.target != runtime.artifact().id()
+    if release.target.artifact != runtime.artifact().id()
         || release.phase != Phase::Serving
         || probe.status != ProbeStatus::Pending
     {
@@ -366,6 +427,14 @@ fn execute_probe(runtime: &Runtime, id: &str, probe: &ProbeDefinition) -> Result
 
 pub(crate) fn require_expected_release(runtime: &Runtime, id: &str) -> Result<()> {
     runtime.sql_read(|db| {
+        if let Some(release) = state(db)?
+            && matches!(release.kind, ReleaseKind::RuntimePair { .. })
+        {
+            // Keep the incumbent's previous release pin restartable. The
+            // new pair pin can never start the candidate in R1.
+            ensure!(id != release.id, "runtime_pair_activation_not_implemented");
+            authority_for(runtime, db)?;
+        }
         ensure!(
             admitted(db, runtime.artifact().id(), runtime.scope())?,
             "rollout_artifact_not_admitted"
@@ -458,6 +527,45 @@ fn schema_sql(sql: &str, app_table: bool) -> Result<String> {
     anyhow::bail!("rollout_schema_columns")
 }
 
+pub(crate) fn storage_shape(
+    runtime: &Runtime,
+    db: &Connection,
+) -> Result<Vec<(String, String, String)>> {
+    schema_shape(db, Some(runtime.artifact()))
+}
+
+pub(crate) fn catalog_storage_shape(db: &Connection) -> Result<Vec<(String, String, String)>> {
+    schema_shape(db, None)
+}
+
+fn schema_shape(
+    db: &Connection,
+    artifact: Option<&LoadedArtifact>,
+) -> Result<Vec<(String, String, String)>> {
+    let mut statement = db.prepare(
+        "SELECT type,name,coalesce(sql,'') FROM sqlite_master
+            WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name",
+    )?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    objects
+        .into_iter()
+        .map(|(kind, name, sql)| {
+            let app_table = kind == "table"
+                && artifact
+                    .is_some_and(|artifact| artifact.contract().schema.models.contains_key(&name));
+            Ok((kind, name, schema_sql(&sql, app_table)?))
+        })
+        .collect()
+}
+
 pub(crate) fn verify_storage_shape(runtime: &Runtime, actual: &Connection) -> Result<()> {
     let metadata =
         crate::store::InitialStoreMetadata::load(runtime.instance_path(), runtime.app())?;
@@ -465,36 +573,8 @@ pub(crate) fn verify_storage_shape(runtime: &Runtime, actual: &Connection) -> Re
     let tx = expected.transaction()?;
     metadata.initialize_in_transaction(&tx)?;
     install(&tx)?;
-    let shape = |db: &Connection| -> Result<Vec<(String, String, String)>> {
-        let mut statement = db.prepare(
-            "SELECT type,name,coalesce(sql,'') FROM sqlite_master
-            WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name",
-        )?;
-        let objects = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        objects
-            .into_iter()
-            .map(|(kind, name, sql)| {
-                let app_table = kind == "table"
-                    && runtime
-                        .artifact()
-                        .contract()
-                        .schema
-                        .models
-                        .contains_key(&name);
-                Ok((kind, name, schema_sql(&sql, app_table)?))
-            })
-            .collect()
-    };
     ensure!(
-        shape(actual)? == shape(&tx)?,
+        storage_shape(runtime, actual)? == storage_shape(runtime, &tx)?,
         "rollout_store_shape_incompatible_requires_maintenance"
     );
     Ok(())
@@ -511,8 +591,9 @@ pub(crate) fn ready(runtime: &Runtime, candidate_probe: bool) -> Result<bool> {
         let Some(release) = state(db)? else {
             return Ok((true, Vec::new()));
         };
-        let ready = candidate_probe
-            || runtime.artifact().id() != release.target
+        let ready = matches!(release.kind, ReleaseKind::RuntimePair { .. })
+            || candidate_probe
+            || runtime.artifact().id() != release.target.artifact
             || matches!(release.phase, Phase::Draining | Phase::Complete);
         let mut warm = Vec::new();
         if candidate_probe
@@ -520,7 +601,7 @@ pub(crate) fn ready(runtime: &Runtime, candidate_probe: bool) -> Result<bool> {
             && release.authority == active.stamp
             && matches!(release.phase, Phase::Serving | Phase::Draining)
         {
-            for id in [release.source, release.target] {
+            for id in [release.source.artifact, release.target.artifact] {
                 if id != runtime.artifact().id() {
                     warm.push(id);
                 }
@@ -537,6 +618,7 @@ pub(crate) fn ready(runtime: &Runtime, candidate_probe: bool) -> Result<bool> {
 
 pub(crate) fn pending_artifacts(runtime: &Runtime) -> Result<Vec<String>> {
     runtime.sql_read(|db| {
+        authority_for(runtime, db)?;
         let mut statement = db.prepare("SELECT DISTINCT artifact FROM day2_invocations WHERE status='pending' ORDER BY artifact")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut admitted_ids = Vec::new();
@@ -544,13 +626,13 @@ pub(crate) fn pending_artifacts(runtime: &Runtime) -> Result<Vec<String>> {
         if let Some(release) = state(db)? {
             // New target traffic cannot starve the finite source backlog after
             // its pod terminates; completion depends on settling that work.
-            admitted_ids.sort_by_key(|id| id != &release.source);
+            admitted_ids.sort_by_key(|id| id != &release.source.artifact);
         }
         Ok(admitted_ids)
     })
 }
 
-fn write(connection: &Connection, release: &Release) -> Result<()> {
+pub(crate) fn write(connection: &Connection, release: &Release) -> Result<()> {
     connection.execute("INSERT INTO day2_rollout VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET release=excluded.release", [serde_json::to_string(release)?])?;
     Ok(())
 }
@@ -573,7 +655,9 @@ pub(crate) fn admitted(connection: &Connection, id: &str, scope: &str) -> Result
     Ok(release.scope == scope
         && release.authority == active.stamp
         && match release.phase {
-            Phase::Serving | Phase::Draining => id == release.source || id == release.target,
+            Phase::Serving | Phase::Draining => {
+                id == release.source.artifact || id == release.target.artifact
+            }
             _ => false,
         })
 }
@@ -627,7 +711,7 @@ pub(crate) fn compatible_ticket(
             )?)?))
 }
 
-fn image(value: &str) -> Result<()> {
+pub(crate) fn image(value: &str) -> Result<()> {
     let (repository, digest) = value
         .rsplit_once('@')
         .context("rollout_image_must_be_immutable")?;
@@ -639,7 +723,7 @@ fn image(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn operator(runtime: &Runtime, operator: &LocalOperator) -> Result<()> {
+pub(crate) fn operator(runtime: &Runtime, operator: &LocalOperator) -> Result<()> {
     ensure!(
         runtime.rolling() && !runtime.uses_native_storage(),
         "ordinary_rolling_profile_required"
@@ -655,7 +739,7 @@ fn operator(runtime: &Runtime, operator: &LocalOperator) -> Result<()> {
     Ok(())
 }
 
-fn release_lock(runtime: &Runtime) -> Result<File> {
+pub(crate) fn release_lock(runtime: &Runtime) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -689,7 +773,7 @@ fn collect_retired(runtime: &Runtime) -> Result<()> {
         let active = authority_state::current(db)?;
         let release = state(db)?;
         Ok(ids.into_iter().filter(|id| id != &active.artifact_id && release.as_ref().is_none_or(|release|
-            matches!(release.phase, Phase::Complete | Phase::Aborted) || (id != &release.source && id != &release.target))).collect::<Vec<_>>())
+            matches!(release.phase, Phase::Complete | Phase::Aborted) || (id != &release.source.artifact && id != &release.target.artifact))).collect::<Vec<_>>())
     })?;
     let connection = open(&bundle_path(runtime))?;
     for id in retired {
@@ -800,8 +884,11 @@ pub fn prepare(
         let mut normalized = desired.clone();
         if let (Some(next), Some(previous)) = (&mut normalized.security, &active.document.security) { next.artifact = previous.artifact.clone(); }
         ensure!(active.artifact_id == runtime.artifact().id() && normalized == active.document, "rollout_authority_changed");
-        let release = Release { id: id.into(), scope: runtime.scope().into(), source: active.artifact_id,
-            target: target.id().into(), source_image: source_image.into(), target_image: target_image.into(),
+        let identity = crate::runtime_pair::RuntimeIdentity::from_artifact(runtime.artifact(), active.document.security.as_ref())?;
+        let release = Release { id: id.into(), scope: runtime.scope().into(),
+            source: Generation { artifact: active.artifact_id, runtime: identity.clone(), instance_digest: runtime.instance_digest().into(), image: source_image.into() },
+            target: Generation { artifact: target.id().into(), runtime: identity, instance_digest: crate::digest(&serde_json::to_vec(&instance)?), image: target_image.into() },
+            kind: ReleaseKind::AppArtifact,
             target_instance_digest, probe: None, authority: active.stamp, target_security: desired.security.clone(), placement: None, phase: Phase::Prepared };
         if let Some(previous) = state(tx)? {
             if previous.id == id {
@@ -816,9 +903,9 @@ pub fn prepare(
         }
         write(tx, &release)?;
         let contract = crate::digest(&serde_json::to_vec(&operational_contract(&target)?)?);
-        for artifact in [&release.source, &release.target] {
+        for artifact in [&release.source.artifact, &release.target.artifact] {
             tx.execute("INSERT INTO day2_rollout_artifacts VALUES(?1,?2,?3,?4,?5,NULL) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,epoch=excluded.epoch,contract=excluded.contract,retired_ms=NULL,admission_id=CASE WHEN excluded.admission_id='' THEN day2_rollout_artifacts.admission_id ELSE excluded.admission_id END",
-                params![artifact, release.scope, release.authority.epoch, contract, if *artifact == release.target { release.id.as_str() } else { "" }])?;
+                params![artifact, release.scope, release.authority.epoch, contract, if *artifact == release.target.artifact { release.id.as_str() } else { "" }])?;
         }
         Ok(release)
     })
@@ -841,6 +928,8 @@ pub fn transition(
         ensure!(release.id == id && release.scope == runtime.scope(), "rollout_identity_changed");
         ensure!(next == Phase::Aborted || release.authority == authority_state::current(tx)?.stamp, "rollout_authority_changed");
         if release.phase == next { return Ok(release); }
+        ensure!(matches!(release.kind, ReleaseKind::AppArtifact) || next == Phase::Aborted,
+            "runtime_pair_activation_not_implemented");
         if next == Phase::Serving && Instance::load(runtime.instance_path())?.identity.is_some() {
             ensure!(release.placement.is_some(), "rollout_placement_required");
         }
@@ -849,21 +938,21 @@ pub fn transition(
             | (Phase::Draining, Phase::Complete) | (Phase::Prepared, Phase::Aborted)
             | (Phase::Serving, Phase::Aborted)), "rollout_phase_conflict");
         if next == Phase::Complete {
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations WHERE status='pending' AND artifact=?1)", [&release.source], |row| row.get(0))?;
+            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations WHERE status='pending' AND artifact=?1)", [&release.source.artifact], |row| row.get(0))?;
             ensure!(!pending, "rollout_source_work_pending");
             // Promotion keeps the policy revision: a release does not revoke or
             // regrant business authority, nor erase completed command outcomes.
             let path = runtime.instance_path().parent().context("installation root")?
-                .join("artifacts").join(day2_assets::hash_part(&release.target)?);
+                .join("artifacts").join(day2_assets::hash_part(&release.target.artifact)?);
             let mut document = authority_state::current(tx)?.document;
             document.security = release.target_security.clone();
-            tx.execute("UPDATE day2_authority SET artifact_id=?1,artifact_path=?2,document=?3 WHERE singleton=1", params![release.target, path.to_string_lossy(), serde_json::to_string(&document)?])?;
-            tx.execute("UPDATE day2_rollout_artifacts SET retired_ms=?1 WHERE id=?2", params![now_ms()?,release.source])?;
+            tx.execute("UPDATE day2_authority SET artifact_id=?1,artifact_path=?2,document=?3 WHERE singleton=1", params![release.target.artifact, path.to_string_lossy(), serde_json::to_string(&document)?])?;
+            tx.execute("UPDATE day2_rollout_artifacts SET retired_ms=?1 WHERE id=?2", params![now_ms()?,release.source.artifact])?;
         }
-        if next == Phase::Aborted {
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations WHERE status='pending' AND artifact=?1)", [&release.target], |row| row.get(0))?;
+        if next == Phase::Aborted && matches!(release.kind, ReleaseKind::AppArtifact) {
+            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations WHERE status='pending' AND artifact=?1)", [&release.target.artifact], |row| row.get(0))?;
             ensure!(!pending, "rollout_target_work_pending");
-            tx.execute("UPDATE day2_rollout_artifacts SET retired_ms=?1 WHERE id=?2", params![now_ms()?,release.target])?;
+            tx.execute("UPDATE day2_rollout_artifacts SET retired_ms=?1 WHERE id=?2", params![now_ms()?,release.target.artifact])?;
         }
         release.phase = next;
         write(tx, &release)?;
@@ -932,10 +1021,8 @@ fn publish(runtime: &Runtime, artifact: &LoadedArtifact) -> Result<()> {
         "rollout_artifact_manifest_bound"
     );
     let mut connection = open(&bundle_path(runtime))?;
-    connection.execute_batch("PRAGMA journal_mode=WAL;
-        CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,digest TEXT NOT NULL,bundle BLOB NOT NULL);
-        CREATE TABLE IF NOT EXISTS artifact_files(artifact TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-            path TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(artifact,path))")?;
+    connection.execute_batch("PRAGMA journal_mode=WAL")?;
+    connection.execute_batch(ARTIFACT_DDL)?;
     let tx = connection.transaction()?;
     let (stored, existing): (i64, bool) = tx.query_row("SELECT coalesce(sum(length(bytes)),0),EXISTS(SELECT 1 FROM artifacts WHERE id=?1) FROM artifact_files", [artifact.id()], |row| Ok((row.get(0)?,row.get(1)?)))?;
     let bytes = files.values().map(Vec::len).sum::<usize>();

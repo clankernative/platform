@@ -86,6 +86,35 @@ fn main() -> Result<()> {
                 &day2::authority_state::LocalOperator::assert_local(operator)?,
             )?)?
         }
+        ["runtime-pair-protocols", instance, app] => serde_json::to_value(
+            day2::runtime_pair::protocols(&Runtime::load(Path::new(instance), app)?)?,
+        )?,
+        [
+            "runtime-pair-prepare",
+            instance,
+            app,
+            candidate,
+            request,
+            receipt,
+            operator,
+        ] => {
+            let read = |path: &str| -> Result<Vec<u8>> {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                fs::File::open(path)?
+                    .take(1_048_577)
+                    .read_to_end(&mut bytes)?;
+                anyhow::ensure!(bytes.len() <= 1_048_576, "runtime_pair_input_budget");
+                Ok(bytes)
+            };
+            serde_json::to_value(day2::runtime_pair::prepare(
+                &Runtime::load(Path::new(instance), app)?,
+                &read(candidate)?,
+                &day2::json::decode(&read(request)?)?,
+                &read(receipt)?,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?)?
+        }
         ["rollout-inspect", instance, app] => {
             serde_json::to_value(day2::rollout::inspect_file(Path::new(instance), app)?)?
         }

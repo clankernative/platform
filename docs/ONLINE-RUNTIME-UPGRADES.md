@@ -4,7 +4,8 @@ Status: proposed runtime-pair protocol. R0 preparation, online preflight rehears
 and backup/release operation exclusion are described in
 [shared activation preparation and recovery](ACTIVATION-RECOVERY.md). The final
 checkpoint and repeated rehearsal remain exclusive; preflight never replaces
-the checkpoint of later writes. No runtime-pair upgrade support is implemented.
+the checkpoint of later writes. R1 now provides the preparation contract below;
+runtime-pair activation remains blocked pending R2 and qualification.
 Source baseline: `bd96d438b666bddd0c37a13f6f4f8e79ae7f585d`.
 
 The goal is to keep an authenticated, writable application available while its
@@ -12,6 +13,57 @@ runtime changes. App-artifact rolling qualification alone does not establish
 that property. This plan covers ordinary SQLite on one retained, same-node RWO
 claim. Native storage, OAuth and other deployment profiles require their own
 protocol and qualification. Same-node overlap provides no node-failure HA.
+
+## R1 preparation contract
+
+The existing release journal now records two closed software generations, each
+containing artifact, runtime identity (SDK inventory and native executable/image
+evidence), effective parsed-instance digest and immutable deployment image. A
+same-artifact runtime change therefore has distinct source and target generations.
+The raw target instance digest separately binds the operator's exact input bytes.
+All app-artifact consumers use this record in place; there is no dual-read format.
+An installed runtime that cannot read this journal still needs the explicit
+bootstrap decision described below.
+
+`runtime-pair-protocols INSTANCE APP` computes the current private SQLite shape
+in memory, excluding the app's tables and their indexes from the reusable digest.
+The manifest also versions serving/operation/execution leases, release journal,
+authority, invocation/effect receipts, web tickets, worker protocol and artifact
+catalog. Per-app preparation compares the complete actual business/private shape;
+the native campaign must prove semantics beyond those format versions.
+
+`runtime-pair-prepare INSTANCE APP CANDIDATE REQUEST RECEIPT OPERATOR` is a narrow
+native preparation transaction. REQUEST is a closed record of `id`, immutable
+`source_image`/`target_image` and the operator-reviewed `receipt_digest`. The receipt
+is a closed, directed source/target manifest pair with verifier/recipe digests,
+complete mandatory checks and feature profile. This reuses the existing trusted
+local-operator evidence model; it is not signed provenance or app authority. No
+native pair campaign or production receipt is produced by this command.
+
+The initial `sqlite_local_v1` class keeps the app artifact and effective instance
+unchanged. It rejects native storage, provider/credential/OAuth access, ingress,
+schedules, unknown top-level SQLite stores and changed artifact-catalog shapes.
+R3 must qualify richer profiles before they can serve installed apps using those
+features. Shared pair evidence contains no app artifact, instance, business model
+or controller identities; compilation and qualification remain reusable per pair
+and profile, with installed state checked separately.
+
+Preparation holds the per-app release lock and captures current authority in the
+same SQLite transaction as the journal write. Schema compilation happens before
+taking the business writer. It changes no active selection/security requirements.
+The incumbent stays ready; actual business work still requires its measured source
+supervisor/launcher and current authority. Artifact equality cannot transfer that
+work to a target host. Any authority revision invalidates the prepared pair.
+Preparation retries require the same request; a second unsettled release refuses.
+Abort preserves accepted source work, including same-artifact work.
+
+R1 **refuses candidate startup and every runtime-pair promotion transition**.
+The app-artifact operational recipe also refuses to resume a runtime-pair record.
+R2 must implement captured generation ownership, source executor recovery,
+LB-health promotion/drain and durable operation/backup exclusion before removing
+those guards. Local two-connection SQLite/serde tests and synthetic receipt
+negatives establish the preparation contract only; they do not qualify two native
+runtime binaries, live ingress availability or zero-downtime runtime activation.
 
 ## Current mechanisms
 
@@ -29,7 +81,7 @@ protocol and qualification. Same-node overlap provides no node-failure HA.
   equal operational contracts and equal platform inventories. It compares the
   instance after normalizing only artifact identities. Runtime-only changes,
   including the same artifact on a new runtime, are outside that protocol.
-- The release record denies unknown fields. Retained work is identified by app
+- The release record denies unknown fields. In the app-artifact lane, retained work is identified by app
   artifact; retaining its worker does not prove that another host runtime can
   safely execute that work.
 
