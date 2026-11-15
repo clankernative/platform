@@ -20,7 +20,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -567,6 +567,8 @@ pub struct Runtime {
     instance_path: PathBuf,
     // Exact parsed selection captured at load; never reconstructed from a later file.
     instance_digest: String,
+    // Immutable process selection DATA; admission is rechecked in SQLite.
+    executor_generation: Arc<OnceLock<String>>,
     // Original published selector DATA, captured before native input path
     // canonicalization. Only native Runtime construction carries it forward.
     restore_registry_selector: Option<PathBuf>,
@@ -989,6 +991,7 @@ impl Runtime {
                 .and_then(|binding| binding.runtime.as_ref())
                 .is_some_and(|profile| profile.rolling()),
             instance_digest: crate::digest(&serde_json::to_vec(&instance)?),
+            executor_generation: Arc::new(OnceLock::new()),
             restore_registry_selector: None,
             scope: instance.scope(&app)?,
             hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
@@ -1098,6 +1101,10 @@ impl Runtime {
 
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+
+    pub(crate) fn executor_generation(&self) -> &OnceLock<String> {
+        &self.executor_generation
     }
 
     pub(crate) fn instance_digest(&self) -> &str {
@@ -1210,6 +1217,7 @@ impl Runtime {
             connections: None,
             rolling,
             instance_digest: crate::digest(&serde_json::to_vec(&instance)?),
+            executor_generation: Arc::new(OnceLock::new()),
             restore_registry_selector: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
@@ -1339,7 +1347,7 @@ impl Runtime {
         request: &Request,
         policy: &Policy,
     ) -> Result<()> {
-        let active = crate::authority_state::require_invocation_in(
+        let active = crate::authority_state::require_execution_in(
             connection,
             self,
             &request.context.invocation_id,
@@ -1697,6 +1705,7 @@ impl Runtime {
                 tx.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status,trigger,caller,authenticated,delegation_rule) VALUES(?1,?2,?3,?4,?5,?6,'pending',?7,?8,?9,?10)",
                 params![id,operation,actor,canonical,self.artifact.id(),now,trigger.as_str(),caller,authenticated,rule])?;
                 crate::authority_state::pin_invocation(tx, id, &active.stamp)?;
+                crate::runtime_generation::capture(self, tx, id, None)?;
                 crate::resources::capture_root_budgets(tx, id, &definition.name, &active)?;
                 let seed = self.host.entropy(&self.scope, id)?;
                 tx.execute(
@@ -1832,6 +1841,13 @@ impl Runtime {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?)
             })?;
+            if pending && !self.sql_read(|db| crate::runtime_generation::owns(self, db, id))? {
+                return Ok(Outcome {
+                    status: "pending".into(),
+                    result: json!({"invocation_id":id}),
+                    error: String::new(),
+                });
+            }
             if pending && artifact != self.artifact.id() {
                 return self
                     .with_rollout_artifact(&artifact)?
@@ -1976,7 +1992,7 @@ impl Runtime {
                 .map(Decision::Existing)
                 .map(SqlDecision::Rollback);
         }
-        crate::authority_state::require_invocation_in(tx, self, id, &operation, &actor)?;
+        crate::authority_state::require_execution_in(tx, self, id, &operation, &actor)?;
         // Still pending, so any saved trace is intact: compaction only touches
         // completed invocations.
         let continuation = crate::execution::load(tx, id)?;

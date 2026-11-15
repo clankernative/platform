@@ -85,7 +85,7 @@ impl Protocols {
             execution_lease: 1,
             release_journal: 2,
             authority: 1,
-            invocation_effect: 1,
+            invocation_effect: 2,
             web_ticket: 1,
             worker: 1,
             artifact_catalog: 1,
@@ -410,11 +410,15 @@ pub fn prepare(
             rollout::storage_shape(runtime, tx)? == expected.shape,
             "runtime_pair_store_shape_changed"
         );
-        let source = Manifest {
-            runtime: RuntimeIdentity::from_artifact(
+        let identity = match crate::runtime_generation::identity(runtime, tx)? {
+            Some(installed) => installed,
+            None => RuntimeIdentity::from_artifact(
                 runtime.artifact(),
                 active.document.security.as_ref(),
             )?,
+        };
+        let source = Manifest {
+            runtime: identity,
             protocols: expected.protocols,
         };
         let admission = Admission::review(receipt_bytes, &request.receipt_digest, &source)?;

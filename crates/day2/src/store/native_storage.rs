@@ -111,6 +111,7 @@ impl Runtime {
                 scope: metadata.scope,
                 hosted_domain: desired.hosted_domain().map(str::to_owned),
                 instance_digest: metadata.instance_digest.as_str().into(),
+                executor_generation: Arc::new(std::sync::OnceLock::new()),
                 instance_path: metadata.instance_path,
                 restore_registry_selector: Some(metadata.instance_selector),
                 app: metadata.app,

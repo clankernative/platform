@@ -918,6 +918,20 @@ pub(crate) fn require_invocation_in(
     Ok(active)
 }
 
+/// Current business authority plus the accepted host-runtime owner. Status and
+/// duplicate admission use require_invocation_in without transferring execution.
+pub(crate) fn require_execution_in(
+    connection: &Connection,
+    runtime: &Runtime,
+    id: &str,
+    operation: &str,
+    actor: &str,
+) -> Result<ActiveAuthority> {
+    let active = require_invocation_in(connection, runtime, id, operation, actor)?;
+    crate::runtime_generation::require(runtime, connection, id)?;
+    Ok(active)
+}
+
 pub fn apply(
     runtime: &Runtime,
     operator: &LocalOperator,
@@ -1305,6 +1319,7 @@ fn apply_transition_in(
     }
     next.document = change.document.clone();
     store(connection, &next, &operator.name, "activate")?;
+    crate::runtime_generation::authority_changed(connection, previous.as_ref(), &next)?;
     crate::rollout::authority_changed(connection, previous.as_ref(), &next)?;
     let receipt = AuthorityReceipt {
         stamp: next.stamp.clone(),
@@ -1362,6 +1377,7 @@ fn fence_restored_in(
         "restore-fence",
     )?;
     discard_restored_sessions_in(connection)?;
+    crate::runtime_generation::invalidate(connection)?;
     crate::rollout::invalidate(connection)
 }
 

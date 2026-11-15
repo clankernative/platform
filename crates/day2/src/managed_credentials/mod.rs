@@ -161,7 +161,7 @@ pub(crate) fn require_metadata(
         origin == request.context,
         "credential metadata principal mismatch"
     );
-    let active = authority_state::require_invocation_in(
+    let active = authority_state::require_execution_in(
         db,
         runtime,
         &origin.invocation_id,

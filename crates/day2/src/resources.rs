@@ -357,7 +357,7 @@ fn load(
         .optional()?
         .ok_or(Failure::ResourceForbidden)?;
     let claims: Claims = crate::json::decode(encoded.as_bytes())?;
-    let active = authority_state::require_invocation_in(
+    let active = authority_state::require_execution_in(
         connection,
         runtime,
         &request.context.invocation_id,
@@ -407,7 +407,7 @@ pub(crate) fn host_operation(
             binding.invocation == request.context.invocation_id,
             Failure::ResourceForbidden
         );
-        let active = authority_state::require_invocation_in(
+        let active = authority_state::require_execution_in(
             connection,
             runtime,
             &request.context.invocation_id,
@@ -520,7 +520,7 @@ pub(crate) fn authorize(
             .split_once('.')
             .ok_or(Failure::ResourceForbidden)?;
         ensure!(app != runtime.app(), Failure::ResourceForbidden);
-        let active = authority_state::require_invocation_in(
+        let active = authority_state::require_execution_in(
             connection,
             runtime,
             &request.context.invocation_id,
@@ -720,7 +720,7 @@ pub(crate) fn reserve_in(
     resource: &ResourceUse,
     quote: ProviderQuote,
 ) -> Result<crate::budget::Reservation> {
-    let active = authority_state::require_invocation_in(
+    let active = authority_state::require_execution_in(
         connection,
         runtime,
         &request.context.invocation_id,
@@ -930,7 +930,7 @@ pub(crate) fn validate_cached(
         // A recorded history page carries no resource. What must still hold is
         // the grant: revoking `audit.history` stops the invocation using what it
         // already read, as revoking any other read does.
-        let active = authority_state::require_invocation_in(
+        let active = authority_state::require_execution_in(
             connection,
             runtime,
             &request.context.invocation_id,
@@ -947,7 +947,7 @@ pub(crate) fn validate_cached(
             .context("resource_handle_required")?;
         load(connection, runtime, request, token)?;
     } else {
-        let active = authority_state::require_invocation_in(
+        let active = authority_state::require_execution_in(
             connection,
             runtime,
             &request.context.invocation_id,

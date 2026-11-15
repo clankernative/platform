@@ -309,7 +309,7 @@ impl Simulation {
             match crate::resources::host_operation(&tx, &self.runtime, &request, &instruction)? {
                 Some(result) => serde_json::from_str(&result)?,
                 None => {
-                    let active = crate::authority_state::require_invocation_in(
+                    let active = crate::authority_state::require_execution_in(
                         &tx,
                         &self.runtime,
                         invocation,

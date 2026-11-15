@@ -215,7 +215,7 @@ fn require_action(
     request: &Request,
     action: &str,
 ) -> Result<()> {
-    let active = crate::authority_state::require_invocation_in(
+    let active = crate::authority_state::require_execution_in(
         db,
         runtime,
         &request.context.invocation_id,
@@ -255,7 +255,7 @@ fn capture(
         status == "active" && token_version > 0,
         "connection reauthorization required"
     );
-    let authority = crate::authority_state::require_invocation_in(
+    let authority = crate::authority_state::require_execution_in(
         db,
         runtime,
         &request.context.invocation_id,
@@ -476,7 +476,7 @@ fn load(
         super::restore::Kind::UseOriginal,
         claim_identity(&claims)?.as_str(),
     )?;
-    let active = crate::authority_state::require_invocation_in(
+    let active = crate::authority_state::require_execution_in(
         db,
         runtime,
         &request.context.invocation_id,

@@ -177,10 +177,14 @@ pub(crate) fn authority_for(
             .security
             .as_ref()
             .context("runtime_pair_source_security_required")?;
-        admission.require_source(&crate::runtime_pair::RuntimeIdentity::from_artifact(
-            runtime.artifact(),
-            Some(requirements),
-        )?)?;
+        let identity = match crate::runtime_generation::identity(runtime, db)? {
+            Some(installed) => installed,
+            None => crate::runtime_pair::RuntimeIdentity::from_artifact(
+                runtime.artifact(),
+                Some(requirements),
+            )?,
+        };
+        admission.require_source(&identity)?;
         // Metadata equality is insufficient: the business executor must
         // still be the actual measured source supervisor/launcher.
         requirements.require_runtime()?;
@@ -619,8 +623,12 @@ pub(crate) fn ready(runtime: &Runtime, candidate_probe: bool) -> Result<bool> {
 pub(crate) fn pending_artifacts(runtime: &Runtime) -> Result<Vec<String>> {
     runtime.sql_read(|db| {
         authority_for(runtime, db)?;
-        let mut statement = db.prepare("SELECT DISTINCT artifact FROM day2_invocations WHERE status='pending' ORDER BY artifact")?;
-        let ids = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        crate::runtime_generation::require_queue(db)?;
+        let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations i WHERE i.status='pending' AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id))", [], |row| row.get(0))?;
+        if !pending { return Ok(Vec::new()); }
+        let generation = crate::runtime_generation::selected(runtime, db)?;
+        let mut statement = db.prepare("SELECT DISTINCT i.artifact FROM day2_invocations i JOIN day2_invocation_runtime r ON r.invocation=i.id WHERE i.status='pending' AND r.generation=?1 ORDER BY i.artifact")?;
+        let ids = statement.query_map([generation], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut admitted_ids = Vec::new();
         for id in ids { if admitted(db, &id, runtime.scope())? { admitted_ids.push(id); } }
         if let Some(release) = state(db)? {
@@ -639,6 +647,7 @@ pub(crate) fn write(connection: &Connection, release: &Release) -> Result<()> {
 
 pub(crate) fn install(connection: &Connection) -> Result<()> {
     connection.execute_batch(DDL)?;
+    crate::runtime_generation::install(connection)?;
     Ok(())
 }
 

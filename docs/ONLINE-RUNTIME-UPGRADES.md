@@ -65,6 +65,55 @@ those guards. Local two-connection SQLite/serde tests and synthetic receipt
 negatives establish the preparation contract only; they do not qualify two native
 runtime binaries, live ingress availability or zero-downtime runtime activation.
 
+## R2a executor ownership
+
+Ordinary RWO accepted work now captures a host-runtime generation separately from
+its app artifact. The existing rollout journal owns an immutable generation
+catalogue, one active runtime selection and an invocation-to-generation row.
+The installed runtime identity is reused when an app artifact changes; it is not
+reconstructed from the next app build's SDK inventory. Retained worker selection
+keeps the process's original runtime selection.
+
+The actual accepting executor measures its supervisor/launcher and binds the
+initial selection under the same transaction as input, authority stamp and work
+ownership. Existing app-artifact rollout admission allows an unchanged-runtime
+candidate to accept the first work too; an unadmitted artifact cannot bootstrap. A process keeps that choice after a rollback; retry can recreate only
+that exact selection. Reopen compares actual code with the durable selection.
+A JSON generation ID, SDK label or artifact ID alone cannot admit another binary.
+Unqualified development harnesses may have no Linux launcher; qualified Linux
+requirements still require the exact launcher digest. This measurement is trusted
+host code identity, not hostile-host attestation or image identity proof.
+
+Decision, observation, child request, dispatch and commit guards check both current
+authority and captured executor ownership. A duplicate pending request remains
+owned by its original executor. Queue selection filters owners before loading
+retained workers. Child commands inherit their parent's owner; external effects
+inherit through their invocation. Completed receipts still use the existing
+current-authority result guard and do not rerun a retired worker.
+
+Settlement of an already-performed effect checks the original process selection,
+actual measured code and original invocation/stamp. Revocation or a changed active
+selection can prevent fresh work without discarding known provider results.
+Settlement does not authorize a new dispatch or business completion. Ownership
+rows are immutable; missing rows are refused rather than backfilled.
+
+This slice does not admit a second runtime or remove R1's startup/promotion guards.
+Only the active generation may execute pending work until the later R2 slice adds
+qualified source retention, target admission and source-executor recovery. Policy-only
+revisions keep runtime identity but continue to fence accepted work; exclusive
+artifact/restore binding changes and native security rebinds clear the active
+selection without transferring captured owners. In particular, an explicitly
+approved replacement supervisor can bootstrap after offline activation even when
+the app artifact is unchanged. Native storage and non-RWO profiles retain their existing execution
+protocols and are outside this runtime-overlap class.
+
+Do not adopt this preparation/ownership slice as the complete serving bridge.
+The remaining R2 work must bind actual deployment/image identity, keep or recover
+source executors, implement actual LB-health promotion/drain and share the native
+operation lease with backups. R3–R5 still precede live app adoption. These ownership
+tables change the private SQLite contract in place; they supply no legacy-owner
+migration or permission to execute unowned historical work.
+
 ## Current mechanisms
 
 - [Maintain.roc](../ops/Maintain.roc) prepares artifacts and a sized helper while

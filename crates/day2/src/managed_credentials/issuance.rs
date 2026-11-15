@@ -946,7 +946,7 @@ pub(crate) fn stage(
         ),
         "unsupported credential issuance profile"
     );
-    let active = authority_state::require_invocation_in(
+    let active = authority_state::require_execution_in(
         tx,
         runtime,
         &origin.invocation_id,
@@ -2972,7 +2972,7 @@ mod tests {
             data: serde_json::json!({"note":public["lineage"]}).to_string(),
             ..Default::default()
         };
-        let active = authority_state::require_invocation_in(
+        let active = authority_state::require_execution_in(
             &tx,
             &runtime,
             "hostile",

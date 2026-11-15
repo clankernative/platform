@@ -138,7 +138,7 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
             && status == "pending",
         "delegated_origin_changed"
     );
-    crate::authority_state::require_invocation_in(
+    crate::authority_state::require_execution_in(
         &tx,
         runtime,
         &call.origin,

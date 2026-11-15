@@ -255,7 +255,7 @@ fn require_authority(
     runtime: &Runtime,
     trace: &Trace,
 ) -> Result<crate::authority_state::ActiveAuthority> {
-    let active = crate::authority_state::require_invocation_in(
+    let active = crate::authority_state::require_execution_in(
         connection,
         runtime,
         &trace.request.context.invocation_id,
@@ -432,6 +432,7 @@ pub(crate) fn check_settlement_binding(
     invocation: &str,
     authority: &crate::authority_state::AuthorityStamp,
 ) -> Result<()> {
+    crate::runtime_generation::require_settlement(runtime, connection, invocation)?;
     let scope: String =
         connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
             row.get(0)
