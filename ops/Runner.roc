@@ -23,6 +23,7 @@ import ops.Release
 import ops.GkeRelease
 import ops.NativeEnrollment
 import ops.SecretRetirement
+import ops.SecureRestore
 import ops.AppSecrets
 import ops.UiDependency
 import ops.Tooling
@@ -76,6 +77,7 @@ run! = |args| match args {
 	["native-enrollment"] => NativeEnrollment.run!(call!)
 	["native-enrollment-qualify"] => NativeEnrollment.qualify!(call!)
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
+	["secure-restore-plan"] => Ok(SecureRestore.plan({}))
 	["app-secret-step", snapshot] => AppSecrets.run(snapshot)
 	["app-secret-table"] => Ok(AppSecrets.table({}))
 	["app-secret-canary"] => AppSecrets.canary!(call!)
