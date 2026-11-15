@@ -73,6 +73,48 @@ fn prepare(world: &World, candidate: &Path, operator: &LocalOperator) -> Result<
 }
 
 #[test]
+fn admitted_candidate_can_accept_first_work_without_transferring_runtime_ownership() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    let replacement = Runtime::load(&candidate, "reports")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let selections: i64 = db.query_row("SELECT count(*) FROM day2_rollout_runtime", [], |row| {
+        row.get(0)
+    })?;
+    assert_eq!(selections, 0);
+    for (runtime, id) in [
+        (&replacement, "first-candidate-work"),
+        (&world.runtime, "later-source-work"),
+    ] {
+        let outcome = runtime.invoke(
+            "reports.submit",
+            "alice",
+            id,
+            &json!({"title":"One report","text":"Same runtime, different app artifact"}),
+            100,
+            Fault::None,
+        )?;
+        assert_eq!(outcome.status, "success", "{}", outcome.error);
+    }
+    let owners: i64 = db.query_row(
+        "SELECT count(DISTINCT generation) FROM day2_invocation_runtime",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(owners, 1);
+    let foreign: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocation_runtime i WHERE i.generation!=(SELECT generation FROM day2_rollout_runtime WHERE singleton=1))", [], |row| row.get(0))?;
+    assert!(!foreign);
+    Ok(())
+}
+
+#[test]
 fn runtime_protocol_manifest_is_reusable_across_different_app_schemas() -> Result<()> {
     let (reports, _, _) = fixture()?;
     let (stock, _, _) = stock_fixture()?;

@@ -114,7 +114,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 return Ok(store::SqlDecision::Rollback(None));
             }
             let active =
-                crate::authority_state::require_invocation_in(tx, runtime, id, &operation, &actor)?;
+                crate::authority_state::require_execution_in(tx, runtime, id, &operation, &actor)?;
             let policy = active.policy()?.clone();
             let definition = runtime.artifact().route(&operation)?;
             let durable = definition.kind == "command";
@@ -145,7 +145,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         // Keep the authority snapshot valid while pure code consumes recorded
         // inputs. Activation can only commit before or after this replay step.
         let response = runtime.sql_write(|tx| {
-            crate::authority_state::require_invocation_in(
+            crate::authority_state::require_execution_in(
                 tx,
                 runtime,
                 id,
@@ -204,7 +204,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         // ends before any provider call, and permits no application mutation.
         let (authority, prepared) = runtime.sql_write(|tx| {
         runtime.check_binding(tx)?;
-        let active = crate::authority_state::require_invocation_in(
+        let active = crate::authority_state::require_execution_in(
             tx,
             runtime,
             id,
@@ -429,7 +429,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         }
         let winner = runtime.sql_write(|tx| {
             runtime.check_binding(tx)?;
-            crate::authority_state::require_invocation_in(
+            crate::authority_state::require_execution_in(
                 tx,
                 runtime,
                 id,

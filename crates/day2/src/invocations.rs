@@ -184,7 +184,7 @@ pub(crate) fn request(
         "command_request_forbidden"
     );
     policy.authorize(&envelope.command, &origin.context.actor)?;
-    let authority = crate::authority_state::require_invocation_in(
+    let authority = crate::authority_state::require_execution_in(
         connection,
         runtime,
         &origin.context.invocation_id,
@@ -265,6 +265,12 @@ pub(crate) fn request(
     // captured target, authority evidence and the parent's final receipt.
     connection.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status,trigger) VALUES(?1,?2,?3,?4,?5,?6,'pending',?7)", params![id, envelope.command, origin.context.actor, serde_json::to_string(&input)?, runtime.artifact().id(), origin.context.now, crate::audit::Trigger::CommandRequest.as_str()])?;
     crate::authority_state::pin_invocation(connection, &id, &authority.stamp)?;
+    crate::runtime_generation::capture(
+        runtime,
+        connection,
+        &id,
+        Some(&origin.context.invocation_id),
+    )?;
     crate::resources::inherit_root(connection, &id, &origin.context.invocation_id)?;
     crate::managed_credentials::ingress::inherit(
         connection,
@@ -513,7 +519,34 @@ fn select_ready(
     interrupted: &[String],
 ) -> Result<Option<ReadyInvocation>> {
     runtime.check_binding(connection)?;
-    let next: Option<(String,String,String)> = connection.query_row("SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1", params![runtime.artifact().id(),serde_json::to_string(operations)?,serde_json::to_string(interrupted)?,runtime.host().now_ms()?], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+    let generation = if runtime.rolling() {
+        Some(crate::runtime_generation::selected(runtime, connection)?)
+    } else {
+        None
+    };
+    // Native/non-RWO stores do not install the ordinary RWO ownership tables.
+    // Keep their query independent of that schema, including at prepare time.
+    let ownership = if runtime.rolling() {
+        "EXISTS(SELECT 1 FROM day2_invocation_runtime g WHERE g.invocation=i.id AND g.generation=?5)"
+    } else {
+        "?5 IS NULL"
+    };
+    let sql = format!(
+        "SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND {ownership} AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1"
+    );
+    let next: Option<(String, String, String)> = connection
+        .query_row(
+            &sql,
+            params![
+                runtime.artifact().id(),
+                serde_json::to_string(operations)?,
+                serde_json::to_string(interrupted)?,
+                runtime.host().now_ms()?,
+                generation
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
     next.map(|(id, parent, operation)| {
         Ok(ReadyInvocation {
             continuing: crate::execution::phase(connection, &id)?.is_some(),

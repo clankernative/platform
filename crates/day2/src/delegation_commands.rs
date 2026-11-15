@@ -156,7 +156,7 @@ pub fn prepare_budget(runtime: &Runtime, call: &Call) -> Result<u32> {
         params![call.origin, call.actor],
         |row| row.get(0),
     )?;
-    crate::authority_state::require_invocation_in(
+    crate::authority_state::require_execution_in(
         &tx,
         runtime,
         &call.origin,

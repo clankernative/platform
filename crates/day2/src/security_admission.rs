@@ -184,21 +184,21 @@ impl Requirements {
     }
 
     pub(crate) fn require_runtime(&self) -> Result<()> {
-        let evidence = HOST.get_or_init(measure_host);
-        let (os, supervisor, sandbox) = evidence
-            .as_ref()
-            .map_err(|_| anyhow::anyhow!("security_host_evidence_unavailable"))?;
+        self.require_host(&host_code()?)
+    }
+
+    fn require_host(&self, actual: &HostCode) -> Result<()> {
         match &self.containment {
             Containment::MacosSandboxV1 {
                 supervisor: expected,
             } => ensure!(
-                os == "macos" && supervisor == expected,
+                actual.os == "macos" && &actual.supervisor == expected,
                 "security_runtime_mismatch"
             ),
             Containment::LinuxQualifiedV1 { evidence } => ensure!(
-                os == "linux"
-                    && supervisor == &evidence.runtime_supervisor
-                    && sandbox.as_ref() == Some(&evidence.runtime_sandbox),
+                actual.os == "linux"
+                    && actual.supervisor == evidence.runtime_supervisor
+                    && actual.sandbox.as_ref() == Some(&evidence.runtime_sandbox),
                 "security_runtime_mismatch"
             ),
         }
@@ -217,24 +217,50 @@ impl Requirements {
     }
 }
 
-type HostEvidence = Result<(String, String, Option<String>), String>;
+type HostEvidence = Result<HostCode, String>;
 static HOST: OnceLock<HostEvidence> = OnceLock::new();
+
+/// Measured process code DATA, never a serving or business permission. The
+/// generation journal compares this with its installed selection at each use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostCode {
+    pub os: String,
+    pub supervisor: String,
+    pub sandbox: Option<String>,
+}
+
+pub(crate) fn host_code() -> Result<HostCode> {
+    HOST.get_or_init(measure_host)
+        .as_ref()
+        .cloned()
+        .map_err(|_| anyhow::anyhow!("security_host_evidence_unavailable"))
+}
 
 fn measure_host() -> HostEvidence {
     (|| -> Result<_> {
         let executable = std::env::current_exe()?.canonicalize()?;
         let supervisor = digest(&fs::read(&executable)?);
         let sandbox = if cfg!(target_os = "linux") {
-            Some(digest(&fs::read(
-                executable
-                    .parent()
-                    .context("supervisor_directory")?
-                    .join("day2-sandbox"),
-            )?))
+            let path = executable
+                .parent()
+                .context("supervisor_directory")?
+                .join("day2-sandbox");
+            match fs::read(path) {
+                Ok(bytes) => Some(digest(&bytes)),
+                // Unqualified development harnesses may have no launcher.
+                // LinuxQualifiedV1 still requires an exact Some launcher hash.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            }
         } else {
             None
         };
-        Ok((std::env::consts::OS.into(), supervisor, sandbox))
+        Ok(HostCode {
+            os: std::env::consts::OS.into(),
+            supervisor,
+            sandbox,
+        })
     })()
     .map_err(|_| "security_host_evidence_unavailable".into())
 }
@@ -389,6 +415,29 @@ mod tests {
             requirements.require_runtime().is_err(),
             "this test runner is not the approved runtime"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn qualified_linux_requires_the_exact_launcher_even_for_a_matching_supervisor() -> Result<()> {
+        let artifact = artifact("app", "compiler");
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("receipt.json");
+        fs::write(&path, serde_json::to_vec(&receipt(&artifact))?)?;
+        let requirements = review_linux(&artifact, &path)?;
+        let mut code = HostCode {
+            os: "linux".into(),
+            supervisor: digest(b"qualified-server"),
+            sandbox: Some(digest(b"qualified-launcher")),
+        };
+        requirements.require_host(&code)?;
+        code.sandbox = None;
+        assert!(requirements.require_host(&code).is_err());
+        code.sandbox = Some(digest(b"another-launcher"));
+        assert!(requirements.require_host(&code).is_err());
+        code.sandbox = Some(digest(b"qualified-launcher"));
+        code.supervisor = digest(b"another-server");
+        assert!(requirements.require_host(&code).is_err());
         Ok(())
     }
 

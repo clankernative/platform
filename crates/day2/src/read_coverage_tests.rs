@@ -90,6 +90,7 @@ impl Fixture {
             connections: None,
             rolling: false,
             restore_registry_selector: None,
+            executor_generation: Arc::new(std::sync::OnceLock::new()),
             instance_digest: crate::digest(b"nonrolling test instance"),
             instance_path,
             app: "app".into(),
