@@ -16,6 +16,11 @@ use std::collections::BTreeMap;
 // Generated from the one provider table; see `day2_capabilities::registry`.
 pub use day2_capabilities::registry::{LOCAL_PROVIDER_DATABASES, READS, WRITES};
 
+/// The live Workspace Directory capture store beside the app database: a cache of
+/// provider data that the next capture fetches again. Backups never take it and
+/// maintenance does not size for it.
+pub const WORKSPACE_DIRECTORY_STORE: &str = "workspace_directory.sqlite";
+
 /// Whether `name` is an observation an operation policy may grant.
 ///
 /// Every provider read, plus the host's own [`crate::audit::HISTORY`]: an
@@ -485,7 +490,7 @@ pub(crate) fn authorized(
                         anyhow::bail!(crate::error::Failure::ResourceForbidden)
                     };
                     let plan = crate::workspace_directory::CapturePlan::prepare(
-                        &runtime.db().with_file_name("workspace_directory.sqlite"),
+                        &runtime.db().with_file_name(WORKSPACE_DIRECTORY_STORE),
                         crate::workspace_directory::CaptureInput {
                             customer_id: customer_id.clone(),
                             connection_id: format!(
@@ -1271,7 +1276,7 @@ fn workspace_directory_capture(
         }
     })?;
     let mut db = crate::workspace_directory::open_store(
-        &runtime.db().with_file_name("workspace_directory.sqlite"),
+        &runtime.db().with_file_name(WORKSPACE_DIRECTORY_STORE),
     )?;
     crate::workspace_directory::publish(&mut db, &complete)?;
     Ok(serde_json::to_string(complete.metadata())?)
@@ -1394,7 +1399,7 @@ fn workspace_directory_page(
     else {
         anyhow::bail!("workspace_directory_resource_invalid")
     };
-    let path = runtime.db().with_file_name("workspace_directory.sqlite");
+    let path = runtime.db().with_file_name(WORKSPACE_DIRECTORY_STORE);
     let db = crate::workspace_directory::open_store(&path)?;
     let page = crate::workspace_directory::page_for_grant(
         &db,

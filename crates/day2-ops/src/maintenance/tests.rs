@@ -2249,6 +2249,38 @@ fn a_small_store_keeps_the_floor_and_inspect_measures_nothing() -> Result<()> {
 }
 
 #[test]
+fn derived_platform_stores_are_allowed_but_never_sized() -> Result<()> {
+    // Equity's credential registration and Home's Directory captures leave
+    // these beside the app database; maintenance must still run.
+    let listing = [
+        format!("10 {STATE}/example_app.sqlite"),
+        format!("4 {STATE}/example_app.sqlite-wal"),
+        format!("7 {STATE}/provider-credentials.sqlite"),
+        format!("3 {STATE}/provider-credentials.sqlite-wal"),
+        format!("9 {STATE}/workspace_directory.sqlite"),
+        format!("2 {STATE}/workspace_directory.sqlite-shm"),
+    ]
+    .join("\n");
+    let sizes = store_sizes(&listing, "example_app")?;
+    assert_eq!(
+        sizes.into_iter().collect::<Vec<_>>(),
+        [
+            ("example_app.sqlite".to_owned(), 10),
+            ("example_app.sqlite-wal".to_owned(), 4)
+        ]
+    );
+    // Only those exact names: anything else is still an undeclared store.
+    for other in ["provider-credentials.sqlite.bak.sqlite", "other_app.sqlite"] {
+        let error = format!(
+            "{:#}",
+            store_sizes(&format!("{listing}\n5 {STATE}/{other}"), "example_app").unwrap_err()
+        );
+        assert_eq!(error, format!("undeclared_auxiliary_sqlite_store: {other}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn activation_measurement_failure_keeps_the_source_serving() -> Result<()> {
     for configure in [
         (|cluster: &mut FakeCluster| cluster.volume = vec![("other_app.sqlite", 8)])

@@ -262,11 +262,17 @@ impl MountedCredentials {
     }
 }
 
+/// The credential registry in the app's state directory. Credential registration
+/// records the reviewed secret mounts in it on every start; backups do not take
+/// it, so maintenance allows it beside the app database without sizing for it.
+pub const CREDENTIAL_REGISTRY: &str = "provider-credentials.sqlite";
+
 fn database(instance: &Path) -> Result<PathBuf> {
     Ok(instance
         .parent()
         .context("instance_directory_missing")?
-        .join(".state/provider-credentials.sqlite"))
+        .join(".state")
+        .join(CREDENTIAL_REGISTRY))
 }
 
 fn read_secret(path: &Path) -> Result<String> {
