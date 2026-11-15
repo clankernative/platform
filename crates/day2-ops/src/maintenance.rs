@@ -3321,12 +3321,16 @@ impl Session {
         if state["id"].as_str() != self.request.request_id.as_deref() {
             return Ok(json!({"resuming":false}));
         }
+        ensure!(
+            state["kind"]["kind"] == "app_artifact",
+            "runtime_pair_activation_not_implemented"
+        );
         let target = self.request.target.as_ref().context("target")?;
         self.require_target_instance(&state)?;
         ensure!(
-            state["source_image"] == self.request.app_image
-                && state["target_image"] == target.app_image
-                && state["target"] == format!("sha256:{}", target.artifact_id)
+            state["source"]["image"] == self.request.app_image
+                && state["target"]["image"] == target.app_image
+                && state["target"]["artifact"] == format!("sha256:{}", target.artifact_id)
                 && state["phase"] != "aborted",
             "rollout_resume_conflict"
         );
@@ -3641,6 +3645,10 @@ impl Session {
             "another_rollout_is_running"
         );
         if state["id"] == id {
+            ensure!(
+                state["kind"]["kind"] == "app_artifact",
+                "runtime_pair_activation_not_implemented"
+            );
             self.require_target_instance(&state)?;
         }
         match step {
@@ -3668,9 +3676,10 @@ impl Session {
                     self.record("rollout-prepared", serde_json::from_str(raw.trim())?)?;
                 } else {
                     ensure!(
-                        state["source_image"] == self.request.app_image
-                            && state["target_image"] == target.app_image
-                            && state["target"] == format!("sha256:{}", target.artifact_id),
+                        state["source"]["image"] == self.request.app_image
+                            && state["target"]["image"] == target.app_image
+                            && state["target"]["artifact"]
+                                == format!("sha256:{}", target.artifact_id),
                         "rollout_id_conflict"
                     );
                 }
@@ -3996,7 +4005,7 @@ impl Session {
                         Some("verified") => {
                             self.record(
                                 "candidate-read-write-verified",
-                                json!({"release":id,"artifact":observed["target"]}),
+                                json!({"release":id,"artifact":observed["target"]["artifact"]}),
                             )?;
                             break;
                         }

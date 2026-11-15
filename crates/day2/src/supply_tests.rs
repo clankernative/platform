@@ -58,6 +58,7 @@ fn runtime(directory: &Path) -> Result<Runtime> {
         connections: None,
         rolling: false,
         restore_registry_selector: None,
+        instance_digest: crate::digest(b"nonrolling test instance"),
         instance_path: directory.join("instance.json"),
         app: "app".into(),
         db,

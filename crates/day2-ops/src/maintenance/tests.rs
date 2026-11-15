@@ -3048,14 +3048,53 @@ fn rolling_request_refuses_replacement_controller_claim_or_node_before_mutation(
 }
 
 #[test]
+fn app_rollout_cannot_resume_or_deploy_a_runtime_pair_record() -> Result<()> {
+    let harness = Harness::new();
+    let request = harness.request(Operation::Rollout);
+    *harness.release.borrow_mut() = json!({"id":"release-1", "phase":"prepared",
+        "kind":{"kind":"runtime_pair"}});
+    let mut session = Session::open("rollout", &request, harness.tools(|_| {}, true))?;
+    session.state.pod = true;
+    session.state.operation_claimed = true;
+    assert!(
+        session
+            .rollout_resume()
+            .unwrap_err()
+            .to_string()
+            .contains("runtime_pair_activation_not_implemented")
+    );
+    session.state.resumed = true;
+    for step in ["prepare", "admit", "deploy"] {
+        assert!(
+            session
+                .rollout(step)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime_pair_activation_not_implemented")
+        );
+    }
+    assert!(
+        !harness
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.iter().any(|arg| matches!(
+                arg.as_str(),
+                "scale" | "rollout-transition" | "rollout-prepare"
+            )))
+    );
+    Ok(())
+}
+
+#[test]
 fn resumed_release_requires_exact_target_instance_bytes_before_any_step() -> Result<()> {
     let harness = Harness::new();
     let request = harness.request(Operation::Rollout);
     let request_bytes = fs::read(&request)?;
     let target = harness.directory.path().join("target-instance.json");
     let original = fs::read(&target)?;
-    let release = json!({"id":"release-1", "source_image":harness.running.reference,
-        "target_image":harness.target.reference,"target":format!("sha256:{}",harness.target.artifact_id),
+    let release = json!({"id":"release-1", "kind":{"kind":"app_artifact"}, "source":{"image":harness.running.reference},
+        "target":{"image":harness.target.reference,"artifact":format!("sha256:{}",harness.target.artifact_id)},
         "target_instance_digest":day2::digest(&original),"phase":"prepared",
         "placement":{"controller_uid":"controller-uid","pvc_uid":"pvc-uid","node":"node-a","request_digest":day2::digest(&request_bytes)}});
     *harness.release.borrow_mut() = release;
@@ -3097,8 +3136,8 @@ fn completed_rollout_resumes_using_its_exact_live_instance_after_bootstrap_recon
         let path = harness.request(Operation::Rollout);
         let request = fs::read(&path)?;
         let target = fs::read_to_string(harness.directory.path().join("target-instance.json"))?;
-        *harness.release.borrow_mut() = json!({"id":"release-1", "source_image":harness.running.reference,
-            "target_image":harness.target.reference,"target":format!("sha256:{}",harness.target.artifact_id),
+        *harness.release.borrow_mut() = json!({"id":"release-1", "kind":{"kind":"app_artifact"}, "source":{"image":harness.running.reference},
+            "target":{"image":harness.target.reference,"artifact":format!("sha256:{}",harness.target.artifact_id)},
             "target_instance_digest":day2::digest(target.as_bytes()),"phase":"complete",
             "placement":{"controller_uid":"controller-uid","pvc_uid":"pvc-uid","node":"node-a",
                 "request_digest":day2::digest(&request)}});
@@ -3160,8 +3199,8 @@ fn release_probe_only_publishes_then_observes_the_candidate_result() -> Result<(
     session.state.operation_claimed = true;
     session.state.resumed = true;
     session.state.candidate_observed = true;
-    *harness.release.borrow_mut() = json!({"id":"release-1","phase":"serving",
-        "target":format!("sha256:{}",harness.target.artifact_id),
+    *harness.release.borrow_mut() = json!({"id":"release-1","phase":"serving","kind":{"kind":"app_artifact"},
+        "target":{"artifact":format!("sha256:{}",harness.target.artifact_id)},
         "target_instance_digest":day2::digest(session.target_instance.as_ref().unwrap().as_bytes())});
     session.rollout("probe")?;
     assert!(session.state.probe_verified);

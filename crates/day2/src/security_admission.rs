@@ -11,7 +11,7 @@ use std::{
     sync::OnceLock,
 };
 
-const LINUX_CHECKS: &[&str] = &[
+pub(crate) const LINUX_CHECKS: &[&str] = &[
     "linux-capture",
     "linux-build-tooling",
     "linux-build-runtime",

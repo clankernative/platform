@@ -90,6 +90,7 @@ impl Fixture {
             connections: None,
             rolling: false,
             restore_registry_selector: None,
+            instance_digest: crate::digest(b"nonrolling test instance"),
             instance_path,
             app: "app".into(),
             db: state.join("app.sqlite"),

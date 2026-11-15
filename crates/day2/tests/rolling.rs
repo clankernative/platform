@@ -72,6 +72,111 @@ fn prepare(world: &World, candidate: &Path, operator: &LocalOperator) -> Result<
     Ok(())
 }
 
+#[test]
+fn runtime_protocol_manifest_is_reusable_across_different_app_schemas() -> Result<()> {
+    let (reports, _, _) = fixture()?;
+    let (stock, _, _) = stock_fixture()?;
+    assert_ne!(
+        reports.runtime.artifact().contract().schema_digest,
+        stock.runtime.artifact().contract().schema_digest
+    );
+    assert_eq!(
+        day2::runtime_pair::protocols(&reports.runtime)?,
+        day2::runtime_pair::protocols(&stock.runtime)?
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_pair_refusal_preserves_current_authority_and_writable_incumbent() -> Result<()> {
+    let (world, different_artifact, operator) = stock_fixture()?;
+    let bytes = fs::read(world.runtime.instance_path())?;
+    let request = day2::runtime_pair::Request {
+        id: "runtime-pair".into(),
+        source_image: format!("registry/app@{}", day2::digest(b"source runtime")),
+        target_image: format!("registry/app@{}", day2::digest(b"target runtime")),
+        receipt_digest: day2::digest(b"unqualified receipt"),
+    };
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let previous = day2::authority_state::current(&db)?;
+    let prepare = |candidate: &[u8], operator: &LocalOperator| {
+        day2::runtime_pair::prepare(
+            &world.runtime,
+            candidate,
+            &request,
+            b"unqualified receipt",
+            operator,
+        )
+    };
+    assert!(
+        prepare(&bytes, &LocalOperator::assert_local("untrusted")?)
+            .unwrap_err()
+            .to_string()
+            .contains("rollout_operator_required")
+    );
+    assert!(
+        prepare(&fs::read(different_artifact)?, &operator)
+            .unwrap_err()
+            .to_string()
+            .contains("runtime_pair_instance_changed")
+    );
+    let mut changed: Value = serde_json::from_slice(&bytes)?;
+    changed["apps"]["reports"]["runtime"]["resources"]["cpu_millis"] = json!(2000);
+    fs::write(world.runtime.instance_path(), serde_json::to_vec(&changed)?)?;
+    assert!(
+        prepare(&bytes, &operator)
+            .unwrap_err()
+            .to_string()
+            .contains("runtime_pair_source_instance_changed")
+    );
+    fs::write(world.runtime.instance_path(), &bytes)?;
+    db.execute_batch("CREATE TABLE unknown_private_store(value TEXT)")?;
+    assert!(
+        prepare(&bytes, &operator)
+            .unwrap_err()
+            .to_string()
+            .contains("runtime_pair_store_shape_changed")
+    );
+    db.execute_batch("DROP TABLE unknown_private_store")?;
+    fs::write(
+        world.runtime.db().parent().unwrap().join("unknown.sqlite"),
+        [],
+    )?;
+    assert!(
+        prepare(&bytes, &operator)
+            .unwrap_err()
+            .to_string()
+            .contains("runtime_pair_auxiliary_store_unsupported")
+    );
+    fs::remove_file(world.runtime.db().parent().unwrap().join("unknown.sqlite"))?;
+    let refusal = prepare(&bytes, &operator).unwrap_err().to_string();
+    assert!(
+        !refusal.contains("runtime_pair_store_shape_changed"),
+        "{refusal}"
+    );
+    assert!(rollout::inspect(&world.runtime)?.is_none());
+    let current = day2::authority_state::current(&db)?;
+    assert_eq!(current.stamp, previous.stamp);
+    assert_eq!(current.document, previous.document);
+    assert_eq!(current.artifact_id, previous.artifact_id);
+    world.runtime.initialize()?;
+    assert_eq!(
+        world
+            .runtime
+            .invoke(
+                "stock_ledger.reserve",
+                "alice",
+                "after-refusal",
+                &json!({"quantity":1}),
+                102,
+                Fault::None
+            )?
+            .status,
+        "success"
+    );
+    Ok(())
+}
+
 fn hold_execution_stripe(world: &World, id: &str) -> Result<fs::File> {
     let stripe = u16::from_str_radix(&day2::digest(id.as_bytes())[7..11], 16)? % 1024;
     let directory = world.runtime.db().parent().unwrap().join("execution-locks");
