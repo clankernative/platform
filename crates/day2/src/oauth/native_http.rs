@@ -1310,23 +1310,54 @@ mod tests {
         use quote::ToTokens;
         use syn::visit::Visit;
         let file = syn::parse_file(include_str!("native_http.rs")).unwrap();
-        let function = |name: &str| file.items.iter().find_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == name => Some(item),
-            _ => None,
-        }).unwrap();
+        let function = |name: &str| {
+            file.items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == name => Some(item),
+                    _ => None,
+                })
+                .unwrap()
+        };
         let restored = function("serve_restored");
         let first: syn::Stmt = syn::parse_quote!(owner.require_executor()?;);
-        let tail: syn::Stmt = syn::Stmt::Expr(syn::parse_quote!(run(
-            endpoint, listener, crate::web::MAX_QUEUED, admission, shutdown,
-            ExecutorInstallation::Restored(owner),
-        ).await), None);
+        let tail: syn::Stmt = syn::Stmt::Expr(
+            syn::parse_quote!(
+                run(
+                    endpoint,
+                    listener,
+                    crate::web::MAX_QUEUED,
+                    admission,
+                    shutdown,
+                    ExecutorInstallation::Restored(owner),
+                )
+                .await
+            ),
+            None,
+        );
         let forwards = |body: &syn::Block| {
-            body.stmts.first().is_some_and(|actual| actual.to_token_stream().to_string() == first.to_token_stream().to_string())
-                && body.stmts.last().is_some_and(|actual| actual.to_token_stream().to_string() == tail.to_token_stream().to_string())
+            body.stmts.first().is_some_and(|actual| {
+                actual.to_token_stream().to_string() == first.to_token_stream().to_string()
+            }) && body.stmts.last().is_some_and(|actual| {
+                actual.to_token_stream().to_string() == tail.to_token_stream().to_string()
+            })
         };
         assert!(forwards(&restored.block));
         let mut foreign = (*restored.block).clone();
-        *foreign.stmts.last_mut().unwrap() = syn::Stmt::Expr(syn::parse_quote!(run(endpoint,listener,crate::web::MAX_QUEUED,admission,shutdown,ExecutorInstallation::Enroll).await),None);
+        *foreign.stmts.last_mut().unwrap() = syn::Stmt::Expr(
+            syn::parse_quote!(
+                run(
+                    endpoint,
+                    listener,
+                    crate::web::MAX_QUEUED,
+                    admission,
+                    shutdown,
+                    ExecutorInstallation::Enroll
+                )
+                .await
+            ),
+            None,
+        );
         assert!(!forwards(&foreign));
         let mut unchecked = (*restored.block).clone();
         unchecked.stmts.remove(0);
@@ -1335,17 +1366,29 @@ mod tests {
             use quote::ToTokens;
             use syn::ext::IdentExt;
             fn named(path: &syn::Path, name: &str) -> bool {
-                path.get_ident().is_some_and(|actual| actual.unraw() == name)
+                path.get_ident()
+                    .is_some_and(|actual| actual.unraw() == name)
             }
             let expected_guard: syn::Stmt = syn::parse_quote!(let _clear = Clear(installation););
             let guards = body.stmts.iter().enumerate().filter(|(_, stmt)| {
                 matches!(stmt, syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(name) if name.ident == "_clear"))
             }).collect::<Vec<_>>();
-            let [(guard, actual)] = guards.as_slice() else { return false; };
-            if actual.to_token_stream().to_string() != expected_guard.to_token_stream().to_string() { return false; }
-            let Some(syn::Stmt::Expr(syn::Expr::Loop(_),None)) = body.stmts.last() else { return false; };
-            if *guard >= body.stmts.len() - 1 { return false; }
-            let structure: syn::ItemStruct = syn::parse_quote!(struct Clear(ExecutorInstallation););
+            let [(guard, actual)] = guards.as_slice() else {
+                return false;
+            };
+            if actual.to_token_stream().to_string() != expected_guard.to_token_stream().to_string()
+            {
+                return false;
+            }
+            let Some(syn::Stmt::Expr(syn::Expr::Loop(_), None)) = body.stmts.last() else {
+                return false;
+            };
+            if *guard >= body.stmts.len() - 1 {
+                return false;
+            }
+            let structure: syn::ItemStruct = syn::parse_quote!(
+                struct Clear(ExecutorInstallation);
+            );
             let disposal: syn::ItemImpl = syn::parse_quote!(impl Drop for Clear {
                 fn drop(&mut self) {
                     match &self.0 {
@@ -1364,29 +1407,42 @@ mod tests {
                 syn::Stmt::Item(syn::Item::Impl(item)) if item.to_token_stream().to_string() == disposal.to_token_stream().to_string()
             )).count();
             #[derive(Default)]
-            struct Uses { constructions: usize, moves: usize }
+            struct Uses {
+                constructions: usize,
+                moves: usize,
+            }
             impl<'ast> syn::visit::Visit<'ast> for Uses {
                 fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                    self.constructions += usize::from(matches!(&*call.func,syn::Expr::Path(path) if path.qself.is_none() && named(&path.path,"Clear")));
-                    syn::visit::visit_expr_call(self,call);
+                    self.constructions += usize::from(
+                        matches!(&*call.func,syn::Expr::Path(path) if path.qself.is_none() && named(&path.path,"Clear")),
+                    );
+                    syn::visit::visit_expr_call(self, call);
                 }
                 fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-                    self.moves += usize::from(path.qself.is_none() && named(&path.path,"_clear"));
-                    syn::visit::visit_expr_path(self,path);
+                    self.moves += usize::from(path.qself.is_none() && named(&path.path, "_clear"));
+                    syn::visit::visit_expr_path(self, path);
                 }
             }
             let mut uses = Uses::default();
             uses.visit_block(body);
             fn mentions(tokens: proc_macro2::TokenStream) -> usize {
-                tokens.into_iter().map(|token| match token {
-                    proc_macro2::TokenTree::Group(group) => mentions(group.stream()),
-                    proc_macro2::TokenTree::Ident(name) => usize::from(name.unraw() == "_clear"),
-                    _ => 0,
-                }).sum()
+                tokens
+                    .into_iter()
+                    .map(|token| match token {
+                        proc_macro2::TokenTree::Group(group) => mentions(group.stream()),
+                        proc_macro2::TokenTree::Ident(name) => {
+                            usize::from(name.unraw() == "_clear")
+                        }
+                        _ => 0,
+                    })
+                    .sum()
             }
             // The sole identifier is the declaration. Also inspect opaque
             // macro tokens so an early move cannot hide inside select!.
-            structures == 1 && disposals == 1 && uses.constructions == 1 && uses.moves == 0
+            structures == 1
+                && disposals == 1
+                && uses.constructions == 1
+                && uses.moves == 0
                 && mentions(body.to_token_stream()) == 1
         }
         let run = function("run");
@@ -1395,19 +1451,30 @@ mod tests {
             syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(name) if name.ident == "_clear")
         )).unwrap();
         let mut early = (*run.block).clone();
-        early.stmts.insert(guard+1,syn::parse_quote!(drop(_clear);));
+        early
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(drop(_clear);));
         assert!(!retained(&early));
         let mut raw_early = (*run.block).clone();
-        raw_early.stmts.insert(guard+1,syn::parse_quote!(drop(r#_clear);));
+        raw_early
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(drop(r#_clear);));
         assert!(!retained(&raw_early));
         let mut hidden = (*run.block).clone();
-        hidden.stmts.insert(guard+1,syn::parse_quote!(opaque! { drop(_clear); }));
+        hidden
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(opaque! { drop(_clear); }));
         assert!(!retained(&hidden));
         let mut raw_hidden = (*run.block).clone();
-        raw_hidden.stmts.insert(guard+1,syn::parse_quote!(opaque! { drop(r#_clear); }));
+        raw_hidden
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(opaque! { drop(r#_clear); }));
         assert!(!retained(&raw_hidden));
         let mut raw_extra = (*run.block).clone();
-        raw_extra.stmts.insert(guard+1,syn::parse_quote!(let extra = r#Clear(other_installation);));
+        raw_extra.stmts.insert(
+            guard + 1,
+            syn::parse_quote!(let extra = r#Clear(other_installation);),
+        );
         assert!(!retained(&raw_extra));
         let mut removed = (*run.block).clone();
         removed.stmts.remove(guard);
@@ -1416,7 +1483,9 @@ mod tests {
         foreign.stmts[guard] = syn::parse_quote!(let _clear = Clear(other_installation););
         assert!(!retained(&foreign));
         let mut conditional = (*run.block).clone();
-        conditional.stmts[guard] = syn::parse_quote!(if false { let _clear = Clear(installation); });
+        conditional.stmts[guard] = syn::parse_quote!(if false {
+            let _clear = Clear(installation);
+        });
         assert!(!retained(&conditional));
         let mut no_retirement = (*run.block).clone();
         let disposal = no_retirement.stmts.iter_mut().find(|stmt| matches!(stmt,

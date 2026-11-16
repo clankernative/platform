@@ -7,6 +7,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::net::TcpListener;
 
+/// Existing listener settings only. Sharing readiness DATA grants no Current,
+/// native owner, Runtime access or startup permission.
+pub(crate) struct RestoredListenerOptions {
+    pub(crate) concurrency: usize,
+    pub(crate) admission: Arc<AtomicBool>,
+}
+
 /// Concrete restored listener resources only. No method can expose the raw
 /// server, start serving or extract native parts before the fixed installer
 /// owns both completed startup settlements and the whole native parent.
@@ -23,9 +30,8 @@ pub(super) fn bind(
     edge: &crate::artifact::Edge,
     verifier: crate::iap::Verifier,
     receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
-    concurrency: usize,
+    options: RestoredListenerOptions,
     current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
-    admission: Arc<AtomicBool>,
 ) -> Result<BoundRestoredListener> {
     current.require_restored_startup_sql(&runtime)?;
     let request_timing = super::request_timing_setting(&runtime).unwrap_or(true);
@@ -36,7 +42,7 @@ pub(super) fn bind(
         edge.origin.clone(),
         SignIn::Edge(verifier),
         ListenerOptions {
-            concurrency,
+            concurrency: options.concurrency,
             health_endpoints: true,
             presentation: PresentationSource::Environment,
             request_timing,
@@ -46,7 +52,7 @@ pub(super) fn bind(
     server.mount_oauth(receiver)?;
     Ok(BoundRestoredListener {
         _server: server,
-        admission,
+        admission: options.admission,
         local: std::marker::PhantomData,
     })
 }
@@ -107,7 +113,9 @@ mod tests {
             })
         }).unwrap();
         assert!(actual.sig.asyncness.is_some());
-        assert!(matches!(actual.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_none()));
+        assert!(
+            matches!(actual.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_none())
+        );
         let expected: syn::Block = syn::parse_quote!({
             crate::oauth::native_http::serve_restored(
                 self.endpoint,
@@ -115,12 +123,27 @@ mod tests {
                 self.admission,
                 self.owner,
                 shutdown,
-            ).await
+            )
+            .await
         });
-        let guarded = |body: &syn::Block| body.to_token_stream().to_string() == expected.to_token_stream().to_string();
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
         assert!(guarded(&actual.block));
         let mut replaced = actual.block.clone();
-        replaced.stmts[0] = syn::Stmt::Expr(syn::parse_quote!(crate::oauth::native_http::serve_restored(self.endpoint,self.listener,self.admission,other_owner,shutdown).await),None);
+        replaced.stmts[0] = syn::Stmt::Expr(
+            syn::parse_quote!(
+                crate::oauth::native_http::serve_restored(
+                    self.endpoint,
+                    self.listener,
+                    self.admission,
+                    other_owner,
+                    shutdown
+                )
+                .await
+            ),
+            None,
+        );
         assert!(!guarded(&replaced));
         let mut early = actual.block.clone();
         early.stmts.insert(0, syn::parse_quote!(drop(self.owner);));
@@ -197,7 +220,7 @@ mod tests {
             };
             let expected: syn::ExprStruct = syn::parse_quote!(BoundRestoredListener {
                 _server: server,
-                admission,
+                admission: options.admission,
                 local: std::marker::PhantomData
             });
             let same_fields = bound.fields.len() == expected.fields.len()
@@ -234,6 +257,16 @@ mod tests {
         *parts.stmts.last_mut().unwrap() =
             syn::Stmt::Expr(syn::parse_quote!(server.into_native_parts(admission)), None);
         assert!(!guarded(&parts));
+        let mut foreign_admission = actual.block.clone();
+        *foreign_admission.stmts.last_mut().unwrap() = syn::Stmt::Expr(
+            syn::parse_quote!(Ok(BoundRestoredListener {
+                _server: server,
+                admission: Arc::new(AtomicBool::new(true)),
+                local: std::marker::PhantomData,
+            })),
+            None,
+        );
+        assert!(!guarded(&foreign_admission));
         let mut unmounted = actual.block.clone();
         unmounted.stmts.remove(3);
         assert!(!guarded(&unmounted));

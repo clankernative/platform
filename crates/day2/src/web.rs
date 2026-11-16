@@ -35,7 +35,9 @@ mod freetool_credentials;
 pub(crate) mod live;
 #[path = "web_restored_listener.rs"]
 mod restored_listener;
-pub(crate) use restored_listener::{BoundRestoredListener, InstalledRestoredListener};
+pub(crate) use restored_listener::{
+    BoundRestoredListener, InstalledRestoredListener, RestoredListenerOptions,
+};
 
 struct Grant {
     hash: String,
@@ -545,19 +547,11 @@ impl LocalServer {
         edge: &crate::artifact::Edge,
         verifier: crate::iap::Verifier,
         receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
-        concurrency: usize,
+        options: RestoredListenerOptions,
         current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
-        admission: Arc<AtomicBool>,
     ) -> Result<BoundRestoredListener> {
         restored_listener::bind(
-            runtime,
-            listener,
-            edge,
-            verifier,
-            receiver,
-            concurrency,
-            current,
-            admission,
+            runtime, listener, edge, verifier, receiver, options, current,
         )
     }
 
@@ -3965,14 +3959,7 @@ mod native_startup_tests {
         let restored = method("bind_restored_edge_listener");
         let expected: syn::Block = syn::parse_quote!({
             restored_listener::bind(
-                runtime,
-                listener,
-                edge,
-                verifier,
-                receiver,
-                concurrency,
-                current,
-                admission,
+                runtime, listener, edge, verifier, receiver, options, current,
             )
         });
         assert_eq!(

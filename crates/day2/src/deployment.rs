@@ -915,9 +915,11 @@ impl ConfiguredRestoredHost {
             edge,
             self.verifier,
             self.receiver,
-            self.concurrency,
+            crate::web::RestoredListenerOptions {
+                concurrency: self.concurrency,
+                admission: Arc::clone(&self.admission),
+            },
             current,
-            Arc::clone(&self.admission),
         )?;
         ensure!(
             self.admission.load(Ordering::Acquire),
@@ -989,9 +991,11 @@ mod restored_host_setup_source_tests {
                 edge,
                 self.verifier,
                 self.receiver,
-                self.concurrency,
+                crate::web::RestoredListenerOptions {
+                    concurrency: self.concurrency,
+                    admission: Arc::clone(&self.admission),
+                },
                 current,
-                Arc::clone(&self.admission),
             )?;
             ensure!(
                 self.admission.load(Ordering::Acquire),

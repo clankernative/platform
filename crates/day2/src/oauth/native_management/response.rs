@@ -195,6 +195,14 @@ impl<T> Registry<T> {
     }
 }
 
+// Internal grouping of the same three negative routing roots, not a native
+// owner, proof alias or source of positive authority. It has no methods/getters.
+struct AbortRoots(
+    Rc<Cell<bool>>,
+    Weak<Cell<bool>>,
+    Rc<super::RestoredAppRefusal>,
+);
+
 /// One request's actual early owner, shared only as executor-local routing.
 /// Restored capture moves the existing registry value before native capture;
 /// sharing this slot cannot create an owner, request, clock or permission.
@@ -204,13 +212,7 @@ pub(super) struct RequestOwner {
     refused: Rc<Cell<bool>>,
     // Direct negative roots remain callable while the slot or native parent
     // is borrowed. They are installed exactly once from the actual lease.
-    abort: Rc<
-        std::cell::OnceCell<(
-            Rc<Cell<bool>>,
-            Weak<Cell<bool>>,
-            Rc<super::RestoredAppRefusal>,
-        )>,
-    >,
+    abort: Rc<std::cell::OnceCell<AbortRoots>>,
 }
 
 enum RequestOwnerSource {
@@ -218,6 +220,8 @@ enum RequestOwnerSource {
     Capturing,
     Initial,
     NonNative,
+    #[cfg(test)]
+    Model(Option<u64>),
     Restored(Box<Lease<Owners>>),
     Moved,
     Refused,
@@ -320,7 +324,7 @@ impl RequestOwner {
             };
             ensure!(
                 self.abort
-                    .set((
+                    .set(AbortRoots(
                         Rc::clone(&lease.refused),
                         Rc::downgrade(&lease.live),
                         Rc::clone(refusal)
@@ -384,6 +388,59 @@ impl RequestOwner {
         captured
     }
 
+    // Test transport classification retains its actual Model original; it
+    // cannot supply an enrolled stage or make a native Runtime ordinary.
+    #[cfg(test)]
+    pub(super) fn capture_model(&self, sink: &Sink) -> Result<()> {
+        let same = Rc::ptr_eq(&self.source, &sink.request_owner.source)
+            && Rc::ptr_eq(&self.refused, &sink.request_owner.refused)
+            && Rc::ptr_eq(&self.abort, &sink.request_owner.abort);
+        if !same {
+            self.refuse();
+            anyhow::bail!("scripted request Sink changed");
+        }
+        let captured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure!(
+                !self.refused.get() && sink.is_open(),
+                "native request owner refused",
+            );
+            let mut source = self.source.try_borrow_mut()?;
+            ensure!(
+                matches!(*source, RequestOwnerSource::Empty),
+                "native request owner already selected",
+            );
+            *source = RequestOwnerSource::Capturing;
+            let domain = crate::oauth::effects::current_domain();
+            if let Some(domain) = domain {
+                super::fixtures::require_model_domain(domain)?;
+            }
+            sink.request.capture_model()?;
+            ensure!(
+                domain == crate::oauth::effects::current_domain(),
+                "scripted request domain changed",
+            );
+            if let Some(domain) = domain {
+                super::fixtures::require_model_domain(domain)?;
+            }
+            *source = RequestOwnerSource::Model(domain);
+            Ok(())
+        }));
+        match captured {
+            Ok(captured) => {
+                if captured.is_err() {
+                    self.refuse();
+                    sink.abort();
+                }
+                captured
+            }
+            Err(payload) => {
+                self.refuse();
+                sink.abort();
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
     /// Source selection DATA only; the accepting method below revalidates the
     /// same lease, Runtime, capture and actual native selection itself.
     pub(super) fn uses_restored(&self) -> Result<bool> {
@@ -392,6 +449,8 @@ impl RequestOwner {
             RequestOwnerSource::Empty
             | RequestOwnerSource::Initial
             | RequestOwnerSource::NonNative => Ok(false),
+            #[cfg(test)]
+            RequestOwnerSource::Model(_) => Ok(false),
             RequestOwnerSource::Restored(_) => Ok(true),
             _ => anyhow::bail!("native request owner unavailable"),
         }
@@ -842,6 +901,17 @@ impl RequestOwner {
                         );
                         return Ok(None);
                     }
+                    #[cfg(test)]
+                    RequestOwnerSource::Model(domain) => {
+                        let domain = domain.context("scripted response fixture missing")?;
+                        super::fixtures::require_model_domain(domain)?;
+                        ensure!(
+                            Some(domain) == crate::oauth::effects::current_domain()
+                                && !runtime.uses_native_storage(),
+                            "scripted response profile changed"
+                        );
+                        return Ok(None);
+                    }
                     _ => anyhow::bail!("native response capture unavailable"),
                 }
             };
@@ -1000,7 +1070,7 @@ impl RequestOwner {
 
     pub(super) fn refuse(&self) {
         self.refused.set(true);
-        if let Some((lease, live, parent)) = self.abort.get() {
+        if let Some(AbortRoots(lease, live, parent)) = self.abort.get() {
             lease.set(true);
             // A completed/retired lease may have returned the same whole
             // parent for another request. Old Sinks cannot burn that owner.
@@ -1041,11 +1111,7 @@ pub(super) struct RuntimeRequest {
     scope: AuthorityScope,
     request: super::request::Request,
     lease: RefCell<Option<Lease<Owners>>>,
-    abort: std::cell::OnceCell<(
-        Rc<Cell<bool>>,
-        Weak<Cell<bool>>,
-        Rc<super::RestoredAppRefusal>,
-    )>,
+    abort: std::cell::OnceCell<AbortRoots>,
     refused: Cell<bool>,
     complete: Cell<bool>,
 }
@@ -1103,7 +1169,7 @@ impl RuntimeRequest {
         ensure!(
             frame
                 .abort
-                .set((
+                .set(AbortRoots(
                     Rc::clone(&lease.refused),
                     Rc::downgrade(&lease.live),
                     parent
@@ -1130,9 +1196,12 @@ impl RuntimeRequest {
             && !self.complete.get()
             && std::ptr::eq(std::sync::Arc::as_ptr(&self.runtime), runtime)
             && runtime.uses_native_storage()
-            && self.abort.get().is_some_and(|(refused, live, _)| {
-                !refused.get() && live.upgrade().is_some_and(|live| live.get())
-            });
+            && self
+                .abort
+                .get()
+                .is_some_and(|AbortRoots(refused, live, _)| {
+                    !refused.get() && live.upgrade().is_some_and(|live| live.get())
+                });
         if !selected {
             self.refuse();
             anyhow::bail!("native Runtime frame changed or closed");
@@ -1172,7 +1241,7 @@ impl RuntimeRequest {
 
     pub(super) fn refuse(&self) {
         self.refused.set(true);
-        if let Some((refused, live, parent)) = self.abort.get() {
+        if let Some(AbortRoots(refused, live, parent)) = self.abort.get() {
             refused.set(true);
             if live.upgrade().is_some_and(|live| live.get()) {
                 parent.refuse();
@@ -1371,7 +1440,7 @@ mod sealed {
     pub trait Material {}
 }
 
-trait LeaseMaterial: sealed::Material {
+pub(super) trait LeaseMaterial: sealed::Material {
     fn retained_parent_refusal(&self) -> Option<Rc<super::RestoredAppRefusal>>;
     fn refuse_lease(&mut self, attempt: Option<&str>);
 }
@@ -2826,7 +2895,7 @@ mod lease_tests {
                 &sink.identity,
                 None
             )),
-            syn::parse_quote!(self.abort.set((
+            syn::parse_quote!(self.abort.set(AbortRoots(
                 Rc::clone(&lease.refused),
                 Rc::downgrade(&lease.live),
                 Rc::clone(refusal)
@@ -2886,7 +2955,7 @@ mod lease_tests {
                 quote::quote!(replacement_lease()),
             ),
             (
-                quote::quote!(self.abort.set((
+                quote::quote!(self.abort.set(AbortRoots(
                     Rc::clone(&lease.refused),
                     Rc::downgrade(&lease.live),
                     Rc::clone(refusal)
@@ -3253,6 +3322,17 @@ mod lease_tests {
                             );
                             return Ok(None);
                         }
+                        #[cfg(test)]
+                        RequestOwnerSource::Model(domain) => {
+                            let domain = domain.context("scripted response fixture missing")?;
+                            super::fixtures::require_model_domain(domain)?;
+                            ensure!(
+                                Some(domain) == crate::oauth::effects::current_domain()
+                                    && !runtime.uses_native_storage(),
+                                "scripted response profile changed"
+                            );
+                            return Ok(None);
+                        }
                         _ => anyhow::bail!("native response capture unavailable"),
                     }
                 };
@@ -3287,6 +3367,23 @@ mod lease_tests {
         let downgraded: syn::Block =
             syn::parse_str(&text.replacen(&actual_route, "Ok(None)", 1)).unwrap();
         assert!(!guarded(&downgraded));
+        for from in [
+            "super::fixtures::require_model_domain(domain)?",
+            "Some(domain) == crate::oauth::effects::current_domain()",
+            "!runtime.uses_native_storage()",
+        ] {
+            let selected: syn::Expr = syn::parse_str(from).unwrap();
+            let selected = selected.to_token_stream().to_string();
+            let index = text.rfind(&selected).unwrap();
+            let mut changed = text.clone();
+            let replacement = if from.ends_with('?') {
+                "Ok(())?"
+            } else {
+                "true"
+            };
+            changed.replace_range(index..index + selected.len(), replacement);
+            assert!(!guarded(&syn::parse_str(&changed).unwrap()), "{from}");
+        }
     }
 
     #[test]
@@ -3306,6 +3403,100 @@ mod lease_tests {
         ordinary.capture_non_native_request()?;
         assert!(super::super::captured_runtime_response_scope(&runtime, &ordinary)?.is_none());
         assert!(ordinary.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn model_response_requires_actual_capture_and_the_same_active_non_native_profile() -> Result<()>
+    {
+        use quote::ToTokens;
+        let directory = tempfile::tempdir()?;
+        let (runtime, _, _) = crate::oauth::admission::tests::management_fixture(directory.path())?;
+        assert!(!runtime.uses_native_storage());
+        let world = crate::oauth::simulation::World::new(917_328);
+        let escaped = crate::oauth::effects::scope(world.clone(), || -> Result<_> {
+            let empty = Sink::new();
+            assert!(super::super::captured_runtime_response_scope(&runtime, &empty).is_err());
+            let actual = Sink::new();
+            actual.capture_model_request()?;
+            assert!(super::super::captured_runtime_response_scope(&runtime, &actual)?.is_none());
+            assert!(actual.is_open() && actual.request.model_origin()?.is_some());
+            let duplicate = Sink::new();
+            duplicate.capture_model_request()?;
+            assert!(duplicate.capture_model_request().is_err() && !duplicate.is_open());
+            let foreign_owner = Sink::new();
+            let foreign_sink = Sink::new();
+            assert!(
+                foreign_owner
+                    .request_owner
+                    .capture_model(&foreign_sink)
+                    .is_err()
+            );
+            assert!(foreign_sink.is_open() && !foreign_sink.request.has_started()?);
+            assert!(foreign_owner.request_owner.refused.get());
+            let changed = Sink::new();
+            changed.capture_model_request()?;
+            crate::oauth::effects::scope(crate::oauth::simulation::World::new(917_329), || {
+                assert!(super::super::captured_runtime_response_scope(&runtime, &changed).is_err());
+            });
+            assert!(!changed.is_open());
+            Ok(actual)
+        })?;
+        assert!(super::super::captured_runtime_response_scope(&runtime, &escaped).is_err());
+        assert!(!escaped.is_open());
+        let unscoped = Sink::new();
+        unscoped.capture_model_request()?;
+        assert!(super::super::captured_runtime_response_scope(&runtime, &unscoped).is_err());
+
+        let actual = request_owner_method("capture_model");
+        let same: syn::Expr = syn::parse_str(
+            "Rc::ptr_eq(&self.source, &sink.request_owner.source) && Rc::ptr_eq(&self.refused, &sink.request_owner.refused) && Rc::ptr_eq(&self.abort, &sink.request_owner.abort)",
+        )?;
+        let same = same.to_token_stream().to_string();
+        let call: syn::Expr = syn::parse_quote!(sink.request.capture_model()?);
+        let call = call.to_token_stream().to_string();
+        let publishing: syn::Expr = syn::parse_quote!(*source = RequestOwnerSource::Model(domain));
+        let publishing = publishing.to_token_stream().to_string();
+        let guarded = |body: &syn::Block| {
+            let Some(syn::Stmt::Local(first)) = body.stmts.first() else {
+                return false;
+            };
+            let text = body.to_token_stream().to_string();
+            first
+                .init
+                .as_ref()
+                .is_some_and(|init| init.expr.to_token_stream().to_string() == same)
+                && text.matches(&call).count() == 1
+                && text.matches(&publishing).count() == 1
+                && text.find(&call) < text.find(&publishing)
+                && text
+                    .matches("super :: fixtures :: require_model_domain (domain) ?")
+                    .count()
+                    == 2
+                && text.contains("std :: panic :: catch_unwind")
+                && text.contains("std :: panic :: resume_unwind")
+        };
+        assert!(guarded(&actual.block));
+        let text = actual.block.to_token_stream().to_string();
+        assert!(!guarded(&syn::parse_str(
+            &text.replacen(&call, "Ok(())?", 1)
+        )?));
+        assert!(!guarded(&syn::parse_str(&text.replacen(&same, "true", 1))?));
+        let source = syn::parse_file(include_str!("../native_management.rs"))?;
+        let methods = source.items.iter().filter_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            (item.trait_.is_none() && matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("Sink"))).then_some(item)
+        }).flat_map(|item| &item.items).filter_map(|item| match item {
+            syn::ImplItem::Fn(item) if item.sig.ident == "capture_model_request" => Some(item),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(methods.len(), 1);
+        let sink = methods[0];
+        let expected: syn::Block = syn::parse_quote!({ self.request_owner.capture_model(self) });
+        assert_eq!(
+            sink.block.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
         Ok(())
     }
 
@@ -3542,7 +3733,7 @@ mod lease_tests {
         let actual = request_owner_method("refuse");
         let expected: syn::Block = syn::parse_quote!({
             self.refused.set(true);
-            if let Some((lease, live, parent)) = self.abort.get() {
+            if let Some(AbortRoots(lease, live, parent)) = self.abort.get() {
                 lease.set(true);
                 if live.upgrade().is_some_and(|live| live.get()) {
                     parent.refuse();
@@ -3560,11 +3751,12 @@ mod lease_tests {
         after_borrow.stmts.swap(1, 2);
         assert!(!guarded(&after_borrow));
         let mut unguarded = actual.block.clone();
-        unguarded.stmts[1] =
-            syn::parse_quote!(if let Some((lease, live, parent)) = self.abort.get() {
-                lease.set(true);
-                parent.refuse();
-            });
+        unguarded.stmts[1] = syn::parse_quote!(if let Some(AbortRoots(lease, live, parent)) =
+            self.abort.get()
+        {
+            lease.set(true);
+            parent.refuse();
+        });
         assert!(!guarded(&unguarded));
         let mut missing = actual.block.clone();
         missing.stmts.remove(1);
@@ -3711,7 +3903,7 @@ mod lease_tests {
         assert!(
             owner
                 .abort
-                .set((
+                .set(AbortRoots(
                     Rc::clone(&lease.refused),
                     Rc::downgrade(&lease.live),
                     parent
@@ -4151,7 +4343,7 @@ mod lease_tests {
         assert!(
             sink.request_owner
                 .abort
-                .set((
+                .set(AbortRoots(
                     Rc::clone(&refused),
                     Rc::downgrade(&live),
                     Rc::clone(&parent)
@@ -4273,7 +4465,7 @@ mod lease_tests {
             assert!(
                 frame
                     .abort
-                    .set((
+                    .set(AbortRoots(
                         Rc::clone(&lease.refused),
                         Rc::downgrade(&lease.live),
                         Rc::clone(&parent)

@@ -266,7 +266,7 @@ pub(super) fn require_new_runtime_frame() -> Result<()> {
     })
 }
 
-pub(super) fn with_runtime_frame<T>(
+fn with_runtime_frame<T>(
     frame: Rc<RuntimeRequest>,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
@@ -4154,7 +4154,7 @@ impl Sink {
 
     #[cfg(test)]
     pub(super) fn capture_model_request(&self) -> Result<()> {
-        self.request.capture_model()
+        self.request_owner.capture_model(self)
     }
 
     /// Called at response creation before Hyper can poll its headers/body.
@@ -6391,6 +6391,47 @@ pub(crate) mod fixtures {
     }
     pub(super) fn active() -> bool {
         FIXTURE.with(|slot| slot.try_borrow().map_or(true, |fixture| fixture.is_some()))
+    }
+
+    // A positive model classification needs the actual unborrowed fixture,
+    // not active()'s deliberately conservative treatment of a busy slot.
+    pub(super) fn require_model_domain(expected: u64) -> Result<()> {
+        FIXTURE.with(|slot| {
+            let fixture = slot.try_borrow()?;
+            let fixture = fixture.as_ref().context("scripted fixture missing")?;
+            ensure!(
+                fixture.domain == expected,
+                "scripted fixture domain changed"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn strict_model_domain_refuses_busy_and_divergent_actual_fixtures() -> Result<()> {
+        let outer = super::super::simulation::World::new(917_330);
+        let outer_domain = super::super::effects::Hooks::domain(&*outer);
+        let inner = super::super::simulation::World::new(917_331);
+        let inner_domain = super::super::effects::Hooks::domain(&*inner);
+        super::super::effects::scope(outer, || -> Result<()> {
+            require_model_domain(outer_domain)?;
+            FIXTURE.with(|slot| -> Result<()> {
+                let held = slot.borrow_mut();
+                assert!(active());
+                assert!(require_model_domain(outer_domain).is_err());
+                super::super::effects::scope(inner, || -> Result<()> {
+                    drop(held);
+                    assert_eq!(super::super::effects::current_domain(), Some(inner_domain));
+                    assert!(require_model_domain(inner_domain).is_err());
+                    let sink = super::Sink::new();
+                    assert!(sink.capture_model_request().is_err());
+                    assert!(!sink.is_open());
+                    Ok(())
+                })
+            })
+        })?;
+        assert!(require_model_domain(outer_domain).is_err());
+        Ok(())
     }
 
     pub(super) fn pending_intent(
