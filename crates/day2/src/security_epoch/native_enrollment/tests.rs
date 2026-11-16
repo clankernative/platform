@@ -5440,9 +5440,12 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
                                     }
                                 }
                             };
-                            if method.vis.to_token_stream().to_string() != expected.vis.to_token_stream().to_string()
-                                || method.sig.to_token_stream().to_string() != expected.sig.to_token_stream().to_string()
-                                || method.block.to_token_stream().to_string() != expected.block.to_token_stream().to_string()
+                            if method.vis.to_token_stream().to_string()
+                                != expected.vis.to_token_stream().to_string()
+                                || method.sig.to_token_stream().to_string()
+                                    != expected.sig.to_token_stream().to_string()
+                                || method.block.to_token_stream().to_string()
+                                    != expected.block.to_token_stream().to_string()
                             {
                                 return false;
                             }
@@ -5457,10 +5460,15 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
         inherent == 1
             && drops == 1
             && methods
-                == ["capture_request", "install_host", "prepare_host_native", "retained_refusal"]
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<std::collections::BTreeSet<_>>()
+                == [
+                    "capture_request",
+                    "install_host",
+                    "prepare_host_native",
+                    "retained_refusal",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<std::collections::BTreeSet<_>>()
     }
     assert!(retired_methods_admitted(&file));
     let actual_impl = file.items.iter().position(|item| {
@@ -5478,21 +5486,29 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
     ));
     assert!(!retired_methods_admitted(&getter));
     let replacements: [syn::Block; 2] = [
-        syn::parse_quote!({ RestoredAppRefusal {
-            gate: Rc::clone(&other.request_state),
-            history: Rc::clone(&self.installed.prepared.pending.history),
-        } }),
-        syn::parse_quote!({ RestoredAppRefusal {
-            gate: Rc::clone(&self.request_state),
-            history: Rc::clone(&other.installed.prepared.pending.history),
-        } }),
+        syn::parse_quote!({
+            RestoredAppRefusal {
+                gate: Rc::clone(&other.request_state),
+                history: Rc::clone(&self.installed.prepared.pending.history),
+            }
+        }),
+        syn::parse_quote!({
+            RestoredAppRefusal {
+                gate: Rc::clone(&self.request_state),
+                history: Rc::clone(&other.installed.prepared.pending.history),
+            }
+        }),
     ];
     for block in replacements {
         let mut changed_refusal = file.clone();
-        let syn::Item::Impl(item) = &mut changed_refusal.items[actual_impl] else { unreachable!(); };
+        let syn::Item::Impl(item) = &mut changed_refusal.items[actual_impl] else {
+            unreachable!();
+        };
         let mut changed = 0;
         for method in &mut item.items {
-            if let syn::ImplItem::Fn(method) = method && method.sig.ident == "retained_refusal" {
+            if let syn::ImplItem::Fn(method) = method
+                && method.sig.ident == "retained_refusal"
+            {
                 method.block = block.clone();
                 changed += 1;
             }
