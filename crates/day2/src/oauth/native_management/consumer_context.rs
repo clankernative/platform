@@ -1400,12 +1400,74 @@ mod tests {
             .to_string()
     }
 
+    // Canonicalize only real ensure arguments through syn's Expr parser.
+    // In raw macro tokens `?.` may stay joint, unlike a parsed expression;
+    // do not solve that by deleting punctuation or weakening target counts.
+    fn host_method_source(method: &syn::ImplItemFn) -> String {
+        fn canonical(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+            use proc_macro2::TokenTree;
+            let mut input = stream.into_iter().peekable();
+            let mut output = proc_macro2::TokenStream::new();
+            while let Some(token) = input.next() {
+                if matches!(&token, TokenTree::Ident(name) if name == "ensure")
+                    && matches!(input.peek(), Some(TokenTree::Punct(punct)) if punct.as_char() == '!')
+                {
+                    let bang = input.next().unwrap();
+                    let Some(TokenTree::Group(group)) = input.next() else {
+                        panic!("actual macro group");
+                    };
+                    let expressions =
+                        syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                            .parse2(canonical(group.stream()))
+                            .unwrap();
+                    let mut parsed =
+                        proc_macro2::Group::new(group.delimiter(), expressions.to_token_stream());
+                    parsed.set_span(group.span());
+                    output.extend([token, bang, TokenTree::Group(parsed)]);
+                } else if let TokenTree::Group(group) = token {
+                    let mut parsed =
+                        proc_macro2::Group::new(group.delimiter(), canonical(group.stream()));
+                    parsed.set_span(group.span());
+                    output.extend([TokenTree::Group(parsed)]);
+                } else {
+                    output.extend([token]);
+                }
+            }
+            output
+        }
+        canonical(method.to_token_stream()).to_string()
+    }
+
     fn replace_host_source(method: &syn::ImplItemFn, before: &str, after: &str) -> syn::ImplItemFn {
-        let source = method.to_token_stream().to_string();
+        let source = host_method_source(method);
         let before = expr(before);
         let after = expr(after);
         assert_eq!(source.matches(&before).count(), 1, "exact mutation target");
         syn::parse_str(&source.replacen(&before, &after, 1)).unwrap()
+    }
+
+    #[test]
+    fn host_mutation_source_normalizes_macro_spacing_without_erasing_tuple_or_argument_identity() {
+        let joint: syn::ImplItemFn =
+            syn::parse_str(r#"fn sample() { ensure!(entry()?.ready(), "closed"); }"#).unwrap();
+        let separate: syn::ImplItemFn =
+            syn::parse_str(r#"fn sample() { ensure!(entry() ? .ready(), "closed"); }"#).unwrap();
+        assert_eq!(host_method_source(&joint), host_method_source(&separate));
+        let changed = replace_host_source(&joint, "entry()?.ready()", "false");
+        assert_eq!(host_facts(&changed).guards, [expr("false")]);
+        for (before, after) in [
+            ("selected((first, second))", "selected((first,))"),
+            ("selected((first, second))", "selected(first, second)"),
+            ("selected((first, second))", "selected((second, first))"),
+        ] {
+            let actual: syn::ImplItemFn = syn::parse_str(&format!(
+                r#"fn sample() {{ ensure!({before}, "closed"); }}"#
+            ))
+            .unwrap();
+            let altered = replace_host_source(&actual, before, after);
+            assert_ne!(host_method_source(&actual), host_method_source(&altered));
+            assert_ne!(host_facts(&actual).guards, host_facts(&altered).guards);
+        }
     }
 
     #[test]
@@ -1448,7 +1510,7 @@ mod tests {
             assert!(!guarded(&replace_host_source(&actual, before, after)));
         }
         // Removing only one of the two human-binding checks must also fail.
-        let source = actual.to_token_stream().to_string();
+        let source = host_method_source(&actual);
         let needle = expr("sink.bindings.try_borrow()?.is_empty()");
         assert_eq!(source.matches(&needle).count(), 2);
         assert!(!guarded(
