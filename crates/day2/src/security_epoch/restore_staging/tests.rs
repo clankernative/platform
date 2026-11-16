@@ -517,13 +517,13 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
         // propagated. An immediately executed but ignored IIFE is insufficient.
         let tail: syn::Block = syn::parse_quote!({
             drop(loan);
-            let post=owner.local_sql();
-            let reset=reset?;
+            let post = owner.local_sql();
+            let reset = reset?;
             post?;
             close_sql_context(owner)?;
             Ok(reset)
         });
-        let tail=tail.stmts;
+        let tail = tail.stmts;
         let actual = block.stmts.get(index + 1..)?;
         if actual.len() != tail.len()
             || !actual
@@ -617,9 +617,9 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
             syn::parse_quote!(let memory=super::MemoryAdmission::configure(&mut db)?;),
         ];
         let mut returned: syn::Block = syn::parse_quote!({
-            crate::backup_archive::verify_snapshot(&manifest,&artifact,memory.db)
+            crate::backup_archive::verify_snapshot(&manifest, &artifact, memory.db)
         });
-        let returned=returned.stmts.pop().unwrap();
+        let returned = returned.stmts.pop().unwrap();
         if !body.attrs.is_empty()
             || body.block.stmts.len() != 7
             || !body
