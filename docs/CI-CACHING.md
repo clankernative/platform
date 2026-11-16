@@ -350,6 +350,16 @@ and no runtime result is inferred from a compiler cache hit.
 
 ## Measurement
 
+Ordinary builds and the complete Clippy target set emit
+`BAZEL_CGROUP_MEMORY_V1` with bounded numeric cgroup memory observations before
+and after the command, including OOM-event deltas. Missing counters remain
+unknown. A changed memory ceiling or decreasing counter cannot supply a delta.
+The kernel peak is cumulative for the container, not per-compiler RSS; a counter
+increase does not identify a particular killed child. Clippy uses the same
+private capture and bounded failure evidence as builds without changing its
+diagnostic-format setting, targets, warnings policy or resource limits. Raw
+compiler output and BEP remain private workspace evidence and are not uploaded.
+
 Use complete hosted runs on fresh runners. Dispatch the same source/ref first
 with `compilation_cache=empty`, then with `compilation_cache=reuse`. The empty
 selection performs cache metadata lookup without downloading prior-run action,

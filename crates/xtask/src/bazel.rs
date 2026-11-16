@@ -365,7 +365,12 @@ fn build_profile(
     let mut build = build_command(root, "build", isolated_job)?;
     profile.configure(&mut build);
     build.args(&expected);
-    crate::build_capture::run(root, &mut build, budget)?;
+    crate::build_capture::run(
+        root,
+        &mut build,
+        budget,
+        crate::build_capture::DiagnosticFormat::RustcJson,
+    )?;
     let remaining = budget
         .checked_sub(started.elapsed())
         .context("Bazel build budget exhausted")?;
@@ -524,7 +529,12 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
     command.arg("--@rules_rust//rust/settings:clippy_flag=-Dwarnings");
     // Filegroup roots do not traverse srcs in the Clippy aspect.
     command.args(&labels);
-    run_with_budget(root, &mut command, budget)?;
+    crate::build_capture::run(
+        root,
+        &mut command,
+        budget,
+        crate::build_capture::DiagnosticFormat::Configured,
+    )?;
     admit_clippy_outputs(
         root,
         &root.join(".cache/bazel-executor"),
@@ -812,7 +822,12 @@ pub(crate) fn configured_output(root: &Path, label: &str) -> Result<PathBuf> {
     let mut command = build_command(root, "build", None)?;
     Profile::Development.configure(&mut command);
     command.arg(label);
-    crate::build_capture::run(root, &mut command, Duration::from_secs(12_600))?;
+    crate::build_capture::run(
+        root,
+        &mut command,
+        Duration::from_secs(12_600),
+        crate::build_capture::DiagnosticFormat::RustcJson,
+    )?;
     let records = descriptors(
         root,
         &selected,
