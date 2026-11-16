@@ -1059,6 +1059,28 @@ impl RestoredAppCurrentPeer<'_, '_, '_> {
         requested
     }
 
+    /// Only the actual retained startup context can enter its SQL adapter.
+    pub(in crate::security_epoch) fn require_startup_sql(
+        &mut self,
+        runtime: &crate::store::Runtime,
+    ) -> Result<()> {
+        if !std::ptr::eq(self.runtime.as_ref(), runtime) {
+            self.refuse();
+            anyhow::bail!("restore_current_runtime_changed");
+        }
+        let requested = self
+            .context
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("restore_current_context_missing"))
+            .and_then(|context| context.require_startup_sql(runtime));
+        let checked = self.check_local();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     /// The closed Runtime consumer can borrow only its exact autonomous
     /// purpose. Human/creator/response relabeling fails before any native work.
     pub(in crate::security_epoch) fn require_runtime_purpose(

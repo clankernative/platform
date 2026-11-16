@@ -1485,7 +1485,16 @@ impl RuntimeConsumer<'_, '_> {
             self.refuse();
             anyhow::bail!("restored startup SQL owner required");
         }
-        self.check()
+        let requested = match &mut self.source {
+            RuntimeSource::Restored(current) => current.require_startup_sql(runtime),
+            _ => Err(anyhow::anyhow!("restored startup SQL owner required")),
+        };
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
     }
 
     pub(crate) fn sql_read<T>(
@@ -1923,7 +1932,16 @@ mod restored_runtime_source_tests {
                 self.refuse();
                 anyhow::bail!("restored startup SQL owner required");
             }
-            self.check()
+            let requested = match &mut self.source {
+                RuntimeSource::Restored(current) => current.require_startup_sql(runtime),
+                _ => Err(anyhow::anyhow!("restored startup SQL owner required")),
+            };
+            let checked = self.check();
+            if requested.is_err() || checked.is_err() {
+                self.refuse();
+            }
+            requested?;
+            checked
         });
         let guarded = |body: &syn::Block| {
             body.to_token_stream().to_string() == expected.to_token_stream().to_string()
@@ -1944,6 +1962,17 @@ mod restored_runtime_source_tests {
         };
         *selected.cond = syn::parse_quote!(!matches!(&self.source, RuntimeSource::Restored(_)));
         assert!(!guarded(&no_phase));
+        let source = actual.block.to_token_stream().to_string();
+        for (before, after) in [
+            (quote::quote!(current.require_startup_sql(runtime)), quote::quote!(current.require_runtime(runtime))),
+            (quote::quote!(let checked = self.check();), quote::quote!(let checked = Ok(());)),
+        ] {
+            let before = before.to_string();
+            assert_eq!(source.matches(&before).count(), 1);
+            let changed: syn::Block = syn::parse_str(&source.replacen(&before, &after.to_string(), 1)).unwrap();
+            assert!(!guarded(&changed));
+        }
+
     }
 
     fn method(name: &str) -> syn::ImplItemFn {

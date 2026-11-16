@@ -425,6 +425,24 @@ impl<'request, 'original> NativeConsumerContext<'request, 'original> {
     /// A RuntimeConsumer may borrow only an actual autonomous Runtime context,
     /// never relabel a human, captured creator or finite response scope. Pure
     /// pointer/purpose selection precedes any saved native-stage observation.
+    /// Startup SQL is selected by the actual closed producer, never by an
+    /// HTTP SqlWrite label or Runtime allocation alone.
+    pub(crate) fn require_startup_sql(&mut self, runtime: &Runtime) -> Result<()> {
+        self.require_runtime(runtime)?;
+        if !matches!(
+            (&self.source, &self.origin, self.purpose),
+            (
+                ConsumerOriginal::Runtime,
+                ConsumerOrigin::Autonomous(_),
+                ScopePurpose::Runtime(RuntimeServingUse::SqlWrite)
+            )
+        ) {
+            self.refuse();
+            anyhow::bail!("native startup original required");
+        }
+        Ok(())
+    }
+
     pub(crate) fn require_runtime_purpose(
         &mut self,
         runtime: &Runtime,
@@ -2647,4 +2665,43 @@ mod tests {
         let deleted = syn::parse_str::<syn::ImplItemFn>(&text.replacen(target, "true", 1)).unwrap();
         assert!(!guarded(&deleted));
     }
+    #[test]
+    fn actual_startup_class_rejects_http_sql_write_before_borrowing_native_inputs() {
+        let actual = host_factory("NativeConsumerContext", "require_startup_sql");
+        let expected: syn::Block = syn::parse_quote!({
+            self.require_runtime(runtime)?;
+            if !matches!(
+                (&self.source, &self.origin, self.purpose),
+                (
+                    ConsumerOriginal::Runtime,
+                    ConsumerOrigin::Autonomous(_),
+                    ScopePurpose::Runtime(RuntimeServingUse::SqlWrite)
+                )
+            ) {
+                self.refuse();
+                anyhow::bail!("native startup original required");
+            }
+            Ok(())
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let source = actual.block.to_token_stream().to_string();
+        for (before, after) in [
+            (quote::quote!(ConsumerOrigin::Autonomous(_)), quote::quote!(ConsumerOrigin::Http { .. })),
+            (quote::quote!(ConsumerOrigin::Autonomous(_)), quote::quote!(ConsumerOrigin::Response { .. })),
+            (quote::quote!(self.require_runtime(runtime)), quote::quote!(Ok(()))),
+            (quote::quote!(self.refuse()), quote::quote!(unrelated())),
+        ] {
+            let before = before.to_string();
+            assert_eq!(source.matches(&before).count(), 1);
+            let changed: syn::Block = syn::parse_str(&source.replacen(&before, &after.to_string(), 1)).unwrap();
+            assert!(!guarded(&changed));
+        }
+        let mut no_class = actual.block.clone();
+        no_class.stmts.remove(1);
+        assert!(!guarded(&no_class));
+    }
+
 }

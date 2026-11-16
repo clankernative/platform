@@ -26,6 +26,7 @@ pub(crate) trait RestoredCurrent: sealed::Current {
 
 pub(crate) trait RestoredRuntimeCurrent: RestoredCurrent {
     fn require_runtime(&mut self, runtime: &crate::store::Runtime) -> Result<()>;
+    fn require_startup_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()>;
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime, access: NativeSqlUse) -> Result<()>;
     fn prepare_provider(
         &mut self,
@@ -88,6 +89,10 @@ impl RestoredCurrent for CurrentView<'_, '_, '_> {
 impl RestoredRuntimeCurrent for CurrentView<'_, '_, '_> {
     fn require_runtime(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
         self.native.require_runtime(runtime)
+    }
+
+    fn require_startup_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        self.native.require_startup_sql(runtime)
     }
 
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime, access: NativeSqlUse) -> Result<()> {
