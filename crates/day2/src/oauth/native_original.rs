@@ -33,6 +33,14 @@ impl ExecutorThread {
 }
 
 #[cfg(test)]
+pub(super) fn foreign_executor_thread_data_fixture() -> ExecutorThread {
+    // Identity DATA only. This builds no native role, original or positive
+    // parent; a consumer can use it only to exercise its actual denial path.
+    let thread = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
+    ExecutorThread { thread, local: PhantomData }
+}
+
+#[cfg(test)]
 mod executor_thread_tests {
     use super::*;
 
@@ -40,8 +48,7 @@ mod executor_thread_tests {
     fn actual_executor_identity_accepts_only_the_current_thread_without_an_original() -> Result<()> {
         let current = ExecutorThread::here();
         current.check()?;
-        let other = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
-        let foreign = ExecutorThread { thread: other, local: PhantomData };
+        let foreign = foreign_executor_thread_data_fixture();
         assert_eq!(foreign.check().unwrap_err().to_string(), "restored executor thread changed");
         current.check()?;
         Ok(())

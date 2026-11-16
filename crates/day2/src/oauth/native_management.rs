@@ -1613,6 +1613,25 @@ mod restored_executor_install_source_tests {
     }
 
     #[test]
+    fn actual_wrong_executor_check_refuses_both_existing_native_negative_roots() {
+        use crate::security_epoch::native_enrollment::{negative_parent_refusal_roots, new_negative_parent_refusal_fixture};
+        let refusal = Rc::new(new_negative_parent_refusal_fixture());
+        assert_eq!(negative_parent_refusal_roots(&refusal), [false,false]);
+        // Empty registry and real denial cells only: no enrolled parent,
+        // owner, original, installation or successful permission is fabricated.
+        let guard = RestoredExecutorGuard {
+            registry: Rc::new(RefCell::new(response::Registry::<Owners>::default())),
+            app: "no-positive-parent".into(),
+            refusal: Rc::clone(&refusal),
+            executor: super::super::native_original::foreign_executor_thread_data_fixture(),
+        };
+        assert_eq!(guard.require_executor().unwrap_err().to_string(), "restored executor thread changed");
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true,true]);
+        drop(guard);
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true,true]);
+    }
+
+    #[test]
     fn actual_first_install_consumes_the_whole_parent_after_exact_runtime_and_empty_registry() {
         let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
         let actual = file
