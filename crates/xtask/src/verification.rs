@@ -2448,7 +2448,7 @@ mod tests {
                 "steps.bazel_actions.outcome == 'failure'",
                 "steps.bazel_actions.outcome == 'success'",
             ),
-            ("run: rm -rf -- \"$HOME/.cache/bazel-disk\"", "run: true"),
+            ("run: echo 'DAY2_CI_DISABLE_DISK_CACHE=true'", "run: true"),
             (
                 "//crates/xtask:xtask -- install-verifier",
                 "//crates/day2:day2",
@@ -2468,10 +2468,7 @@ mod tests {
                     "Bootstrap the current source artifact admission guard",
                 )
             } else {
-                ci_step(
-                    &job,
-                    "Discard incomplete compiler data after a cache restore failure",
-                )
+                ci_step(&job, "Disable compiler cache after a restore failure")
             };
             let changed = job.replacen(step, &step.replacen(before, after, 1), 1);
             assert_ne!(changed, job);
@@ -2673,6 +2670,30 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn failed_cache_restore_cannot_delete_or_reuse_the_extractors_directory() {
+        for name in ["verify-prepare", "verify-shards", "verify"] {
+            let job = ci_job(name);
+            assert!(consumer_compiler_cache_flow(&job));
+            for (before, after) in [
+                (
+                    "run: echo 'DAY2_CI_DISABLE_DISK_CACHE=true' >> \"$GITHUB_ENV\"",
+                    "run: rm -rf -- \"$HOME/.cache/bazel-disk\"",
+                ),
+                (
+                    "DAY2_CI_DISABLE_DISK_CACHE=true",
+                    "DAY2_CI_DISABLE_DISK_CACHE=false",
+                ),
+                ("$GITHUB_ENV", "$GITHUB_OUTPUT"),
+                ("&& '--disk_cache='", "&& '--disk_cache=partial-cache'"),
+            ] {
+                let changed = job.replacen(before, after, 1);
+                assert_ne!(changed, job);
+                assert!(!consumer_compiler_cache_flow(&changed), "{name}");
+            }
+        }
+    }
+
     fn consumer_compiler_cache_flow(job: &str) -> bool {
         fn step<'a>(job: &'a str, name: &str) -> Option<&'a str> {
             job.split_once(&format!("      - name: {name}\n"))
@@ -2686,12 +2707,12 @@ mod tests {
             return false;
         }
         let cache_name = "Restore source-keyed compiled actions";
-        let cleanup_name = "Discard incomplete compiler data after a cache restore failure";
+        let fallback_name = "Disable compiler cache after a restore failure";
         let bootstrap_name = "Bootstrap the current source artifact admission guard";
         let Some(cache) = step(job, cache_name) else {
             return false;
         };
-        let Some(cleanup) = step(job, cleanup_name) else {
+        let Some(fallback) = step(job, fallback_name) else {
             return false;
         };
         let Some(bootstrap) = step(job, bootstrap_name) else {
@@ -2701,19 +2722,21 @@ mod tests {
             && cache.contains("timeout-minutes: 4")
             && cache.contains("path: ~/.cache/bazel-disk")
             && cache.contains("lookup-only: ${{ inputs.compilation_cache == 'empty' }}")
-            && cleanup
+            && fallback
                 .contains("if: ${{ !cancelled() && steps.bazel_actions.outcome == 'failure' }}")
-            && cleanup.contains("timeout-minutes: 1")
-            && cleanup.contains("run: rm -rf -- \"$HOME/.cache/bazel-disk\"")
-            && !cleanup.contains("continue-on-error:")
+            && fallback.contains("timeout-minutes: 1")
+            && fallback.contains("run: echo 'DAY2_CI_DISABLE_DISK_CACHE=true' >> \"$GITHUB_ENV\"")
+            && !fallback.contains("continue-on-error:")
             && !bootstrap.contains("        if:")
             && bootstrap.contains("run: bazel --batch --nosystem_rc --nohome_rc")
             && bootstrap.contains("--config=ci-linux")
-            && bootstrap.contains("--disk_cache=\"$HOME/.cache/bazel-disk\"")
+            && bootstrap.contains("${{ steps.bazel_actions.outcome == 'failure' && '--disk_cache=' || '--disk_cache=\"$HOME/.cache/bazel-disk\"' }}")
+            && !fallback.contains("rm ")
+            && !fallback.contains("mv ")
             && bootstrap.contains("//crates/xtask:xtask -- install-verifier")
             && !bootstrap.contains("tar -x")
-            && job.find(cache_name) < job.find(cleanup_name)
-            && job.find(cleanup_name) < job.find(bootstrap_name)
+            && job.find(cache_name) < job.find(fallback_name)
+            && job.find(fallback_name) < job.find(bootstrap_name)
     }
 
     #[test]
