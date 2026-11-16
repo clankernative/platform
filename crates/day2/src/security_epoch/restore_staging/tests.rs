@@ -474,7 +474,7 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
         }
         fn immediate(expression: &syn::Expr) -> Option<&syn::ExprClosure> {
             match expression {
-                syn::Expr::Closure(closure) if closure.inputs.is_empty() => Some(closure),
+                syn::Expr::Closure(closure) if closure.inputs.is_empty() && closure.asyncness.is_none() && closure.attrs.is_empty() => Some(closure),
                 syn::Expr::Paren(paren) => immediate(&paren.expr),
                 _ => None,
             }
@@ -487,6 +487,7 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
                 visit::visit_block(self, block);
             }
             fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if !call.attrs.is_empty() { return; }
                 if call.args.is_empty() && let Some(closure) = immediate(&call.func) {
                     self.visit_expr(&closure.body);
                 } else {
@@ -494,15 +495,22 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
                 }
             }
             fn visit_expr_try(&mut self, tried: &'ast syn::ExprTry) {
+                if !tried.attrs.is_empty() { return; }
                 if let syn::Expr::MethodCall(call) = &*tried.expr
                     && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("capture"))
-                    && call.method == "observe" && call.args.len() == 1
+                    && call.method == "observe" && call.args.len() == 1 && call.attrs.is_empty()
                     && let Some(closure) = immediate(call.args.first().unwrap())
                 {
                     self.visit_expr(&closure.body);
                 } else {
                     visit::visit_expr_try(self, tried);
                 }
+            }
+            fn visit_expr_block(&mut self, block: &'ast syn::ExprBlock) {
+                if block.attrs.is_empty() { visit::visit_expr_block(self, block); }
+            }
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if local.attrs.is_empty() { visit::visit_local(self, local); }
             }
             fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
             fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
@@ -567,6 +575,9 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
             quote::quote!({ let _unused = || -> Result<()> { #(#expected)* Ok(()) }; }),
             quote::quote!({ fn unused() -> Result<()> { #(#expected)* Ok(()) } }),
             quote::quote!({ let _unused = async { #(#expected)* }; }),
+            quote::quote!({ let _unused = (async || -> Result<()> { #(#expected)* Ok(()) })(); }),
+            quote::quote!({ #[cfg(any())] { #(#expected)* } }),
+            quote::quote!({ #[cfg(any())] let _unused = (|| -> Result<()> { #(#expected)* Ok(()) })(); }),
             quote::quote!({ let _unused = false && { #(#expected)* true }; }),
             quote::quote!({ capture.observe(|| -> Result<()> { #(#expected)* Ok(()) }); }),
         ] {
