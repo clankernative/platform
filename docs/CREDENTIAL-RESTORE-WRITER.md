@@ -33,8 +33,9 @@ bound remains; larger valid application databases refuse without pruning. Only
 ordinary maintenance's two explicitly rebuildable auxiliary databases have its
 separate omission rule; this native archive profile does not adopt that rule.
 
-The ordinary backup/release path retains its actual shared `OperationLease`
-through snapshot, verification and offsite completion. This Controller driver
+The scheduled backup binary and release helper retain their actual shared
+`OperationLease` through snapshot, verification and offsite completion. This is
+not a lease spanning separate standalone backup commands. This Controller driver
 does not enter that maintenance profile, forge its lease or substitute a native
 grant for it. Rehearsal, final checkpoint/admission and target-only recovery
 remain separate guarded operations. Native stop/drain, current-writer and
