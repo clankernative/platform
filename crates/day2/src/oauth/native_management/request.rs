@@ -281,6 +281,86 @@ impl Request {
         }
     }
 
+    /// The human clock comes from this SAME pre-queue saved request. Scope
+    /// DATA only narrows that actual capture; it cannot select an initial
+    /// owner or create a replacement enrolled request.
+    pub(super) fn capture_restored_human_clock(
+        &self,
+        scope: &AuthorityScope,
+        parent: &mut RestoredAppServingOwner,
+    ) -> Result<crate::security_epoch::native_enrollment::EnrolledOriginalClock> {
+        ensure!(!self.refused.get(), "native request refused");
+        let mut slot = self.slot.try_borrow_mut()?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Slot::Live(original) = &mut *slot else {
+                anyhow::bail!("native request unavailable");
+            };
+            original.require(scope, NativeRole::AppHost)?;
+            let Original::Selected { current, .. } = original else {
+                unreachable!("checked selected request");
+            };
+            let SavedSource::Restored(current) = &mut current.source else {
+                anyhow::bail!("restored human request required");
+            };
+            current.capture_human_clock(parent)
+        }));
+        match result {
+            Ok(result) => {
+                if result.is_err() {
+                    self.refused.set(true);
+                    slot.refuse();
+                    parent.refuse();
+                }
+                result
+            }
+            Err(payload) => {
+                self.refused.set(true);
+                slot.refuse();
+                parent.refuse();
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    pub(super) fn sample_restored_human_clock(
+        &self,
+        scope: &AuthorityScope,
+        parent: &mut RestoredAppServingOwner,
+        clock: &mut crate::security_epoch::native_enrollment::EnrolledOriginalClock,
+    ) -> Result<std::time::Duration> {
+        ensure!(!self.refused.get(), "native request refused");
+        let mut slot = self.slot.try_borrow_mut()?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Slot::Live(original) = &mut *slot else {
+                anyhow::bail!("native request unavailable");
+            };
+            original.require(scope, NativeRole::AppHost)?;
+            let Original::Selected { current, .. } = original else {
+                unreachable!("checked selected request");
+            };
+            let SavedSource::Restored(current) = &mut current.source else {
+                anyhow::bail!("restored human request required");
+            };
+            current.sample_human_clock(parent, clock)
+        }));
+        match result {
+            Ok(result) => {
+                if result.is_err() {
+                    self.refused.set(true);
+                    slot.refuse();
+                    parent.refuse();
+                }
+                result
+            }
+            Err(payload) => {
+                self.refused.set(true);
+                slot.refuse();
+                parent.refuse();
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
     /// Actual negative identity only. No original clock or stage can escape.
     pub(super) fn consumer_origin(
         &self,
@@ -716,6 +796,176 @@ const _: () = {
     assert_not_impl!(Request, serde::Serialize);
     assert_not_impl!(Request, serde::Deserialize<'static>);
 };
+
+#[cfg(test)]
+mod restored_human_clock_source_tests {
+    use quote::ToTokens;
+
+    fn method(name: &str) -> syn::ImplItemFn {
+        syn::parse_file(include_str!("request.rs"))
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("Request"))
+                {
+                    return None;
+                }
+                item.items.into_iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                    _ => None,
+                })
+            })
+            .next()
+            .unwrap()
+    }
+
+    fn tokens(source: &str) -> String {
+        fn normalized(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+            stream
+                .into_iter()
+                .filter_map(|token| match token {
+                    proc_macro2::TokenTree::Punct(punctuation) if punctuation.as_char() == ',' => {
+                        None
+                    }
+                    proc_macro2::TokenTree::Punct(punctuation) if punctuation.as_char() == '?' => {
+                        Some(proc_macro2::TokenTree::Punct(proc_macro2::Punct::new(
+                            '?',
+                            proc_macro2::Spacing::Alone,
+                        )))
+                    }
+                    proc_macro2::TokenTree::Group(group) => Some(proc_macro2::TokenTree::Group(
+                        proc_macro2::Group::new(group.delimiter(), normalized(group.stream())),
+                    )),
+                    other => Some(other),
+                })
+                .collect()
+        }
+        normalized(source.parse::<proc_macro2::TokenStream>().unwrap()).to_string()
+    }
+
+    fn scope_forwarder(source: &str, owner: &str) -> syn::Block {
+        syn::parse_file(source)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let syn::Item::Impl(item) = item else { return None };
+                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident(owner)) {
+                    return None;
+                }
+                item.items.into_iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == "native_captured_response_scope" => Some(method.block),
+                    _ => None,
+                })
+            })
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn receiver_scope_forwarders_preserve_the_actual_runtime_and_captured_sink() {
+        for (source, owner, expected, wrong) in [
+            (
+                include_str!("../management/app.rs"),
+                "Manager",
+                "{ crate::oauth::native_management::captured_runtime_response_scope(&self.runtime, sink) }",
+                "{ crate::oauth::native_management::runtime_response_scope(&self.runtime) }",
+            ),
+            (
+                include_str!("../shell_transport.rs"),
+                "AppApprovalReceiver",
+                "{ self.management.as_ref().map_or_else(|| Ok(None), |manager| manager.native_captured_response_scope(sink)) }",
+                "{ self.management.as_ref().map_or_else(|| Ok(None), |manager| manager.native_runtime_response_scope()) }",
+            ),
+        ] {
+            let actual = tokens(&scope_forwarder(source, owner).to_token_stream().to_string());
+            let expected: syn::Block = syn::parse_str(expected).unwrap();
+            let expected = tokens(&expected.to_token_stream().to_string());
+            assert_eq!(actual, expected, "actual {owner}");
+            let wrong: syn::Block = syn::parse_str(wrong).unwrap();
+            assert_ne!(tokens(&wrong.to_token_stream().to_string()), expected);
+            assert_eq!(actual.matches("sink").count(), 1);
+            assert_ne!(actual.replacen("sink", "other", 1), expected);
+        }
+    }
+
+    fn actual_clock_flow(source: &str, operation: &str) -> bool {
+        let required = [
+            tokens("let mut slot = self.slot.try_borrow_mut()?;"),
+            tokens("original.require(scope, NativeRole::AppHost)?;"),
+            tokens("let SavedSource::Restored(current) = &mut current.source else"),
+            tokens(operation),
+        ];
+        required
+            .iter()
+            .all(|needle| source.matches(needle).count() == 1)
+            && required
+                .windows(2)
+                .all(|pair| source.find(&pair[0]) < source.find(&pair[1]))
+            && source.matches(&tokens("self.refused.set(true)")).count() == 2
+            && source.matches(&tokens("slot.refuse()")).count() == 2
+            && source.matches(&tokens("parent.refuse()")).count() == 2
+            && source.matches(&tokens("std::panic::catch_unwind")).count() == 1
+            && source
+                .matches(&tokens("std::panic::resume_unwind(payload)"))
+                .count()
+                == 1
+            && !source.contains("capture_request")
+            && !source.contains("NativeAcquisition")
+            && !source.contains("SavedSource :: Enrolled")
+    }
+
+    #[test]
+    fn human_clock_ports_use_only_the_same_saved_restored_request_and_parent() {
+        let statement: syn::Stmt =
+            syn::parse_quote!(original.require(scope, NativeRole::AppHost)?;);
+        assert_eq!(
+            tokens("original.require(scope, NativeRole::AppHost)?;"),
+            tokens(&statement.to_token_stream().to_string())
+        );
+        assert_eq!(
+            tokens("current.sample_human_clock(parent, clock,)"),
+            tokens("current.sample_human_clock(parent, clock)")
+        );
+        for (name, operation) in [
+            (
+                "capture_restored_human_clock",
+                "current.capture_human_clock(parent)",
+            ),
+            (
+                "sample_restored_human_clock",
+                "current.sample_human_clock(parent, clock)",
+            ),
+        ] {
+            let source = tokens(&method(name).block.to_token_stream().to_string());
+            assert!(actual_clock_flow(&source, operation), "actual {name}");
+            for (before, after) in [
+                (tokens(operation), tokens("unrelated(parent)")),
+                (tokens("parent.refuse()"), tokens("unrelated()")),
+                (
+                    tokens("SavedSource::Restored(current)"),
+                    tokens("SavedSource::Enrolled(current)"),
+                ),
+                (
+                    tokens("original.require(scope, NativeRole::AppHost)?;"),
+                    tokens("let _ = scope;"),
+                ),
+            ] {
+                assert!(source.contains(&before));
+                assert!(!actual_clock_flow(
+                    &source.replacen(&before, &after, 1),
+                    operation
+                ));
+            }
+            let renewed = format!("{} {}", source, tokens("NativeAcquisition::begin(5)?"));
+            assert!(!actual_clock_flow(&renewed, operation));
+        }
+    }
+}
 
 // Common move/cancellation code is tested with non-authority material. Only
 // the native Lease wrapper can expose a stage, and only with a genuine role.
