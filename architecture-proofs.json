@@ -756,6 +756,71 @@
     },
     {
       "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "CompletedResponse",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "consumer_context"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
+        }
+      ],
+      "methods": [
+        "pub (super) fn require_lease (& self , sink : & Sink , lease : & ConsumerLeaseOrigin) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "ResponseBorrow < '_ , '_ , '_ >",
+          "signature": "async fn drive < T : hyper :: rt :: Write + Unpin > (& mut self , transport : & mut Transport < T > , mut request : (u64 , Operation)) -> Result < CompletedResponse >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CompletedResponse",
+          "signature": "pub (super) fn require_lease (& self , sink : & Sink , lease : & ConsumerLeaseOrigin) -> Result < () >"
+        },
+        {
+          "owner": "FinalContextFactoryAttempt < '_ , '_ >",
+          "signature": "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'original >",
+          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:07f4836aed31808b1a60fa1c402fabc510bd736000cdbd335fb14133034a389d"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "Consumer",
       "owning_children": [
         {
@@ -1455,6 +1520,34 @@
           }
         }
       ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
+      "type_name": "FinalContextFactoryAttempt",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'original >",
+          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "FinalContextFactoryAttempt < '_ , '_ >",
+          "signature": "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:dac35a080744726f985c3c2d280b9fa4bba27eda419a753c416dd2fff45cea25"
     },
     {
       "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
@@ -20798,99 +20891,6 @@
       ],
       "material_uses": [],
       "proof_uses": []
-    },
-    {
-      "source": "crates/day2/src/oauth/native_management.rs",
-      "type_name": "CompletedResponse",
-      "kind": "private_material",
-      "consuming_methods": [],
-      "owning_children": [
-        {
-          "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
-          "registration": {
-            "source": "crates/day2/src/oauth/native_management.rs",
-            "module": "consumer_context"
-          }
-        },
-        {
-          "source": "crates/day2/src/oauth/native_management/request.rs",
-          "registration": {
-            "source": "crates/day2/src/oauth/native_management.rs",
-            "module": "request"
-          }
-        },
-        {
-          "source": "crates/day2/src/oauth/native_management/response.rs",
-          "registration": {
-            "source": "crates/day2/src/oauth/native_management.rs",
-            "module": "response"
-          }
-        },
-        {
-          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
-          "registration": {
-            "source": "crates/day2/src/oauth/native_management.rs",
-            "module": "response_tickets"
-          }
-        }
-      ],
-      "methods": [
-        "pub (super) fn require_lease (& self , sink : & Sink , lease : & ConsumerLeaseOrigin) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "ResponseBorrow < '_ , '_ , '_ >",
-          "signature": "async fn drive < T : hyper :: rt :: Write + Unpin > (& mut self , transport : & mut Transport < T > , mut request : (u64 , Operation)) -> Result < CompletedResponse >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "CompletedResponse",
-          "signature": "pub (super) fn require_lease (& self , sink : & Sink , lease : & ConsumerLeaseOrigin) -> Result < () >"
-        },
-        {
-          "owner": "FinalContextFactoryAttempt < '_ , '_ >",
-          "signature": "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
-        },
-        {
-          "owner": "NativeRequestFinalContext < 'request , 'original >",
-          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
-        },
-        {
-          "owner": "NativeRequestFinalContext < 'request , 'static >",
-          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
-        }
-      ],
-      "proof_uses": [],
-      "destructor": "sha256:07f4836aed31808b1a60fa1c402fabc510bd736000cdbd335fb14133034a389d"
-    },
-    {
-      "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
-      "type_name": "FinalContextFactoryAttempt",
-      "kind": "private_material",
-      "consuming_methods": [],
-      "owning_children": [],
-      "methods": [
-        "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "NativeRequestFinalContext < 'request , 'original >",
-          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
-        },
-        {
-          "owner": "NativeRequestFinalContext < 'request , 'static >",
-          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "FinalContextFactoryAttempt < '_ , '_ >",
-          "signature": "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
-        }
-      ],
-      "proof_uses": [],
-      "destructor": "sha256:dac35a080744726f985c3c2d280b9fa4bba27eda419a753c416dd2fff45cea25"
     }
   ],
   "buffer_destructors": [
