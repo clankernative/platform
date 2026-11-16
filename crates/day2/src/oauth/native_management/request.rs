@@ -853,12 +853,18 @@ mod restored_human_clock_source_tests {
             .items
             .into_iter()
             .filter_map(|item| {
-                let syn::Item::Impl(item) = item else { return None };
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
                 if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident(owner)) {
                     return None;
                 }
                 item.items.into_iter().find_map(|item| match item {
-                    syn::ImplItem::Fn(method) if method.sig.ident == "native_captured_response_scope" => Some(method.block),
+                    syn::ImplItem::Fn(method)
+                        if method.sig.ident == "native_captured_response_scope" =>
+                    {
+                        Some(method.block)
+                    }
                     _ => None,
                 })
             })
