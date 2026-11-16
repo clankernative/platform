@@ -750,6 +750,25 @@ fn memory_delta(before: &Value, after: &Value, key: &str) -> Option<u64> {
     after[key].as_u64()?.checked_sub(before[key].as_u64()?)
 }
 
+fn memory_observations(before: &Value, after: &Value) -> Value {
+    let snapshot = |value: &Value| {
+        json!({
+            "limit_bytes": value["limit_bytes"].as_u64(),
+            "current_bytes": value["current_bytes"].as_u64(),
+            "peak_bytes": value["peak_bytes"].as_u64(),
+            "oom_events": value["oom_events"].as_u64(),
+            "oom_kills": value["oom_kills"].as_u64(),
+        })
+    };
+    json!({
+        "before": snapshot(before),
+        "after": snapshot(after),
+        "oom_events_delta": memory_delta(before, after, "oom_events"),
+        "oom_kill_delta": memory_delta(before, after, "oom_kills"),
+        "cause_attribution": false,
+    })
+}
+
 fn report(
     root: &Path,
     process: Outcome,
@@ -763,11 +782,17 @@ fn report(
         Ok(bytes) if finished(bytes).is_err() => Some("events"),
         Ok(_) => None,
     };
+    let memory_after = memory(Path::new("/sys/fs/cgroup"));
+    let oom_kill_delta = memory_delta(&memory_before, &memory_after, "oom_kills");
+    // Fixed numeric fields only. The kernel peak is cumulative for this cgroup,
+    // not a per-action RSS measurement or proof of which child was killed.
+    eprintln!(
+        "BAZEL_CGROUP_MEMORY_V1 {}",
+        memory_observations(&memory_before, &memory_after)
+    );
     if process.category == "success" && capture.is_none() {
         return Ok(());
     }
-    let memory_after = memory(Path::new("/sys/fs/cgroup"));
-    let oom_kill_delta = memory_delta(&memory_before, &memory_after, "oom_kills");
     let catalog = crate::bazel::targets(root)
         .map(|targets| targets.into_iter().map(|target| target.label).collect())
         .unwrap_or_default();
@@ -862,21 +887,61 @@ fn capture(root: &Path, command: &mut Command, budget: Duration, events: &Path) 
     result
 }
 
-pub(crate) fn run(root: &Path, command: &mut Command, budget: Duration) -> Result<()> {
-    let events = tempfile::NamedTempFile::new()?;
+pub(crate) enum DiagnosticFormat {
+    RustcJson,
+    Configured,
+}
+
+fn capture_arguments(command: &mut Command, format: DiagnosticFormat, events: &Path) {
     // Keep original structured diagnostics inside the existing private capture.
     // The upstream wrapper otherwise replaces them with free-form rendering.
-    command.arg("--@rules_rust//rust/settings:error_format=json");
-    command.arg(format!(
-        "--build_event_json_file={}",
-        events.path().display()
-    ));
+    // Clippy already configures its own diagnostic outputs; preserve its flags.
+    if matches!(format, DiagnosticFormat::RustcJson) {
+        command.arg("--@rules_rust//rust/settings:error_format=json");
+    }
+    command.arg(format!("--build_event_json_file={}", events.display()));
+}
+
+pub(crate) fn run(
+    root: &Path,
+    command: &mut Command,
+    budget: Duration,
+    format: DiagnosticFormat,
+) -> Result<()> {
+    let events = tempfile::NamedTempFile::new()?;
+    capture_arguments(command, format, events.path());
     capture(root, command, budget, events.path())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_preserves_clippy_configuration_and_normal_build_json_diagnostics() {
+        use std::ffi::OsStr;
+        let original = [
+            "build",
+            "--config=ci-linux",
+            "--aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect",
+            "--output_groups=clippy_checks,clippy_output",
+            "--@rules_rust//rust/settings:clippy_flag=-Dwarnings",
+            "//crates/day2:unit_lib",
+        ];
+        for format in [DiagnosticFormat::Configured, DiagnosticFormat::RustcJson] {
+            let json = matches!(format, DiagnosticFormat::RustcJson);
+            let mut command = Command::new("bazel");
+            command.args(original);
+            capture_arguments(&mut command, format, Path::new("/owned/events.jsonl"));
+            let mut expected = original.to_vec();
+            if json {
+                expected.push("--@rules_rust//rust/settings:error_format=json");
+            }
+            expected.push("--build_event_json_file=/owned/events.jsonl");
+            // Never print arguments or inherited environment on a test failure.
+            assert!(command.get_args().eq(expected.iter().map(OsStr::new)));
+        }
+    }
 
     #[test]
     fn numeric_metrics_never_export_private_event_fields() -> Result<()> {
@@ -1428,6 +1493,44 @@ mod tests {
             memory_delta(&before, &json!({"limit_bytes":6442450944_u64}), "oom_kills"),
             None
         );
+    }
+
+    #[test]
+    fn public_memory_observations_keep_only_numeric_facts_and_unknown_deltas() {
+        let before = json!({
+            "limit_bytes": 6442450944_u64,
+            "current_bytes": 100,
+            "oom_kills": 2,
+            "private": "PRIVATE",
+        });
+        let after = json!({
+            "limit_bytes": 6442450944_u64,
+            "current_bytes": "PRIVATE",
+            "peak_bytes": 6000000000_u64,
+            "oom_kills": 3,
+            "cause_attribution": true,
+        });
+        let value = memory_observations(&before, &after);
+        assert_eq!(value["oom_kill_delta"], 1);
+        assert!(value["oom_events_delta"].is_null());
+        assert!(value["after"]["current_bytes"].is_null());
+        assert_eq!(value["after"]["peak_bytes"], 6000000000_u64);
+        assert_eq!(value["cause_attribution"], false);
+        assert!(!value.to_string().contains("PRIVATE"));
+        assert_eq!(value["before"].as_object().unwrap().len(), 5);
+        assert_eq!(value["after"].as_object().unwrap().len(), 5);
+        for snapshot in [&value["before"], &value["after"]] {
+            assert!(
+                snapshot
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .all(|value| value.is_u64() || value.is_null())
+            );
+        }
+        let changed = json!({"limit_bytes": 8589934592_u64, "oom_kills": 3});
+        assert!(memory_observations(&before, &changed)["oom_kill_delta"].is_null());
+        assert!(memory_observations(&Value::Null, &after)["oom_kill_delta"].is_null());
     }
 
     fn failed() -> Outcome {
