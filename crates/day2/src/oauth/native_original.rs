@@ -27,7 +27,10 @@ impl ExecutorThread {
     }
 
     pub(super) fn check(&self) -> Result<()> {
-        ensure!(self.thread == std::thread::current().id(), "restored executor thread changed");
+        ensure!(
+            self.thread == std::thread::current().id(),
+            "restored executor thread changed"
+        );
         Ok(())
     }
 }
@@ -36,8 +39,13 @@ impl ExecutorThread {
 pub(super) fn foreign_executor_thread_data_fixture() -> ExecutorThread {
     // Identity DATA only. This builds no native role, original or positive
     // parent; a consumer can use it only to exercise its actual denial path.
-    let thread = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
-    ExecutorThread { thread, local: PhantomData }
+    let thread = std::thread::spawn(|| std::thread::current().id())
+        .join()
+        .unwrap();
+    ExecutorThread {
+        thread,
+        local: PhantomData,
+    }
 }
 
 #[cfg(test)]
@@ -45,11 +53,15 @@ mod executor_thread_tests {
     use super::*;
 
     #[test]
-    fn actual_executor_identity_accepts_only_the_current_thread_without_an_original() -> Result<()> {
+    fn actual_executor_identity_accepts_only_the_current_thread_without_an_original() -> Result<()>
+    {
         let current = ExecutorThread::here();
         current.check()?;
         let foreign = foreign_executor_thread_data_fixture();
-        assert_eq!(foreign.check().unwrap_err().to_string(), "restored executor thread changed");
+        assert_eq!(
+            foreign.check().unwrap_err().to_string(),
+            "restored executor thread changed"
+        );
         current.check()?;
         Ok(())
     }
@@ -57,7 +69,9 @@ mod executor_thread_tests {
     const _: () = {
         macro_rules! assert_not_impl {
             ($bound:path) => {{
-                trait Ambiguous<T> { fn check() {} }
+                trait Ambiguous<T> {
+                    fn check() {}
+                }
                 impl<T: ?Sized> Ambiguous<()> for T {}
                 impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
                 let _ = <ExecutorThread as Ambiguous<_>>::check;

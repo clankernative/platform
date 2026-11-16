@@ -1594,31 +1594,48 @@ mod restored_executor_install_source_tests {
             }
             Ok(())
         });
-        let guarded = |body: &syn::Block| body.to_token_stream().to_string() == expected.to_token_stream().to_string();
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
         assert!(guarded(&actual.block));
         let mut omitted = actual.block.clone();
         omitted.stmts.remove(0);
         assert!(!guarded(&omitted));
         let mut recaptured = actual.block.clone();
-        recaptured.stmts[0] = syn::parse_quote!(if let Err(error) = super::native_original::ExecutorThread::here().check() { self.refusal.refuse(); return Err(error); });
+        recaptured.stmts[0] = syn::parse_quote!(if let Err(error) =
+            super::native_original::ExecutorThread::here().check()
+        {
+            self.refusal.refuse();
+            return Err(error);
+        });
         assert!(!guarded(&recaptured));
         let mut swallowed = actual.block.clone();
-        swallowed.stmts[0] = syn::parse_quote!(if let Err(_error) = self.executor.check() { self.refusal.refuse(); return Ok(()); });
+        swallowed.stmts[0] = syn::parse_quote!(if let Err(_error) = self.executor.check() {
+            self.refusal.refuse();
+            return Ok(());
+        });
         assert!(!guarded(&swallowed));
         let mut late = actual.block.clone();
-        let syn::Stmt::Expr(syn::Expr::If(branch), _) = &mut late.stmts[0] else { panic!("actual checked refusal branch"); };
-        branch.then_branch.stmts.swap(0,1);
+        let syn::Stmt::Expr(syn::Expr::If(branch), _) = &mut late.stmts[0] else {
+            panic!("actual checked refusal branch");
+        };
+        branch.then_branch.stmts.swap(0, 1);
         assert!(!guarded(&late));
         let mut replaced = actual.block.clone();
-        replaced.stmts.insert(0, syn::parse_quote!(let executor = super::native_original::ExecutorThread::here();));
+        replaced.stmts.insert(
+            0,
+            syn::parse_quote!(let executor = super::native_original::ExecutorThread::here();),
+        );
         assert!(!guarded(&replaced));
     }
 
     #[test]
     fn actual_wrong_executor_check_refuses_both_existing_native_negative_roots() {
-        use crate::security_epoch::native_enrollment::{negative_parent_refusal_roots, new_negative_parent_refusal_fixture};
+        use crate::security_epoch::native_enrollment::{
+            negative_parent_refusal_roots, new_negative_parent_refusal_fixture,
+        };
         let refusal = Rc::new(new_negative_parent_refusal_fixture());
-        assert_eq!(negative_parent_refusal_roots(&refusal), [false,false]);
+        assert_eq!(negative_parent_refusal_roots(&refusal), [false, false]);
         // Empty registry and real denial cells only: no enrolled parent,
         // owner, original, installation or successful permission is fabricated.
         let guard = RestoredExecutorGuard {
@@ -1627,10 +1644,13 @@ mod restored_executor_install_source_tests {
             refusal: Rc::clone(&refusal),
             executor: super::super::native_original::foreign_executor_thread_data_fixture(),
         };
-        assert_eq!(guard.require_executor().unwrap_err().to_string(), "restored executor thread changed");
-        assert_eq!(negative_parent_refusal_roots(&refusal), [true,true]);
+        assert_eq!(
+            guard.require_executor().unwrap_err().to_string(),
+            "restored executor thread changed"
+        );
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true, true]);
         drop(guard);
-        assert_eq!(negative_parent_refusal_roots(&refusal), [true,true]);
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true, true]);
     }
 
     #[test]
