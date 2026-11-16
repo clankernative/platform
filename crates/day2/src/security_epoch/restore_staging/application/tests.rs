@@ -228,7 +228,7 @@ impl Fixture {
 
     // Real current-schema DATA for the offline archive controls. This fixture
     // does not create a native owner, a backup lease or restore permission.
-    pub(super) fn seed_current_backup_contents(&mut self) -> Result<crate::protocol::Trace> {
+    pub(in crate::security_epoch::restore_staging) fn seed_current_backup_contents(&mut self) -> Result<crate::protocol::Trace> {
         let scope = format!(
             "{}/{}/{}",
             self.namespace.installation.as_str(),
@@ -301,7 +301,7 @@ impl Fixture {
         Ok(trace)
     }
 
-    pub(super) fn seed_runtime_generation_history(&self) -> Result<String> {
+    pub(in crate::security_epoch::restore_staging) fn seed_runtime_generation_history(&self) -> Result<String> {
         #[derive(Serialize)]
         struct Generation {
             runtime: crate::runtime_pair::RuntimeIdentity,
