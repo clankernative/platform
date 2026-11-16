@@ -1,9 +1,9 @@
 //! Container entrypoint.
 //!
-//! Two forms, and which one an installation may use is decided by its instance,
-//! not by the argument: `--edge` serves behind the installation's identity
+//! Public serving mode is decided by the instance: `--edge` serves behind its identity
 //! provider and requires one to be declared; `--development-auth` prints a
-//! one-use sign-in link and is refused when one is.
+//! one-use sign-in link and is refused when one is. Runtime-pair modes instead
+//! require their exact durable executor admission and expose no app listener.
 
 use anyhow::{Context, Result, ensure};
 use std::{num::NonZeroU16, path::PathBuf, time::Duration};
@@ -13,8 +13,53 @@ enum ServiceExit {
     NativeRefused(Result<day2::deployment::NativeTerminalHold>),
 }
 
+fn pair_executor_exit(result: Result<()>) -> Result<ServiceExit> {
+    // Executor failures may include app-owned diagnostics. Replay evidence has
+    // its own protected destination; process logs retain only this fixed label.
+    result
+        .map(|()| ServiceExit::Stopped)
+        .map_err(|_| anyhow::anyhow!("runtime_pair_executor_refused"))
+}
+
+fn run_pair_executor(arguments: &[std::ffi::OsString]) -> Result<()> {
+    let instance = PathBuf::from(&arguments[0]);
+    let app = arguments[1].to_str().context("app must be UTF-8")?;
+    let selection = day2::runtime_pair::Selection::load(&PathBuf::from(&arguments[3]))?;
+    if arguments[2] == "--runtime-source-executor" {
+        let budget: usize = arguments[4]
+            .to_str()
+            .context("source budget must be UTF-8")?
+            .parse()?;
+        let outcomes = day2::runtime_pair::source_drain(&instance, app, &selection, budget)?;
+        println!("{}", serde_json::json!({"settled":outcomes.len()}));
+        return Ok(());
+    }
+    let candidate = day2::runtime_pair::Candidate::open(&instance, app, selection)?;
+    let evidence = PathBuf::from(&arguments[4]);
+    if arguments[2] == "--runtime-candidate-check" {
+        println!("{}", serde_json::to_string(&candidate.check(&evidence)?)?);
+    } else {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        let result = runtime.block_on(candidate.serve(&evidence));
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        result?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<ServiceExit> {
     let mut arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments.len() == 5
+        && matches!(
+            arguments[2].to_str(),
+            Some("--runtime-candidate" | "--runtime-candidate-check" | "--runtime-source-executor")
+        )
+    {
+        return pair_executor_exit(run_pair_executor(&arguments));
+    }
     let app_calls = if arguments.len() == 5 && arguments[3] == "--app-calls" {
         let path = PathBuf::from(arguments.pop().context("app call configuration")?);
         arguments.pop();
@@ -22,7 +67,7 @@ fn run() -> Result<ServiceExit> {
     } else {
         None
     };
-    let usage = "usage: day2-serve INSTANCE APP --edge\n       day2-serve INSTANCE APP --development-auth ACTOR --published-port PORT";
+    let usage = "usage: day2-serve INSTANCE APP --edge\n       day2-serve INSTANCE APP --development-auth ACTOR --published-port PORT\n       day2-serve INSTANCE APP --runtime-candidate SELECTION EVIDENCE_DIRECTORY\n       day2-serve INSTANCE APP --runtime-candidate-check SELECTION EVIDENCE_DIRECTORY\n       day2-serve INSTANCE APP --runtime-source-executor SELECTION BUDGET";
     ensure!(arguments.len() >= 3, "{usage}");
     let instance = PathBuf::from(&arguments[0]);
     let app = arguments[1].to_str().context("app must be UTF-8")?;
@@ -131,6 +176,20 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
         }
+    }
+
+    #[test]
+    fn pair_executor_failure_drops_private_details_before_logging() {
+        assert!(matches!(
+            pair_executor_exit(Ok(())).unwrap(),
+            ServiceExit::Stopped
+        ));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let error = pair_executor_exit(Err(anyhow::Error::new(PrivateFailure(dropped.clone()))))
+            .err()
+            .expect("failed executor accepted");
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(format!("{error:#}"), "runtime_pair_executor_refused");
     }
 
     #[test]

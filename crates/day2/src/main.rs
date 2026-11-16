@@ -115,6 +115,13 @@ fn main() -> Result<()> {
                 &day2::authority_state::LocalOperator::assert_local(operator)?,
             )?)?
         }
+        ["runtime-pair-admit", instance, app, id, operator] => {
+            serde_json::to_value(day2::runtime_pair::admit(
+                &Runtime::load(Path::new(instance), app)?,
+                id,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?)?
+        }
         ["rollout-inspect", instance, app] => {
             serde_json::to_value(day2::rollout::inspect_file(Path::new(instance), app)?)?
         }

@@ -82,6 +82,7 @@ pub enum ReleaseKind {
     AppArtifact,
     RuntimePair {
         admission: Box<crate::runtime_pair::Admission>,
+        execution: crate::runtime_pair::Execution,
     },
 }
 
@@ -169,7 +170,7 @@ pub(crate) fn authority_for(
 ) -> Result<authority_state::ActiveAuthority> {
     let mut active = authority_state::current(db)?;
     if let Some(release) = if runtime.rolling() { state(db)? } else { None }
-        && let ReleaseKind::RuntimePair { admission } = &release.kind
+        && let ReleaseKind::RuntimePair { admission, .. } = &release.kind
         && release.phase == Phase::Prepared
     {
         let requirements = active
@@ -221,8 +222,9 @@ pub(crate) fn state(connection: &Connection) -> Result<Option<Release>> {
         .map(|raw| crate::json::decode(raw.as_bytes()))
         .transpose()?;
     if let Some(release) = &release
-        && let ReleaseKind::RuntimePair { admission } = &release.kind
+        && let ReleaseKind::RuntimePair { admission, .. } = &release.kind
     {
+        admission.validate_record()?;
         ensure!(
             matches!(release.phase, Phase::Prepared | Phase::Aborted)
                 && release.source.artifact == release.target.artifact
@@ -231,6 +233,9 @@ pub(crate) fn state(connection: &Connection) -> Result<Option<Release>> {
                 && release.target.runtime == admission.receipt.target.runtime,
             "runtime_pair_journal_invalid"
         );
+        if let ReleaseKind::RuntimePair { execution, .. } = &release.kind {
+            execution.validate(release)?;
+        }
     }
     Ok(release)
 }
