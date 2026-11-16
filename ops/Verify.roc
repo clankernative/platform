@@ -99,17 +99,15 @@ Verify :: [].{
 	}
 
 	input_finish! : (Str => Try(Str, Str)) => Try(Str, Str)
-	input_finish! = |host!| {
-		_ = Capability.call!("verify-browser", "{}", host!)?
-		Capability.call!("verify-lint", "{}", host!)
-	}
+	input_finish! = |host!| Capability.call!("verify-browser", "{}", host!)
 
 	inputs! : (Str => Try(Str, Str)) => Try(Str, Str)
 	inputs! = |host!| {
 		_ = input_checks!(host!)?
 		_ = input_fixtures!(host!)?
 		_ = remaining_fixtures!(host!)?
-		input_finish!(host!)
+		_ = input_finish!(host!)?
+		Capability.call!("verify-lint", "{}", host!)
 	}
 
 	all! : (Str => Try(Str, Str)) => Try(Str, Str)
@@ -156,7 +154,8 @@ Verify :: [].{
 			}
 			"tests" => {
 				_ = Capability.call!("verify-test-build", "{}", host!)?
-				Capability.call!("verify-test-docs", "{}", host!)
+				_ = Capability.call!("verify-test-docs", "{}", host!)?
+				Capability.call!("verify-lint", "{}", host!)
 			}
 			_ => Err("unknown verification preparation part")
 		}?

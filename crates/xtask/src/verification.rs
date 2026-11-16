@@ -20,29 +20,29 @@ const CACHE_FORMAT: u32 = 2;
 #[derive(Clone, Copy)]
 pub(super) enum LinuxContext {
     Standard,
-    CompilerPreparation,
+    TestPreparation,
 }
 
 impl LinuxContext {
     pub(super) fn parse(value: &str) -> Result<Self> {
         match value {
             "standard" => Ok(Self::Standard),
-            "compiler-preparation" => Ok(Self::CompilerPreparation),
-            _ => bail!("CI context requires standard or compiler-preparation purpose"),
+            "test-preparation" => Ok(Self::TestPreparation),
+            _ => bail!("CI context requires standard or test-preparation purpose"),
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             Self::Standard => "standard",
-            Self::CompilerPreparation => "compiler-preparation",
+            Self::TestPreparation => "test-preparation",
         }
     }
 
     fn memory_ceiling(self) -> u64 {
         let gib = match self {
             Self::Standard => 6,
-            Self::CompilerPreparation => 8,
+            Self::TestPreparation => 8,
         };
         gib * 1024_u64 * 1024 * 1024
     }
@@ -144,7 +144,7 @@ fn validate_linux_context(
             job,
             "verify-prepare-parts" | "verify-prepare" | "verify-shards" | "verify"
         ),
-        LinuxContext::CompilerPreparation => job == "verify-prepare-parts",
+        LinuxContext::TestPreparation => job == "verify-prepare-parts",
     };
     ensure!(
         expected_job,
@@ -3279,7 +3279,7 @@ mod tests {
     #[test]
     fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
         let standard = LinuxContext::Standard;
-        let preparation = LinuxContext::CompilerPreparation;
+        let preparation = LinuxContext::TestPreparation;
         validate_linux_context(standard, "verify-shards", "0::/\n", "6442450944\n", "0")?;
         validate_linux_context(standard, "verify", "0::/\n", "6442450944\n", "0")?;
         validate_linux_context(
@@ -3323,17 +3323,11 @@ mod tests {
             );
             assert!(result.is_err());
         }
-        for value in [
-            "",
-            "8",
-            "runtime",
-            "test-preparation",
-            "compiler-preparation extra",
-        ] {
+        for value in ["", "8", "runtime", "test-preparation extra"] {
             assert!(LinuxContext::parse(value).is_err());
         }
         LinuxContext::parse("standard")?;
-        LinuxContext::parse("compiler-preparation")?;
+        LinuxContext::parse("test-preparation")?;
         Ok(())
     }
 
@@ -3376,11 +3370,7 @@ mod tests {
     fn linux_context_swap_refusal_reports_bounded_current_quotas() {
         for (purpose, memory, swap) in [
             (LinuxContext::Standard, "4096\n", "max\n"),
-            (
-                LinuxContext::CompilerPreparation,
-                "8589934592\n",
-                "1048576\n",
-            ),
+            (LinuxContext::TestPreparation, "8589934592\n", "1048576\n"),
         ] {
             let error =
                 validate_linux_context(purpose, "verify-prepare-parts", "0::/", memory, swap)
@@ -3409,22 +3399,20 @@ mod tests {
     }
 
     #[test]
-    fn only_inputs_and_tests_use_existing_runner_memory_headroom() {
+    fn only_test_preparation_uses_existing_runner_memory_headroom() {
         let preparation = ci_job("verify-prepare-parts");
-        assert!(preparation.contains(
-            "--memory=${{ (matrix.part == 'tests' || matrix.part == 'inputs') && '8g' || '6g' }}"
-        ));
+        assert!(preparation.contains("--memory=${{ matrix.part == 'tests' && '8g' || '6g' }}"));
         assert!(
-            preparation.contains("--memory-swap=${{ (matrix.part == 'tests' || matrix.part == 'inputs') && '8g' || '6g' }}")
+            preparation.contains("--memory-swap=${{ matrix.part == 'tests' && '8g' || '6g' }}")
         );
         assert!(preparation.contains(
-            "verify-linux-context ${{ (matrix.part == 'tests' || matrix.part == 'inputs') && 'compiler-preparation' || 'standard' }}"
+            "verify-linux-context ${{ matrix.part == 'tests' && 'test-preparation' || 'standard' }}"
         ));
         for name in ["verify-prepare", "verify-shards", "verify"] {
             let job = ci_job(name);
             assert!(job.contains("--memory=6g --memory-swap=6g"));
             assert!(job.contains("verify-linux-context standard"));
-            assert!(!job.contains("verify-linux-context compiler-preparation"));
+            assert!(!job.contains("verify-linux-context test-preparation"));
         }
     }
 
