@@ -292,11 +292,9 @@ impl Fixture {
             "UPDATE day2_invocations SET trace=?1 WHERE id='old-work'",
             [&stored],
         )?;
-        let captured = crate::oauth::schema::admit_retained_memory_transaction(
-            &tx,
-            &hook,
-            |tx| crate::oauth::restore::Snapshot::capture(tx, &self.oauth_schema),
-        )?;
+        let captured = crate::oauth::schema::admit_retained_memory_transaction(&tx, &hook, |tx| {
+            crate::oauth::restore::Snapshot::capture(tx, &self.oauth_schema)
+        })?;
         self.cut = restore_cut::fixture_for_storage_epoch(
             captured.digest().clone(),
             909,
