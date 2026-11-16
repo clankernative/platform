@@ -3976,7 +3976,14 @@ mod native_startup_tests {
             restored.block.stmts[0].to_token_stream().to_string(),
             first.to_token_stream().to_string()
         );
-        let syn::Stmt::Local(server) = &restored.block.stmts[1] else {
+        let timing: syn::Stmt = syn::parse_quote!(
+            let request_timing = super::request_timing_setting(&runtime).unwrap_or(true);
+        );
+        assert_eq!(
+            restored.block.stmts[1].to_token_stream().to_string(),
+            timing.to_token_stream().to_string()
+        );
+        let syn::Stmt::Local(server) = &restored.block.stmts[2] else {
             panic!("common builder");
         };
         let syn::Expr::Try(built) = &*server.init.as_ref().unwrap().expr else {
