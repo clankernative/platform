@@ -2651,8 +2651,18 @@ mod tests {
                 let source = body.to_token_stream().to_string();
                 let disarm = "attempt . complete = true";
                 let returned = "Ok (context)";
-                armed && source.matches(disarm).count() == 1
+                let selected = if owner == "NativeConsumerContext" {
+                    source.matches("frame . consumer_origin (runtime) ?").count() == 1
+                        && source.matches("super :: runtime_serving_use (phase) ?").count() == 1
+                } else {
+                    source.matches("request . consumer_origin () ?").count() == 1
+                        && source.matches("frame . require_origin (& native) ?").count() == 1
+                        && source.matches("FinalCompletion :: RuntimeOperation").count() == 1
+                };
+                armed && selected && source.matches(disarm).count() == 1
                     && source.matches(returned).count() == 1
+                    && source.matches("let context").count() == 1
+                    && source.matches("let affinity").count() == 1
                     && source.find("let context") < source.find(disarm)
                     && source.find(disarm) < source.find(returned)
                     && source.find("let affinity") < source.find("let context")
@@ -2678,6 +2688,14 @@ mod tests {
             let mut early_disarm = actual.block.clone();
             early_disarm.stmts.insert(1, syn::parse_quote!(attempt.complete = true;));
             assert!(!guarded(&early_disarm));
+            let mut no_origin = actual.block.clone();
+            no_origin.stmts.remove(2);
+            assert!(!guarded(&no_origin));
+            if owner == "NativeRequestFinalContext" {
+                let mut no_join = actual.block.clone();
+                no_join.stmts.remove(3);
+                assert!(!guarded(&no_join));
+            }
             for substituted in [
                 quote::quote!(ConsumerOrigin::Startup(native)),
                 quote::quote!(ConsumerOrigin::Http { native, sink }),
