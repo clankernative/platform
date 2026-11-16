@@ -863,7 +863,8 @@ impl<'request> NativeConsumerContext<'request, 'static> {
         let selected = (|| {
             origin.require_runtime_input(runtime)?;
             ensure!(
-                match (&origin, purpose) {
+                matches!(
+                    (&origin, purpose),
                     (
                         ConsumerOrigin::Http { .. },
                         RuntimeServingUse::Registration
@@ -871,10 +872,8 @@ impl<'request> NativeConsumerContext<'request, 'static> {
                         | RuntimeServingUse::Refresh
                         | RuntimeServingUse::SqlRead
                         | RuntimeServingUse::SqlWrite,
-                    ) => true,
-                    (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response) => true,
-                    _ => false,
-                },
+                    ) | (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response)
+                ),
                 "native Runtime origin purpose changed"
             );
             Ok((
@@ -1547,7 +1546,8 @@ mod tests {
     #[test]
     fn runtime_host_factory_checks_origin_before_binding_and_cannot_select_capture_or_completion() {
         let actual = host_factory("NativeConsumerContext", "runtime_input");
-        let allowed: syn::Expr = syn::parse_quote!(match (&origin, purpose) {
+        let allowed: syn::Expr = syn::parse_quote!(matches!(
+            (&origin, purpose),
             (
                 ConsumerOrigin::Http { .. },
                 RuntimeServingUse::Registration
@@ -1555,10 +1555,8 @@ mod tests {
                 | RuntimeServingUse::Refresh
                 | RuntimeServingUse::SqlRead
                 | RuntimeServingUse::SqlWrite,
-            ) => true,
-            (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response) => true,
-            _ => false,
-        });
+            ) | (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response)
+        ));
         let guarded = |actual: &syn::ImplItemFn| {
             let facts = host_facts(actual);
             facts.propagated.first() == Some(&expr("origin.require_runtime_input(runtime)"))
