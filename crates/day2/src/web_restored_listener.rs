@@ -25,6 +25,7 @@ pub(super) fn bind(
     current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
 ) -> Result<BoundRestoredListener> {
     current.require_restored_startup_sql(&runtime)?;
+    let request_timing = super::request_timing_setting(&runtime).unwrap_or(true);
     let mut server = LocalServer::bind_listener_with_sql(
         runtime,
         listener,
@@ -35,6 +36,7 @@ pub(super) fn bind(
             concurrency,
             health_endpoints: true,
             presentation: PresentationSource::Environment,
+            request_timing,
         },
         ListenerSql::Restored(current),
     )?;
@@ -126,11 +128,20 @@ mod tests {
                             == expected.to_token_stream().to_string()
                     });
             let mount: syn::Stmt = syn::parse_quote!(server.mount_oauth(receiver)?;);
+            let startup: syn::Stmt =
+                syn::parse_quote!(current.require_restored_startup_sql(&runtime)?;);
+            let timing: syn::Stmt = syn::parse_quote!(
+                let request_timing = super::request_timing_setting(&runtime).unwrap_or(true);
+            );
             bound.path.is_ident("BoundRestoredListener")
                 && bound.rest.is_none()
                 && same_fields
-                && block.stmts.len() == 4
-                && block.stmts[2].to_token_stream().to_string()
+                && block.stmts.len() == 5
+                && block.stmts[0].to_token_stream().to_string()
+                    == startup.to_token_stream().to_string()
+                && block.stmts[1].to_token_stream().to_string()
+                    == timing.to_token_stream().to_string()
+                && block.stmts[3].to_token_stream().to_string()
                     == mount.to_token_stream().to_string()
         };
         assert!(guarded(&actual.block));
@@ -142,8 +153,14 @@ mod tests {
             syn::Stmt::Expr(syn::parse_quote!(server.into_native_parts(admission)), None);
         assert!(!guarded(&parts));
         let mut unmounted = actual.block.clone();
-        unmounted.stmts.remove(2);
+        unmounted.stmts.remove(3);
         assert!(!guarded(&unmounted));
+        let mut timing_before_owner = actual.block.clone();
+        timing_before_owner.stmts.swap(0, 1);
+        assert!(!guarded(&timing_before_owner));
+        let mut ignored_instance_setting = actual.block.clone();
+        ignored_instance_setting.stmts[1] = syn::parse_quote!(let request_timing = true;);
+        assert!(!guarded(&ignored_instance_setting));
         struct Factories(usize);
         impl<'ast> Visit<'ast> for Factories {
             fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
