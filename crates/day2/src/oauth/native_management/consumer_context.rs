@@ -962,7 +962,10 @@ impl<'request> NativeConsumerContext<'request, 'static> {
         phase: super::RuntimePhase,
         frame: &'request RuntimeRequest,
     ) -> Result<Self> {
-        let mut attempt = RuntimeContextFactoryAttempt { frame, complete: false };
+        let mut attempt = RuntimeContextFactoryAttempt {
+            frame,
+            complete: false,
+        };
         frame.require_runtime(runtime)?;
         let native = frame.consumer_origin(runtime)?;
         let purpose = super::runtime_serving_use(phase)?;
@@ -1278,7 +1281,10 @@ impl<'request> NativeRequestFinalContext<'request, 'static> {
         frame: &'request RuntimeRequest,
         request: &super::request::Lease,
     ) -> Result<Self> {
-        let mut attempt = RuntimeContextFactoryAttempt { frame, complete: false };
+        let mut attempt = RuntimeContextFactoryAttempt {
+            frame,
+            complete: false,
+        };
         frame.require_runtime(runtime)?;
         let native = request.consumer_origin()?;
         frame.require_origin(&native)?;
@@ -1346,7 +1352,10 @@ const _: () = {
     assert_not_impl!(RuntimeContextFactoryAttempt<'static>, Send);
     assert_not_impl!(RuntimeContextFactoryAttempt<'static>, Sync);
     assert_not_impl!(RuntimeContextFactoryAttempt<'static>, serde::Serialize);
-    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, serde::Deserialize<'static>);
+    assert_not_impl!(
+        RuntimeContextFactoryAttempt<'static>,
+        serde::Deserialize<'static>
+    );
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Clone);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Copy);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Default);
@@ -2639,38 +2648,52 @@ mod tests {
             let origin: syn::Expr = syn::parse_quote!(ConsumerOrigin::Runtime { native, frame });
             let guarded = |body: &syn::Block| {
                 let armed = matches!(body.stmts.first(), Some(syn::Stmt::Local(local))
-                    if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "attempt" && name.mutability.is_some())
-                    && matches!(local.init.as_ref().map(|value| &*value.expr), Some(syn::Expr::Struct(value))
-                        if value.path.is_ident("RuntimeContextFactoryAttempt") && value.rest.is_none()
-                        && value.fields.len() == 2
-                        && value.fields.iter().all(|field| match &field.member {
-                            syn::Member::Named(name) if name == "frame" => field.expr.to_token_stream().to_string() == "frame",
-                            syn::Member::Named(name) if name == "complete" => field.expr.to_token_stream().to_string() == "false",
-                            _ => false,
-                        })));
+                if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "attempt" && name.mutability.is_some())
+                && matches!(local.init.as_ref().map(|value| &*value.expr), Some(syn::Expr::Struct(value))
+                    if value.path.is_ident("RuntimeContextFactoryAttempt") && value.rest.is_none()
+                    && value.fields.len() == 2
+                    && value.fields.iter().all(|field| match &field.member {
+                        syn::Member::Named(name) if name == "frame" => field.expr.to_token_stream().to_string() == "frame",
+                        syn::Member::Named(name) if name == "complete" => field.expr.to_token_stream().to_string() == "false",
+                        _ => false,
+                    })));
                 let source = body.to_token_stream().to_string();
                 let disarm = "attempt . complete = true";
                 let returned = "Ok (context)";
                 let selected = if owner == "NativeConsumerContext" {
-                    source.matches("frame . consumer_origin (runtime) ?").count() == 1
-                        && source.matches("super :: runtime_serving_use (phase) ?").count() == 1
+                    source
+                        .matches("frame . consumer_origin (runtime) ?")
+                        .count()
+                        == 1
+                        && source
+                            .matches("super :: runtime_serving_use (phase) ?")
+                            .count()
+                            == 1
                 } else {
                     source.matches("request . consumer_origin () ?").count() == 1
-                        && source.matches("frame . require_origin (& native) ?").count() == 1
-                        && source.matches("FinalCompletion :: RuntimeOperation").count() == 1
+                        && source
+                            .matches("frame . require_origin (& native) ?")
+                            .count()
+                            == 1
+                        && source
+                            .matches("FinalCompletion :: RuntimeOperation")
+                            .count()
+                            == 1
                 };
-                armed && selected && source.matches(disarm).count() == 1
+                armed
+                    && selected
+                    && source.matches(disarm).count() == 1
                     && source.matches(returned).count() == 1
                     && source.matches("let context").count() == 1
                     && source.matches("let affinity").count() == 1
                     && source.find("let context") < source.find(disarm)
                     && source.find(disarm) < source.find(returned)
                     && source.find("let affinity") < source.find("let context")
-                    &&
-                body.stmts
-                    .get(1)
-                    .map(|stmt| stmt.to_token_stream().to_string())
-                    == Some(first.to_token_stream().to_string())
+                    && body
+                        .stmts
+                        .get(1)
+                        .map(|stmt| stmt.to_token_stream().to_string())
+                        == Some(first.to_token_stream().to_string())
                     && body
                         .to_token_stream()
                         .to_string()
@@ -2686,7 +2709,9 @@ mod tests {
             no_attempt.stmts.remove(0);
             assert!(!guarded(&no_attempt));
             let mut early_disarm = actual.block.clone();
-            early_disarm.stmts.insert(1, syn::parse_quote!(attempt.complete = true;));
+            early_disarm
+                .stmts
+                .insert(1, syn::parse_quote!(attempt.complete = true;));
             assert!(!guarded(&early_disarm));
             let mut no_origin = actual.block.clone();
             no_origin.stmts.remove(2);
@@ -2734,7 +2759,9 @@ mod tests {
                 self.frame.refuse();
             }
         });
-        let guarded = |body: &syn::Block| body.to_token_stream().to_string() == expected.to_token_stream().to_string();
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
         assert!(guarded(&drop.block));
         let mut no_refusal = drop.block.clone();
         no_refusal.stmts.clear();
