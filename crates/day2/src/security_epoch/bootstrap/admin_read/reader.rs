@@ -15,8 +15,9 @@ pub(in crate::security_epoch) use authentication_store::{
     FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
     RestoreAuthenticationAction, RestoreFinalInstallationLoan, RestoreTargetCheck,
     RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
-    RestoreWriterExchangeContext, RestoreWriterReleaseLoan, TargetSettlementSourceLoan,
-    WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
+    RestoreWriterExchangeContext, RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan,
+    TargetSettlementSourceLoan, WriterConfirmationSourceLoan, WriterMayRegistryLoan,
+    WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use authentication_store::{
     FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit,

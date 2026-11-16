@@ -238,6 +238,7 @@ const _: () = {
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <RestoredCurrentPeerPort<'static> as Ambiguous<_>>::check;
             let _ = <RestoredPeerConnection<'static> as Ambiguous<_>>::check;
+            let _ = <CapturedRestoredControllerRequest as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);
@@ -263,11 +264,12 @@ pub(crate) enum StoragePeerPurpose {
 pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(in crate::security_epoch) use owner::PendingRestoredEnrollment;
 pub(in crate::security_epoch) use owner::{
-    ActivatedRestoredAppRole, CapturedRestoredAppRequest, CompletedRestoreIssuer,
-    InstalledRestoredAppConfirmation, IssuerRestoreFinishing, IssuerRestorePreparation,
-    IssuerRestoreRoleActivating, PreparedRestoreAdmission, PreparedRestoredAppConfirmation,
-    ReceiverDurability, ReceiverRendezvous, RestorePreparationData, RestoredAppCurrentPeer,
-    RestoredWriterPeer, RetainedControllerNative, RetiredRestoredAppNative,
+    ActivatedRestoredAppRole, CapturedRestoredAppRequest, CapturedRestoredControllerRequest,
+    CompletedRestoreIssuer, InstalledRestoredAppConfirmation, IssuerRestoreFinishing,
+    IssuerRestorePreparation, IssuerRestoreRoleActivating, PreparedRestoreAdmission,
+    PreparedRestoredAppConfirmation, ReceiverDurability, ReceiverRendezvous,
+    RestorePreparationData, RestoredAppCurrentPeer, RestoredWriterPeer, RetainedControllerNative,
+    RetiredRestoredAppNative,
 };
 pub(crate) use owner::{
     EnrolledCurrentRequest, EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage,

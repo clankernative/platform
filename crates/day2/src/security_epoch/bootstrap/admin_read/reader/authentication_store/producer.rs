@@ -22,8 +22,8 @@ pub(in crate::security_epoch) use consumer::{
     FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
     RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
     RestoreWriterActivationLoan, RestoreWriterConfirmation, RestoreWriterExchangeContext,
-    RestoreWriterReleaseLoan, TargetSettlementSourceLoan, WriterConfirmationSourceLoan,
-    WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
+    RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan, TargetSettlementSourceLoan,
+    WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use consumer::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
 

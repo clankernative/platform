@@ -437,7 +437,10 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
                             let cohort_method=cohort
                                 && matches!(&f.vis,syn::Visibility::Restricted(v) if v.in_token.is_some()
                                     && v.path.to_token_stream().to_string()=="crate :: security_epoch")
-                                && signature(&f.sig)==signature(&syn::parse_str::<syn::Signature>("fn check(&mut self,target:&mut NativeStagedTarget<'_,'_>,creator:&crate::security_epoch::native_enrollment::RestoreCreatorData,report:&crate::security_epoch::kernel::restore::completion::TargetReport)->Result<crate::security_epoch::native_enrollment::SqliteCohort>").unwrap());
+                                && [
+                                    "fn check(&mut self,target:&mut NativeStagedTarget<'_,'_>,creator:&crate::security_epoch::native_enrollment::RestoreCreatorData,report:&crate::security_epoch::kernel::restore::completion::TargetReport)->Result<crate::security_epoch::native_enrollment::SqliteCohort>",
+                                    "fn check_current(&mut self,target:&mut NativeStagedTarget<'_,'_>,stage:&mut crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,creator:&crate::security_epoch::native_enrollment::RestoreCreatorData,report:&crate::security_epoch::kernel::restore::completion::TargetReport)->Result<crate::security_epoch::native_enrollment::SqliteCohort>",
+                                ].into_iter().any(|expected| signature(&f.sig)==signature(&syn::parse_str::<syn::Signature>(expected).unwrap()));
                             restore_consumers += usize::from(restore_consumer);
                             if !context_method
                                 && !target_method

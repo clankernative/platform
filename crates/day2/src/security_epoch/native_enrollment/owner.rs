@@ -26,7 +26,7 @@ use crate::security_epoch::native_enrollment::{
     runtime,
 };
 use crate::security_epoch::serving::{NativeProviderUse, NativeSqlUse, RuntimeServingUse};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use day2_capabilities::{Digest, security_epoch::AuthorityScope};
 #[cfg(target_os = "linux")]
 use std::cell::RefCell;
@@ -189,6 +189,7 @@ enum RestoredRequestState {
     Vacant,
     Captured,
     Busy,
+    Finalizing,
     Refused,
 }
 
@@ -202,6 +203,7 @@ mod restored_request_state_tests {
             RestoredRequestState::Vacant,
             RestoredRequestState::Captured,
             RestoredRequestState::Busy,
+            RestoredRequestState::Finalizing,
             RestoredRequestState::Refused,
         ]
         .into_iter()
@@ -273,8 +275,23 @@ impl RestoredRequestGate {
         Ok(())
     }
 
+    // Final request settlement is distinct from a borrowed consumer scope.
+    // Only the real consuming supplier enters it, after a scope has settled.
+    fn begin_final(parent: &Rc<Self>, captured: &Rc<Self>) -> Result<()> {
+        if !Rc::ptr_eq(parent, captured) || parent.state.get() != RestoredRequestState::Captured {
+            parent.refuse();
+            captured.refuse();
+            anyhow::bail!("restore_current_capture_parent_changed_or_spent");
+        }
+        parent.state.set(RestoredRequestState::Finalizing);
+        Ok(())
+    }
+
     fn finish(&self) -> Result<()> {
-        self.require_busy()?;
+        if self.state.get() != RestoredRequestState::Finalizing {
+            self.refuse();
+            anyhow::bail!("restore_request_not_finalizing");
+        }
         self.state.set(RestoredRequestState::Vacant);
         Ok(())
     }
@@ -640,7 +657,7 @@ impl CapturedRestoredAppRequest {
             ),
             "restore_request_final_history_changed"
         );
-        RestoredRequestGate::begin(&attempt.parent.request_state, &captured.refusal.gate)?;
+        RestoredRequestGate::begin_final(&attempt.parent.request_state, &captured.refusal.gate)?;
         {
             let context = attempt.context.as_mut().expect("actual final context");
             context.require_origin(attempt.origin.as_ref().expect("actual original"))?;
@@ -1444,8 +1461,9 @@ impl InstalledRestoredAppNative {
             }
             requested?;
             checked?;
+            let request_state = Rc::new(RestoredRequestGate::new());
             // The actual SAME connection/original leaf is LAST. Only this
-            // whole owning move follows: no wait, I/O or old positive check.
+            // whole owning move follows: no allocation, wait, I/O or old check.
             self.prepared
                 .pending
                 .owner
@@ -1453,7 +1471,7 @@ impl InstalledRestoredAppNative {
                 .retire_checked(&mut self.prepared.pending.original)?;
             Ok(RetiredRestoredAppNative {
                 installed: self,
-                request_state: Rc::new(RestoredRequestGate::new()),
+                request_state,
                 current_peer: None,
             })
         }
@@ -1921,14 +1939,466 @@ impl RestoredAppFileContinuity {
 /// from this type. The physical finalizer must close its genuine old owners
 /// before consuming its actual stage into this fixed native transition.
 pub(in crate::security_epoch) struct RetainedControllerNative<'role> {
-    owner: &'role mut EnrolledProcessRoleOwner,
+    // The old stage is retained whole for negative predecessor identity only.
+    // Never check/sample it or export its owner after retirement.
+    retired: EnrolledRoleStage<'role>,
     refusal: NativeOriginalRefusal,
+    request_state: Rc<RestoredRequestGate>,
 }
 
 impl Drop for RetainedControllerNative<'_> {
     fn drop(&mut self) {
-        self.owner.refused = true;
+        self.refuse();
+    }
+}
+
+/// A distinct real Current request on the same retained Controller connection.
+/// It is not a physical/storage/ten-record observation or ordinary Controller.
+/// Its fixed whole-flow entry alone may consume final settlement; neither a
+/// native check nor a parts getter can release the capture for another request.
+/// Loss and every failed check burn the request AND its actual retained parent.
+pub(in crate::security_epoch) struct CapturedRestoredControllerRequest {
+    refusal: RestoredCaptureRefusal,
+    predecessor: NativeOriginalRefusal,
+    request: Option<EnrolledCurrentRequest>,
+}
+
+impl Drop for CapturedRestoredControllerRequest {
+    fn drop(&mut self) {
+        if self.refusal.armed {
+            self.refuse();
+        }
+    }
+}
+
+struct RestoredControllerRequestAttempt<'capture, 'parent, 'role> {
+    captured: &'capture mut CapturedRestoredControllerRequest,
+    parent: &'parent mut RetainedControllerNative<'role>,
+    completed: bool,
+}
+
+impl Drop for RestoredControllerRequestAttempt<'_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.captured.refuse();
+            self.parent.refuse();
+        }
+    }
+}
+
+/// Real historical peer owners are armed before native validation. Their
+/// borrows transfer directly into the existing fixed port guard; a failed
+/// validation or lost preparation cannot leave either supplied owner reusable.
+struct RestoredControllerPeerInputs<'tail> {
+    peer: Option<&'tail mut RestoredWriterPeer>,
+    installed: Option<&'tail mut InstalledRestoredAppConfirmation>,
+}
+
+impl Drop for RestoredControllerPeerInputs<'_> {
+    fn drop(&mut self) {
+        if let Some(peer) = &mut self.peer {
+            peer.refuse();
+        }
+        if let Some(installed) = &mut self.installed {
+            installed.refuse();
+        }
+    }
+}
+
+// The actual peer is guarded before even the captured native precheck. Its
+// existing whole tail and both real native roots survive every failed return.
+struct RestoredControllerPeerAttempt<'borrow, 'capture, 'parent, 'role, 'tail> {
+    native: RestoredControllerRequestAttempt<'capture, 'parent, 'role>,
+    phase: &'borrow mut super::CurrentStoragePeerPhase<'tail>,
+}
+
+impl Drop for RestoredControllerPeerAttempt<'_, '_, '_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.native.completed {
+            self.phase.refuse();
+        }
+        // The nested native guard refuses the actual capture and parent.
+    }
+}
+
+// The complete fixed flow retains every actual negative owner. The returned
+// peer stays guarded here until both phase and saved native request settle.
+struct RestoredControllerServingAttempt<
+    'capture,
+    'parent,
+    'role,
+    'tail,
+    'loan,
+    'borrow,
+    'target,
+    'selection,
+> {
+    native: RestoredControllerRequestAttempt<'capture, 'parent, 'role>,
+    phase: Option<super::CurrentStoragePeerPhase<'tail>>,
+    returned: Option<super::RestoredPeerConnection<'tail>>,
+    loan: &'loan mut crate::security_epoch::bootstrap::RestoredControllerCurrentReadLoan<
+        'borrow,
+        'target,
+        'selection,
+    >,
+}
+
+impl Drop for RestoredControllerServingAttempt<'_, '_, '_, '_, '_, '_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.native.completed {
+            if let Some(phase) = &mut self.phase {
+                phase.refuse();
+            }
+            self.loan.refuse();
+        }
+        // Nested native and actual returned-peer Drops retain their own roots.
+    }
+}
+
+impl CapturedRestoredControllerRequest {
+    pub(in crate::security_epoch) fn refuse(&mut self) {
         self.refusal.refuse();
+        self.predecessor.refuse();
+        if let Some(request) = &mut self.request {
+            request.refuse();
+        }
+    }
+
+    /// Native continuity only, using the SAME saved request. No old stage is
+    /// sampled and no target/file/counter/peer or Current permission is returned.
+    pub(in crate::security_epoch) fn check(
+        &mut self,
+        parent: &mut RetainedControllerNative<'_>,
+    ) -> Result<()> {
+        let mut attempt = RestoredControllerRequestAttempt {
+            captured: self,
+            parent,
+            completed: false,
+        };
+        let checked = (|| {
+            ensure!(
+                Rc::ptr_eq(
+                    &attempt.parent.request_state,
+                    &attempt.captured.refusal.gate
+                ) && attempt.parent.request_state.state.get() == RestoredRequestState::Captured,
+                "restore_controller_capture_parent_changed_or_spent"
+            );
+            attempt
+                .captured
+                .predecessor
+                .require_same(&attempt.parent.refusal)?;
+            let request = attempt
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            // Negative old identity plus the actual NEW sample. The retired
+            // interval can never be repaired, sampled or reset by this join.
+            attempt
+                .parent
+                .retired
+                .acquisition
+                .as_mut()
+                .require_retired_predecessor(&mut request.acquisition)?;
+            let mut stage = attempt
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            stage.require_current_role()?;
+            ensure!(
+                stage.owner.role == NativeRole::EpochController,
+                "restore_controller_capture_role_changed"
+            );
+            Ok(())
+        })();
+        checked?;
+        attempt.completed = true;
+        Ok(())
+    }
+
+    /// Prepare only ordinary serving on the actual transferred Installed peer.
+    /// The caller retains its whole installation and supplies both real tail
+    /// borrows from that same carrier. No stage or clock escapes this operation.
+    pub(in crate::security_epoch) fn prepare_current_peer<'tail>(
+        &mut self,
+        parent: &mut RetainedControllerNative<'_>,
+        peer: &'tail mut RestoredWriterPeer,
+        installed: &'tail mut InstalledRestoredAppConfirmation,
+    ) -> Result<super::ControllerCurrentRendezvous<'tail>> {
+        let mut inputs = RestoredControllerPeerInputs {
+            peer: Some(peer),
+            installed: Some(installed),
+        };
+        let mut attempt = RestoredControllerRequestAttempt {
+            captured: self,
+            parent,
+            completed: false,
+        };
+        let requested = (|| {
+            attempt.captured.check(attempt.parent)?;
+            let request = attempt
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            // No fallible work, callback, allocation or wait between taking
+            // these whole borrows and the existing port's first armed guard.
+            super::RestoredPeerConnection::prepare_controller(
+                inputs.peer.take().expect("actual restored Controller peer"),
+                inputs
+                    .installed
+                    .take()
+                    .expect("actual installed App confirmation"),
+                &mut stage,
+                super::StoragePeerPurpose::CurrentServing,
+            )
+        })();
+        // Preparation includes real transport. This same saved original gets
+        // an independent native post even when the operation already failed.
+        let checked = attempt.captured.check(attempt.parent);
+        let rendezvous = requested?;
+        checked?;
+        attempt.completed = true;
+        Ok(rendezvous)
+    }
+
+    /// Fixed whole-flow entry. The concrete storage loan must keep its actual
+    /// counter request across Known/ACK/read and finish it before release.
+    /// Only complete phase AND native settlement may return the real peer.
+    pub(in crate::security_epoch) fn serve_current_peer<'tail>(
+        mut self,
+        parent: &mut RetainedControllerNative<'_>,
+        phase: super::CurrentStoragePeerPhase<'tail>,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+        loan: &mut crate::security_epoch::bootstrap::RestoredControllerCurrentReadLoan<'_, '_, '_>,
+    ) -> Result<(
+        super::RestoredPeerConnection<'tail>,
+        day2_capabilities::Digest,
+    )> {
+        let mut attempt = RestoredControllerServingAttempt {
+            native: RestoredControllerRequestAttempt {
+                captured: &mut self,
+                parent,
+                completed: false,
+            },
+            phase: Some(phase),
+            returned: None,
+            loan,
+        };
+        let requested: Result<day2_capabilities::Digest> = (|| {
+            attempt.native.captured.check(attempt.native.parent)?;
+            let request = attempt
+                .native
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .native
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            ensure!(
+                stage.owner.role == NativeRole::EpochController
+                    && &stage.owner.policy.store == selected,
+                "restore_controller_reader_selection_changed"
+            );
+            let phase = attempt
+                .phase
+                .as_mut()
+                .context("restore_controller_phase_missing")?;
+            let reader = phase.checked_restored_controller_reader(&mut stage, selected)?;
+            let requested = attempt.loan.observe(&mut stage, phase, &reader);
+            // Both posts evaluate even after the actual storage flow failed.
+            let phase_post = phase.check(&mut stage);
+            let native_post = stage.check();
+            let snapshot = requested?;
+            phase_post?;
+            native_post?;
+            Ok(snapshot)
+        })();
+        let native_post = attempt.native.captured.check(attempt.native.parent);
+        let snapshot = requested?;
+        native_post?;
+        {
+            let request = attempt
+                .native
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .native
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            let phase = attempt
+                .phase
+                .take()
+                .context("restore_controller_phase_missing")?;
+            let finished = match phase.finish_restored(&mut stage) {
+                Ok(peer) => {
+                    attempt.returned = Some(peer);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+            // Phase finalization performs real native/tail I/O. The actual
+            // physical/old-observation post must follow it, even on error.
+            let physical_post = attempt.loan.final_check(&mut stage);
+            let native_post = stage.check();
+            finished?;
+            physical_post?;
+            native_post?;
+        }
+        RestoredRequestGate::begin_final(
+            &attempt.native.parent.request_state,
+            &attempt.native.captured.refusal.gate,
+        )?;
+        attempt
+            .native
+            .captured
+            .request
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?
+            .finish(attempt.native.parent.retired.owner)?;
+        let peer = attempt
+            .returned
+            .take()
+            .context("restore_controller_peer_missing")?;
+        attempt.native.parent.request_state.finish()?;
+        attempt.native.captured.refusal.transfer();
+        attempt.native.completed = true;
+        Ok((peer, snapshot))
+    }
+
+    /// Warm preparation consumes the SAME connection returned by real prior
+    /// settlement. Its negative Drop is armed before the first native check.
+    /// No socket, tail, native original or replacement connection is supplied.
+    pub(in crate::security_epoch) fn prepare_retained_current_peer<'tail>(
+        &mut self,
+        parent: &mut RetainedControllerNative<'_>,
+        peer: super::RestoredPeerConnection<'tail>,
+    ) -> Result<super::ControllerCurrentRendezvous<'tail>> {
+        let mut attempt = RestoredControllerRequestAttempt {
+            captured: self,
+            parent,
+            completed: false,
+        };
+        let requested = (|| {
+            attempt.captured.check(attempt.parent)?;
+            let request = attempt
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            peer.prepare_retained_controller(&mut stage)
+        })();
+        let checked = attempt.captured.check(attempt.parent);
+        let rendezvous = requested?;
+        checked?;
+        attempt.completed = true;
+        Ok(rendezvous)
+    }
+
+    /// Accept the real Ready transcript with the SAME captured original.
+    /// Expected request DATA can narrow serving only, never select a purpose,
+    /// replace the native request or complete the enclosing Controller action.
+    pub(in crate::security_epoch) fn accept_current_peer<'tail>(
+        &mut self,
+        parent: &mut RetainedControllerNative<'_>,
+        rendezvous: super::ControllerCurrentRendezvous<'tail>,
+        expected: Option<&super::StoragePeerRequest>,
+    ) -> Result<super::CurrentStoragePeerPhase<'tail>> {
+        let mut attempt = RestoredControllerRequestAttempt {
+            captured: self,
+            parent,
+            completed: false,
+        };
+        let requested = (|| {
+            attempt.captured.check(attempt.parent)?;
+            ensure!(
+                expected.is_none_or(
+                    |request| request.purpose() == super::StoragePeerPurpose::CurrentServing
+                ),
+                "restore_controller_serving_request_required"
+            );
+            let request = attempt
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            rendezvous.accept_current(&mut stage, expected)
+        })();
+        let checked = attempt.captured.check(attempt.parent);
+        let phase = requested?;
+        checked?;
+        attempt.completed = true;
+        Ok(phase)
+    }
+
+    /// Comparison DATA derived only through the genuine transferred Controller
+    /// tail. The real fresh counter/read and whole physical join still owe it.
+    pub(in crate::security_epoch) fn checked_current_reader(
+        &mut self,
+        parent: &mut RetainedControllerNative<'_>,
+        phase: &mut super::CurrentStoragePeerPhase<'_>,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+    ) -> Result<crate::security_epoch::firestore::RestoreWriterPeerRead> {
+        let mut attempt = RestoredControllerPeerAttempt {
+            native: RestoredControllerRequestAttempt {
+                captured: self,
+                parent,
+                completed: false,
+            },
+            phase,
+        };
+        let requested = (|| {
+            attempt.native.captured.check(attempt.native.parent)?;
+            let request = attempt
+                .native
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .native
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            ensure!(
+                stage.owner.role == NativeRole::EpochController
+                    && &stage.owner.policy.store == selected,
+                "restore_controller_reader_selection_changed"
+            );
+            attempt
+                .phase
+                .checked_restored_controller_reader(&mut stage, selected)
+        })();
+        let checked = attempt.native.captured.check(attempt.native.parent);
+        let reader = requested?;
+        checked?;
+        attempt.native.completed = true;
+        Ok(reader)
     }
 }
 
@@ -1949,13 +2419,35 @@ impl Drop for ControllerNativeRetirement<'_> {
 }
 
 impl RetainedControllerNative<'_> {
-    /// Capture a distinct real request on this SAME admitted connection. The
-    /// consumed old stage is never renewed or returned as current permission.
-    /// Native role identity still supplies no storage/epoch/consumer authority.
-    pub(in crate::security_epoch) fn begin_current_stage(
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.request_state.refuse();
+        self.retired.owner.refused = true;
+        self.refusal.refuse();
+    }
+
+    /// Capture before fresh Controller work/queueing on the actual connection.
+    /// No stage escapes. The outer installation must retain its WHOLE carrier
+    /// and supply its own actual target/file/counter/ten-record/peer guards.
+    pub(in crate::security_epoch) fn capture_current_request(
         &mut self,
-    ) -> Result<EnrolledRoleStage<'_>> {
-        self.owner.begin_current_stage()
+    ) -> Result<CapturedRestoredControllerRequest> {
+        let mut captured = CapturedRestoredControllerRequest {
+            refusal: RestoredCaptureRefusal::new(&self.request_state),
+            predecessor: self.retired.acquisition.as_ref().retained_refusal(),
+            request: None,
+        };
+        {
+            let mut attempt = RestoredControllerRequestAttempt {
+                captured: &mut captured,
+                parent: self,
+                completed: false,
+            };
+            attempt.captured.refusal.gate.capture()?;
+            attempt.captured.request = Some(attempt.parent.retired.owner.begin_current_request()?);
+            attempt.captured.check(attempt.parent)?;
+            attempt.completed = true;
+        }
+        Ok(captured)
     }
 }
 
@@ -1968,7 +2460,7 @@ impl<'role> EnrolledRoleStage<'role> {
             stage: Some(self),
             completed: false,
         };
-        let requested: Result<NativeOriginalRefusal> = (|| {
+        let requested: Result<(NativeOriginalRefusal, Rc<RestoredRequestGate>)> = (|| {
             let stage = attempt
                 .stage
                 .as_mut()
@@ -1984,10 +2476,14 @@ impl<'role> EnrolledRoleStage<'role> {
             }
             #[cfg(target_os = "linux")]
             {
-                stage.acquisition.retire_owned(&mut stage.owner.clock)
+                // Allocate the future negative request gate while the old
+                // guarded original is still live, before its last sample.
+                let request_state = Rc::new(RestoredRequestGate::new());
+                let refusal = stage.acquisition.retire_owned(&mut stage.owner.clock)?;
+                Ok((refusal, request_state))
             }
         })();
-        let refusal = requested?;
+        let (refusal, request_state) = requested?;
         let stage = attempt
             .stage
             .take()
@@ -1995,8 +2491,9 @@ impl<'role> EnrolledRoleStage<'role> {
         // No effect, wait, allocation or callback follows the final actual
         // original sample/retirement before this SAME owning borrow moves.
         let retained = RetainedControllerNative {
-            owner: stage.owner,
+            retired: stage,
             refusal,
+            request_state,
         };
         attempt.completed = true;
         Ok(retained)
@@ -2814,6 +3311,19 @@ const _: () = {
             let _ = <PreparedRestoredAppConfirmation as Ambiguous<_>>::check;
             let _ = <InstalledRestoredAppConfirmation as Ambiguous<_>>::check;
             let _ = <RetainedControllerNative<'static> as Ambiguous<_>>::check;
+            let _ = <RestoredControllerRequestAttempt<'static,'static,'static> as Ambiguous<_>>::check;
+            let _ = <RestoredControllerPeerInputs<'static> as Ambiguous<_>>::check;
+            let _ = <RestoredControllerPeerAttempt<'static, 'static, 'static, 'static, 'static> as Ambiguous<_,>>::check;
+            let _ = <RestoredControllerServingAttempt<
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+            > as Ambiguous<_,>>::check;
             let _ = <ControllerNativeRetirement<'static> as Ambiguous<_>>::check;
             let _ = <RestoredAppPeerContinuity as Ambiguous<_>>::check;
             let _ = <PreparedRestoredAppNative as Ambiguous<_>>::check;
@@ -5120,7 +5630,7 @@ mod restored_app_current_source_tests {
                 "captured.consumer_origin()?",
                 "ensure!(captured.scope_settled,",
                 "Rc::ptr_eq(&captured.history,&attempt.parent.installed.prepared.pending.history)",
-                "RestoredRequestGate::begin(&attempt.parent.request_state,&captured.refusal.gate)?",
+                "RestoredRequestGate::begin_final(&attempt.parent.request_state,&captured.refusal.gate)?",
                 "context.require_origin(",
                 "context.require_affinity(",
                 "context.require_runtime(prepared.pending.runtime.as_ref())?",
@@ -5210,6 +5720,53 @@ mod restored_app_current_source_tests {
                 assert!(drop.contains(context));
             }
         }
+    }
+
+    #[test]
+    fn native_scope_and_request_suppliers_wire_their_distinct_settlement_states() {
+        let scope = body_tokens("CapturedRestoredAppRequest", "begin_current");
+        let final_request = body_tokens("CapturedRestoredAppRequest", "finish");
+        let scope_begin =
+            "RestoredRequestGate::begin(&current.state,&current.captured.refusal.gate)?";
+        let final_begin = "RestoredRequestGate::begin_final(&attempt.parent.request_state,&captured.refusal.gate)?";
+        required_with_deletion_controls(&scope, &[scope_begin]);
+        required_with_deletion_controls(&final_request, &[final_begin]);
+        assert!(!scope.contains("RestoredRequestGate::begin_final"));
+        assert!(!final_request.contains("RestoredRequestGate::begin("));
+        let wrong = final_request.replace(
+            "RestoredRequestGate::begin_final(",
+            "RestoredRequestGate::begin(",
+        );
+        assert_ne!(wrong, final_request);
+        assert!(!wrong.contains(final_begin));
+        let closing = body_tokens("RestoredRequestGate", "begin_final");
+        required_with_deletion_controls(
+            &closing,
+            &[
+                "!Rc::ptr_eq(parent,captured)",
+                "parent.state.get()!=RestoredRequestState::Captured",
+                "parent.refuse()",
+                "captured.refuse()",
+                "parent.state.set(RestoredRequestState::Finalizing)",
+            ],
+        );
+        assert!(!closing.contains("RestoredRequestState::Busy"));
+        let finish = body_tokens("RestoredRequestGate", "finish");
+        required_with_deletion_controls(
+            &finish,
+            &[
+                "self.state.get()!=RestoredRequestState::Finalizing",
+                "self.refuse()",
+                "self.state.set(RestoredRequestState::Vacant)",
+            ],
+        );
+        assert!(!finish.contains("require_busy"));
+        let completed_scope = body_tokens("NativeConsumerCompletion", "complete_native");
+        let completed_request = body_tokens("RestoredAppRequestSettlement", "complete_native");
+        assert!(completed_scope.contains("self.scope.state.finish_scope()?"));
+        assert!(!completed_scope.contains("self.scope.state.finish()?"));
+        assert!(completed_request.contains("self.attempt.parent.request_state.finish()?"));
+        assert!(!completed_request.contains("finish_scope"));
     }
 
     #[test]
@@ -5376,6 +5933,7 @@ mod restored_owned_capture_gate_tests {
         Free,
         Waiting,
         Running,
+        Closing,
         Dead,
     }
 
@@ -5384,6 +5942,7 @@ mod restored_owned_capture_gate_tests {
             RestoredRequestState::Vacant => Expected::Free,
             RestoredRequestState::Captured => Expected::Waiting,
             RestoredRequestState::Busy => Expected::Running,
+            RestoredRequestState::Finalizing => Expected::Closing,
             RestoredRequestState::Refused => Expected::Dead,
         }
     }
@@ -5400,6 +5959,9 @@ mod restored_owned_capture_gate_tests {
         capture.transfer();
         drop(capture);
         assert_eq!(actual(&moved), Expected::Running);
+        moved.finish_scope().unwrap();
+        RestoredRequestGate::begin_final(&moved, &active.gate).unwrap();
+        assert_eq!(actual(&moved), Expected::Closing);
         moved.finish().unwrap();
         active.transfer();
         drop(active);
@@ -5419,7 +5981,7 @@ mod restored_owned_capture_gate_tests {
 
     #[test]
     fn actual_capture_loss_and_constructor_unwind_never_rearm_a_moved_parent() {
-        for after_begin in [false, true] {
+        for entry in 0..3 {
             for unwind in [false, true] {
                 let parent = Rc::new(RestoredRequestGate::new());
                 let capture = RestoredCaptureRefusal::new(&parent);
@@ -5427,8 +5989,11 @@ mod restored_owned_capture_gate_tests {
                 let moved = Box::new(parent);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _actual = capture;
-                    if after_begin {
-                        RestoredRequestGate::begin(&moved, &_actual.gate).unwrap();
+                    match entry {
+                        0 => {}
+                        1 => RestoredRequestGate::begin(&moved, &_actual.gate).unwrap(),
+                        2 => RestoredRequestGate::begin_final(&moved, &_actual.gate).unwrap(),
+                        _ => unreachable!(),
                     }
                     if unwind {
                         panic!("controlled capture construction loss");
@@ -5462,7 +6027,8 @@ mod restored_owned_capture_gate_tests {
             assert_eq!(actual(&parent), Expected::Waiting);
             assert!(captured.armed);
         }
-        RestoredRequestGate::begin(&parent, &captured.gate).unwrap();
+        RestoredRequestGate::begin_final(&parent, &captured.gate).unwrap();
+        assert_eq!(actual(&parent), Expected::Closing);
         parent.finish().unwrap();
         captured.transfer();
         drop(captured);
@@ -5493,6 +6059,155 @@ mod restored_owned_capture_gate_tests {
     }
 
     #[test]
+    fn scope_and_final_completions_cannot_substitute_for_each_other() {
+        for expected in [
+            Expected::Free,
+            Expected::Waiting,
+            Expected::Running,
+            Expected::Closing,
+            Expected::Dead,
+        ] {
+            for final_completion in [false, true] {
+                let parent = Rc::new(RestoredRequestGate::new());
+                match expected {
+                    Expected::Free => {}
+                    Expected::Waiting => parent.capture().unwrap(),
+                    Expected::Running => {
+                        parent.capture().unwrap();
+                        RestoredRequestGate::begin(&parent, &parent).unwrap();
+                    }
+                    Expected::Closing => {
+                        parent.capture().unwrap();
+                        RestoredRequestGate::begin_final(&parent, &parent).unwrap();
+                    }
+                    Expected::Dead => parent.refuse(),
+                }
+                assert_eq!(actual(&parent), expected);
+                let allowed = if final_completion {
+                    expected == Expected::Closing
+                } else {
+                    expected == Expected::Running
+                };
+                let result = if final_completion {
+                    parent.finish()
+                } else {
+                    parent.finish_scope()
+                };
+                assert_eq!(
+                    result.is_ok(),
+                    allowed,
+                    "{expected:?} final={final_completion}"
+                );
+                let after = if !allowed {
+                    Expected::Dead
+                } else if final_completion {
+                    Expected::Free
+                } else {
+                    Expected::Waiting
+                };
+                assert_eq!(actual(&parent), after);
+                if !allowed {
+                    assert!(parent.capture().is_err());
+                    assert!(RestoredRequestGate::begin(&parent, &parent).is_err());
+                    assert!(RestoredRequestGate::begin_final(&parent, &parent).is_err());
+                    assert!(parent.finish_scope().is_err());
+                    assert!(parent.finish().is_err());
+                    assert_eq!(actual(&parent), Expected::Dead);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_entry_refuses_foreign_parent_busy_and_lost_requests_without_regrant() {
+        for final_entry in [false, true] {
+            let parent = Rc::new(RestoredRequestGate::new());
+            let foreign = Rc::new(RestoredRequestGate::new());
+            parent.capture().unwrap();
+            foreign.capture().unwrap();
+            let result = if final_entry {
+                RestoredRequestGate::begin_final(&parent, &foreign)
+            } else {
+                RestoredRequestGate::begin(&parent, &foreign)
+            };
+            assert!(result.is_err());
+            assert_eq!([actual(&parent), actual(&foreign)], [Expected::Dead; 2]);
+        }
+        for final_entry in [false, true] {
+            let parent = Rc::new(RestoredRequestGate::new());
+            parent.capture().unwrap();
+            RestoredRequestGate::begin_final(&parent, &parent).unwrap();
+            let result = if final_entry {
+                RestoredRequestGate::begin_final(&parent, &parent)
+            } else {
+                RestoredRequestGate::begin(&parent, &parent)
+            };
+            assert!(result.is_err());
+            assert_eq!(actual(&parent), Expected::Dead);
+            assert!(parent.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn final_request_and_scope_histories_match_the_independent_lifecycle_table() {
+        // Exhaust every five-step word, including capture/scope/return/final/
+        // release. Only the real negative latch runs: no native completion,
+        // human delivery, clock, file or enrolled owner is fabricated here.
+        #[derive(Clone, Copy)]
+        enum Action {
+            Capture,
+            Borrow,
+            ReturnLoan,
+            BeginFinal,
+            FinishFinal,
+            Lose,
+        }
+        fn expected_step(state: Expected, action: Action) -> (Expected, bool) {
+            match (state, action) {
+                (Expected::Free, Action::Capture) => (Expected::Waiting, true),
+                (Expected::Waiting, Action::Borrow) => (Expected::Running, true),
+                (Expected::Running, Action::ReturnLoan) => (Expected::Waiting, true),
+                (Expected::Waiting, Action::BeginFinal) => (Expected::Closing, true),
+                (Expected::Closing, Action::FinishFinal) => (Expected::Free, true),
+                (_, Action::Lose) => (Expected::Dead, true),
+                _ => (Expected::Dead, false),
+            }
+        }
+        let actions = [
+            Action::Capture,
+            Action::Borrow,
+            Action::ReturnLoan,
+            Action::BeginFinal,
+            Action::FinishFinal,
+            Action::Lose,
+        ];
+        for word in 0..6usize.pow(5) {
+            let parent = Rc::new(RestoredRequestGate::new());
+            let mut expected = Expected::Free;
+            let mut digits = word;
+            for step in 0..5 {
+                let action = actions[digits % 6];
+                digits /= 6;
+                let (after, allowed) = expected_step(expected, action);
+                let result = match action {
+                    Action::Capture => parent.capture(),
+                    Action::Borrow => RestoredRequestGate::begin(&parent, &parent),
+                    Action::ReturnLoan => parent.finish_scope(),
+                    Action::BeginFinal => RestoredRequestGate::begin_final(&parent, &parent),
+                    Action::FinishFinal => parent.finish(),
+                    Action::Lose => {
+                        parent.refuse();
+                        Ok(())
+                    }
+                };
+                assert_eq!(result.is_ok(), allowed, "word {word} step {step}");
+                assert_eq!(actual(&parent), after, "word {word} step {step}");
+                expected = after;
+            }
+        }
+    }
+
+    #[test]
     fn generated_gate_histories_match_an_independent_move_capture_and_refusal_model() {
         for seed in 1u64..=64 {
             let mut random = seed;
@@ -5507,7 +6222,7 @@ mod restored_owned_capture_gate_tests {
                     .wrapping_add(1442695040888963407);
                 let selected = (random as usize >> 4) & 1;
                 let other = selected ^ 1;
-                match (random >> 32) % 7 {
+                match (random >> 32) % 9 {
                     0 => {
                         let ok = expected[selected] == Expected::Free;
                         assert_eq!(gates[selected].capture().is_ok(), ok);
@@ -5536,7 +6251,7 @@ mod restored_owned_capture_gate_tests {
                         expected = [Expected::Dead; 2];
                     }
                     3 => {
-                        let ok = expected[selected] == Expected::Running;
+                        let ok = expected[selected] == Expected::Closing;
                         assert_eq!(gates[selected].finish().is_ok(), ok);
                         expected[selected] = if ok { Expected::Free } else { Expected::Dead };
                     }
@@ -5552,6 +6267,26 @@ mod restored_owned_capture_gate_tests {
                     5 => {
                         let moved = Box::new(gates[selected].clone());
                         gates[selected] = *moved;
+                    }
+                    6 => {
+                        let ok = expected[selected] == Expected::Waiting;
+                        assert_eq!(
+                            RestoredRequestGate::begin_final(&gates[selected], &gates[selected])
+                                .is_ok(),
+                            ok
+                        );
+                        expected[selected] = if ok {
+                            Expected::Closing
+                        } else {
+                            Expected::Dead
+                        };
+                    }
+                    7 => {
+                        assert!(
+                            RestoredRequestGate::begin_final(&gates[selected], &gates[other])
+                                .is_err()
+                        );
+                        expected = [Expected::Dead; 2];
                     }
                     _ => {
                         let loss = RestoredCaptureRefusal::new(&gates[selected]);

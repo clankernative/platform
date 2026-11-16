@@ -1294,6 +1294,7 @@ fn capture_snapshot(
             .db
             .deserialize_read_exact(rusqlite::MAIN_DB, &image[..], image.len(), false)?;
         super::memory_shape(memory.db, Some(image.len()))?;
+        super::require_no_runtime_generation_objects(memory.db)?;
         crate::backup_archive::verify_snapshot(&manifest, &artifact, memory.db)
     })?;
     let inventory = Digest::of(&("day2-native-restore-inventory-v1", &inventory))?;

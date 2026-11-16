@@ -129,6 +129,7 @@ impl MemoryHook<'_> {
         );
         ensure!(!tx.is_autocommit(), "restore_memory_transaction_required");
         memory_shape(tx, None)?;
+        self::require_no_runtime_generation_objects(tx)?;
         Ok(())
     }
 }
@@ -520,6 +521,24 @@ fn image_shape(bytes: &[u8]) -> Result<()> {
     );
     Ok(())
 }
+
+/// The first native restore profile does not admit ordinary RWO executor
+/// generations. Even an empty or inactive unit is outside that profile; never
+/// import it, clear its active slot or backfill captured invocation owners.
+/// Inspect the actual captured/deserialized database, including other schema
+/// objects using a reserved name. This read supplies no restore authority.
+fn require_no_runtime_generation_objects(db: &Connection) -> Result<()> {
+    let present: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema
+         WHERE name COLLATE NOCASE IN
+         ('day2_rollout_generations','day2_rollout_runtime','day2_invocation_runtime'))",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(!present, "native_restore_runtime_generation_unsupported");
+    Ok(())
+}
+
 fn memory_shape(db: &Connection, expected: Option<usize>) -> Result<usize> {
     ensure!(
         db.path().is_none_or(str::is_empty),
@@ -579,6 +598,7 @@ fn prepare_image(
                 // stream; exact source bytes were hashed above, before any SQL admit.
                 db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;
                 memory_shape(db, Some(image.len()))?;
+                self::require_no_runtime_generation_objects(db)?;
                 let page_size: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0))?;
                 db.pragma_update(
                     None,

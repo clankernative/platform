@@ -2381,6 +2381,869 @@ impl DecisionHandoffAttempt<'_, '_, '_, '_> {
     }
 }
 
+/// Both actual historical owners stay armed even before the first readiness
+/// check. This lends no stage and cannot settle or renew a native request.
+struct RestoredControllerIdleAttempt<'borrow> {
+    peer: &'borrow mut RestoredWriterPeer,
+    installed: &'borrow mut InstalledRestoredAppConfirmation,
+    done: bool,
+}
+
+impl Drop for RestoredControllerIdleAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.peer.refuse();
+            self.installed.refuse();
+        }
+    }
+}
+
+/// Negative historical pair identity only. There is deliberately no stage,
+/// native clock, liveness sample or future serving permission in this check.
+fn check_first_current_idle_pair(
+    peer: &RestoredWriterPeer,
+    installed: &InstalledRestoredAppConfirmation,
+) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (peer, installed);
+        anyhow::bail!("native_restore_platform_unsupported");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use anyhow::Context;
+        let state = &peer.receiver.receiver;
+        let retained = &peer.receiver.admission.preparation.same;
+        ensure!(
+            !state.refused.get()
+                && state.phase == Phase::Released
+                && state.role.phase == RoleHandoffPhase::Delivered
+                && state.decision.phase == RoleHandoffPhase::Delivered
+                && !installed.refused
+                && installed.acceptance_phase == PreparedAcceptancePhase::Delivered
+                && state.socket.is_some()
+                && state.current_socket.is_none()
+                && !state.waiting
+                && !state.started
+                && state.outgoing.is_none()
+                && state.delivered.is_none()
+                && state.transcript.complete()
+                && state
+                    .role
+                    .transcript
+                    .as_ref()
+                    .is_some_and(|history| history.complete())
+                && state
+                    .decision
+                    .transcript
+                    .as_ref()
+                    .is_some_and(|history| history.complete()),
+            "restore_current_idle_tail_refused_or_transferred"
+        );
+        ensure!(
+            !retained.refused
+                && !installed.same.refused
+                && std::rc::Weak::ptr_eq(&retained.identity, &installed.same.identity)
+                && retained.incarnation == installed.same.incarnation,
+            "restore_current_idle_controller_changed"
+        );
+        installed
+            .transcript
+            .as_ref()
+            .context("restore_current_idle_cursor_missing")?
+            .require_installed_current_data(Actor::Controller)?;
+        let app = state.app.as_ref().context("restore_receiver_app_missing")?;
+        app.require_controller(
+            state
+                .controller
+                .as_ref()
+                .context("restore_receiver_controller_missing")?,
+        )?;
+        installed.message.verify_restored_app(app)?;
+        let Body::Restore { payload } = &installed.message.body else {
+            anyhow::bail!("restore_current_installed_packet_kind");
+        };
+        let Body::Restore {
+            payload: acceptance,
+        } = &installed
+            .acceptance
+            .as_ref()
+            .context("restore_current_acceptance_missing")?
+            .body
+        else {
+            anyhow::bail!("restore_current_acceptance_packet_kind");
+        };
+        let RestoreBody::AppInstalled {
+            exchange,
+            cohort,
+            app,
+            ..
+        } = payload
+        else {
+            anyhow::bail!("restore_current_installed_packet_kind");
+        };
+        ensure!(
+            *exchange
+                == state
+                    .exchange
+                    .as_ref()
+                    .context("restore_receiver_exchange_missing")?
+                    .digest()?
+                && Some(cohort) == state.keeper_ack.as_ref()
+                && &app.stage.data.process == installed.sender.data(),
+            "restore_current_idle_receiver_changed"
+        );
+        payload.current_connection_binding_data(acceptance)?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn poll_first_current_socket(socket: Option<&File>) -> Result<bool> {
+    use anyhow::Context;
+    let socket = socket.context("restore_current_idle_socket_missing")?;
+    let mut fds = [PollFd::new(socket, PollFlags::IN | PollFlags::RDHUP)];
+    rustix::event::poll(
+        &mut fds,
+        Some(&rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }),
+    )?;
+    let flags = fds[0].revents();
+    ensure!(
+        !flags.intersects(PollFlags::HUP | PollFlags::RDHUP | PollFlags::ERR | PollFlags::NVAL),
+        "storage_peer_idle_channel_closed"
+    );
+    Ok(flags.contains(PollFlags::IN))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod first_current_socket_tests {
+    use super::poll_first_current_socket;
+    use anyhow::Result;
+    use rustix::event::{PollFd, PollFlags};
+    use rustix::net::{self, AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
+    use std::fs::File;
+
+    #[test]
+    fn actual_first_socket_probe_is_nonconsuming_and_terminal_wins_over_buffered_data() -> Result<()>
+    {
+        // Raw socket observations only; no enrolled stage or restored owner.
+        let (left, right) = net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        let left = File::from(left);
+        assert!(!poll_first_current_socket(Some(&left))?);
+        assert_eq!(net::send(&right, b"wakeup", SendFlags::NOSIGNAL)?, 6);
+        assert!(poll_first_current_socket(Some(&left))?);
+        let mut bytes = [0; 6];
+        assert_eq!(net::recv(&left, &mut bytes, RecvFlags::empty())?, (6, 6));
+        assert_eq!(&bytes, b"wakeup");
+        assert!(!poll_first_current_socket(Some(&left))?);
+        net::send(&right, b"buffered", SendFlags::NOSIGNAL)?;
+        drop(right);
+        assert!(poll_first_current_socket(Some(&left)).is_err());
+        assert!(poll_first_current_socket(None).is_err());
+        Ok(())
+    }
+    #[test]
+    fn actual_first_socket_probe_refuses_write_half_close_even_with_queued_data() -> Result<()> {
+        let (left, right) = net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        let left = File::from(left);
+        net::send(&right, b"half", SendFlags::NOSIGNAL)?;
+        net::shutdown(&right, net::Shutdown::Write)?;
+        let mut fds = [PollFd::new(&left, PollFlags::IN | PollFlags::RDHUP)];
+        rustix::event::poll(
+            &mut fds,
+            Some(&rustix::time::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
+        )?;
+        let flags = fds[0].revents();
+        assert!(flags.contains(PollFlags::IN | PollFlags::RDHUP));
+        assert!(!flags.contains(PollFlags::HUP));
+        assert!(poll_first_current_socket(Some(&left)).is_err());
+        let mut bytes = [0; 4];
+        assert_eq!(net::recv(&left, &mut bytes, RecvFlags::empty())?, (4, 4));
+        assert_eq!(&bytes, b"half");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod first_current_idle_source_tests {
+    use quote::ToTokens;
+    use syn::parse::Parser;
+    use syn::visit::Visit;
+
+    #[derive(Default)]
+    struct PairFacts {
+        fields: std::collections::BTreeSet<String>,
+        methods: std::collections::BTreeMap<String, usize>,
+        clauses: Vec<usize>,
+        equalities: usize,
+        negations: usize,
+        forbidden: bool,
+    }
+
+    impl PairFacts {
+        fn merge(&mut self, other: Self) {
+            self.fields.extend(other.fields);
+            for (method, count) in other.methods {
+                *self.methods.entry(method).or_default() += count;
+            }
+            self.clauses.extend(other.clauses);
+            self.equalities += other.equalities;
+            self.negations += other.negations;
+            self.forbidden |= other.forbidden;
+        }
+    }
+
+    fn field_path(expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                Some(path.path.segments[0].ident.to_string())
+            }
+            syn::Expr::Field(field) => Some(format!(
+                "{}.{}",
+                field_path(&field.base)?,
+                printed(&field.member)
+            )),
+            _ => None,
+        }
+    }
+
+    fn argument_path(expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Reference(reference) => field_path(&reference.expr),
+            syn::Expr::Path(path) => Some(
+                path.path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            ),
+            _ => None,
+        }
+    }
+
+    fn and_clauses(expr: &syn::Expr) -> usize {
+        match expr {
+            syn::Expr::Binary(expr) if matches!(expr.op, syn::BinOp::And(_)) => {
+                and_clauses(&expr.left) + and_clauses(&expr.right)
+            }
+            _ => 1,
+        }
+    }
+
+    impl<'ast> Visit<'ast> for PairFacts {
+        fn visit_expr_field(&mut self, expr: &'ast syn::ExprField) {
+            if let Some(path) = field_path(&syn::Expr::Field(expr.clone())) {
+                self.fields.insert(path);
+            }
+            syn::visit::visit_expr_field(self, expr);
+        }
+
+        fn visit_expr_binary(&mut self, expr: &'ast syn::ExprBinary) {
+            match expr.op {
+                syn::BinOp::Eq(_) => self.equalities += 1,
+                syn::BinOp::And(_) => {}
+                _ => self.forbidden = true,
+            }
+            syn::visit::visit_expr_binary(self, expr);
+        }
+
+        fn visit_expr_unary(&mut self, expr: &'ast syn::ExprUnary) {
+            if matches!(expr.op, syn::UnOp::Not(_)) {
+                self.negations += 1;
+            }
+            syn::visit::visit_expr_unary(self, expr);
+        }
+
+        fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
+            let name = printed(&expr.func);
+            let args: Vec<_> = expr.args.iter().map(argument_path).collect();
+            if name == "std :: rc :: Weak :: ptr_eq" {
+                self.forbidden |= args
+                    != [
+                        Some("retained.identity".to_owned()),
+                        Some("installed.same.identity".to_owned()),
+                    ];
+            } else if name == "Some" {
+                self.forbidden |= args != [Some("cohort".to_owned())];
+            } else if name == "Ok" {
+                self.forbidden |= expr.args.len() != 1
+                    || !matches!(&expr.args[0], syn::Expr::Tuple(tuple) if tuple.elems.is_empty());
+            } else {
+                self.forbidden = true;
+            }
+            syn::visit::visit_expr_call(self, expr);
+        }
+
+        fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
+            let method = expr.method.to_string();
+            *self.methods.entry(method.clone()).or_default() += 1;
+            self.forbidden |= ![
+                "get",
+                "is_some",
+                "is_none",
+                "complete",
+                "as_ref",
+                "is_some_and",
+                "context",
+                "require_installed_current_data",
+                "require_controller",
+                "verify_restored_app",
+                "digest",
+                "data",
+                "current_connection_binding_data",
+            ]
+            .contains(&method.as_str());
+            let args: Vec<_> = expr.args.iter().map(argument_path).collect();
+            match method.as_str() {
+                "verify_restored_app" => {
+                    self.forbidden |= field_path(&expr.receiver).as_deref()
+                        != Some("installed.message")
+                        || args != [Some("app".to_owned())]
+                }
+                "current_connection_binding_data" => {
+                    self.forbidden |= field_path(&expr.receiver).as_deref() != Some("payload")
+                        || args != [Some("acceptance".to_owned())]
+                }
+                "require_installed_current_data" => {
+                    self.forbidden |= args != [Some("Actor::Controller".to_owned())]
+                }
+                "require_controller" => {
+                    self.forbidden |= field_path(&expr.receiver).as_deref() != Some("app")
+                }
+                _ => {}
+            }
+            syn::visit::visit_expr_method_call(self, expr);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if mac.path.is_ident("ensure") {
+                match syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                    .parse2(mac.tokens.clone())
+                {
+                    Ok(args) => {
+                        if let Some(condition) = args.first() {
+                            self.clauses.push(and_clauses(condition));
+                        } else {
+                            self.forbidden = true;
+                        }
+                        // Parsed macro arguments are owned here, not borrowed
+                        // for the outer Visit lifetime. Merge owned facts only.
+                        let mut nested = PairFacts::default();
+                        for expr in &args {
+                            nested.visit_expr(expr);
+                        }
+                        self.merge(nested);
+                    }
+                    Err(_) => self.forbidden = true,
+                }
+            } else if printed(&mac.path) != "anyhow :: bail" {
+                self.forbidden = true;
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+
+    fn pair_contract(function: &syn::ItemFn) -> bool {
+        let mut facts = PairFacts::default();
+        facts.visit_item_fn(function);
+        let fields = [
+            "peer.receiver.receiver",
+            "peer.receiver.admission.preparation.same",
+            "state.refused",
+            "state.phase",
+            "state.role.phase",
+            "state.decision.phase",
+            "installed.refused",
+            "installed.acceptance_phase",
+            "state.socket",
+            "state.current_socket",
+            "state.waiting",
+            "state.started",
+            "state.outgoing",
+            "state.delivered",
+            "state.transcript",
+            "state.role.transcript",
+            "state.decision.transcript",
+            "retained.refused",
+            "installed.same.refused",
+            "retained.identity",
+            "installed.same.identity",
+            "retained.incarnation",
+            "installed.same.incarnation",
+            "installed.transcript",
+            "state.app",
+            "state.controller",
+            "installed.message.body",
+            "installed.acceptance",
+            "state.exchange",
+            "state.keeper_ack",
+            "app.stage.data.process",
+            "installed.sender",
+        ];
+        let required = [
+            ("require_installed_current_data", 1),
+            ("require_controller", 1),
+            ("verify_restored_app", 1),
+            ("current_connection_binding_data", 1),
+            ("is_none", 3),
+            ("is_some", 1),
+            ("is_some_and", 2),
+            ("complete", 3),
+            ("data", 1),
+        ];
+        !facts.forbidden
+            && facts.clauses == [15, 4, 3]
+            && facts.equalities == 8
+            && facts.negations == 6
+            && fields.iter().all(|field| facts.fields.contains(*field))
+            && required
+                .iter()
+                .all(|(method, count)| facts.methods.get(*method) == Some(count))
+    }
+
+    fn function(name: &str) -> syn::ItemFn {
+        let mut found = syn::parse_file(include_str!("restore_receiver.rs"))
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            });
+        let result = found.next().unwrap();
+        assert!(found.next().is_none());
+        result
+    }
+
+    fn method(name: &str) -> syn::ImplItemFn {
+        let mut found = syn::parse_file(include_str!("restore_receiver.rs"))
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("InstalledRestoredAppConfirmation")) => Some(item),
+                _ => None,
+            })
+            .flat_map(|item| item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            });
+        let result = found.next().unwrap();
+        assert!(found.next().is_none());
+        result
+    }
+
+    fn local<'a>(statement: &'a syn::Stmt, name: &str) -> Option<&'a syn::Expr> {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        let syn::Pat::Ident(binding) = &local.pat else {
+            return None;
+        };
+        (binding.ident == name).then_some(local.init.as_ref()?.expr.as_ref())
+    }
+
+    fn printed(value: &impl ToTokens) -> String {
+        value.to_token_stream().to_string()
+    }
+
+    fn mask(expr: &syn::Expr) -> Option<Vec<String>> {
+        match expr {
+            syn::Expr::Binary(expr) if matches!(expr.op, syn::BinOp::BitOr(_)) => {
+                let mut result = mask(&expr.left)?;
+                result.extend(mask(&expr.right)?);
+                Some(result)
+            }
+            syn::Expr::Path(path)
+                if path.path.segments.len() == 2 && path.path.segments[0].ident == "PollFlags" =>
+            {
+                Some(vec![path.path.segments[1].ident.to_string()])
+            }
+            _ => None,
+        }
+    }
+
+    fn closed_poll(function: &syn::ItemFn) -> bool {
+        let stmts = &function.block.stmts;
+        if stmts.len() != 7 {
+            return false;
+        }
+        let Some(syn::Expr::Array(fds)) = local(&stmts[2], "fds") else {
+            return false;
+        };
+        if fds.elems.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Call(descriptor) = &fds.elems[0] else {
+            return false;
+        };
+        if printed(&descriptor.func) != "PollFd :: new"
+            || descriptor.args.len() != 2
+            || printed(&descriptor.args[0]) != "socket"
+        {
+            return false;
+        }
+        let Some(mut requested) = mask(&descriptor.args[1]) else {
+            return false;
+        };
+        requested.sort();
+        if requested != ["IN".to_owned(), "RDHUP".to_owned()] {
+            return false;
+        }
+        let syn::Stmt::Expr(syn::Expr::Try(polled), _) = &stmts[3] else {
+            return false;
+        };
+        let syn::Expr::Call(call) = &*polled.expr else {
+            return false;
+        };
+        let expected: syn::Expr = syn::parse_quote!(rustix::event::poll);
+        if printed(&call.func) != printed(&expected) || call.args.len() != 2 {
+            return false;
+        }
+        let borrowed: syn::Expr = syn::parse_quote!(&mut fds);
+        if printed(&call.args[0]) != printed(&borrowed) {
+            return false;
+        }
+        let syn::Expr::Call(timeout) = &call.args[1] else {
+            return false;
+        };
+        if printed(&timeout.func) != "Some" || timeout.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Reference(reference) = &timeout.args[0] else {
+            return false;
+        };
+        let syn::Expr::Struct(timeout) = &*reference.expr else {
+            return false;
+        };
+        if timeout.fields.len() != 2 || timeout.rest.is_some() {
+            return false;
+        }
+        let fields: Vec<_> = timeout
+            .fields
+            .iter()
+            .map(|field| (printed(&field.member), printed(&field.expr)))
+            .collect();
+        if fields
+            != [
+                ("tv_sec".to_owned(), "0".to_owned()),
+                ("tv_nsec".to_owned(), "0".to_owned()),
+            ]
+        {
+            return false;
+        }
+        let mac = match &stmts[5] {
+            syn::Stmt::Macro(mac) => &mac.mac,
+            syn::Stmt::Expr(syn::Expr::Macro(mac), _) => &mac.mac,
+            _ => return false,
+        };
+        if !mac.path.is_ident("ensure") {
+            return false;
+        }
+        let Ok(args) = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+            .parse2(mac.tokens.clone())
+        else {
+            return false;
+        };
+        let Some(syn::Expr::Unary(condition)) = args.first() else {
+            return false;
+        };
+        if !matches!(condition.op, syn::UnOp::Not(_)) {
+            return false;
+        }
+        let syn::Expr::MethodCall(condition) = &*condition.expr else {
+            return false;
+        };
+        if condition.method != "intersects"
+            || printed(&condition.receiver) != "flags"
+            || condition.args.len() != 1
+        {
+            return false;
+        }
+        let Some(mut terminal) = mask(&condition.args[0]) else {
+            return false;
+        };
+        terminal.sort();
+        let expected = vec![
+            "ERR".to_owned(),
+            "HUP".to_owned(),
+            "NVAL".to_owned(),
+            "RDHUP".to_owned(),
+        ];
+        let result = syn::Stmt::Expr(syn::parse_quote!(Ok(flags.contains(PollFlags::IN))), None);
+        terminal == expected && printed(&stmts[6]) == printed(&result)
+    }
+
+    fn envelope(method: &syn::ImplItemFn) -> bool {
+        let stmts = &method.block.stmts;
+        if stmts.len() != 9 {
+            return false;
+        }
+        let Some(syn::Expr::Struct(guard)) = local(&stmts[0], "attempt") else {
+            return false;
+        };
+        if !guard.path.is_ident("RestoredControllerIdleAttempt")
+            || guard.rest.is_some()
+            || guard.fields.len() != 3
+        {
+            return false;
+        }
+        let expected: [(syn::Member, syn::Expr); 3] = [
+            (syn::parse_quote!(peer), syn::parse_quote!(peer)),
+            (syn::parse_quote!(installed), syn::parse_quote!(self)),
+            (syn::parse_quote!(done), syn::parse_quote!(false)),
+        ];
+        if !guard
+            .fields
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, (name, value))| {
+                printed(&actual.member) == printed(name) && printed(&actual.expr) == printed(value)
+            })
+        {
+            return false;
+        }
+        let pre: syn::Stmt =
+            syn::parse_quote!(check_first_current_idle_pair(attempt.peer, attempt.installed)?;);
+        let poll: syn::Expr = syn::parse_quote!(poll_first_current_socket(
+            attempt.peer.receiver.receiver.socket.as_ref()
+        ));
+        let post: syn::Expr = syn::parse_quote!(check_first_current_idle_pair(
+            attempt.peer,
+            attempt.installed
+        ));
+        let ready: syn::Expr = syn::parse_quote!(requested?);
+        let checked: syn::Stmt = syn::parse_quote!(checked?;);
+        let done: syn::Stmt = syn::parse_quote!(attempt.done = true;);
+        let result = syn::Stmt::Expr(syn::parse_quote!(Ok(ready)), None);
+        printed(&stmts[1]) == printed(&pre)
+            && local(&stmts[3], "requested").is_some_and(|actual| printed(actual) == printed(&poll))
+            && local(&stmts[4], "checked").is_some_and(|actual| printed(actual) == printed(&post))
+            && local(&stmts[5], "ready").is_some_and(|actual| printed(actual) == printed(&ready))
+            && printed(&stmts[6]) == printed(&checked)
+            && printed(&stmts[7]) == printed(&done)
+            && printed(&stmts[8]) == printed(&result)
+    }
+
+    #[test]
+    fn actual_first_probe_arms_both_owners_and_runs_post_before_selecting_poll_error() {
+        let actual = method("first_current_pending");
+        assert!(envelope(&actual));
+        let mut no_post = actual.clone();
+        no_post.block.stmts.remove(4);
+        assert!(!envelope(&no_post));
+        let mut conditional_post = actual.clone();
+        conditional_post.block.stmts.swap(4, 5);
+        assert!(!envelope(&conditional_post));
+        let mut early_done = actual.clone();
+        early_done.block.stmts.swap(3, 7);
+        assert!(!envelope(&early_done));
+        let mut foreign = actual.clone();
+        foreign.block.stmts[3] =
+            syn::parse_quote!(let requested = poll_first_current_socket(other.socket.as_ref()););
+        assert!(!envelope(&foreign));
+        let mut overridden = actual.clone();
+        overridden.block.stmts[8] = syn::Stmt::Expr(syn::parse_quote!(Ok(true)), None);
+        assert!(!envelope(&overridden));
+    }
+
+    fn pair_block(function: &mut syn::ItemFn) -> &mut syn::Block {
+        let syn::Stmt::Expr(syn::Expr::Block(block), _) = function.block.stmts.last_mut().unwrap()
+        else {
+            panic!("actual Linux pair block missing");
+        };
+        &mut block.block
+    }
+
+    #[test]
+    fn actual_pair_checks_bind_the_same_owners_cursor_and_packets_without_sampling_old_time() {
+        let actual = function("check_first_current_idle_pair");
+        assert!(pair_contract(&actual));
+        for omitted in [
+            "Weak :: ptr_eq",
+            "require_installed_current_data",
+            "require_controller",
+            "verify_restored_app",
+            "current_connection_binding_data",
+        ] {
+            let mut changed = actual.clone();
+            let block = pair_block(&mut changed);
+            let positions: Vec<_> = block
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, statement)| printed(statement).contains(omitted).then_some(i))
+                .collect();
+            assert_eq!(positions.len(), 1, "{omitted}");
+            block.stmts.remove(positions[0]);
+            assert!(!pair_contract(&changed), "{omitted}");
+        }
+        for (before, after) in [
+            ("installed . same . identity", "retained.identity"),
+            ("installed . same . incarnation", "retained.incarnation"),
+            ("state . keeper_ack . as_ref ()", "Some(cohort)"),
+            ("installed . sender . data ()", "&app.stage.data.process"),
+            ("Actor :: Controller", "Actor::App"),
+        ] {
+            let mut changed = actual.clone();
+            let block = pair_block(&mut changed);
+            let positions: Vec<_> = block
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, statement)| printed(statement).contains(before).then_some(i))
+                .collect();
+            assert_eq!(positions.len(), 1, "{before}");
+            let position = positions[0];
+            let source = printed(&block.stmts[position]);
+            assert_eq!(source.matches(before).count(), 1);
+            block.stmts[position] = syn::parse_str(&source.replacen(before, after, 1)).unwrap();
+            assert!(!pair_contract(&changed), "{before}");
+        }
+        let mut unchecked_exchange = actual.clone();
+        let block = pair_block(&mut unchecked_exchange);
+        let positions: Vec<_> = block
+            .stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, statement)| {
+                printed(statement)
+                    .contains("restore_current_idle_receiver_changed")
+                    .then_some(i)
+            })
+            .collect();
+        assert_eq!(positions.len(), 1);
+        block.stmts[positions[0]] = syn::parse_quote!(ensure!(
+            *exchange == *exchange && Some(cohort) == state.keeper_ack.as_ref()
+                && &app.stage.data.process == installed.sender.data(),
+            "restore_current_idle_receiver_changed"
+        ););
+        assert!(!pair_contract(&unchecked_exchange));
+        for renewed in [
+            "let _ = installed.original.sample()?;",
+            "let _ = installed.original.remaining()?;",
+            "let _ = NativeAcquisition::begin(5)?;",
+        ] {
+            let mut changed = actual.clone();
+            pair_block(&mut changed)
+                .stmts
+                .insert(0, syn::parse_str(renewed).unwrap());
+            assert!(!pair_contract(&changed), "{renewed}");
+        }
+    }
+
+    #[test]
+    fn actual_zero_poll_propagates_errors_without_retry_and_terminal_precedes_readiness() {
+        let actual = function("poll_first_current_socket");
+        assert!(closed_poll(&actual));
+        let mut lost_requested_rdhup = actual.clone();
+        lost_requested_rdhup.block.stmts[2] =
+            syn::parse_quote!(let mut fds = [PollFd::new(socket, PollFlags::IN)];);
+        assert!(!closed_poll(&lost_requested_rdhup));
+        let mut foreign_socket = actual.clone();
+        foreign_socket.block.stmts[2] = syn::parse_quote!(let mut fds = [PollFd::new(other, PollFlags::IN | PollFlags::RDHUP)];);
+        assert!(!closed_poll(&foreign_socket));
+        let mut waited = actual.clone();
+        waited.block.stmts[3] = syn::parse_quote!(rustix::event::poll(&mut fds, Some(&rustix::time::Timespec { tv_sec: 1, tv_nsec: 0 }))?;);
+        assert!(!closed_poll(&waited));
+        let mut swallowed = actual.clone();
+        swallowed.block.stmts[3] = syn::parse_quote!(let _ = rustix::event::poll(&mut fds, Some(&rustix::time::Timespec { tv_sec: 0, tv_nsec: 0 })););
+        assert!(!closed_poll(&swallowed));
+        let mut lost_hup = actual.clone();
+        lost_hup.block.stmts[5] = syn::parse_quote!(ensure!(!flags.intersects(PollFlags::ERR | PollFlags::NVAL), "storage_peer_idle_channel_closed"););
+        assert!(!closed_poll(&lost_hup));
+        let mut consumed = actual.clone();
+        consumed
+            .block
+            .stmts
+            .insert(3, syn::parse_quote!(consume_packet(socket)?;));
+        assert!(!closed_poll(&consumed));
+    }
+
+    #[test]
+    fn actual_idle_drop_refuses_both_borrows_on_every_incomplete_exit() {
+        let file = syn::parse_file(include_str!("restore_receiver.rs")).unwrap();
+        let mut bodies = file.items.into_iter().filter_map(|item| {
+            let syn::Item::Impl(item) = item else {
+                return None;
+            };
+            let syn::Type::Path(owner) = &*item.self_ty else {
+                return None;
+            };
+            if owner.path.segments.last()?.ident != "RestoredControllerIdleAttempt" {
+                return None;
+            }
+            item.items.into_iter().find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == "drop" => Some(item.block),
+                _ => None,
+            })
+        });
+        let actual = bodies.next().unwrap();
+        assert!(bodies.next().is_none());
+        let expected: syn::Block = syn::parse_quote!({
+            if !self.done {
+                self.peer.refuse();
+                self.installed.refuse();
+            }
+        });
+        assert_eq!(printed(&actual), printed(&expected));
+        for missing in [0, 1] {
+            let mut changed = expected.clone();
+            let syn::Stmt::Expr(syn::Expr::If(branch), _) = &mut changed.stmts[0] else {
+                unreachable!();
+            };
+            branch.then_branch.stmts.remove(missing);
+            assert_ne!(printed(&actual), printed(&changed));
+        }
+    }
+}
+
+impl InstalledRestoredAppConfirmation {
+    /// Untrusted readiness DATA on the actual first installed socket. Capture
+    /// the new request only AFTER this returns true; preparation must then
+    /// establish all native authority under that genuine new saved original.
+    pub(in crate::security_epoch) fn first_current_pending(
+        &mut self,
+        peer: &mut RestoredWriterPeer,
+    ) -> Result<bool> {
+        let mut attempt = RestoredControllerIdleAttempt {
+            peer,
+            installed: self,
+            done: false,
+        };
+        check_first_current_idle_pair(attempt.peer, attempt.installed)?;
+        #[cfg(not(target_os = "linux"))]
+        let requested: Result<bool> = Err(anyhow::anyhow!("native_restore_platform_unsupported"));
+        #[cfg(target_os = "linux")]
+        let requested = poll_first_current_socket(attempt.peer.receiver.receiver.socket.as_ref());
+        // The same negative pair post runs even after a poll error. Neither
+        // readiness nor a post can replace the original poll failure.
+        let checked = check_first_current_idle_pair(attempt.peer, attempt.installed);
+        let ready = requested?;
+        checked?;
+        attempt.done = true;
+        Ok(ready)
+    }
+}
+
 impl RestoredWriterPeer {
     /// Spend the actual Installed socket and final cursor once. Both native
     /// historical owners remain borrowed for every later fresh Current phase.
@@ -2492,6 +3355,55 @@ impl RestoredWriterPeer {
 }
 
 impl InstalledRestoredAppConfirmation {
+    /// Only the same checked Current phase calls this fixed historical DATA
+    /// derivation. Never call an old peer/pending check or sample its clock.
+    pub(in crate::security_epoch::native_enrollment) fn current_reader_data(
+        &mut self,
+        peer: &mut RestoredWriterPeer,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+    ) -> Result<crate::security_epoch::firestore::RestoreWriterPeerRead> {
+        let requested = (|| {
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (&mut *peer, selected);
+                anyhow::bail!("native_restore_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                use anyhow::Context;
+                let state = &peer.receiver.receiver;
+                ensure!(
+                    !self.refused
+                        && !state.refused.get()
+                        && state.socket.is_none()
+                        && self.transcript.is_none(),
+                    "restore_controller_reader_tail_not_transferred"
+                );
+                let app = state.app.as_ref().context("restore_receiver_app_missing")?;
+                self.message.verify_restored_app(app)?;
+                let projection = state
+                    .projection
+                    .as_ref()
+                    .context("restore_receiver_projection_missing")?;
+                let activation = state
+                    .activation
+                    .as_ref()
+                    .context("restore_receiver_activation_missing")?;
+                crate::security_epoch::firestore::RestoreWriterPeerRead::new(
+                    selected,
+                    projection,
+                    activation,
+                    &app.holder_data()?,
+                )
+            }
+        })();
+        if requested.is_err() {
+            self.refuse();
+            peer.refuse();
+        }
+        requested
+    }
+
     /// Negative provenance of the actual moved socket/gate and exact old
     /// packet pair. This samples no old clock and creates no current grant.
     pub(in crate::security_epoch::native_enrollment) fn check_current_source(

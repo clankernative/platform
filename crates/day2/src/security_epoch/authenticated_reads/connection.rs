@@ -6,7 +6,7 @@ use super::{AuthenticatedReads, ReadScope};
 use crate::security_epoch::{
     credential_material::CounterMaterial,
     firestore::{self, Budget, EpochObservation, EpochReply, Names, Port, Sample},
-    native_clock::NativeAcquisition,
+    native_clock::{NativeAcquisition, NativeOriginalRefusal},
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
     transport::{NativeHttp, Route},
 };
@@ -48,6 +48,136 @@ pub(in crate::security_epoch) struct CounterRequest<'connection> {
     request: CounterUseGuard,
 }
 
+/// Negative continuation of the ACTUAL finished restored read. It owns the
+/// same before-I/O acquisition and observation, never a Connection borrow,
+/// copied deadline or replacement read. Only finish_restored constructs it.
+/// There is no Current, credential, transport, stage or snapshot getter.
+pub(in crate::security_epoch) struct CompletedRestoredCounterRead {
+    request: CounterUseGuard,
+    observation: RestoredEpochObservation,
+    selection: Digest,
+    reader: Digest,
+    original: NativeOriginalRefusal,
+    state: CompletedReadState,
+}
+
+#[derive(PartialEq, Eq)]
+enum CompletedReadState {
+    PendingFinal,
+    Checking,
+    FinalChecked,
+    Released,
+    Refused,
+}
+
+impl CompletedReadState {
+    fn refuse(&mut self) {
+        *self = Self::Refused;
+    }
+
+    fn begin_final(&mut self) -> Result<()> {
+        if *self != Self::PendingFinal {
+            self.refuse();
+            anyhow::bail!("epoch_completed_counter_final_spent");
+        }
+        *self = Self::Checking;
+        Ok(())
+    }
+
+    fn finish_final(&mut self) -> Result<()> {
+        if *self != Self::Checking {
+            self.refuse();
+            anyhow::bail!("epoch_completed_counter_final_refused");
+        }
+        *self = Self::FinalChecked;
+        Ok(())
+    }
+
+    fn require_release(&mut self) -> Result<()> {
+        if *self != Self::FinalChecked {
+            self.refuse();
+            anyhow::bail!("epoch_completed_counter_final_required");
+        }
+        Ok(())
+    }
+
+    fn release(&mut self) -> Result<()> {
+        self.require_release()?;
+        *self = Self::Released;
+        Ok(())
+    }
+}
+
+impl CompletedRestoredCounterRead {
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.state.refuse();
+        self.request.refuse();
+        self.observation.refuse();
+    }
+
+    fn remaining_original(&mut self) -> Result<()> {
+        let result = self.observation.remaining_completed_original(
+            &self.selection,
+            &self.reader,
+            &mut self.request.acquisition,
+        );
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+}
+
+impl Drop for CompletedRestoredCounterRead {
+    fn drop(&mut self) {
+        if self.state != CompletedReadState::Released {
+            self.refuse();
+        }
+    }
+}
+
+struct CompletedCounterCheck<'slot, 'tail, 'stage, 'role> {
+    slot: &'slot mut CounterConnectionSlot,
+    tail: &'tail mut CompletedRestoredCounterRead,
+    stage: &'stage mut EnrolledRoleStage<'role>,
+    done: bool,
+}
+
+impl Drop for CompletedCounterCheck<'_, '_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.stage.refuse_serving();
+            self.tail.refuse();
+            self.slot.refuse();
+        }
+    }
+}
+
+// Comparison/refusal of actual connection roots only. This pure leaf supplies
+// no slot, native request or completion tail and has no public constructor.
+fn require_completed_connection(
+    completed: bool,
+    retained: &Rc<Cell<bool>>,
+    actual: &Rc<Cell<bool>>,
+    expected_selection: &Digest,
+    actual_selection: &Digest,
+) -> Result<()> {
+    let matches = completed
+        && retained.get()
+        && actual.get()
+        && Rc::ptr_eq(retained, actual)
+        && expected_selection == actual_selection;
+    if !matches {
+        retained.set(false);
+        actual.set(false);
+    }
+    ensure!(
+        matches,
+        "epoch_completed_counter_connection_changed_or_refused"
+    );
+    Ok(())
+}
+
 /// A restored ten-record observation retains the actual request's BEFORE-IO
 /// budget. Its commitment is comparison DATA; neither parsed bytes nor that
 /// digest can construct a Current, native role, physical owner or new clock.
@@ -67,6 +197,23 @@ impl RestoredEpochObservation {
 
     pub(in crate::security_epoch) fn snapshot_data(&self) -> &Digest {
         &self.snapshot
+    }
+
+    fn remaining_completed_original(
+        &mut self,
+        selection: &Digest,
+        reader: &Digest,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result: Result<()> = (|| {
+            self.require_binding(selection, reader)?;
+            self.budget.remaining_native(original)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
     }
 
     fn remaining(
@@ -261,8 +408,137 @@ impl CounterConnectionSlot {
         }
     }
 
+    /// Fixed restored Controller entry. Only the actual never-attempted slot
+    /// may authenticate; every warm request borrows its same admitted owner.
+    /// Refused or uncertain admission is terminal, never another cold attempt.
+    pub(in crate::security_epoch) fn restored_controller_request<'connection>(
+        &'connection mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<CounterRequest<'connection>> {
+        if matches!(&self.state, CounterConnectionState::Vacant) {
+            self.admit(stage, policy, store, NativeRole::EpochController)?;
+        }
+        self.request(stage, policy, store, NativeRole::EpochController)
+    }
+
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.state = CounterConnectionState::Refused;
+    }
+
+    /// Final read-only post AFTER native peer return, without re-opening a
+    /// counter request or replacing its old observation. This returns no grant.
+    pub(in crate::security_epoch) fn check_completed_restored(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        tail: &mut CompletedRestoredCounterRead,
+    ) -> Result<()> {
+        let mut attempt = CompletedCounterCheck {
+            slot: self,
+            tail,
+            stage,
+            done: false,
+        };
+        let requested: Result<()> = (|| {
+            attempt.tail.state.begin_final()?;
+            attempt
+                .slot
+                .completed_current(attempt.stage, attempt.tail)?;
+            attempt.tail.remaining_original()
+        })();
+        // Both posts execute even after a binding/budget/native failure. A
+        // fresh sample cannot repair the old observation's high-water/expiry.
+        let checked = attempt.slot.completed_current(attempt.stage, attempt.tail);
+        let budget_post = attempt.tail.remaining_original();
+        requested?;
+        checked?;
+        budget_post?;
+        attempt.tail.state.finish_final()?;
+        attempt.done = true;
+        Ok(())
+    }
+
+    /// Consume the negative duty only AFTER the sole genuine lexical driver
+    /// has received actual native completion for this same snapshot. This is
+    /// pure identity/refusal validation: no clock, I/O, reauthentication, slot
+    /// promotion or permission is produced. Source controls at that driver
+    /// must bind this consuming call after the actual native Result succeeds.
+    pub(in crate::security_epoch) fn release_completed_restored(
+        &mut self,
+        mut tail: CompletedRestoredCounterRead,
+        snapshot: &Digest,
+    ) -> Result<()> {
+        let requested: Result<()> = (|| {
+            tail.state.require_release()?;
+            let CounterConnectionState::Admitted(connection) = &self.state else {
+                anyhow::bail!("epoch_completed_counter_slot_refused");
+            };
+            require_completed_connection(
+                tail.request.completed,
+                &tail.request.valid,
+                &connection.valid,
+                &tail.selection,
+                &connection.selection,
+            )?;
+            tail.original
+                .require_same(&tail.request.acquisition.retained_refusal())?;
+            ensure!(
+                connection.purpose == NativeRole::EpochController
+                    && tail.observation.snapshot == *snapshot,
+                "epoch_completed_counter_snapshot_changed"
+            );
+            tail.observation
+                .require_binding(&tail.selection, &tail.reader)?;
+            tail.state.release()?;
+            Ok(())
+        })();
+        if requested.is_err() {
+            tail.refuse();
+            self.refuse();
+        }
+        requested
+    }
+
+    fn completed_current(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        tail: &mut CompletedRestoredCounterRead,
+    ) -> Result<()> {
+        let CounterConnectionState::Admitted(connection) = &mut self.state else {
+            anyhow::bail!("epoch_completed_counter_slot_refused");
+        };
+        require_completed_connection(
+            tail.request.completed,
+            &tail.request.valid,
+            &connection.valid,
+            &tail.selection,
+            &connection.selection,
+        )?;
+        ensure!(
+            connection.purpose == NativeRole::EpochController
+                && connection.selection == Digest::of(&connection.store)?,
+            "epoch_completed_counter_selection_changed"
+        );
+        tail.original
+            .require_same(&tail.request.acquisition.retained_refusal())?;
+        connection.owner.check(stage)?;
+        stage.check_current_selection(&connection.policy, &connection.store, connection.purpose)?;
+        // Bind to the SAME actual saved original before using the retained
+        // credential ceiling, then meet its shorter bound back into that stage.
+        connection
+            .owner
+            .meet_current_read_view(stage, &mut tail.request.acquisition)?;
+        connection.credential.check(
+            &mut tail.request.acquisition,
+            connection.store.max_lease_seconds,
+        )?;
+        connection
+            .owner
+            .meet_current_read_view(stage, &mut tail.request.acquisition)?;
+        connection.owner.check(stage)?;
+        tail.request.acquisition.remaining()?;
+        Ok(())
     }
 }
 
@@ -477,6 +753,44 @@ impl CounterRequest<'_> {
         Ok(())
     }
 
+    /// End the real counter borrow BEFORE peer release while retaining its
+    /// actual original and OLD ten-record budget for the later final post.
+    /// Moving the whole guard avoids a self-reference to the admitted slot.
+    pub(in crate::security_epoch) fn finish_restored(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        names: &firestore::RestoreWriterPeerRead,
+        mut observation: RestoredEpochObservation,
+    ) -> Result<CompletedRestoredCounterRead> {
+        let requested: Result<(Digest, Digest, NativeOriginalRefusal)> = (|| {
+            ensure!(
+                self.connection.purpose == NativeRole::EpochController,
+                "epoch_completed_counter_controller_required"
+            );
+            self.check_restored_observation(stage, names, &mut observation)?;
+            let selection = self.connection.selection.clone();
+            let reader = names.binding_data()?;
+            let original = self.request.acquisition.retained_refusal();
+            self.finish(stage)?;
+            Ok((selection, reader, original))
+        })();
+        if requested.is_err() {
+            observation.refuse();
+            self.refuse();
+        }
+        let (selection, reader, original) = requested?;
+        // No fallible operation, clock, I/O or callback after finish and before
+        // moving this exact guard; no scalar reconstructs its acquisition.
+        Ok(CompletedRestoredCounterRead {
+            request: self.request,
+            observation,
+            selection,
+            reader,
+            original,
+            state: CompletedReadState::PendingFinal,
+        })
+    }
+
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.request.refuse();
     }
@@ -590,6 +904,8 @@ const _: () = {
     local_owner!(CounterRequest<'static>);
     local_owner!(CounterUseGuard);
     local_owner!(RestoredEpochObservation);
+    local_owner!(CompletedRestoredCounterRead);
+    local_owner!(CompletedCounterCheck<'static, 'static, 'static, 'static>);
 };
 
 impl Port for CounterReadPort<'_, '_, '_, '_> {
@@ -762,6 +1078,667 @@ mod tests {
                     .is_ok();
                 assert_eq!(actual, expected, "seed={seed}, step={step}, event={event}");
             }
+        }
+    }
+
+    #[test]
+    fn completed_connection_comparison_twice_replays_independent_negative_root_histories() {
+        // Pure comparison/latch leaf only. No admitted connection, genuine
+        // completion tail, enrolled role, physical owner or Current exists.
+        for seed in 0..32_u64 {
+            let mut replays = Vec::new();
+            for _ in 0..2 {
+                let roots = [Rc::new(Cell::new(true)), Rc::new(Cell::new(true))];
+                let selection = Digest::new(b"actual-completed-selection");
+                let mut model = [true, true];
+                let mut trace = Vec::new();
+                for step in 0..12_u64 {
+                    let event = (seed.wrapping_mul(5) + step.wrapping_mul(11)) % 7;
+                    let selected = usize::from(event == 2);
+                    let completed = event != 0;
+                    let selected_digest = if event == 1 {
+                        Digest::new(b"foreign-selection")
+                    } else {
+                        selection.clone()
+                    };
+                    if event == 3 {
+                        roots[0].set(false);
+                        model[0] = false;
+                    }
+                    if event == 4 {
+                        roots[selected].set(false);
+                        model[selected] = false;
+                    }
+                    let expected =
+                        completed && model[0] && model[selected] && selected == 0 && event != 1;
+                    if !expected {
+                        model[0] = false;
+                        model[selected] = false;
+                    }
+                    let actual = super::require_completed_connection(
+                        completed,
+                        &roots[0],
+                        &roots[selected],
+                        &selection,
+                        &selected_digest,
+                    )
+                    .is_ok();
+                    assert_eq!(actual, expected, "seed={seed}, step={step}, event={event}");
+                    assert_eq!([roots[0].get(), roots[1].get()], model);
+                    trace.push((actual, [roots[0].get(), roots[1].get()]));
+                }
+                replays.push(trace);
+            }
+            assert_eq!(replays[0], replays[1]);
+        }
+    }
+
+    #[test]
+    fn completed_observation_retains_its_old_budget_despite_replacement_clock_attempts() {
+        // Real lower native-clock/Budget adapters, not a completed owner or
+        // stage. Fresh fixture clocks deliberately cannot renew the OLD read.
+        for seed in 0..32_u64 {
+            let mut replays = Vec::new();
+            for _ in 0..2 {
+                let (mut observed, _) = observation_clock_fixture();
+                let selected = Digest::new(b"selected-store");
+                let reader = Digest::new(b"complete-restored-reader");
+                let mut valid = true;
+                let mut latest = 10_u64;
+                let mut trace = Vec::new();
+                for step in 0..12_u64 {
+                    let event = (seed.wrapping_mul(7) + step.wrapping_mul(11)) % 9;
+                    let now = match event {
+                        0 => 9,
+                        1 => 15,
+                        2 => 16,
+                        _ => 10 + step % 5,
+                    };
+                    let selection = if event == 3 {
+                        Digest::new(b"foreign-store")
+                    } else {
+                        selected.clone()
+                    };
+                    let names = if event == 4 {
+                        Digest::new(b"foreign-reader")
+                    } else {
+                        reader.clone()
+                    };
+                    let domain = if event == 5 {
+                        Digest::new(b"foreign-original")
+                    } else {
+                        Digest::new(b"actual-lower-original")
+                    };
+                    // A new test clock would otherwise have its own five
+                    // seconds from now. Only the retained observation's old
+                    // domain/high-water/15s deadline is the model's oracle.
+                    let mut clock = NativeAcquisition::fixture(
+                        domain,
+                        std::process::id(),
+                        Duration::from_secs(now),
+                        Duration::from_secs(5),
+                    );
+                    if event == 6 {
+                        clock.refuse();
+                    }
+                    let expected = valid
+                        && event != 3
+                        && event != 4
+                        && event != 5
+                        && event != 6
+                        && now >= latest
+                        && now < 15;
+                    if expected {
+                        latest = now;
+                    } else {
+                        valid = false;
+                    }
+                    let actual = observed
+                        .remaining_completed_original(&selection, &names, &mut clock)
+                        .is_ok();
+                    assert_eq!(actual, expected, "seed={seed}, step={step}, event={event}");
+                    trace.push(actual);
+                }
+                replays.push(trace);
+            }
+            assert_eq!(replays[0], replays[1]);
+        }
+    }
+
+    #[test]
+    fn completed_read_lifecycle_twice_replays_an_independent_one_way_model() {
+        use super::CompletedReadState as State;
+        for seed in 0..32_u64 {
+            let mut replays = Vec::new();
+            for _ in 0..2 {
+                let mut state = State::PendingFinal;
+                let mut model = 0_u8; // pending, checking, checked, released, refused
+                let mut trace = Vec::new();
+                for step in 0..12_u64 {
+                    let action = if seed % 2 == 0 && step < 3 {
+                        step
+                    } else {
+                        (seed * 3 + step * 7) % 5
+                    };
+                    let expected = match action {
+                        0 if model == 0 => {
+                            model = 1;
+                            true
+                        }
+                        1 if model == 1 => {
+                            model = 2;
+                            true
+                        }
+                        2 if model == 2 => {
+                            model = 3;
+                            true
+                        }
+                        3 if model == 2 => true,
+                        4 => {
+                            model = 4;
+                            true
+                        }
+                        _ => {
+                            model = 4;
+                            false
+                        }
+                    };
+                    let actual = match action {
+                        0 => state.begin_final().is_ok(),
+                        1 => state.finish_final().is_ok(),
+                        2 => state.release().is_ok(),
+                        3 => state.require_release().is_ok(),
+                        _ => {
+                            state.refuse();
+                            true
+                        }
+                    };
+                    assert_eq!(
+                        actual, expected,
+                        "seed={seed}, step={step}, action={action}"
+                    );
+                    let observed = match state {
+                        State::PendingFinal => 0,
+                        State::Checking => 1,
+                        State::FinalChecked => 2,
+                        State::Released => 3,
+                        State::Refused => 4,
+                    };
+                    assert_eq!(observed, model);
+                    trace.push((actual, observed));
+                }
+                replays.push(trace);
+            }
+            assert_eq!(replays[0], replays[1]);
+        }
+    }
+
+    // Finite source comparison for these closed bodies, not a macro resolver.
+    // Preserve tuple grouping/commas; ignore only formatter-optional commas in
+    // call/macro/struct lists and punctuation's token-string spacing.
+    fn completed_tokens(stream: proc_macro2::TokenStream) -> String {
+        fn normalize_punctuation(tokens: Vec<proc_macro2::TokenTree>) -> proc_macro2::TokenStream {
+            use proc_macro2::{Punct, Spacing, TokenTree};
+            // Preserve actual compound operators. Only an operator's boundary
+            // spacing may differ between source macro tokens and typed syn:
+            // `==&value` is `==` then `&`, but `&&` is NEVER two references.
+            const OPERATORS: &[&str] = &[
+                "<<=", ">>=", "...", "..=", "::", "->", "=>", "==", "!=", ">=", "<=", "&&", "||",
+                "<<", ">>", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "..",
+            ];
+            let mut output = Vec::new();
+            let mut index = 0;
+            while index < tokens.len() {
+                let TokenTree::Punct(first) = &tokens[index] else {
+                    output.push(tokens[index].clone());
+                    index += 1;
+                    continue;
+                };
+                let mut end = index + 1;
+                let mut previous = first;
+                while previous.spacing() == Spacing::Joint {
+                    let Some(TokenTree::Punct(next)) = tokens.get(end) else {
+                        break;
+                    };
+                    previous = next;
+                    end += 1;
+                }
+                let mut at = index;
+                while at < end {
+                    let available: String = tokens[at..end]
+                        .iter()
+                        .map(|token| {
+                            let TokenTree::Punct(p) = token else {
+                                unreachable!();
+                            };
+                            p.as_char()
+                        })
+                        .collect();
+                    let length = OPERATORS
+                        .iter()
+                        .find(|op| available.starts_with(**op))
+                        .map_or(1, |op| op.len());
+                    for offset in 0..length {
+                        let TokenTree::Punct(p) = &tokens[at + offset] else {
+                            unreachable!();
+                        };
+                        let spacing = if offset + 1 < length {
+                            Spacing::Joint
+                        } else if at + offset + 1 == end {
+                            p.spacing()
+                        } else {
+                            Spacing::Alone
+                        };
+                        output.push(TokenTree::Punct(Punct::new(p.as_char(), spacing)));
+                    }
+                    at += length;
+                }
+                index = end;
+            }
+            output.into_iter().collect()
+        }
+        fn normalize(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+            use proc_macro2::{Delimiter, Group, TokenTree};
+            let mut output = Vec::new();
+            for token in stream {
+                match token {
+                    TokenTree::Group(group) => {
+                        let optional = matches!(output.last(),Some(TokenTree::Ident(name))
+                            if !["let","return","if","else","while","for","match"].contains(&name.to_string().as_str()))
+                            || matches!(output.last(),Some(TokenTree::Punct(p)) if matches!(p.as_char(),'!'|'>'));
+                        let mut inner: Vec<_> = normalize(group.stream()).into_iter().collect();
+                        if optional
+                            && matches!(
+                                group.delimiter(),
+                                Delimiter::Parenthesis | Delimiter::Brace
+                            )
+                            && matches!(inner.last(),Some(TokenTree::Punct(p)) if p.as_char()==',')
+                        {
+                            inner.pop();
+                        }
+                        output.push(TokenTree::Group(Group::new(
+                            group.delimiter(),
+                            inner.into_iter().collect(),
+                        )));
+                    }
+                    other => output.push(other),
+                }
+            }
+            normalize_punctuation(output)
+        }
+        normalize(stream).to_string()
+    }
+
+    fn completed_body(owner: &str, name: &str) -> syn::Block {
+        let file = syn::parse_file(include_str!("connection.rs")).unwrap();
+        let mut bodies=file.items.into_iter().filter_map(|item| {
+            let syn::Item::Impl(item)=item else {return None;};
+            if !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.len()==1 && path.path.segments[0].ident==owner) {return None;}
+            item.items.into_iter().find_map(|item|match item {
+                syn::ImplItem::Fn(method) if method.sig.ident==name=>Some(method.block),_=>None,
+            })
+        });
+        let result = bodies.next().expect("actual unique closed method");
+        assert!(bodies.next().is_none());
+        result
+    }
+
+    fn same_completed_body(actual: &syn::Block, expected: &str) -> bool {
+        use quote::ToTokens as _;
+        let expected: syn::Block = syn::parse_str(expected).unwrap();
+        completed_tokens(actual.to_token_stream()) == completed_tokens(expected.to_token_stream())
+    }
+
+    #[test]
+    fn completed_body_comparison_keeps_tuple_arguments_and_arity() {
+        let normal = |s: &str| completed_tokens(s.parse().unwrap());
+        assert_eq!(normal("call(stage,)"), normal("call(stage)"));
+        assert_ne!(normal("(stage,)"), normal("(stage)"));
+        assert_ne!(normal("let (stage,)=value;"), normal("let (stage)=value;"));
+        assert_ne!(normal("return (stage,);"), normal("return (stage);"));
+        assert_ne!(normal("call(stage,reader)"), normal("call((stage,reader))"));
+        assert_ne!(normal("call(actual)"), normal("call(foreign)"));
+        assert_ne!(normal("a && b"), normal("a & &b"));
+        assert_ne!(normal("a || b"), normal("a | |x| b"));
+        assert_eq!(
+            normal("ensure!(actual==&value)"),
+            normal("ensure!(actual == &value)")
+        );
+    }
+
+    #[test]
+    fn restored_counter_factory_authenticates_only_the_real_never_attempted_slot() {
+        let actual = completed_body("CounterConnectionSlot", "restored_controller_request");
+        let expected = r#"{
+            if matches!(&self.state,CounterConnectionState::Vacant) {
+                self.admit(stage,policy,store,NativeRole::EpochController)?;
+            }
+            self.request(stage,policy,store,NativeRole::EpochController)
+        }"#;
+        assert!(same_completed_body(&actual, expected));
+        use quote::ToTokens as _;
+        let rendered = actual.to_token_stream().to_string();
+        for (from, to) in [
+            (
+                "CounterConnectionState :: Vacant",
+                "CounterConnectionState::Refused",
+            ),
+            (
+                "self . admit (stage , policy , store , NativeRole :: EpochController)",
+                "unrelated()",
+            ),
+            (
+                "self . request (stage , policy , store , NativeRole :: EpochController)",
+                "Ok(forged)",
+            ),
+        ] {
+            assert_eq!(rendered.matches(from).count(), 1);
+            let changed: syn::Block = syn::parse_str(&rendered.replacen(from, to, 1)).unwrap();
+            assert!(
+                !same_completed_body(&changed, expected),
+                "fixed cold/warm cut {from}"
+            );
+        }
+        let changed: syn::Block = syn::parse_quote!({
+            if !matches!(&self.state, CounterConnectionState::Admitted(_)) {
+                self.admit(stage, policy, store, NativeRole::EpochController)?;
+            }
+            self.request(stage, policy, store, NativeRole::EpochController)
+        });
+        assert!(
+            !same_completed_body(&changed, expected),
+            "no failed-admission fallback"
+        );
+    }
+
+    #[test]
+    fn actual_restored_finish_moves_the_same_guard_and_old_observation_without_a_new_clock() {
+        let actual = completed_body("CounterRequest", "finish_restored");
+        let expected = r#"{
+            let requested:Result<(Digest,Digest,NativeOriginalRefusal)>=(|| {
+                ensure!(self.connection.purpose==NativeRole::EpochController,"epoch_completed_counter_controller_required");
+                self.check_restored_observation(stage,names,&mut observation)?;
+                let selection=self.connection.selection.clone();
+                let reader=names.binding_data()?;
+                let original=self.request.acquisition.retained_refusal();
+                self.finish(stage)?;
+                Ok((selection,reader,original))
+            })();
+            if requested.is_err() {observation.refuse();self.refuse();}
+            let (selection,reader,original)=requested?;
+            Ok(CompletedRestoredCounterRead {request:self.request,observation,selection,reader,original,state:CompletedReadState::PendingFinal})
+        }"#;
+        assert!(same_completed_body(&actual, expected));
+        use quote::ToTokens as _;
+        let rendered = actual.to_token_stream().to_string();
+        for (from, to) in [
+            (
+                "self . check_restored_observation (stage , names , & mut observation)",
+                "self.check(stage)",
+            ),
+            ("self . finish (stage)", "unrelated()"),
+            ("request : self . request", "request:forged"),
+            (
+                "CompletedReadState :: PendingFinal",
+                "CompletedReadState::Released",
+            ),
+            ("observation . refuse () ; self . refuse ()", "unrelated()"),
+        ] {
+            assert_eq!(rendered.matches(from).count(), 1);
+            let changed: syn::Block = syn::parse_str(&rendered.replacen(from, to, 1)).unwrap();
+            assert!(
+                !same_completed_body(&changed, expected),
+                "closed finish cut {from}"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_completed_post_arms_before_work_keeps_both_independent_posts_and_error_priority() {
+        let actual = completed_body("CounterConnectionSlot", "check_completed_restored");
+        let expected = r#"{
+            let mut attempt=CompletedCounterCheck {slot:self,tail,stage,done:false};
+            let requested:Result<()>=(|| {
+                attempt.tail.state.begin_final()?;
+                attempt.slot.completed_current(attempt.stage,attempt.tail)?;
+                attempt.tail.remaining_original()
+            })();
+            let checked=attempt.slot.completed_current(attempt.stage,attempt.tail);
+            let budget_post=attempt.tail.remaining_original();
+            requested?;
+            checked?;
+            budget_post?;
+            attempt.tail.state.finish_final()?;
+            attempt.done=true;
+            Ok(())
+        }"#;
+        assert!(same_completed_body(&actual, expected));
+        for cut in 0..actual.stmts.len() - 1 {
+            let mut omitted = actual.clone();
+            omitted.stmts.remove(cut);
+            assert!(!same_completed_body(&omitted, expected), "post cut {cut}");
+        }
+        let mut conditional = actual.clone();
+        conditional.stmts[2] = syn::parse_quote!(let checked=if requested.is_ok() {attempt.slot.completed_current(attempt.stage,attempt.tail)} else {Ok(())};);
+        assert!(!same_completed_body(&conditional, expected));
+        let mut priority = actual.clone();
+        priority.stmts.swap(4, 5);
+        assert!(!same_completed_body(&priority, expected));
+        let mut premature = actual.clone();
+        premature.stmts.swap(7, 4);
+        assert!(!same_completed_body(&premature, expected));
+    }
+
+    #[test]
+    fn actual_completed_owner_guard_meets_only_the_old_acquisition_and_rechecks_credential_ceiling()
+    {
+        let actual = completed_body("CounterConnectionSlot", "completed_current");
+        let expected = r#"{
+            let CounterConnectionState::Admitted(connection)=&mut self.state else {anyhow::bail!("epoch_completed_counter_slot_refused");};
+            require_completed_connection(tail.request.completed,&tail.request.valid,&connection.valid,&tail.selection,&connection.selection)?;
+            ensure!(connection.purpose==NativeRole::EpochController && connection.selection==Digest::of(&connection.store)?,"epoch_completed_counter_selection_changed");
+            tail.original.require_same(&tail.request.acquisition.retained_refusal())?;
+            connection.owner.check(stage)?;
+            stage.check_current_selection(&connection.policy,&connection.store,connection.purpose)?;
+            connection.owner.meet_current_read_view(stage,&mut tail.request.acquisition)?;
+            connection.credential.check(&mut tail.request.acquisition,connection.store.max_lease_seconds)?;
+            connection.owner.meet_current_read_view(stage,&mut tail.request.acquisition)?;
+            connection.owner.check(stage)?;
+            tail.request.acquisition.remaining()?;
+            Ok(())
+        }"#;
+        assert!(same_completed_body(&actual, expected));
+        for cut in 0..actual.stmts.len() - 1 {
+            let mut omitted = actual.clone();
+            omitted.stmts.remove(cut);
+            assert!(
+                !same_completed_body(&omitted, expected),
+                "old-acquisition cut {cut}"
+            );
+        }
+        let mut wrong_stage = actual.clone();
+        wrong_stage.stmts[6] = syn::parse_quote!(connection.owner.meet_current_read_view(foreign,&mut tail.request.acquisition)?;);
+        assert!(!same_completed_body(&wrong_stage, expected));
+        let mut swapped = actual.clone();
+        swapped.stmts.swap(7, 8);
+        assert!(!same_completed_body(&swapped, expected));
+        let calls = method_calls(
+            include_str!("connection.rs"),
+            "CounterConnectionSlot",
+            "completed_current",
+        );
+        for denied in [
+            "request",
+            "read",
+            "read_restored",
+            "admit",
+            "acquire",
+            "narrow_io_acquisition",
+            "begin",
+            "budget",
+            "post",
+            "authorization",
+        ] {
+            assert!(
+                !calls.iter().any(|call| call == denied),
+                "no new authority: {denied}"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_completed_disposal_consumes_only_final_checked_same_snapshot_without_any_clock() {
+        let actual = completed_body("CounterConnectionSlot", "release_completed_restored");
+        let expected = r#"{
+            let requested:Result<()>=(|| {
+                tail.state.require_release()?;
+                let CounterConnectionState::Admitted(connection)=&self.state else {anyhow::bail!("epoch_completed_counter_slot_refused");};
+                require_completed_connection(tail.request.completed,&tail.request.valid,&connection.valid,&tail.selection,&connection.selection)?;
+                tail.original.require_same(&tail.request.acquisition.retained_refusal())?;
+                ensure!(connection.purpose==NativeRole::EpochController && tail.observation.snapshot==*snapshot,"epoch_completed_counter_snapshot_changed");
+                tail.observation.require_binding(&tail.selection,&tail.reader)?;
+                tail.state.release()?;
+                Ok(())
+            })();
+            if requested.is_err() {tail.refuse();self.refuse();}
+            requested
+        }"#;
+        assert!(same_completed_body(&actual, expected));
+        use quote::ToTokens as _;
+        let rendered = actual.to_token_stream().to_string();
+        for (from, to) in [
+            ("tail . state . require_release ()", "unrelated()"),
+            ("tail . observation . snapshot == * snapshot", "true"),
+            (
+                "tail . observation . require_binding (& tail . selection , & tail . reader)",
+                "unrelated()",
+            ),
+            ("tail . state . release ()", "unrelated()"),
+            ("tail . refuse () ; self . refuse ()", "unrelated()"),
+        ] {
+            assert_eq!(rendered.matches(from).count(), 1);
+            let changed: syn::Block = syn::parse_str(&rendered.replacen(from, to, 1)).unwrap();
+            assert!(
+                !same_completed_body(&changed, expected),
+                "disposal cut {from}"
+            );
+        }
+        let calls = method_calls(
+            include_str!("connection.rs"),
+            "CounterConnectionSlot",
+            "release_completed_restored",
+        );
+        for denied in [
+            "sample",
+            "check",
+            "remaining",
+            "remaining_native",
+            "begin",
+            "request",
+            "admit",
+            "read",
+            "read_restored",
+            "post",
+            "authorization",
+        ] {
+            assert!(
+                !calls.iter().any(|call| call == denied),
+                "disposal is negative only: {denied}"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_completed_token_and_check_scope_keep_drop_refusal_until_consuming_release() {
+        let actual = completed_body("CompletedRestoredCounterRead", "drop");
+        assert!(same_completed_body(
+            &actual,
+            "{if self.state != CompletedReadState::Released {self.refuse();}}"
+        ));
+        let mut lost = actual.clone();
+        lost.stmts.clear();
+        assert!(!same_completed_body(
+            &lost,
+            "{if self.state != CompletedReadState::Released {self.refuse();}}"
+        ));
+        let actual = completed_body("CompletedCounterCheck", "drop");
+        let expected =
+            "{if !self.done {self.stage.refuse_serving();self.tail.refuse();self.slot.refuse();}}";
+        assert!(same_completed_body(&actual, expected));
+        let syn::Stmt::Expr(syn::Expr::If(branch), _) = &actual.stmts[0] else {
+            panic!("actual armed drop");
+        };
+        for cut in 0..3 {
+            let mut changed = actual.clone();
+            let syn::Stmt::Expr(syn::Expr::If(changed_branch), _) = &mut changed.stmts[0] else {
+                unreachable!();
+            };
+            changed_branch.then_branch.stmts.remove(cut);
+            assert!(!same_completed_body(&changed, expected));
+        }
+        assert_eq!(branch.then_branch.stmts.len(), 3);
+    }
+
+    fn completed_factories(source: &str) -> Vec<(Option<String>, Option<String>)> {
+        #[derive(Default)]
+        struct Factories {
+            owner: Option<String>,
+            method: Option<String>,
+            found: Vec<(Option<String>, Option<String>)>,
+        }
+        impl<'ast> Visit<'ast> for Factories {
+            fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+                if item.attrs.iter().any(|a|matches!(&a.meta,syn::Meta::List(meta) if meta.path.is_ident("cfg") && meta.tokens.to_string()=="test")) {return;}
+                syn::visit::visit_item_mod(self, item);
+            }
+            fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+                let old = self.owner.clone();
+                self.owner = match &*item.self_ty {
+                    syn::Type::Path(path) if path.path.segments.len() == 1 => {
+                        Some(path.path.segments[0].ident.to_string())
+                    }
+                    _ => None,
+                };
+                syn::visit::visit_item_impl(self, item);
+                self.owner = old;
+            }
+            fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+                let old = self.method.replace(item.sig.ident.to_string());
+                syn::visit::visit_impl_item_fn(self, item);
+                self.method = old;
+            }
+            fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+                if item.path.segments.last().is_some_and(|part| {
+                    part.ident == "CompletedRestoredCounterRead"
+                        || part.ident == "Self"
+                            && self.owner.as_deref() == Some("CompletedRestoredCounterRead")
+                }) {
+                    self.found.push((self.owner.clone(), self.method.clone()));
+                }
+                syn::visit::visit_expr_struct(self, item);
+            }
+        }
+        let mut found = Factories::default();
+        found.visit_file(&syn::parse_file(source).unwrap());
+        found.found
+    }
+
+    #[test]
+    fn completed_tail_has_only_the_actual_consuming_finish_factory_and_no_part_adoption() {
+        let source = include_str!("connection.rs");
+        let expected = vec![(
+            Some("CounterRequest".to_owned()),
+            Some("finish_restored".to_owned()),
+        )];
+        assert_eq!(completed_factories(source), expected);
+        for counterfeit in [
+            "fn counterfeit(request:Untrusted,observation:Untrusted,selection:Untrusted,reader:Untrusted)->Untrusted {CompletedRestoredCounterRead {request,observation,selection,reader,state:CompletedReadState::PendingFinal}}",
+            "impl CompletedRestoredCounterRead {fn counterfeit(request:Untrusted,observation:Untrusted,selection:Untrusted,reader:Untrusted)->Self {Self {request,observation,selection,reader,state:CompletedReadState::PendingFinal}}}",
+        ] {
+            assert_ne!(
+                completed_factories(&format!("{source}\n{counterfeit}")),
+                expected
+            );
         }
     }
 

@@ -222,7 +222,7 @@ impl EnrolledRoleStage<'_> {
         self.check_serving_statement(statement, observed.process, Some(observed), acquisition)
     }
 
-    pub(in crate::security_epoch::native_enrollment) fn refuse_serving(&mut self) {
+    pub(in crate::security_epoch) fn refuse_serving(&mut self) {
         self.owner.refused = true;
         self.acquisition.as_mut().refuse();
     }
