@@ -45,7 +45,7 @@
     {
       "source": "crates/day2/src/security_epoch/authenticated_reads/connection.rs",
       "scope": "const",
-      "fingerprint": "sha256:ab8e6a7e8865cfecfa08aa8604444c4cc694c901512b9bab8aeb11181b64cd4a",
+      "fingerprint": "sha256:855cc2cc85eec0ba237c76d6a3205f25363b12fffa971e8b22393561ce15244d",
       "registration": null
     },
     {
@@ -97,7 +97,7 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop/native_current.rs",
       "scope": "const",
-      "fingerprint": "sha256:2b11d124c26abf3ba1407afb0a98501662eabc3c9478c8153f04a923bcee345d"
+      "fingerprint": "sha256:39b349dbaf5f827ee12c5ddbe4e1adee35a0a4edda47fd9903f712a18bf00c8a"
     },
     {
       "source": "crates/day2/src/security_epoch/credential_material.rs",
@@ -114,7 +114,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment.rs",
       "scope": "const",
-      "fingerprint": "sha256:4f46e2218cc7e6a3196dd0584d9c73f4487dfe5c38a0e2fba814b832586f7c51"
+      "fingerprint": "sha256:9ec290216f69c9340a8525d75e0fcf25bd370a1418ddc659940877eabab82252"
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/birth.rs",
@@ -125,7 +125,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "scope": "const",
-      "fingerprint": "sha256:99d017abcfd5d98c336f7b15cf2d36ed0dcf3275381cfedd1701fe84aff0ffdc",
+      "fingerprint": "sha256:663731a2b1117af5f3a558a7b4dc0a80e9cbdce37f919ebd3b7b1ab001b84609",
       "registration": null
     },
     {
@@ -191,6 +191,12 @@
       }
     },
     {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f286a481dd85bbe73d43ead4eebef9f76757b50b5ff6b5bde9347d29680f455b",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
       "scope": "const",
       "fingerprint": "sha256:ee6f6031af4ba869e024cf8bcbdd334fae1b05222439cce2f7ac6a174353a9c4",
@@ -218,6 +224,12 @@
       "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
       "scope": "const",
       "fingerprint": "sha256:5722fc840604c24fc0bba2020f0c7c8b028266eba9e5e625d07eafb731f54736",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "scope": "const",
+      "fingerprint": "sha256:c5bde9bfaefdc69b0db5e71985046376f2bf5d8b1ae397214003dfeab9ad008c",
       "registration": null
     },
     {
@@ -2297,6 +2309,64 @@
     },
     {
       "source": "crates/day2/src/security_epoch/authenticated_reads/connection.rs",
+      "type_name": "CompletedCounterCheck",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "CounterConnectionSlot",
+          "signature": "pub (in crate :: security_epoch) fn check_completed_restored (& mut self , stage : & mut EnrolledRoleStage < '_ > , tail : & mut CompletedRestoredCounterRead) -> Result < () >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "destructor": "sha256:56b5720e741fab1bc3f940b86c2cd287305c94a1596daf3c324514547a1cbc6a"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/authenticated_reads/connection.rs",
+      "type_name": "CompletedRestoredCounterRead",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "fn remaining_original (& mut self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "CounterRequest < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_restored (mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , mut observation : RestoredEpochObservation) -> Result < CompletedRestoredCounterRead >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CompletedRestoredCounterRead",
+          "signature": "fn remaining_original (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CompletedRestoredCounterRead",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CounterConnectionSlot",
+          "signature": "fn completed_current (& mut self , stage : & mut EnrolledRoleStage < '_ > , tail : & mut CompletedRestoredCounterRead) -> Result < () >"
+        },
+        {
+          "owner": "CounterConnectionSlot",
+          "signature": "pub (in crate :: security_epoch) fn check_completed_restored (& mut self , stage : & mut EnrolledRoleStage < '_ > , tail : & mut CompletedRestoredCounterRead) -> Result < () >"
+        },
+        {
+          "owner": "CounterConnectionSlot",
+          "signature": "pub (in crate :: security_epoch) fn release_completed_restored (& mut self , mut tail : CompletedRestoredCounterRead , snapshot : & Digest) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:b7bacd759c011648d0405e10e768fb0a12f6e7a5e9a51b4e93766cb555e0809d"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/authenticated_reads/connection.rs",
       "type_name": "CounterConnection",
       "owning_children": [],
       "methods": [],
@@ -2317,9 +2387,13 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn admit (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , purpose : NativeRole) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_completed_restored (& mut self , stage : & mut EnrolledRoleStage < '_ > , tail : & mut CompletedRestoredCounterRead) -> Result < () >",
+        "fn completed_current (& mut self , stage : & mut EnrolledRoleStage < '_ > , tail : & mut CompletedRestoredCounterRead) -> Result < () >",
         "pub (in crate :: security_epoch) fn new () -> Self",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn request < 'connection > (& 'connection mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , purpose : NativeRole) -> Result < CounterRequest < 'connection > >"
+        "pub (in crate :: security_epoch) fn release_completed_restored (& mut self , mut tail : CompletedRestoredCounterRead , snapshot : & Digest) -> Result < () >",
+        "pub (in crate :: security_epoch) fn request < 'connection > (& 'connection mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , purpose : NativeRole) -> Result < CounterRequest < 'connection > >",
+        "pub (in crate :: security_epoch) fn restored_controller_request < 'connection > (& 'connection mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < CounterRequest < 'connection > >"
       ],
       "factories": [
         {
@@ -2330,7 +2404,15 @@
       "material_uses": [
         {
           "owner": "CounterConnectionSlot",
+          "signature": "fn completed_current (& mut self , stage : & mut EnrolledRoleStage < '_ > , tail : & mut CompletedRestoredCounterRead) -> Result < () >"
+        },
+        {
+          "owner": "CounterConnectionSlot",
           "signature": "pub (in crate :: security_epoch) fn admit (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , purpose : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "CounterConnectionSlot",
+          "signature": "pub (in crate :: security_epoch) fn check_completed_restored (& mut self , stage : & mut EnrolledRoleStage < '_ > , tail : & mut CompletedRestoredCounterRead) -> Result < () >"
         },
         {
           "owner": "CounterConnectionSlot",
@@ -2338,7 +2420,15 @@
         },
         {
           "owner": "CounterConnectionSlot",
+          "signature": "pub (in crate :: security_epoch) fn release_completed_restored (& mut self , mut tail : CompletedRestoredCounterRead , snapshot : & Digest) -> Result < () >"
+        },
+        {
+          "owner": "CounterConnectionSlot",
           "signature": "pub (in crate :: security_epoch) fn request < 'connection > (& 'connection mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , purpose : NativeRole) -> Result < CounterRequest < 'connection > >"
+        },
+        {
+          "owner": "CounterConnectionSlot",
+          "signature": "pub (in crate :: security_epoch) fn restored_controller_request < 'connection > (& 'connection mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < CounterRequest < 'connection > >"
         }
       ],
       "proof_uses": [],
@@ -2355,6 +2445,7 @@
         "pub (in crate :: security_epoch) fn check_restored_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , observation : & mut RestoredEpochObservation) -> Result < () >",
         "pub (in crate :: security_epoch) fn confirm_restore_reservation (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & firestore :: RestoreConfirmationNames) -> Result < crate :: security_epoch :: kernel :: Snapshot >",
         "pub (in crate :: security_epoch) fn finish (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_restored (mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , mut observation : RestoredEpochObservation) -> Result < CompletedRestoredCounterRead >",
         "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "pub (in crate :: security_epoch) fn read_restored (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & firestore :: RestoreWriterPeerRead) -> Result < RestoredEpochObservation >",
@@ -2365,6 +2456,10 @@
         {
           "owner": "CounterConnectionSlot",
           "signature": "pub (in crate :: security_epoch) fn request < 'connection > (& 'connection mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , purpose : NativeRole) -> Result < CounterRequest < 'connection > >"
+        },
+        {
+          "owner": "CounterConnectionSlot",
+          "signature": "pub (in crate :: security_epoch) fn restored_controller_request < 'connection > (& 'connection mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < CounterRequest < 'connection > >"
         }
       ],
       "material_uses": [
@@ -2395,6 +2490,10 @@
         {
           "owner": "CounterRequest < '_ >",
           "signature": "pub (in crate :: security_epoch) fn finish (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CounterRequest < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_restored (mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , mut observation : RestoredEpochObservation) -> Result < CompletedRestoredCounterRead >"
         },
         {
           "owner": "CounterRequest < '_ >",
@@ -2447,6 +2546,7 @@
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "fn remaining (& mut self , selection : & EpochStore , names : & firestore :: RestoreWriterPeerRead , port : & mut impl Port) -> Result < () >",
         "fn remaining_bound (& mut self , selection : & Digest , reader : & Digest , port : & mut impl Port) -> Result < () >",
+        "fn remaining_completed_original (& mut self , selection : & Digest , reader : & Digest , original : & mut NativeAcquisition) -> Result < () >",
         "fn require_binding (& mut self , selection : & Digest , reader : & Digest) -> Result < () >",
         "pub (in crate :: security_epoch) fn snapshot_data (& self) -> & Digest"
       ],
@@ -2462,12 +2562,20 @@
           "signature": "pub (in crate :: security_epoch) fn check_restored_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , observation : & mut RestoredEpochObservation) -> Result < () >"
         },
         {
+          "owner": "CounterRequest < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_restored (mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , mut observation : RestoredEpochObservation) -> Result < CompletedRestoredCounterRead >"
+        },
+        {
           "owner": "RestoredEpochObservation",
           "signature": "fn remaining (& mut self , selection : & EpochStore , names : & firestore :: RestoreWriterPeerRead , port : & mut impl Port) -> Result < () >"
         },
         {
           "owner": "RestoredEpochObservation",
           "signature": "fn remaining_bound (& mut self , selection : & Digest , reader : & Digest , port : & mut impl Port) -> Result < () >"
+        },
+        {
+          "owner": "RestoredEpochObservation",
+          "signature": "fn remaining_completed_original (& mut self , selection : & Digest , reader : & Digest , original : & mut NativeAcquisition) -> Result < () >"
         },
         {
           "owner": "RestoredEpochObservation",
@@ -6210,20 +6318,101 @@
     },
     {
       "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop/native_current.rs",
-      "type_name": "RetiredControllerCurrentInstallation",
+      "type_name": "RestoredControllerCurrentReadLoan",
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_after_native"
+      ],
+      "owning_children": [],
+      "methods": [
+        "fn check_physical (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn final_check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "fn finish_after_native (mut self , snapshot : & day2_capabilities :: Digest) -> Result < () >",
+        "pub (in crate :: security_epoch) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ > , phase : & mut CurrentStoragePeerPhase < '_ > , reader : & crate :: security_epoch :: firestore :: RestoreWriterPeerRead) -> Result < day2_capabilities :: Digest >",
+        "fn observe_in (& mut self , stage : & mut EnrolledRoleStage < '_ > , phase : & mut CurrentStoragePeerPhase < '_ > , reader : & crate :: security_epoch :: firestore :: RestoreWriterPeerRead) -> Result < day2_capabilities :: Digest >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "RetiredControllerCurrentInstallation < '_ , '_ , '_ , '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn serve_app_currents (mut self) -> Result < () >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "fn check_physical (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "fn finish_after_native (mut self , snapshot : & day2_capabilities :: Digest) -> Result < () >"
+        },
+        {
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "fn observe_in (& mut self , stage : & mut EnrolledRoleStage < '_ > , phase : & mut CurrentStoragePeerPhase < '_ > , reader : & crate :: security_epoch :: firestore :: RestoreWriterPeerRead) -> Result < day2_capabilities :: Digest >"
+        },
+        {
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn final_check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ > , phase : & mut CurrentStoragePeerPhase < '_ > , reader : & crate :: security_epoch :: firestore :: RestoreWriterPeerRead) -> Result < day2_capabilities :: Digest >"
+        },
+        {
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:6eefedd61647da2d06f6c00d5b60f6e43d07c821f3365004f9d9ccb9f850ce9c"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop/native_current.rs",
+      "type_name": "RestoredCurrentReadAttempt",
       "kind": "private_material",
       "consuming_methods": [],
       "owning_children": [],
       "methods": [],
       "factories": [
         {
-          "owner": "PendingControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , >",
-          "signature": "pub (in crate :: security_epoch) fn retire_old_current (mut self) -> Result < RetiredControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , > , >"
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn final_check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RestoredControllerCurrentReadLoan < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn observe (& mut self , stage : & mut EnrolledRoleStage < '_ > , phase : & mut CurrentStoragePeerPhase < '_ > , reader : & crate :: security_epoch :: firestore :: RestoreWriterPeerRead) -> Result < day2_capabilities :: Digest >"
         }
       ],
       "material_uses": [],
       "proof_uses": [],
-      "destructor": "sha256:cec233b6e92964af52ca00176e01c5b3f9a7863d2d727e9e4aa2f2592e07a104"
+      "destructor": "sha256:44ee2e3b9376a1cff1ae27090401929e63a4330c6ecfdeccc1109683f12630c9"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/admin_read/reader/authentication_store/producer/consumer/stop/native_current.rs",
+      "type_name": "RetiredControllerCurrentInstallation",
+      "kind": "private_material",
+      "consuming_methods": [
+        "serve_app_currents"
+      ],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn serve_app_currents (mut self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "PendingControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , >",
+          "signature": "pub (in crate :: security_epoch) fn retire_old_current (mut self) -> Result < RetiredControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , > , >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RetiredControllerCurrentInstallation < '_ , '_ , '_ , '_ , '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn serve_app_currents (mut self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:e9b9e5bc62e6976eb5b79ac1543102adc8b1d3b47e25b7252e481ca7937e90df"
     },
     {
       "source": "crates/day2/src/security_epoch/control_slot_io.rs",
@@ -7452,6 +7641,89 @@
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "CapturedRestoredControllerRequest",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore_receiver"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "storage"
+          }
+        }
+      ],
+      "methods": [
+        "pub (in crate :: security_epoch) fn accept_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , rendezvous : super :: ControllerCurrentRendezvous < 'tail > , expected : Option < & super :: StoragePeerRequest >) -> Result < super :: CurrentStoragePeerPhase < 'tail > >",
+        "pub (in crate :: security_epoch) fn check (& mut self , parent : & mut RetainedControllerNative < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn checked_current_reader (& mut self , parent : & mut RetainedControllerNative < '_ > , phase : & mut super :: CurrentStoragePeerPhase < '_ > , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >",
+        "pub (in crate :: security_epoch) fn prepare_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : & 'tail mut RestoredWriterPeer , installed : & 'tail mut InstalledRestoredAppConfirmation) -> Result < super :: ControllerCurrentRendezvous < 'tail > >",
+        "pub (in crate :: security_epoch) fn prepare_retained_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : super :: RestoredPeerConnection < 'tail >) -> Result < super :: ControllerCurrentRendezvous < 'tail > >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn serve_current_peer < 'tail > (mut self , parent : & mut RetainedControllerNative < '_ > , phase : super :: CurrentStoragePeerPhase < 'tail > , selected : & day2_capabilities :: security_epoch :: EpochStore , loan : & mut crate :: security_epoch :: bootstrap :: RestoredControllerCurrentReadLoan < '_ , '_ , '_ >) -> Result < (super :: RestoredPeerConnection < 'tail > , day2_capabilities :: Digest ,) >"
+      ],
+      "factories": [
+        {
+          "owner": "RetainedControllerNative < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn capture_current_request (& mut self) -> Result < CapturedRestoredControllerRequest >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn accept_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , rendezvous : super :: ControllerCurrentRendezvous < 'tail > , expected : Option < & super :: StoragePeerRequest >) -> Result < super :: CurrentStoragePeerPhase < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , parent : & mut RetainedControllerNative < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn checked_current_reader (& mut self , parent : & mut RetainedControllerNative < '_ > , phase : & mut super :: CurrentStoragePeerPhase < '_ > , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : & 'tail mut RestoredWriterPeer , installed : & 'tail mut InstalledRestoredAppConfirmation) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_retained_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : super :: RestoredPeerConnection < 'tail >) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn serve_current_peer < 'tail > (mut self , parent : & mut RetainedControllerNative < '_ > , phase : super :: CurrentStoragePeerPhase < 'tail > , selected : & day2_capabilities :: security_epoch :: EpochStore , loan : & mut crate :: security_epoch :: bootstrap :: RestoredControllerCurrentReadLoan < '_ , '_ , '_ >) -> Result < (super :: RestoredPeerConnection < 'tail > , day2_capabilities :: Digest ,) >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:678a93a12ec15a6a2df37e447c336f226d9dc7db0d7c5767c830eca30aec1d4f"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "type_name": "CompletedRestoreIssuer",
       "kind": "private_material",
       "consuming_methods": [],
@@ -8051,7 +8323,7 @@
         "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
-        "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)",
+        "pub (in crate :: security_epoch) fn refuse_serving (& mut self)",
         "pub (crate) fn require_current_role (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >",
         "fn require_role_data (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
@@ -8112,10 +8384,6 @@
         {
           "owner": "PreparedRestoredAppNative",
           "signature": "pub (in crate :: security_epoch) fn confirm_installed (mut self) -> Result < InstalledRestoredAppNative >"
-        },
-        {
-          "owner": "RetainedControllerNative < '_ >",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
         }
       ],
       "material_uses": [
@@ -8126,6 +8394,10 @@
         {
           "owner": "ClockAnchors",
           "signature": "fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledOriginalClock",
+          "signature": "fn capture_at (stage : & mut EnrolledRoleStage < '_ > , origin : Duration , expected : NativeRole) -> Result < Self >"
         },
         {
           "owner": "EnrolledOriginalClock",
@@ -8193,10 +8465,6 @@
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
-          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)"
-        },
-        {
-          "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_code (& mut self) -> Result < Digest >"
         },
         {
@@ -8233,6 +8501,10 @@
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse_serving (& mut self)"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >"
         },
         {
@@ -8250,6 +8522,10 @@
         {
           "owner": "InstalledRestoredAppConfirmation",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_current_tail (& mut self , peer : & mut RestoredWriterPeer , binding : & day2_capabilities :: Digest , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "NativeConsumerOrigin",
+          "signature": "pub (crate) fn check_current (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         },
         {
           "owner": "RestoredAppFileContinuity",
@@ -8270,14 +8546,6 @@
         {
           "owner": "SameEnrolledOwner",
           "signature": "pub (in crate :: security_epoch) fn meet_current_read_view (& mut self , stage : & mut EnrolledRoleStage < '_ > , actual : & mut NativeAcquisition) -> Result < () >"
-        },
-        {
-          "owner": "EnrolledOriginalClock",
-          "signature": "fn capture_at (stage : & mut EnrolledRoleStage < '_ > , origin : Duration , expected : NativeRole) -> Result < Self >"
-        },
-        {
-          "owner": "NativeConsumerOrigin",
-          "signature": "pub (crate) fn check_current (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -9030,7 +9298,9 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn check_current_source (& mut self , peer : & mut RestoredWriterPeer , source : & RestoredPeerSource < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_current_tail (& mut self , peer : & mut RestoredWriterPeer , binding : & day2_capabilities :: Digest , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (super) fn check_received_installation (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , peer : & mut RestoredWriterPeer , completed : & mut CompletedRestoreIssuer , activation : & mut ActivatedRestoredAppRole , prepared : & mut PreparedRestoredAppConfirmation , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn current_reader_data (& mut self , peer : & mut RestoredWriterPeer , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >",
         "fn current_transfer_binding (& mut self , peer : & mut RestoredWriterPeer , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < day2_capabilities :: Digest >",
+        "pub (in crate :: security_epoch) fn first_current_pending (& mut self , peer : & mut RestoredWriterPeer) -> Result < bool >",
         "pub (in crate :: security_epoch) fn poll_acceptance (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , peer : & mut RestoredWriterPeer , completed : & mut CompletedRestoreIssuer , activation : & mut ActivatedRestoredAppRole , prepared : & mut PreparedRestoredAppConfirmation , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < crate :: security_epoch :: native_enrollment :: ReceiverProgress >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn try_send_acceptance (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , peer : & mut RestoredWriterPeer , completed : & mut CompletedRestoreIssuer , activation : & mut ActivatedRestoredAppRole , prepared : & mut PreparedRestoredAppConfirmation , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < crate :: security_epoch :: native_enrollment :: ReceiverProgress >"
@@ -9047,6 +9317,14 @@
       ],
       "material_uses": [
         {
+          "owner": null,
+          "signature": "fn check_first_current_idle_pair (peer : & RestoredWriterPeer , installed : & InstalledRestoredAppConfirmation) -> Result < () >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : & 'tail mut RestoredWriterPeer , installed : & 'tail mut InstalledRestoredAppConfirmation) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
           "owner": "InstalledRestoredAppConfirmation",
           "signature": "fn current_transfer_binding (& mut self , peer : & mut RestoredWriterPeer , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < day2_capabilities :: Digest >"
         },
@@ -9060,7 +9338,15 @@
         },
         {
           "owner": "InstalledRestoredAppConfirmation",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn current_reader_data (& mut self , peer : & mut RestoredWriterPeer , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
+        },
+        {
+          "owner": "InstalledRestoredAppConfirmation",
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , peer : & mut RestoredWriterPeer , completed : & mut CompletedRestoreIssuer , activation : & mut ActivatedRestoredAppRole , prepared : & mut PreparedRestoredAppConfirmation , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "InstalledRestoredAppConfirmation",
+          "signature": "pub (in crate :: security_epoch) fn first_current_pending (& mut self , peer : & mut RestoredWriterPeer) -> Result < bool >"
         },
         {
           "owner": "InstalledRestoredAppConfirmation",
@@ -10638,6 +10924,98 @@
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "RestoredControllerPeerAttempt",
+      "kind": "private_material",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore_receiver"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "storage"
+          }
+        }
+      ],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn checked_current_reader (& mut self , parent : & mut RetainedControllerNative < '_ > , phase : & mut super :: CurrentStoragePeerPhase < '_ > , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "consuming_methods": [],
+      "destructor": "sha256:8eef628017c6f5e72f566424b9f13b3ba1f974cedd2fb5b3fadcf92567dd62ee"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "RestoredControllerPeerInputs",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore_receiver"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "storage"
+          }
+        }
+      ],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : & 'tail mut RestoredWriterPeer , installed : & 'tail mut InstalledRestoredAppConfirmation) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:1530c214ad369b36a930849e7da125d29149d3ea6ff5a9d55a21be9cce11d53c"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "type_name": "RestoredControllerPortTransfer",
       "owning_children": [
         {
@@ -10681,6 +11059,122 @@
       "kind": "private_material",
       "consuming_methods": [],
       "destructor": "sha256:c0d9bb21b37c13dc4029489435b2e00d89b04ca3145a648944cdd59c9a645a88"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "RestoredControllerRequestAttempt",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore_receiver"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "storage"
+          }
+        }
+      ],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn accept_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , rendezvous : super :: ControllerCurrentRendezvous < 'tail > , expected : Option < & super :: StoragePeerRequest >) -> Result < super :: CurrentStoragePeerPhase < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , parent : & mut RetainedControllerNative < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn checked_current_reader (& mut self , parent : & mut RetainedControllerNative < '_ > , phase : & mut super :: CurrentStoragePeerPhase < '_ > , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : & 'tail mut RestoredWriterPeer , installed : & 'tail mut InstalledRestoredAppConfirmation) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_retained_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : super :: RestoredPeerConnection < 'tail >) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn serve_current_peer < 'tail > (mut self , parent : & mut RetainedControllerNative < '_ > , phase : super :: CurrentStoragePeerPhase < 'tail > , selected : & day2_capabilities :: security_epoch :: EpochStore , loan : & mut crate :: security_epoch :: bootstrap :: RestoredControllerCurrentReadLoan < '_ , '_ , '_ >) -> Result < (super :: RestoredPeerConnection < 'tail > , day2_capabilities :: Digest ,) >"
+        },
+        {
+          "owner": "RetainedControllerNative < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn capture_current_request (& mut self) -> Result < CapturedRestoredControllerRequest >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:7de033c7f4b2f2baf2abf4bfb992a7de9326e9ff6749ef710574e8b420c39945"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "RestoredControllerServingAttempt",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore_receiver"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "storage"
+          }
+        }
+      ],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn serve_current_peer < 'tail > (mut self , parent : & mut RetainedControllerNative < '_ > , phase : super :: CurrentStoragePeerPhase < 'tail > , selected : & day2_capabilities :: security_epoch :: EpochStore , loan : & mut crate :: security_epoch :: bootstrap :: RestoredControllerCurrentReadLoan < '_ , '_ , '_ >) -> Result < (super :: RestoredPeerConnection < 'tail > , day2_capabilities :: Digest ,) >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:0d7f5f0026c194bc466ae0d723be90e0464590c330505684f8c63a9b80a453bb"
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -10875,12 +11369,13 @@
       ],
       "methods": [
         "fn begin (parent : & Rc < Self > , captured : & Rc < Self >) -> Result < () >",
+        "fn begin_final (parent : & Rc < Self > , captured : & Rc < Self >) -> Result < () >",
         "fn capture (& self) -> Result < () >",
         "fn finish (& self) -> Result < () >",
+        "fn finish_scope (& self) -> Result < () >",
         "fn new () -> Self",
         "fn refuse (& self)",
-        "fn require_busy (& self) -> Result < () >",
-        "fn finish_scope (& self) -> Result < () >"
+        "fn require_busy (& self) -> Result < () >"
       ],
       "factories": [
         {
@@ -10899,6 +11394,10 @@
         },
         {
           "owner": "RestoredRequestGate",
+          "signature": "fn begin_final (parent : & Rc < Self > , captured : & Rc < Self >) -> Result < () >"
+        },
+        {
+          "owner": "RestoredRequestGate",
           "signature": "fn capture (& self) -> Result < () >"
         },
         {
@@ -10907,15 +11406,15 @@
         },
         {
           "owner": "RestoredRequestGate",
+          "signature": "fn finish_scope (& self) -> Result < () >"
+        },
+        {
+          "owner": "RestoredRequestGate",
           "signature": "fn refuse (& self)"
         },
         {
           "owner": "RestoredRequestGate",
           "signature": "fn require_busy (& self) -> Result < () >"
-        },
-        {
-          "owner": "RestoredRequestGate",
-          "signature": "fn finish_scope (& self) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -10969,12 +11468,20 @@
       ],
       "material_uses": [
         {
+          "owner": null,
+          "signature": "fn check_first_current_idle_pair (peer : & RestoredWriterPeer , installed : & InstalledRestoredAppConfirmation) -> Result < () >"
+        },
+        {
           "owner": "ActivatedRestoredAppRole",
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , peer : & mut RestoredWriterPeer , completed : & mut CompletedRestoreIssuer , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < () >"
         },
         {
           "owner": "ActivatedRestoredAppRole",
           "signature": "pub (in crate :: security_epoch) fn receive_app_confirmation (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , peer : & mut RestoredWriterPeer , completed : & mut CompletedRestoreIssuer , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < PreparedRestoredAppConfirmation >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : & 'tail mut RestoredWriterPeer , installed : & 'tail mut InstalledRestoredAppConfirmation) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
         },
         {
           "owner": "CompletedRestoreIssuer",
@@ -11002,7 +11509,15 @@
         },
         {
           "owner": "InstalledRestoredAppConfirmation",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn current_reader_data (& mut self , peer : & mut RestoredWriterPeer , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
+        },
+        {
+          "owner": "InstalledRestoredAppConfirmation",
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , peer : & mut RestoredWriterPeer , completed : & mut CompletedRestoreIssuer , activation : & mut ActivatedRestoredAppRole , prepared : & mut PreparedRestoredAppConfirmation , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "InstalledRestoredAppConfirmation",
+          "signature": "pub (in crate :: security_epoch) fn first_current_pending (& mut self , peer : & mut RestoredWriterPeer) -> Result < bool >"
         },
         {
           "owner": "InstalledRestoredAppConfirmation",
@@ -11291,7 +11806,8 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
+        "pub (in crate :: security_epoch) fn capture_current_request (& mut self) -> Result < CapturedRestoredControllerRequest >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
       ],
       "factories": [
         {
@@ -11301,14 +11817,42 @@
       ],
       "material_uses": [
         {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn accept_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , rendezvous : super :: ControllerCurrentRendezvous < 'tail > , expected : Option < & super :: StoragePeerRequest >) -> Result < super :: CurrentStoragePeerPhase < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , parent : & mut RetainedControllerNative < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn checked_current_reader (& mut self , parent : & mut RetainedControllerNative < '_ > , phase : & mut super :: CurrentStoragePeerPhase < '_ > , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : & 'tail mut RestoredWriterPeer , installed : & 'tail mut InstalledRestoredAppConfirmation) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn prepare_retained_current_peer < 'tail > (& mut self , parent : & mut RetainedControllerNative < '_ > , peer : super :: RestoredPeerConnection < 'tail >) -> Result < super :: ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
+          "owner": "CapturedRestoredControllerRequest",
+          "signature": "pub (in crate :: security_epoch) fn serve_current_peer < 'tail > (mut self , parent : & mut RetainedControllerNative < '_ > , phase : super :: CurrentStoragePeerPhase < 'tail > , selected : & day2_capabilities :: security_epoch :: EpochStore , loan : & mut crate :: security_epoch :: bootstrap :: RestoredControllerCurrentReadLoan < '_ , '_ , '_ >) -> Result < (super :: RestoredPeerConnection < 'tail > , day2_capabilities :: Digest ,) >"
+        },
+        {
           "owner": "RetainedControllerNative < '_ >",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
+          "signature": "pub (in crate :: security_epoch) fn capture_current_request (& mut self) -> Result < CapturedRestoredControllerRequest >"
+        },
+        {
+          "owner": "RetainedControllerNative < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": [],
-      "destructor": "sha256:9eacf75acf275c16702e5abd56afb07c6d03e56cc472eff2bf4c427ce7a41178"
+      "destructor": "sha256:3fd3d737df377578b1ca2c5153337be5a60b1c86560ccf5e89673a0f6c52634e"
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -11587,6 +12131,23 @@
       "proof_uses": [],
       "owning_children": [],
       "destructor": "sha256:70c2d559a2cd2a06a3b12104724b7e7de0a24f584253de798bccdfe718688413"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
+      "type_name": "RestoredControllerIdleAttempt",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "InstalledRestoredAppConfirmation",
+          "signature": "pub (in crate :: security_epoch) fn first_current_pending (& mut self , peer : & mut RestoredWriterPeer) -> Result < bool >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:e2ad14970bfc213595c702ef6cee76f0f2ea835959c5a7e18d4fab4e120805ac"
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/restored.rs",
@@ -15940,6 +16501,10 @@
         },
         {
           "owner": "RestoredPeerConnection < 'tail >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn prepare_retained_controller (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerCurrentRendezvous < 'tail > >"
+        },
+        {
+          "owner": "RestoredPeerConnection < 'tail >",
           "signature": "pub (in crate :: security_epoch) fn prepare_controller (peer : & 'tail mut super :: super :: owner :: RestoredWriterPeer , installed : & 'tail mut super :: super :: owner :: InstalledRestoredAppConfirmation , stage : & mut EnrolledRoleStage < '_ > , purpose : StoragePeerPurpose) -> Result < ControllerCurrentRendezvous < 'tail > >"
         },
         {
@@ -16037,6 +16602,7 @@
         "pub (in crate :: security_epoch) fn await_restore_release (& mut self , stage : & mut EnrolledRoleStage < '_ > , data : & super :: super :: AuthorityStopData) -> Result < () >",
         "pub (in crate :: security_epoch) fn await_restore_stopped (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < super :: super :: AuthorityStopData >",
         "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn checked_restored_controller_reader (& mut self , stage : & mut EnrolledRoleStage < '_ > , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >",
         "fn completion_packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Completion , next : Completion , role : NativeRole , send : bool) -> Result < () >",
         "pub (crate) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn finish_owner (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < PeerPhaseOwner < 'peer > >",
@@ -16128,6 +16694,10 @@
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
           "signature": "pub (crate) fn request (& self) -> & StoragePeerRequest"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn checked_restored_controller_reader (& mut self , stage : & mut EnrolledRoleStage < '_ > , selected : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
         },
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
@@ -16253,7 +16823,8 @@
         "fn from_port (mut input : RestoredCurrentPeerPort < 'tail > , stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
         "pub (in crate :: security_epoch) fn pending (& mut self) -> Result < bool >",
         "pub (in crate :: security_epoch) fn prepare_controller (peer : & 'tail mut super :: super :: owner :: RestoredWriterPeer , installed : & 'tail mut super :: super :: owner :: InstalledRestoredAppConfirmation , stage : & mut EnrolledRoleStage < '_ > , purpose : StoragePeerPurpose) -> Result < ControllerCurrentRendezvous < 'tail > >",
-        "pub (in crate :: security_epoch) fn prepare_current (self , stage : & mut EnrolledRoleStage < '_ > , purpose : StoragePeerPurpose) -> Result < ControllerCurrentRendezvous < 'tail > >"
+        "pub (in crate :: security_epoch) fn prepare_current (self , stage : & mut EnrolledRoleStage < '_ > , purpose : StoragePeerPurpose) -> Result < ControllerCurrentRendezvous < 'tail > >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn prepare_retained_controller (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerCurrentRendezvous < 'tail > >"
       ],
       "factories": [
         {
@@ -16277,6 +16848,10 @@
         {
           "owner": "RestoredPeerConnection < 'tail >",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn begin_app (self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'tail > >"
+        },
+        {
+          "owner": "RestoredPeerConnection < 'tail >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn prepare_retained_controller (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerCurrentRendezvous < 'tail > >"
         },
         {
           "owner": "RestoredPeerConnection < 'tail >",
@@ -17080,7 +17655,9 @@
         }
       ],
       "methods": [
+        "fn active_current_identity (& mut self , stage : & mut crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >",
         "fn active_local_identity (& mut self , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >",
+        "fn active_metadata (& mut self , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_active_identity (& mut self , check : & mut crate :: security_epoch :: bootstrap :: RestoreTargetCheck < '_ , '_ , '_ , '_ , '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >",
         "fn check_native (& mut self , check : & mut crate :: security_epoch :: bootstrap :: RestoreTargetCheck < '_ , '_ , '_ , '_ , '_ > , peer : & mut Option < & mut crate :: security_epoch :: native_enrollment :: ReceiverDurability < '_ > >) -> Result < () >",
         "pub (in crate :: security_epoch) fn creator_data (& mut self , check : & mut crate :: security_epoch :: bootstrap :: RestoreTargetCheck < '_ , '_ , '_ , '_ , '_ >) -> Result < crate :: security_epoch :: native_enrollment :: RestoreCreatorData >",
@@ -17101,7 +17678,15 @@
       "material_uses": [
         {
           "owner": "NativeStagedTarget < '_ , '_ >",
+          "signature": "fn active_current_identity (& mut self , stage : & mut crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >"
+        },
+        {
+          "owner": "NativeStagedTarget < '_ , '_ >",
           "signature": "fn active_local_identity (& mut self , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >"
+        },
+        {
+          "owner": "NativeStagedTarget < '_ , '_ >",
+          "signature": "fn active_metadata (& mut self , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >"
         },
         {
           "owner": "NativeStagedTarget < '_ , '_ >",
@@ -17148,11 +17733,62 @@
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , target : & mut NativeStagedTarget < '_ , '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < crate :: security_epoch :: native_enrollment :: SqliteCohort >"
         },
         {
+          "owner": "RestoreControllerCohort",
+          "signature": "pub (in crate :: security_epoch) fn check_current (& mut self , target : & mut NativeStagedTarget < '_ , '_ > , stage : & mut crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < crate :: security_epoch :: native_enrollment :: SqliteCohort >"
+        },
+        {
           "owner": "RestoredWriterCandidate < 'target , 'state , 'selection >",
           "signature": "pub (in crate :: security_epoch) fn receive (target : & 'target mut NativeStagedTarget < 'state , 'selection > , context : & mut RestoreWriterExchangeContext < '_ , '_ , '_ , '_ >) -> Result < Self >"
         }
       ],
       "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+      "type_name": "RestoreCohortValidation",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer/dispatch.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+            "module": "dispatch"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/restore_staging/writer/receiver.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
+            "module": "receiver"
+          }
+        }
+      ],
+      "methods": [
+        "fn check (& mut self , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "RestoreControllerCohort",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , target : & mut NativeStagedTarget < '_ , '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < crate :: security_epoch :: native_enrollment :: SqliteCohort >"
+        },
+        {
+          "owner": "RestoreControllerCohort",
+          "signature": "pub (in crate :: security_epoch) fn check_current (& mut self , target : & mut NativeStagedTarget < '_ , '_ > , stage : & mut crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < crate :: security_epoch :: native_enrollment :: SqliteCohort >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoreCohortValidation < '_ , '_ , '_ , '_ , '_ >",
+          "signature": "fn check (& mut self , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < () >"
+        },
+        {
+          "owner": "RestoreControllerCohort",
+          "signature": "fn check_in (& mut self , validation : & mut RestoreCohortValidation < '_ , '_ , '_ , '_ , '_ > , creator : & crate :: security_epoch :: native_enrollment :: RestoreCreatorData , report : & crate :: security_epoch :: kernel :: restore :: completion :: TargetReport) -> Result < crate :: security_epoch :: native_enrollment :: SqliteCohort >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:6c42ce852331ef6fce8dac967fbb9cb70f469be0a2f5b8528b586606630b8c3f"
     },
     {
       "source": "crates/day2/src/security_epoch/restore_staging/writer.rs",
@@ -19000,7 +19636,8 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch) fn check (& mut self , held_root : & File) -> Result < () >"
+        "pub (in crate :: security_epoch) fn check (& mut self , held_root : & File) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_current (& mut self , held_root : & File , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -19012,10 +19649,46 @@
         {
           "owner": "RestoreCreatorRoot",
           "signature": "pub (in crate :: security_epoch) fn check (& mut self , held_root : & File) -> Result < () >"
+        },
+        {
+          "owner": "RestoreCreatorRoot",
+          "signature": "pub (in crate :: security_epoch) fn check_current (& mut self , held_root : & File , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
       "destructor": "sha256:d3de64a9cf1d3e0e6602165764d9a5d2f94010aa3864549b755ab685f459cdd4"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "RestoreRootCurrentAttempt",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "authentication_store"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/restore_approval.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "restore_approval"
+          }
+        }
+      ],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "RestoreCreatorRoot",
+          "signature": "pub (in crate :: security_epoch) fn check_current (& mut self , held_root : & File , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "destructor": "sha256:8f41c604d79a9ff128734de810125afc4b05f1f7416ebc39fd726dd16b312b04"
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/native_volume/authentication_store.rs",
