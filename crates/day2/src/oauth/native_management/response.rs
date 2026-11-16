@@ -4819,11 +4819,21 @@ mod lease_tests {
             left_shape.visit_stmt(left);
             right_shape.visit_stmt(right);
             left_shape.0 == right_shape.0
-                && tokens(left.to_token_stream()).to_string() == tokens(right.to_token_stream()).to_string()
+                && tokens(left.to_token_stream()).to_string()
+                    == tokens(right.to_token_stream()).to_string()
         }
-        assert!(same(&syn::parse_quote!(take(value);), &syn::parse_quote!(take(value,);)));
-        assert!(!same(&syn::parse_quote!(take(value);), &syn::parse_quote!(take(value, other);)));
-        assert!(!same(&syn::parse_quote!(take((value,));), &syn::parse_quote!(take((value));)));
+        assert!(same(
+            &syn::parse_quote!(take(value);),
+            &syn::parse_quote!(take(value,);)
+        ));
+        assert!(!same(
+            &syn::parse_quote!(take(value);),
+            &syn::parse_quote!(take(value, other);)
+        ));
+        assert!(!same(
+            &syn::parse_quote!(take((value,));),
+            &syn::parse_quote!(take((value));)
+        ));
         fn ensured(statement: &syn::Stmt, predicate: syn::Expr, message: &str) -> bool {
             let mac = match statement {
                 syn::Stmt::Macro(item) => &item.mac,
