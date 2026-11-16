@@ -246,20 +246,32 @@ impl ResponseTickets {
         scope: &AuthorityScope,
         response: &ResponseIdentity,
     ) -> Result<()> {
-        let mut tickets = self.tickets.try_borrow_mut()?;
-        ensure!(tickets.is_empty(), "response_rights_already_captured");
         OWNERS.with(|owners| {
             let owners = owners.try_borrow()?;
             let owner = owners
                 .get(scope.app.as_str())
                 .context("native request App missing")?;
-            ensure!(
-                owner.kind == NativeRole::AppHost && owner.selection.scope() == scope,
-                "native request App selection changed"
-            );
-            tickets.push(owner.response_rights.register(response)?);
-            Ok(())
+            self.capture_app_owner(scope, response, owner)
         })
+    }
+
+    /// Register only from the actual selected owner, including after that
+    /// entire value moved into the same request's early lease. No index/receipt
+    /// lookup or new ledger can replace its retained response cohort.
+    pub(super) fn capture_app_owner(
+        &self,
+        scope: &AuthorityScope,
+        response: &ResponseIdentity,
+        owner: &super::Owners,
+    ) -> Result<()> {
+        let mut tickets = self.tickets.try_borrow_mut()?;
+        ensure!(tickets.is_empty(), "response_rights_already_captured");
+        ensure!(
+            owner.kind == NativeRole::AppHost && owner.selection.scope() == scope,
+            "native request App selection changed"
+        );
+        tickets.push(owner.response_rights.register(response)?);
+        Ok(())
     }
 
     pub(super) fn capture_shell(&self, response: &ResponseIdentity) -> Result<()> {
@@ -411,6 +423,46 @@ mod sql_debt_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn actual_retained_capture_uses_only_its_whole_owners_response_ledger() {
+        use quote::ToTokens;
+        let file = syn::parse_file(include_str!("response_tickets.rs")).unwrap();
+        let actual = file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("ResponseTickets")) { return None; }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == "capture_app_owner" => Some(item), _ => None,
+            })
+        }).unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            let mut tickets = self.tickets.try_borrow_mut()?;
+            ensure!(tickets.is_empty(), "response_rights_already_captured");
+            ensure!(
+                owner.kind == NativeRole::AppHost && owner.selection.scope() == scope,
+                "native request App selection changed"
+            );
+            tickets.push(owner.response_rights.register(response)?);
+            Ok(())
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for index in 0..4 {
+            let mut missing = actual.block.clone();
+            missing.stmts.remove(index);
+            assert!(!guarded(&missing));
+        }
+        let mut replacement = actual.block.clone();
+        replacement.stmts[3] =
+            syn::parse_quote!(tickets.push(ResponseRights::new().register(response)?););
+        assert!(!guarded(&replacement));
+        let mut foreign = actual.block.clone();
+        foreign.stmts[3] =
+            syn::parse_quote!(tickets.push(other.response_rights.register(response)?););
+        assert!(!guarded(&foreign));
+    }
+
     use super::*;
 
     fn fixture() -> (ResponseRights, ResponseIdentity, ResponseTickets) {
@@ -552,7 +604,7 @@ mod tests {
                 "native_admin_read_storage_required",
             ),
             (
-                "ACTIVE_SINK.with(|slot| slot.try_borrow().map(|slot| slot.is_none()))?",
+                "ACTIVE_REQUEST.with(|slot| slot.try_borrow().map(|slot| slot.is_none()))?",
                 "native_admin_read_standalone_required",
             ),
         ];
@@ -1158,28 +1210,29 @@ mod tests {
         );
     }
 
-    fn registration_precedes_request(source: &str) -> bool {
+    fn registration_precedes_request(source: &str, owner_source: &str) -> bool {
         use quote::ToTokens;
-        let Ok(file) = syn::parse_file(source) else {
+        use syn::visit::Visit;
+        let (Ok(file), Ok(owners)) = (syn::parse_file(source), syn::parse_file(owner_source))
+        else {
             return false;
         };
         let mut matched = 0;
-        for item in file.items {
+        for item in &file.items {
             let syn::Item::Impl(item) = item else {
                 continue;
             };
             if item.self_ty.to_token_stream().to_string() != "Sink" {
                 continue;
             }
-            for member in item.items {
+            for member in &item.items {
                 let syn::ImplItem::Fn(function) = member else {
                     continue;
                 };
                 let expected: syn::Block = match function.sig.ident.to_string().as_str() {
-                    "capture_app_request" => syn::parse_quote!({
-                        self.response_tickets.capture_app(scope, &self.identity)?;
-                        self.request.capture_app(scope)
-                    }),
+                    "capture_app_request" => {
+                        syn::parse_quote!({ self.request_owner.capture_app(self, scope) })
+                    }
                     "capture_shell_request" => syn::parse_quote!({
                         self.response_tickets.capture_shell(&self.identity)?;
                         self.request.capture_shell()
@@ -1194,31 +1247,283 @@ mod tests {
                 }
             }
         }
-        matched == 2
+        let functions = owners
+            .items
+            .iter()
+            .filter_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if item.self_ty.to_token_stream().to_string() != "RequestOwner" {
+                    return None;
+                }
+                item.items.iter().find_map(|member| match member {
+                    syn::ImplItem::Fn(function) if function.sig.ident == "capture_app" => {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<Vec<_>>();
+        if matched != 2 || functions.len() != 1 {
+            return false;
+        }
+        #[derive(Default)]
+        struct Registration {
+            initial: Vec<syn::Block>,
+            restored: Vec<(String, Vec<String>)>,
+        }
+        impl<'ast> Visit<'ast> for Registration {
+            fn visit_expr_if(&mut self, value: &'ast syn::ExprIf) {
+                if matches!(&*value.cond, syn::Expr::Unary(value) if matches!(value.op,syn::UnOp::Not(_)) && matches!(&*value.expr,syn::Expr::Path(path) if path.path.is_ident("restored")))
+                {
+                    self.initial.push(value.then_branch.clone());
+                }
+                syn::visit::visit_expr_if(self, value);
+            }
+            fn visit_expr_method_call(&mut self, value: &'ast syn::ExprMethodCall) {
+                if value.method == "capture_app_owner" || value.method == "capture_request" {
+                    self.restored.push((
+                        format!("{}::{}", value.receiver.to_token_stream(), value.method),
+                        value
+                            .args
+                            .iter()
+                            .map(|arg| arg.to_token_stream().to_string())
+                            .collect(),
+                    ));
+                }
+                syn::visit::visit_expr_method_call(self, value);
+            }
+        }
+        let mut registration = Registration::default();
+        registration.visit_block(&functions[0].block);
+        let initial: syn::Block = syn::parse_quote!({
+            sink.response_tickets.capture_app(scope, &sink.identity)?;
+            sink.request.capture_app(scope)?;
+            *self.source.try_borrow_mut()? = RequestOwnerSource::Initial;
+            return Ok(());
+        });
+        let Some(syn::Stmt::Local(result)) = functions[0].block.stmts.first() else {
+            return false;
+        };
+        let Some(init) = &result.init else {
+            return false;
+        };
+        let syn::Expr::Call(catch) = &*init.expr else {
+            return false;
+        };
+        let Some(syn::Expr::Call(safe)) = catch.args.first() else {
+            return false;
+        };
+        let Some(syn::Expr::Closure(callback)) = safe.args.first() else {
+            return false;
+        };
+        let syn::Expr::Block(callback) = &*callback.body else {
+            return false;
+        };
+        let checked: syn::Stmt = syn::parse_quote!(sink.response_tickets.capture_app_owner(scope, &sink.identity, owner)?;);
+        let captured: syn::Stmt = syn::parse_quote!({
+            let mut routing = routing.try_borrow_mut()?;
+            let runtime = std::sync::Arc::clone(&routing.runtime);
+            routing.capture_request(&runtime, sink)?;
+        });
+        let positions = |expected: &syn::Stmt| {
+            callback
+                .block
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, stmt)| {
+                    (stmt.to_token_stream().to_string() == expected.to_token_stream().to_string())
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>()
+        };
+        let registered = positions(&checked);
+        let captured = positions(&captured);
+        registration.initial.len() == 1
+            && registration.initial[0].to_token_stream().to_string()
+                == initial.to_token_stream().to_string()
+            && registered.len() == 1
+            && captured.len() == 1
+            && registered[0] < captured[0]
+            && registration.restored
+                == [
+                    (
+                        "sink . response_tickets::capture_app_owner".into(),
+                        vec!["scope".into(), "& sink . identity".into(), "owner".into()],
+                    ),
+                    (
+                        "routing::capture_request".into(),
+                        vec!["& runtime".into(), "sink".into()],
+                    ),
+                ]
     }
 
     #[test]
     fn actual_app_and_unselected_shell_register_before_original_capture() {
+        use quote::ToTokens;
         let source = include_str!("../native_management.rs");
-        assert!(registration_precedes_request(source));
-        for (old, new) in [
+        let owner_source = include_str!("response.rs");
+        assert!(registration_precedes_request(source, owner_source));
+        for (name, replacement) in [
             (
-                "self.response_tickets.capture_app(scope, &self.identity)?;",
-                "",
-            ),
-            ("self.response_tickets.capture_shell(&self.identity)?;", ""),
-            (
-                "self.response_tickets.capture_app(scope, &self.identity)?;",
-                "let _ignored = self.response_tickets.capture_app(scope, &self.identity);",
+                "capture_app_request",
+                syn::parse_quote!({ self.request.capture_app(scope) }),
             ),
             (
-                "self.request.capture_app(scope)",
-                "self.request.capture_app(scope)?; self.response_tickets.capture_app(scope, &self.identity)",
+                "capture_shell_request",
+                syn::parse_quote!({ self.request.capture_shell() }),
+            ),
+            (
+                "capture_shell_request",
+                syn::parse_quote!({
+                    let _ignored = self.response_tickets.capture_shell(&self.identity);
+                    self.request.capture_shell()
+                }),
+            ),
+            (
+                "capture_shell_request",
+                syn::parse_quote!({
+                    self.request.capture_shell()?;
+                    self.response_tickets.capture_shell(&self.identity)
+                }),
             ),
         ] {
-            let mutant = source.replacen(old, new, 1);
-            assert_ne!(source, mutant, "actual request registration");
-            assert!(!registration_precedes_request(&mutant));
+            let replacement: syn::Block = replacement;
+            let mut file = syn::parse_file(source).unwrap();
+            let mut changed = 0;
+            for item in &mut file.items {
+                let syn::Item::Impl(item) = item else {
+                    continue;
+                };
+                if item.self_ty.to_token_stream().to_string() != "Sink" {
+                    continue;
+                }
+                for member in &mut item.items {
+                    if let syn::ImplItem::Fn(function) = member
+                        && function.sig.ident == name
+                    {
+                        function.block = replacement.clone();
+                        changed += 1;
+                    }
+                }
+            }
+            assert_eq!(changed, 1);
+            assert!(!registration_precedes_request(
+                &file.to_token_stream().to_string(),
+                owner_source
+            ));
+        }
+        fn capture_body(block: &mut syn::Block) -> &mut syn::Block {
+            let syn::Stmt::Local(result) = &mut block.stmts[0] else {
+                panic!("actual capture result");
+            };
+            let syn::Expr::Call(catch) = result.init.as_mut().unwrap().expr.as_mut() else {
+                panic!("actual catch");
+            };
+            let syn::Expr::Call(safe) = &mut catch.args[0] else {
+                panic!("actual unwind boundary");
+            };
+            let syn::Expr::Closure(callback) = &mut safe.args[0] else {
+                panic!("actual capture callback");
+            };
+            let syn::Expr::Block(callback) = callback.body.as_mut() else {
+                panic!("actual capture body");
+            };
+            &mut callback.block
+        }
+        for action in 0..8 {
+            let mut file = syn::parse_file(owner_source).unwrap();
+            let mut changed = 0;
+            for item in &mut file.items {
+                let syn::Item::Impl(item) = item else {
+                    continue;
+                };
+                if item.self_ty.to_token_stream().to_string() != "RequestOwner" {
+                    continue;
+                }
+                for member in &mut item.items {
+                    if let syn::ImplItem::Fn(function) = member
+                        && function.sig.ident == "capture_app"
+                    {
+                        let body = capture_body(&mut function.block);
+                        if action == 7 {
+                            let checked: syn::Stmt = syn::parse_quote!(sink.response_tickets.capture_app_owner(scope, &sink.identity, owner)?;);
+                            let captured: syn::Stmt = syn::parse_quote!({
+                                let mut routing = routing.try_borrow_mut()?;
+                                let runtime = std::sync::Arc::clone(&routing.runtime);
+                                routing.capture_request(&runtime, sink)?;
+                            });
+                            let index = |expected: &syn::Stmt| {
+                                body.stmts
+                                    .iter()
+                                    .position(|stmt| {
+                                        stmt.to_token_stream().to_string()
+                                            == expected.to_token_stream().to_string()
+                                    })
+                                    .unwrap()
+                            };
+                            let before = index(&checked);
+                            let after = index(&captured);
+                            body.stmts.swap(before, after);
+                            changed += 1;
+                            continue;
+                        }
+                        for statement in &mut body.stmts {
+                            if action < 3 {
+                                let syn::Stmt::Expr(syn::Expr::If(value), _) = statement else {
+                                    continue;
+                                };
+                                if !matches!(&*value.cond, syn::Expr::Unary(value) if matches!(value.op,syn::UnOp::Not(_)) && matches!(&*value.expr,syn::Expr::Path(path) if path.path.is_ident("restored")))
+                                {
+                                    continue;
+                                }
+                                match action {
+                                    0 => {
+                                        value.then_branch.stmts.remove(0);
+                                    }
+                                    1 => value.then_branch.stmts.swap(0, 1),
+                                    2 => {
+                                        value.then_branch.stmts[0] = syn::parse_quote!(let _ignored = sink.response_tickets.capture_app(scope, &sink.identity);)
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                changed += 1;
+                            } else {
+                                let syn::Stmt::Expr(syn::Expr::Try(value), _) = statement else {
+                                    continue;
+                                };
+                                let syn::Expr::MethodCall(value) = value.expr.as_mut() else {
+                                    continue;
+                                };
+                                if value.method != "capture_app_owner" {
+                                    continue;
+                                }
+                                match action {
+                                    3 => value.method = syn::parse_quote!(unregistered_capture),
+                                    4 => value.args[2] = syn::parse_quote!(foreign_owner),
+                                    5 => {
+                                        let call = value.clone();
+                                        *statement = syn::parse_quote!(let _ignored = #call;);
+                                    }
+                                    6 => {
+                                        let call = value.clone();
+                                        *statement = syn::parse_quote!(if false { #call?; });
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                changed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(changed, 1);
+            assert!(!registration_precedes_request(
+                source,
+                &file.to_token_stream().to_string()
+            ));
         }
     }
 

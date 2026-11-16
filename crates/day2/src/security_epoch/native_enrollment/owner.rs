@@ -1,6 +1,7 @@
 //! Stable native executor ownership. Nothing here adopts a parsed certificate as
 //! authority, moves a role between threads, or renews a failed original.
 
+use crate::deployment::{NativeRestoredHostInputs, RestoredHostInstallation};
 use crate::oauth::native_management::{
     NativeConsumerAffinity, NativeConsumerContext, NativeRequestFinalContext,
 };
@@ -183,6 +184,412 @@ pub(in crate::security_epoch) struct RetiredRestoredAppNative {
     current_peer: Option<super::RestoredPeerConnection<'static>>,
 }
 
+/// Negative projection of the actual retired App's two roots. Holding or
+/// dropping this value grants nothing and does not change disposition. The
+/// registry's disposal guard calls refuse explicitly, even during unwind or
+/// while routing/history are borrowed; no RefCell or original sample is needed.
+pub(crate) struct RestoredAppRefusal {
+    gate: Rc<RestoredRequestGate>,
+    history: Rc<super::restored::RestoredAppHistory>,
+}
+
+#[cfg(test)]
+pub(super) mod restored_parent_refusal_tests {
+    use super::*;
+    use quote::ToTokens;
+    use std::cell::RefCell;
+
+    // Only real negative gate/history cells are exercised. The empty history
+    // models a loaned-out slot and owns no Accepted App, keeper or native role.
+    fn roots(state: RestoredRequestState) -> (RestoredAppRefusal, Rc<RestoredRequestGate>) {
+        let gate = Rc::new(RestoredRequestGate::new());
+        match state {
+            RestoredRequestState::Vacant => {}
+            RestoredRequestState::Captured => gate.capture().unwrap(),
+            RestoredRequestState::Busy => {
+                gate.capture().unwrap();
+                RestoredRequestGate::begin(&gate, &gate).unwrap();
+            }
+            RestoredRequestState::Finalizing => {
+                gate.capture().unwrap();
+                RestoredRequestGate::begin_final(&gate, &gate).unwrap();
+            }
+            RestoredRequestState::Refused => gate.refuse(),
+        }
+        let refusal = RestoredAppRefusal {
+            gate: Rc::clone(&gate),
+            history: super::super::restored::RestoredAppHistory::empty_refusal_test_root(),
+        };
+        (refusal, gate)
+    }
+
+    // Shared negative-only fixture: the real two refusal roots, with no
+    // accepted App, keeper, enrolled owner, stage or successful history loan.
+    pub(crate) fn new_negative_parent_refusal_fixture() -> RestoredAppRefusal {
+        roots(RestoredRequestState::Vacant).0
+    }
+
+    // Refusal observations only. False is never evidence of native authority.
+    pub(crate) fn negative_parent_refusal_roots(refusal: &RestoredAppRefusal) -> [bool; 2] {
+        [
+            refusal.gate.state.get() == RestoredRequestState::Refused,
+            refusal.history.all_refusal_test_roots_set(),
+        ]
+    }
+
+    #[test]
+    fn shared_negative_fixture_distinguishes_each_actual_refusal_root() {
+        use crate::security_epoch::native_enrollment::{
+            negative_parent_refusal_roots, new_negative_parent_refusal_fixture,
+        };
+        let refusal = new_negative_parent_refusal_fixture();
+        assert_eq!(negative_parent_refusal_roots(&refusal), [false, false]);
+        refusal.gate.refuse();
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true, false]);
+        refusal.history.refuse();
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true, true]);
+
+        let other = new_negative_parent_refusal_fixture();
+        other.history.refuse();
+        assert_eq!(negative_parent_refusal_roots(&other), [false, true]);
+        other.refuse();
+        assert_eq!(negative_parent_refusal_roots(&other), [true, true]);
+    }
+
+    struct Dispose<'a>(&'a RestoredAppRefusal);
+
+    impl Drop for Dispose<'_> {
+        fn drop(&mut self) {
+            self.0.refuse();
+        }
+    }
+
+    #[derive(Debug)]
+    struct Primary;
+
+    #[test]
+    fn explicit_error_and_unwind_disposal_refuse_actual_negative_roots_while_routing_is_borrowed() {
+        for state in [
+            RestoredRequestState::Vacant,
+            RestoredRequestState::Captured,
+            RestoredRequestState::Busy,
+            RestoredRequestState::Finalizing,
+            RestoredRequestState::Refused,
+        ] {
+            for cut in 0..3 {
+                let (refusal, gate) = roots(state);
+                // This stand-in routing container owns only the same negative
+                // roots, never a fabricated genuine restored Host/parent.
+                let routing = RefCell::new((Rc::clone(&gate), Rc::clone(&refusal.history)));
+                let held = routing.borrow_mut();
+                match cut {
+                    0 => refusal.refuse(),
+                    1 => {
+                        let result: std::result::Result<(), Primary> = {
+                            let _dispose = Dispose(&refusal);
+                            Err(Primary)
+                        };
+                        assert!(matches!(result, Err(Primary)));
+                    }
+                    _ => {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _dispose = Dispose(&refusal);
+                            std::panic::panic_any(Primary);
+                        }));
+                        assert!(result.unwrap_err().is::<Primary>());
+                    }
+                }
+                assert!(routing.try_borrow_mut().is_err());
+                assert!(Rc::ptr_eq(&held.0, &gate));
+                assert!(Rc::ptr_eq(&held.1, &refusal.history));
+                for _ in 0..3 {
+                    refusal.refuse();
+                    assert!(refusal.history.all_refusal_test_roots_set());
+                    assert!(gate.state.get() == RestoredRequestState::Refused);
+                    assert!(gate.capture().is_err());
+                    assert!(RestoredRequestGate::begin(&gate, &gate).is_err());
+                    assert!(RestoredRequestGate::begin_final(&gate, &gate).is_err());
+                    assert!(gate.finish_scope().is_err());
+                    assert!(gate.finish().is_err());
+                    assert!(gate.state.get() == RestoredRequestState::Refused);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_a_projection_is_not_disposal_and_old_refusal_cannot_poison_replacement_roots() {
+        let (projection, gate) = roots(RestoredRequestState::Vacant);
+        let history = Rc::clone(&projection.history);
+        drop(projection);
+        assert!(gate.state.get() == RestoredRequestState::Vacant);
+        assert!(!history.all_refusal_test_roots_set());
+
+        let old = Rc::new(RestoredAppRefusal { gate, history });
+        let shared = Rc::clone(&old);
+        let (replacement, next) = roots(RestoredRequestState::Vacant);
+        old.refuse();
+        drop(old);
+        shared.refuse();
+        assert!(shared.history.all_refusal_test_roots_set());
+        assert!(!replacement.history.all_refusal_test_roots_set());
+        assert!(next.state.get() == RestoredRequestState::Vacant);
+        next.capture().unwrap();
+        RestoredRequestGate::begin(&next, &next).unwrap();
+        shared.refuse();
+        assert!(next.state.get() == RestoredRequestState::Busy);
+        next.finish_scope().unwrap();
+        assert!(next.state.get() == RestoredRequestState::Captured);
+        assert!(!replacement.history.all_refusal_test_roots_set());
+    }
+
+    fn method<'a>(file: &'a syn::File, owner: &str, name: &str) -> &'a syn::ImplItemFn {
+        file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().unwrap().ident == owner) {
+                return None;
+            }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            })
+        }).unwrap()
+    }
+
+    #[test]
+    fn actual_parent_projection_retains_only_its_exact_two_roots_and_exposes_only_refusal() {
+        let file = syn::parse_file(include_str!("owner.rs")).unwrap();
+        let actual = method(&file, "RetiredRestoredAppNative", "retained_refusal");
+        let expected: syn::Block = syn::parse_quote!({
+            RestoredAppRefusal {
+                gate: Rc::clone(&self.request_state),
+                history: Rc::clone(&self.installed.prepared.pending.history),
+            }
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for substitute in [
+            syn::parse_quote!({
+                RestoredAppRefusal {
+                    gate: Rc::clone(&other.request_state),
+                    history: Rc::clone(&self.installed.prepared.pending.history),
+                }
+            }),
+            syn::parse_quote!({
+                RestoredAppRefusal {
+                    gate: Rc::clone(&self.request_state),
+                    history: Rc::clone(&other.installed.prepared.pending.history),
+                }
+            }),
+        ] {
+            assert!(!guarded(&substitute));
+        }
+        assert_eq!(actual.sig.inputs.len(), 1);
+        assert!(
+            matches!(&actual.sig.inputs[0], syn::FnArg::Receiver(receiver)
+            if receiver.reference.is_some() && receiver.mutability.is_none())
+        );
+        let refusal = method(&file, "RestoredAppRefusal", "refuse");
+        let expected: syn::Block = syn::parse_quote!({
+            self.gate.refuse();
+            self.history.refuse();
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&refusal.block));
+        for index in 0..2 {
+            let mut missing = refusal.block.clone();
+            missing.stmts.remove(index);
+            assert!(!guarded(&missing));
+        }
+        let mut methods = Vec::new();
+        for item in &file.items {
+            match item {
+                syn::Item::Struct(item) if item.ident == "RestoredAppRefusal" => {
+                    assert_eq!(item.fields.len(), 2);
+                    assert!(
+                        item.fields
+                            .iter()
+                            .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+                    );
+                    assert!(
+                        item.attrs
+                            .iter()
+                            .all(|attribute| attribute.path().is_ident("doc"))
+                    );
+                }
+                syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("RestoredAppRefusal")) =>
+                {
+                    assert!(
+                        item.trait_.is_none(),
+                        "no Drop, Clone or other alternate behavior"
+                    );
+                    methods.extend(item.items.iter().map(|item| match item {
+                        syn::ImplItem::Fn(item) => item.sig.ident.to_string(),
+                        _ => panic!("only the fixed negative operation"),
+                    }));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(methods, ["refuse"]);
+    }
+
+    fn attempt_sites(file: &syn::File) -> Vec<(String, String, [String; 3])> {
+        struct Sites(Vec<[String; 3]>);
+        impl<'ast> syn::visit::Visit<'ast> for Sites {
+            fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
+                if value.path.is_ident("RestoredAppBeginAttempt") {
+                    assert!(value.rest.is_none());
+                    assert_eq!(value.fields.len(), 3);
+                    let fields = value
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.member.to_token_stream().to_string(),
+                                field
+                                    .expr
+                                    .to_token_stream()
+                                    .to_string()
+                                    .chars()
+                                    .filter(|c| !c.is_whitespace())
+                                    .collect::<String>(),
+                            )
+                        })
+                        .collect::<std::collections::BTreeMap<_, _>>();
+                    self.0.push(
+                        ["parent", "captured", "context"]
+                            .map(|key| fields.get(key).unwrap().clone()),
+                    );
+                }
+                syn::visit::visit_expr_struct(self, value);
+            }
+        }
+        let mut found = Vec::new();
+        // Root production impls only; quoted mutation fixtures inside the
+        // cfg(test) module cannot be counted as real accepting constructors.
+        for item in &file.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            let syn::Type::Path(owner) = &*item.self_ty else {
+                continue;
+            };
+            for method in &item.items {
+                let syn::ImplItem::Fn(method) = method else {
+                    continue;
+                };
+                let mut sites = Sites(Vec::new());
+                syn::visit::Visit::visit_block(&mut sites, &method.block);
+                for fields in sites.0 {
+                    found.push((
+                        owner.path.segments.last().unwrap().ident.to_string(),
+                        method.sig.ident.to_string(),
+                        fields,
+                    ));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn contextless_guard_is_confined_to_fixed_passive_checks_and_never_begins_a_consumer() {
+        let file = syn::parse_file(include_str!("owner.rs")).unwrap();
+        let mut expected = [
+            (
+                "RestoredAppHostSetupNative",
+                "check_native",
+                ["Some(parent)", "Some(captured)", "None"],
+            ),
+            (
+                "CapturedRestoredAppRequest",
+                "capture_human_clock",
+                ["Some(parent)", "Some(self)", "None"],
+            ),
+            (
+                "CapturedRestoredAppRequest",
+                "sample_human_clock",
+                ["Some(parent)", "Some(self)", "None"],
+            ),
+            (
+                "CapturedRestoredAppRequest",
+                "begin_current",
+                ["Some(parent)", "Some(self)", "Some(context)"],
+            ),
+        ]
+        .map(|(owner, name, fields)| (owner.to_owned(), name.to_owned(), fields.map(str::to_owned)))
+        .to_vec();
+        expected.sort();
+        assert_eq!(attempt_sites(&file), expected);
+
+        let mut missing = file.clone();
+        let mut changed = 0;
+        for item in &mut missing.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("CapturedRestoredAppRequest"))
+            {
+                continue;
+            }
+            for method in &mut item.items {
+                let syn::ImplItem::Fn(method) = method else {
+                    continue;
+                };
+                if method.sig.ident != "begin_current" {
+                    continue;
+                }
+                let Some(syn::Stmt::Local(local)) = method.block.stmts.first_mut() else {
+                    panic!("actual begin guard local");
+                };
+                assert!(
+                    matches!(&local.pat, syn::Pat::Ident(pattern) if pattern.ident == "attempt")
+                );
+                let syn::Expr::Struct(value) = local.init.as_mut().unwrap().expr.as_mut() else {
+                    panic!("actual begin guard constructor");
+                };
+                assert!(value.path.is_ident("RestoredAppBeginAttempt"));
+                let context = value.fields.iter_mut().find(|field|
+                    matches!(&field.member, syn::Member::Named(name) if name == "context")
+                ).unwrap();
+                assert_eq!(context.expr.to_token_stream().to_string(), "Some (context)");
+                context.expr = syn::parse_quote!(None);
+                changed += 1;
+            }
+        }
+        assert_eq!(
+            changed, 1,
+            "one actual consumer constructor, not a quote fixture"
+        );
+        assert_ne!(attempt_sites(&missing), expected);
+
+        let mut broad = file.clone();
+        broad.items.push(syn::parse_quote! {
+            impl RetiredRestoredAppNative {
+                fn arbitrary_consumer_without_context(&mut self, captured: &mut CapturedRestoredAppRequest) {
+                    let _attempt = RestoredAppBeginAttempt {
+                        parent: Some(self), captured: Some(captured), context: None,
+                    };
+                }
+            }
+        });
+        assert_ne!(attempt_sites(&broad), expected);
+    }
+}
+
+impl RestoredAppRefusal {
+    pub(crate) fn refuse(&self) {
+        self.gate.refuse();
+        self.history.refuse();
+    }
+}
+
 /// Only local one-shot disposition DATA. It grants no native or storage right.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RestoredRequestState {
@@ -363,8 +770,10 @@ impl RestoredAppHostSetupNative {
     // actual native/file continuity and the later real Current remain required.
     fn install(
         mut self,
-        inputs: crate::deployment::NativeRestoredHostInputs,
-    ) -> Result<crate::deployment::RestoredHostInstallation> {
+        listener: tokio::net::TcpListener,
+        concurrency: usize,
+        admission: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<RestoredHostInstallation> {
         self.check_native()?;
         let expected = std::sync::Arc::as_ptr(
             &self
@@ -376,16 +785,34 @@ impl RestoredAppHostSetupNative {
                 .pending
                 .runtime,
         );
-        let requested = inputs.configure(
-            &mut self
-                .parent
-                .as_mut()
+        // Resource preparation may read configuration and construct provider
+        // ports. It belongs to this already captured setup original, never to
+        // a caller preparing DATA before prepare_host_native captures it.
+        let requested = NativeRestoredHostInputs::prepare(
+            self.parent
+                .as_ref()
                 .expect("actual native setup parent")
                 .installed
                 .prepared
                 .pending
-                .runtime,
-        );
+                .runtime
+                .as_ref(),
+            listener,
+            concurrency,
+            admission,
+        )
+        .and_then(|inputs| {
+            inputs.configure(
+                &mut self
+                    .parent
+                    .as_mut()
+                    .expect("actual native setup parent")
+                    .installed
+                    .prepared
+                    .pending
+                    .runtime,
+            )
+        });
         let actual = std::sync::Arc::as_ptr(
             &self
                 .parent
@@ -443,13 +870,14 @@ impl RestoredAppHostSetupNative {
                 .captured
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("restore_host_setup_request_missing"))?;
-            let mut attempt = RestoredHumanClockAttempt {
-                captured,
-                parent,
-                completed: false,
+            let mut attempt = RestoredAppBeginAttempt {
+                captured: Some(captured),
+                parent: Some(parent),
+                context: None,
             };
             attempt.check_posts()?;
-            attempt.completed = true;
+            attempt.parent = None;
+            attempt.captured = None;
             Ok(())
         })();
         if requested.is_err() {
@@ -509,35 +937,29 @@ impl Drop for RestoredAppBeginAttempt<'_, '_, '_> {
     }
 }
 
-/// Both real roots stay armed across passive capture continuity and human-clock observations.
-struct RestoredHumanClockAttempt<'capture, 'parent> {
-    captured: &'capture mut CapturedRestoredAppRequest,
-    parent: &'parent mut RetiredRestoredAppNative,
-    completed: bool,
-}
-
-impl Drop for RestoredHumanClockAttempt<'_, '_> {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.captured.refuse();
-            self.parent.request_state.refuse();
-            self.parent.installed.prepared.pending.refuse();
-        }
-    }
-}
-
-impl RestoredHumanClockAttempt<'_, '_> {
+// The same actual parent/capture guard also covers the three fixed passive
+// setup/clock operations. They supply no consumer context or Current and
+// release only their borrowed roots after all independent posts succeed.
+impl RestoredAppBeginAttempt<'_, '_, '_> {
     fn require_parent(&mut self) -> Result<()> {
-        let same = Rc::ptr_eq(&self.parent.request_state, &self.captured.refusal.gate)
+        let parent = self
+            .parent
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("restore_clock_parent_missing"))?;
+        let captured = self
+            .captured
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("restore_clock_capture_missing"))?;
+        let same = Rc::ptr_eq(&parent.request_state, &captured.refusal.gate)
             && Rc::ptr_eq(
-                &self.parent.installed.prepared.pending.history,
-                &self.captured.history,
+                &parent.installed.prepared.pending.history,
+                &captured.history,
             )
-            && self.parent.request_state.state.get() == RestoredRequestState::Captured;
+            && parent.request_state.state.get() == RestoredRequestState::Captured;
         if !same {
-            self.captured.refuse();
-            self.parent.request_state.refuse();
-            self.parent.installed.prepared.pending.refuse();
+            captured.refuse();
+            parent.request_state.refuse();
+            parent.installed.prepared.pending.refuse();
             anyhow::bail!("restore_human_clock_parent_changed_or_busy");
         }
         Ok(())
@@ -545,9 +967,16 @@ impl RestoredHumanClockAttempt<'_, '_> {
 
     fn check_posts(&mut self) -> Result<()> {
         self.require_parent()?;
-        let prepared = &mut self.parent.installed.prepared;
-        let request = self
+        let parent = self
+            .parent
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("restore_clock_parent_missing"))?;
+        let captured = self
             .captured
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("restore_clock_capture_missing"))?;
+        let prepared = &mut parent.installed.prepared;
+        let request = captured
             .request
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("restore_current_request_missing"))?;
@@ -703,21 +1132,25 @@ impl CapturedRestoredAppRequest {
         &mut self,
         parent: &mut RetiredRestoredAppNative,
     ) -> Result<EnrolledOriginalClock> {
-        let mut attempt = RestoredHumanClockAttempt {
-            captured: self,
-            parent,
-            completed: false,
+        let mut attempt = RestoredAppBeginAttempt {
+            captured: Some(self),
+            parent: Some(parent),
+            context: None,
         };
         let origin = boottime()?;
         let requested = (|| {
             attempt.require_parent()?;
             let request = attempt
                 .captured
+                .as_mut()
+                .expect("actual captured request")
                 .request
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("restore_current_request_missing"))?;
             let mut stage = attempt
                 .parent
+                .as_mut()
+                .expect("actual native parent")
                 .installed
                 .prepared
                 .pending
@@ -728,7 +1161,8 @@ impl CapturedRestoredAppRequest {
         let checked = attempt.check_posts();
         let clock = requested?;
         checked?;
-        attempt.completed = true;
+        attempt.parent = None;
+        attempt.captured = None;
         Ok(clock)
     }
 
@@ -737,20 +1171,24 @@ impl CapturedRestoredAppRequest {
         parent: &mut RetiredRestoredAppNative,
         clock: &mut EnrolledOriginalClock,
     ) -> Result<Duration> {
-        let mut attempt = RestoredHumanClockAttempt {
-            captured: self,
-            parent,
-            completed: false,
+        let mut attempt = RestoredAppBeginAttempt {
+            captured: Some(self),
+            parent: Some(parent),
+            context: None,
         };
         let requested = (|| {
             attempt.require_parent()?;
             let request = attempt
                 .captured
+                .as_mut()
+                .expect("actual captured request")
                 .request
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("restore_current_request_missing"))?;
             let mut stage = attempt
                 .parent
+                .as_mut()
+                .expect("actual native parent")
                 .installed
                 .prepared
                 .pending
@@ -761,7 +1199,8 @@ impl CapturedRestoredAppRequest {
         let checked = attempt.check_posts();
         let now = requested?;
         checked?;
-        attempt.completed = true;
+        attempt.parent = None;
+        attempt.captured = None;
         Ok(now)
     }
 
@@ -1219,6 +1658,34 @@ impl RestoredAppCurrentPeer<'_, '_, '_> {
         checked
     }
 
+    /// Borrow only the same captured Pending creator; a matching Runtime or
+    /// purpose label cannot replace its actual saved request and original.
+    pub(in crate::security_epoch) fn require_captured(
+        &mut self,
+        runtime: &crate::store::Runtime,
+    ) -> Result<()> {
+        self.require_runtime(runtime)?;
+        self.check_local()?;
+        let requested: Result<()> = (|| {
+            let request = self
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_current_request_missing"))?;
+            let mut stage = self.owner.borrow_current_request(request)?;
+            self.context
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_current_context_missing"))?
+                .require_captured(&mut stage, runtime)
+        })();
+        let checked = self.check_local();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn require_human(
         &mut self,
         intent: &crate::oauth::fresh_auth::FreshIntent,
@@ -1378,14 +1845,26 @@ impl RestoredAppCurrentPeer<'_, '_, '_> {
 }
 
 impl RetiredRestoredAppNative {
+    /// This can only poison the actual parent whose fixed roots are retained.
+    /// No original, native owner, identity lookup or parts constructor escapes.
+    pub(in crate::security_epoch) fn retained_refusal(&self) -> RestoredAppRefusal {
+        RestoredAppRefusal {
+            gate: Rc::clone(&self.request_state),
+            history: Rc::clone(&self.installed.prepared.pending.history),
+        }
+    }
+
     /// Fixed same-executor setup. A real native original precedes every
     /// configuration read; no caller can supply Runtime/native parts or reset
     /// the request between configuration and actual Host startup work.
     pub(in crate::security_epoch) fn install_host(
         self,
-        inputs: crate::deployment::NativeRestoredHostInputs,
-    ) -> Result<crate::deployment::RestoredHostInstallation> {
-        self.prepare_host_native()?.install(inputs)
+        listener: tokio::net::TcpListener,
+        concurrency: usize,
+        admission: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<RestoredHostInstallation> {
+        self.prepare_host_native()?
+            .install(listener, concurrency, admission)
     }
 
     /// This is the setup action's original, before fixed configuration reads
@@ -1615,6 +2094,23 @@ impl Drop for PendingRestoredEnrollment {
 }
 
 impl PendingRestoredEnrollment {
+    /// The genuine pending App, current lineage and real installed exchange
+    /// are mandatory before the old restore original can retire. The fixed
+    /// setup entry then captures its own original before any Host config I/O.
+    /// Listener/admission resources cannot manufacture any intermediate owner.
+    pub(in crate::security_epoch) fn install_host(
+        self,
+        lineage: crate::security_epoch::bootstrap::ActiveLineage,
+        listener: tokio::net::TcpListener,
+        concurrency: usize,
+        admission: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<RestoredHostInstallation> {
+        self.prepare_current_native(lineage)?
+            .confirm_installed()?
+            .retire_current_native()?
+            .install_host(listener, concurrency, admission)
+    }
+
     /// Consume the genuine pending App and keep all of its owning fields.
     /// Only its actual old request may admit the counter and construct file /
     /// peer continuity. Full old-owner posts precede this owning preparation;
@@ -3356,7 +3852,7 @@ const _: () = {
             let _ = <RestoredAppHostSetupNative as Ambiguous<_>>::check;
             let _ = <RestoredCaptureRefusal as Ambiguous<_>>::check;
             let _ = <RestoredAppBeginAttempt<'static, 'static, 'static> as Ambiguous<_>>::check;
-            let _ = <RestoredHumanClockAttempt<'static, 'static> as Ambiguous<_>>::check;
+            let _ = <RestoredAppRefusal as Ambiguous<_>>::check;
             let _ = <RestoredRequestFinishAttempt<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <RestoredAppCurrentPeer<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <RestoredControllerPortTransfer<'static,'static,'static> as Ambiguous<_>>::check;
@@ -4942,6 +5438,58 @@ mod restored_app_current_source_tests {
     }
 
     #[test]
+    fn actual_startup_class_guard_keeps_runtime_first_context_identity_and_independent_posts() {
+        use quote::ToTokens;
+        let actual = method("RestoredAppCurrentPeer", "require_startup_sql");
+        let expected: syn::Block = syn::parse_quote!({
+            if !std::ptr::eq(self.runtime.as_ref(), runtime) {
+                self.refuse();
+                anyhow::bail!("restore_current_runtime_changed");
+            }
+            let requested = self
+                .context
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_current_context_missing"))
+                .and_then(|context| context.require_startup_sql(runtime));
+            let checked = self.check_local();
+            if requested.is_err() || checked.is_err() {
+                self.refuse();
+            }
+            requested?;
+            checked
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for index in 0..5 {
+            let mut missing = actual.block.clone();
+            missing.stmts.remove(index);
+            assert!(!guarded(&missing));
+        }
+        let mut early_primary = actual.block.clone();
+        early_primary.stmts.swap(2, 4);
+        assert!(!guarded(&early_primary));
+        let mut suppressed_post = actual.block.clone();
+        suppressed_post.stmts[2] = syn::parse_quote!(let checked = Ok(()););
+        assert!(!guarded(&suppressed_post));
+        let mut other_context = actual.block.clone();
+        other_context.stmts[1] = syn::parse_quote! {
+            let requested = other.context.as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_current_context_missing"))
+                .and_then(|context| context.require_startup_sql(runtime));
+        };
+        assert!(!guarded(&other_context));
+        let mut generic_sql = actual.block.clone();
+        generic_sql.stmts[1] = syn::parse_quote! {
+            let requested = self.context.as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_current_context_missing"))
+                .and_then(|context| context.require_runtime(runtime));
+        };
+        assert!(!guarded(&generic_sql));
+    }
+
+    #[test]
     fn actual_runtime_identity_and_native_scope_cannot_be_replaced_by_matching_metadata() {
         let begin = tokens(&method("CapturedRestoredAppRequest", "begin_current"));
         let source = "runtime:&prepared.pending.runtime";
@@ -5400,6 +5948,73 @@ mod restored_app_current_source_tests {
     }
 
     #[test]
+    fn captured_pending_port_keeps_same_request_runtime_and_unconditional_refusal_posts() {
+        let actual = method("RestoredAppCurrentPeer", "require_captured");
+        let first: syn::Stmt = syn::parse_quote!(self.require_runtime(runtime)?;);
+        let runtime_first = |body: &syn::Block| {
+            body.stmts.first().is_some_and(|statement| {
+                statement.to_token_stream().to_string() == first.to_token_stream().to_string()
+            })
+        };
+        assert!(runtime_first(&actual.block));
+        let mut late_runtime = actual.block.clone();
+        late_runtime.stmts.swap(0, 1);
+        assert!(!runtime_first(&late_runtime));
+        let body = body_tokens("RestoredAppCurrentPeer", "require_captured");
+        let required = [
+            "self.require_runtime(runtime)?;",
+            "self.check_local()?;",
+            "letrequested:Result<()>=",
+            "self.captured.request.as_mut()",
+            "self.owner.borrow_current_request(request)?",
+            ".require_captured(&mutstage,runtime)",
+            "letchecked=self.check_local();",
+            "ifrequested.is_err()||checked.is_err(){self.refuse();}",
+            "requested?;checked",
+        ];
+        required_with_deletion_controls(&body, &required);
+        for (before, after) in [
+            (
+                "self.owner.borrow_current_request(request)?",
+                "self.owner.begin_current_stage()?",
+            ),
+            (
+                "self.captured.request.as_mut()",
+                "replacement.request.as_mut()",
+            ),
+            (
+                ".require_captured(&mutstage,runtime)",
+                ".check(&mutstage,runtime)",
+            ),
+            ("letchecked=self.check_local();", "letchecked=Ok(());"),
+            ("self.refuse();", "unrelated();"),
+        ] {
+            assert_eq!(body.matches(before).count(), 1);
+            assert!(!ordered(&body.replacen(before, after, 1), &required));
+        }
+        let late_post = body
+            .replacen("letchecked=self.check_local();", "", 1)
+            .replacen(
+                "requested?;",
+                "requested?;letchecked=self.check_local();",
+                1,
+            );
+        assert!(
+            !ordered(&late_post, &required),
+            "requested errors cannot skip the independent post"
+        );
+        for forbidden in [
+            "begin_current_request(",
+            "begin_current_stage(",
+            ".sample(",
+            ".arm(",
+            ".finish(",
+        ] {
+            assert!(!body.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
     fn response_view_requires_the_actual_http_context_before_any_native_observation() {
         let actual = method("RestoredAppCurrentPeer", "require_response");
         let Some(syn::Stmt::Expr(syn::Expr::If(first), _)) = actual.block.stmts.first() else {
@@ -5471,9 +6086,10 @@ mod restored_app_current_source_tests {
             &[
                 "self.parent.as_mut()",
                 "self.captured.as_mut()",
-                "letmutattempt=RestoredHumanClockAttempt{",
+                "letmutattempt=RestoredAppBeginAttempt{",
                 "attempt.check_posts()?",
-                "attempt.completed=true",
+                "attempt.parent=None;",
+                "attempt.captured=None;",
                 "ifrequested.is_err()",
                 "self.refuse()",
                 "requested}",
@@ -5515,14 +6131,19 @@ mod restored_app_current_source_tests {
     #[test]
     fn fixed_host_configuration_preserves_original_runtime_and_independent_posts_before_transfer() {
         let entry = body_tokens("RetiredRestoredAppNative", "install_host");
-        assert_eq!(entry, "{self.prepare_host_native()?.install(inputs)}");
+        assert_eq!(
+            entry,
+            "{self.prepare_host_native()?.install(listener,concurrency,admission)}"
+        );
         let body = body_tokens("RestoredAppHostSetupNative", "install");
         required_with_deletion_controls(
             &body,
             &[
                 "self.check_native()?;",
                 "letexpected=std::sync::Arc::as_ptr(",
-                "letrequested=inputs.configure(",
+                "letrequested=NativeRestoredHostInputs::prepare(",
+                "self.parent.as_ref().expect(\"actualnativesetupparent\").installed.prepared.pending.runtime.as_ref()",
+                ".and_then(|inputs|{inputs.configure(",
                 "letactual=std::sync::Arc::as_ptr(",
                 "letidentity=ifstd::ptr::eq(expected,actual)",
                 "restore_host_setup_runtime_replaced",
@@ -5540,7 +6161,7 @@ mod restored_app_current_source_tests {
                 "configured.install(runtime,owner,captured)",
             ],
         );
-        let configured = "letrequested=inputs.configure(";
+        let configured = "letrequested=NativeRestoredHostInputs::prepare(";
         let posts = "letchecked=self.check_native();";
         let premature =
             body.replacen(posts, "", 1)
@@ -5579,6 +6200,54 @@ mod restored_app_current_source_tests {
         let mut absent = call.clone();
         absent.args.clear();
         assert!(!exact(&absent));
+    }
+
+    #[test]
+    fn actual_pending_host_entry_requires_current_lineage_and_installed_retirement_before_setup() {
+        let actual = method("PendingRestoredEnrollment", "install_host");
+        let expected: syn::Block = syn::parse_quote!({
+            self.prepare_current_native(lineage)?
+                .confirm_installed()?
+                .retire_current_native()?
+                .install_host(listener, concurrency, admission)
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for changed in [
+            syn::parse_quote!({
+                self.prepare_current_native(other_lineage)?
+                    .confirm_installed()?
+                    .retire_current_native()?
+                    .install_host(listener, concurrency, admission)
+            }),
+            syn::parse_quote!({
+                self.prepare_current_native(lineage)?
+                    .retire_current_native()?
+                    .install_host(listener, concurrency, admission)
+            }),
+            syn::parse_quote!({
+                self.prepare_current_native(lineage)?
+                    .confirm_installed()?
+                    .install_host(listener, concurrency, admission)
+            }),
+            syn::parse_quote!({
+                self.prepare_current_native(lineage)?
+                    .confirm_installed()?
+                    .retire_current_native()?
+                    .install_host(other_listener, concurrency, admission)
+            }),
+            syn::parse_quote!({
+                self.prepare_current_native(lineage)?
+                    .confirm_installed()?
+                    .retire_current_native()?
+                    .install_host(listener, concurrency, other_admission)
+            }),
+        ] {
+            let changed: syn::Block = changed;
+            assert!(!guarded(&changed));
+        }
     }
 
     #[test]
@@ -5797,31 +6466,33 @@ mod restored_app_current_source_tests {
         required_with_deletion_controls(
             &capture,
             &[
-                "letmutattempt=RestoredHumanClockAttempt{",
+                "letmutattempt=RestoredAppBeginAttempt{",
                 "letorigin=boottime()?;",
                 "attempt.require_parent()?",
-                "attempt.captured.request.as_mut()",
-                "attempt.parent.installed.prepared.pending.owner.borrow_current_request(request)?",
+                "attempt.captured.as_mut().expect(\"actualcapturedrequest\").request.as_mut()",
+                "attempt.parent.as_mut().expect(\"actualnativeparent\").installed.prepared.pending.owner.borrow_current_request(request)?",
                 "EnrolledOriginalClock::capture_at(&mutstage,origin,NativeRole::AppHost)",
                 "letchecked=attempt.check_posts();",
                 "letclock=requested?;",
                 "checked?;",
-                "attempt.completed=true",
+                "attempt.parent=None;",
+                "attempt.captured=None;",
             ],
         );
         let sampled = body_tokens("CapturedRestoredAppRequest", "sample_human_clock");
         required_with_deletion_controls(
             &sampled,
             &[
-                "letmutattempt=RestoredHumanClockAttempt{",
+                "letmutattempt=RestoredAppBeginAttempt{",
                 "attempt.require_parent()?",
-                "attempt.captured.request.as_mut()",
-                "attempt.parent.installed.prepared.pending.owner.borrow_current_request(request)?",
+                "attempt.captured.as_mut().expect(\"actualcapturedrequest\").request.as_mut()",
+                "attempt.parent.as_mut().expect(\"actualnativeparent\").installed.prepared.pending.owner.borrow_current_request(request)?",
                 "clock.sample(&mutstage)",
                 "letchecked=attempt.check_posts();",
                 "letnow=requested?;",
                 "checked?;",
-                "attempt.completed=true",
+                "attempt.parent=None;",
+                "attempt.captured=None;",
             ],
         );
         for body in [&capture, &sampled] {
@@ -5834,12 +6505,14 @@ mod restored_app_current_source_tests {
                 assert!(!body.contains(forbidden), "{forbidden}");
             }
         }
-        let posts = body_tokens("RestoredHumanClockAttempt", "check_posts");
+        let posts = body_tokens("RestoredAppBeginAttempt", "check_posts");
         required_with_deletion_controls(
             &posts,
             &[
                 "self.require_parent()?",
-                "self.captured.request.as_mut()",
+                "self.parent.as_mut()",
+                "self.captured.as_mut()",
+                "captured.request.as_mut()",
                 "prepared.pending.owner.borrow_current_request(request)?",
                 "letfile=prepared.file.check_current(&mutstage);",
                 "letanchors=prepared.peer.check_anchors(&mutstage,&mutacquisition);",
@@ -5871,7 +6544,7 @@ mod restored_app_current_source_tests {
             cold.matches("EnrolledOriginalClock::capture_at(").count(),
             1
         );
-        let actual = method("RestoredHumanClockAttempt", "require_parent");
+        let actual = method("RestoredAppBeginAttempt", "require_parent");
         use syn::visit::Visit;
         struct Joins(Vec<syn::ExprCall>);
         impl<'ast> Visit<'ast> for Joins {
@@ -5893,10 +6566,10 @@ mod restored_app_current_source_tests {
                 .collect::<String>()
         };
         let expected = [
-            ["&self.parent.request_state", "&self.captured.refusal.gate"],
+            ["&parent.request_state", "&captured.refusal.gate"],
             [
-                "&self.parent.installed.prepared.pending.history",
-                "&self.captured.history",
+                "&parent.installed.prepared.pending.history",
+                "&captured.history",
             ],
         ];
         assert_eq!(joins.0.len(), expected.len());
@@ -5919,25 +6592,28 @@ mod restored_app_current_source_tests {
                 assert!(!exact(&foreign));
             }
         }
-        let parent = body_tokens("RestoredHumanClockAttempt", "require_parent");
+        let parent = body_tokens("RestoredAppBeginAttempt", "require_parent");
         required_with_deletion_controls(
             &parent,
             &[
-                "self.parent.request_state.state.get()==RestoredRequestState::Captured",
+                "letparent=self.parent.as_mut()",
+                "letcaptured=self.captured.as_mut()",
+                "parent.request_state.state.get()==RestoredRequestState::Captured",
                 "if!same",
-                "self.captured.refuse()",
-                "self.parent.request_state.refuse()",
-                "self.parent.installed.prepared.pending.refuse()",
+                "captured.refuse()",
+                "parent.request_state.refuse()",
+                "parent.installed.prepared.pending.refuse()",
             ],
         );
-        let drop = body_tokens("RestoredHumanClockAttempt", "drop");
+        let drop = body_tokens("RestoredAppBeginAttempt", "drop");
         required_with_deletion_controls(
             &drop,
             &[
-                "if!self.completed",
-                "self.captured.refuse()",
-                "self.parent.request_state.refuse()",
-                "self.parent.installed.prepared.pending.refuse()",
+                "ifletSome(parent)=&mutself.parent",
+                "parent.request_state.refuse()",
+                "parent.installed.prepared.pending.refuse()",
+                "ifletSome(captured)=&mutself.captured",
+                "captured.refuse()",
             ],
         );
     }

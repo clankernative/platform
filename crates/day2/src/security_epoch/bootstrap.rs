@@ -13,7 +13,7 @@ use super::{
     firestore::{EpochObservation, Names, Port, RestoreWriterPeerRead},
     journal::{CurrentBootstrapExecution, Purpose},
     kernel::{self, Outcome, Request, Snapshot},
-    native_enrollment::{EnrolledRoleStage, NativeRole},
+    native_enrollment::{EnrolledRoleStage, NativeRole, PendingRestoredEnrollment},
     self_check_profile::{self, Category},
 };
 use anyhow::{Context, Result, ensure};
@@ -78,6 +78,77 @@ impl ActiveObservation {
         match &mut self.kind {
             ObservationKind::Initial(observed) => observed.refuse(),
             ObservationKind::Restored(observed) => observed.refuse(),
+        }
+    }
+}
+
+/// Closed App installation. The lineage is derived from this SAME actual
+/// pending owner and never escapes as a caller-supplied permission or getter.
+/// Any error drops that owning attempt; none can be resumed from DATA.
+pub(in crate::security_epoch) fn install_restored_app_host(
+    mut pending: PendingRestoredEnrollment,
+    selection: &EpochStore,
+    listener: tokio::net::TcpListener,
+    concurrency: usize,
+    admission: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<crate::deployment::RestoredHostInstallation> {
+    let lineage = ActiveLineage::from_app_install(&mut pending, selection)?;
+    pending.install_host(lineage, listener, concurrency, admission)
+}
+
+#[cfg(test)]
+mod restored_host_installation_source_tests {
+    use quote::ToTokens;
+
+    #[test]
+    fn actual_app_installation_derives_lineage_from_the_same_consumed_owner_without_exposing_it() {
+        let file = syn::parse_file(include_str!("bootstrap.rs")).unwrap();
+        let functions = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == "install_restored_app_host" => {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(functions.len(), 1);
+        let actual = functions[0];
+        assert!(actual.sig.generics.params.is_empty());
+        let expected: syn::Block = syn::parse_quote!({
+            let lineage = ActiveLineage::from_app_install(&mut pending, selection)?;
+            pending.install_host(lineage, listener, concurrency, admission)
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for index in 0..actual.block.stmts.len() {
+            let mut missing = (*actual.block).clone();
+            missing.stmts.remove(index);
+            assert!(!guarded(&missing));
+        }
+        for changed in [
+            syn::parse_quote!({
+                let lineage = ActiveLineage::from_app_install(&mut other_pending, selection)?;
+                pending.install_host(lineage, listener, concurrency, admission)
+            }),
+            syn::parse_quote!({
+                let lineage = ActiveLineage::from_app_install(&mut pending, selection)?;
+                pending.install_host(other_lineage, listener, concurrency, admission)
+            }),
+            syn::parse_quote!({
+                let lineage = ActiveLineage::from_app_install(&mut pending, selection)?;
+                pending.install_host(lineage, other_listener, concurrency, admission)
+            }),
+            syn::parse_quote!({
+                let lineage = ActiveLineage::from_app_install(&mut pending, selection)?;
+                Ok(lineage)
+            }),
+        ] {
+            let changed: syn::Block = changed;
+            assert!(!guarded(&changed));
         }
     }
 }

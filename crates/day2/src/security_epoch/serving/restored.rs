@@ -6,7 +6,7 @@ use super::{NativeProviderUse, NativeSqlUse, RuntimeServingUse};
 use crate::oauth::native_management::{NativeConsumerContext, NativeRequestFinalContext};
 use crate::security_epoch::native_enrollment::{
     CapturedRestoredAppRequest, EnrolledOriginalClock, NativeConsumerOrigin,
-    RestoredAppCurrentPeer, RetiredRestoredAppNative,
+    RestoredAppCurrentPeer, RestoredAppRefusal, RetiredRestoredAppNative,
 };
 use anyhow::{Context, Result};
 
@@ -24,15 +24,37 @@ pub(crate) trait RestoredCurrent: sealed::Current {
     fn refuse(&mut self);
 }
 
-pub(crate) trait RestoredRuntimeCurrent: RestoredCurrent {
+/// SQL-only operation view. It cannot perform provider work, expose a stage
+/// or acquire an owner; only a genuinely selected scope can lend this view.
+pub(crate) trait RestoredSqlCurrent: RestoredCurrent {
     fn require_runtime(&mut self, runtime: &crate::store::Runtime) -> Result<()>;
-    fn require_startup_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()>;
+    fn require_app_selection(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &day2_capabilities::security_epoch::EpochStore,
+    ) -> Result<()>;
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime, access: NativeSqlUse) -> Result<()>;
+}
+
+pub(crate) trait RestoredRuntimeCurrent: RestoredSqlCurrent {
+    fn require_startup_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()>;
     fn prepare_provider(
         &mut self,
         runtime: &crate::store::Runtime,
         use_: NativeProviderUse,
     ) -> Result<()>;
+}
+
+/// A bound App human consumer. Its actual original remains inside the native
+/// context; the view cannot expose/reconstruct it or supply a Shell producer.
+pub(crate) trait RestoredHumanCurrent: RestoredSqlCurrent {
+    fn require_human(
+        &mut self,
+        intent: &crate::oauth::fresh_auth::FreshIntent,
+        phase: crate::oauth::native_management::Phase,
+    ) -> Result<()>;
+    fn finish_excluded(&mut self) -> Result<()>;
 }
 
 pub(crate) trait RestoredResponseCurrent: RestoredCurrent {
@@ -86,17 +108,33 @@ impl RestoredCurrent for CurrentView<'_, '_, '_> {
     }
 }
 
-impl RestoredRuntimeCurrent for CurrentView<'_, '_, '_> {
+impl RestoredSqlCurrent for CurrentView<'_, '_, '_> {
     fn require_runtime(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
         self.native.require_runtime(runtime)
     }
 
-    fn require_startup_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
-        self.native.require_startup_sql(runtime)
+    fn require_app_selection(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &day2_capabilities::security_epoch::EpochStore,
+    ) -> Result<()> {
+        self.native.require_runtime(runtime)?;
+        self.native.check_selection(
+            policy,
+            store,
+            crate::security_epoch::native_enrollment::NativeRole::AppHost,
+        )
     }
 
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime, access: NativeSqlUse) -> Result<()> {
         self.native.prepare_sql(runtime, access)
+    }
+}
+
+impl RestoredRuntimeCurrent for CurrentView<'_, '_, '_> {
+    fn require_startup_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        self.native.require_startup_sql(runtime)
     }
 
     fn prepare_provider(
@@ -105,6 +143,20 @@ impl RestoredRuntimeCurrent for CurrentView<'_, '_, '_> {
         use_: NativeProviderUse,
     ) -> Result<()> {
         self.native.prepare_provider(runtime, use_)
+    }
+}
+
+impl RestoredHumanCurrent for CurrentView<'_, '_, '_> {
+    fn require_human(
+        &mut self,
+        intent: &crate::oauth::fresh_auth::FreshIntent,
+        phase: crate::oauth::native_management::Phase,
+    ) -> Result<()> {
+        self.native.require_human(intent, phase)
+    }
+
+    fn finish_excluded(&mut self) -> Result<()> {
+        self.native.finish_excluded()
     }
 }
 
@@ -123,6 +175,16 @@ impl RestoredAppServingOwner {
         Self {
             native: Some(native),
         }
+    }
+
+    /// Negative roots from this actual parent, not permission or a parent
+    /// getter. Disposal may poison them even while routing is borrowed.
+    pub(crate) fn retained_refusal(&self) -> Result<RestoredAppRefusal> {
+        Ok(self
+            .native
+            .as_ref()
+            .context("restored serving owner refused")?
+            .retained_refusal())
     }
 
     pub(crate) fn capture_request(&mut self) -> Result<CapturedRestoredServingRequest> {
@@ -246,6 +308,16 @@ impl CapturedRestoredServingRequest {
 }
 
 impl RestoredServingScope<'_, '_, '_> {
+    /// Admission on the genuine saved scope, not selection DATA or a renewed
+    /// role. Response and synchronous drivers must call it before actual use.
+    pub(crate) fn require_app_selection(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &day2_capabilities::security_epoch::EpochStore,
+    ) -> Result<()> {
+        self.current.require_app_selection(runtime, policy, store)
+    }
     /// Checked operation loan only. The concrete parent retains completion;
     /// no caller-supplied trait object can stand in for this genuine scope.
     pub(crate) fn borrow_runtime(
@@ -259,6 +331,16 @@ impl RestoredServingScope<'_, '_, '_> {
         Ok(&mut self.current)
     }
 
+    /// The retained creator's actual unbound human original remains in the
+    /// context. This view cannot become autonomous or provider authority.
+    pub(crate) fn borrow_pending(
+        &mut self,
+        runtime: &crate::store::Runtime,
+    ) -> Result<&mut dyn RestoredSqlCurrent> {
+        self.current.native.require_captured(runtime)?;
+        Ok(&mut self.current)
+    }
+
     pub(crate) fn borrow_response(
         &mut self,
         runtime: &crate::store::Runtime,
@@ -267,14 +349,15 @@ impl RestoredServingScope<'_, '_, '_> {
         Ok(&mut self.current)
     }
 
-    pub(crate) fn require_human(
+    pub(crate) fn borrow_human(
         &mut self,
         runtime: &crate::store::Runtime,
         intent: &crate::oauth::fresh_auth::FreshIntent,
         phase: crate::oauth::native_management::Phase,
-    ) -> Result<()> {
+    ) -> Result<&mut dyn RestoredHumanCurrent> {
         self.current.native.require_runtime(runtime)?;
-        self.current.native.require_human(intent, phase)
+        self.current.native.require_human(intent, phase)?;
+        Ok(&mut self.current)
     }
 
     pub(crate) fn finish_excluded(&mut self) -> Result<()> {
@@ -359,6 +442,21 @@ mod tests {
                 }),
             ),
             (
+                "borrow_pending",
+                syn::parse_quote!({
+                    self.current.native.require_captured(runtime)?;
+                    Ok(&mut self.current)
+                }),
+            ),
+            (
+                "borrow_human",
+                syn::parse_quote!({
+                    self.current.native.require_runtime(runtime)?;
+                    self.current.native.require_human(intent, phase)?;
+                    Ok(&mut self.current)
+                }),
+            ),
+            (
                 "borrow_response",
                 syn::parse_quote!({
                     self.current.native.require_response(runtime)?;
@@ -389,12 +487,213 @@ mod tests {
                 body.to_token_stream().to_string() == expected.to_token_stream().to_string()
             };
             assert!(guarded(&actual.block));
-            let mut omitted = actual.block.clone();
-            omitted.stmts.remove(0);
-            assert!(!guarded(&omitted));
+            if name == "borrow_pending" {
+                let expected: syn::ReturnType =
+                    syn::parse_quote!(-> Result<&mut dyn RestoredSqlCurrent>);
+                assert_eq!(
+                    actual.sig.output.to_token_stream().to_string(),
+                    expected.to_token_stream().to_string()
+                );
+            }
+            if name == "borrow_human" {
+                let expected: syn::ReturnType =
+                    syn::parse_quote!(-> Result<&mut dyn RestoredHumanCurrent>);
+                assert_eq!(
+                    actual.sig.output.to_token_stream().to_string(),
+                    expected.to_token_stream().to_string()
+                );
+            }
+            for cut in 0..actual.block.stmts.len() - 1 {
+                let mut omitted = actual.block.clone();
+                omitted.stmts.remove(cut);
+                assert!(!guarded(&omitted));
+            }
             let mut relabelled = actual.block.clone();
             relabelled.stmts[0] = syn::parse_quote!(self.current.native.check_local()?;);
             assert!(!guarded(&relabelled));
+        }
+    }
+
+    #[test]
+    fn human_operation_view_keeps_original_checks_and_exclusion_on_the_same_native_scope() {
+        let file = syn::parse_file(include_str!("restored.rs")).unwrap();
+        let view = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Trait(item) if item.ident == "RestoredHumanCurrent" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let expected: syn::TypeParamBound = syn::parse_quote!(RestoredSqlCurrent);
+        assert_eq!(view.supertraits.len(), 1);
+        assert_eq!(
+            view.supertraits[0].to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        let methods = view
+            .items
+            .iter()
+            .map(|item| match item {
+                syn::TraitItem::Fn(item) => item.sig.ident.to_string(),
+                _ => panic!("human view has only its fixed operation methods"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(methods, ["require_human", "finish_excluded"]);
+        let implementation = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Impl(item)
+                    if item
+                        .trait_
+                        .as_ref()
+                        .is_some_and(|(_, path, _)| path.is_ident("RestoredHumanCurrent")) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.segments.last().unwrap().ident == "CurrentView")
+        );
+        for (name, expected, substituted) in [
+            (
+                "require_human",
+                syn::parse_quote!({ self.native.require_human(intent, phase) }),
+                syn::parse_quote!({ self.native.require_human(foreign_intent, phase) }),
+            ),
+            (
+                "finish_excluded",
+                syn::parse_quote!({ self.native.finish_excluded() }),
+                syn::parse_quote!({ self.native.finish_known() }),
+            ),
+        ] {
+            let expected: syn::Block = expected;
+            let substituted: syn::Block = substituted;
+            let actual = implementation
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                    _ => None,
+                })
+                .unwrap();
+            let guarded = |body: &syn::Block| {
+                body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+            };
+            assert!(guarded(&actual.block));
+            assert!(!guarded(&substituted));
+            assert!(!guarded(&syn::parse_quote!({ Ok(()) })));
+        }
+    }
+
+    #[test]
+    fn parent_refusal_projection_only_delegates_to_its_actual_retained_native_parent() {
+        let file = syn::parse_file(include_str!("restored.rs")).unwrap();
+        let actual = file.items.iter().find_map(|item| match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("RestoredAppServingOwner")) => item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == "retained_refusal" => Some(item),
+                _ => None,
+            }), _ => None,
+        }).unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            Ok(self
+                .native
+                .as_ref()
+                .context("restored serving owner refused")?
+                .retained_refusal())
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for substitute in [
+            syn::parse_quote!({
+                Ok(other
+                    .native
+                    .as_ref()
+                    .context("restored serving owner refused")?
+                    .retained_refusal())
+            }),
+            syn::parse_quote!({
+                Ok(self
+                    .native
+                    .as_ref()
+                    .context("restored serving owner refused")?
+                    .capture_request())
+            }),
+        ] {
+            assert!(!guarded(&substitute));
+        }
+        assert_eq!(actual.sig.inputs.len(), 1);
+        assert!(
+            matches!(&actual.sig.inputs[0], syn::FnArg::Receiver(receiver) if receiver.reference.is_some() && receiver.mutability.is_none())
+        );
+        let expected: syn::ReturnType = syn::parse_quote!(-> Result<RestoredAppRefusal>);
+        assert_eq!(
+            actual.sig.output.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+
+    #[test]
+    fn selection_admission_is_runtime_first_on_the_same_saved_app_stage() {
+        let file = syn::parse_file(include_str!("restored.rs")).unwrap();
+        for (owner, expected) in [
+            (
+                "CurrentView",
+                syn::parse_quote!({
+                    self.native.require_runtime(runtime)?;
+                    self.native.check_selection(
+                        policy,
+                        store,
+                        crate::security_epoch::native_enrollment::NativeRole::AppHost,
+                    )
+                }),
+            ),
+            (
+                "RestoredServingScope",
+                syn::parse_quote!({ self.current.require_app_selection(runtime, policy, store) }),
+            ),
+        ] {
+            let expected: syn::Block = expected;
+            let actual = file.items.iter().find_map(|item| match item {
+                syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().unwrap().ident == owner) => item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == "require_app_selection" => Some(item), _ => None,
+                }), _ => None,
+            }).unwrap();
+            let guarded = |body: &syn::Block| {
+                body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+            };
+            assert!(guarded(&actual.block));
+            assert!(!guarded(&syn::parse_quote!({ Ok(()) })));
+            if owner == "CurrentView" {
+                let mut omitted = actual.block.clone();
+                omitted.stmts.remove(0);
+                assert!(!guarded(&omitted));
+                let mut wrong_role = actual.block.clone();
+                wrong_role.stmts[1] = syn::Stmt::Expr(
+                    syn::parse_quote!(self.native.check_selection(
+                        policy,
+                        store,
+                        crate::security_epoch::native_enrollment::NativeRole::SecurityShell
+                    )),
+                    None,
+                );
+                assert!(!guarded(&wrong_role));
+                let mut foreign = actual.block.clone();
+                foreign.stmts[1] = syn::Stmt::Expr(
+                    syn::parse_quote!(self.native.check_selection(
+                        other_policy,
+                        store,
+                        crate::security_epoch::native_enrollment::NativeRole::AppHost
+                    )),
+                    None,
+                );
+                assert!(!guarded(&foreign));
+            }
         }
     }
 

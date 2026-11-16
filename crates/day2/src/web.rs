@@ -35,7 +35,7 @@ mod freetool_credentials;
 pub(crate) mod live;
 #[path = "web_restored_listener.rs"]
 mod restored_listener;
-pub(crate) use restored_listener::BoundRestoredListener;
+pub(crate) use restored_listener::{BoundRestoredListener, InstalledRestoredListener};
 
 struct Grant {
     hash: String,
@@ -547,6 +547,7 @@ impl LocalServer {
         receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
         concurrency: usize,
         current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
+        admission: Arc<AtomicBool>,
     ) -> Result<BoundRestoredListener> {
         restored_listener::bind(
             runtime,
@@ -556,6 +557,7 @@ impl LocalServer {
             receiver,
             concurrency,
             current,
+            admission,
         )
     }
 
@@ -938,10 +940,24 @@ pub(crate) fn native_selections(
         .native_selections()
 }
 
+pub(crate) fn install_restored_listener(
+    prepared: BoundRestoredListener,
+    routing: crate::oauth::native_management::RestoredHostRouting,
+) -> Result<InstalledRestoredListener> {
+    restored_listener::install(prepared, routing)
+}
+
 pub(crate) fn native_runtime_response_scope(
     host: &Host,
 ) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
     crate::oauth::native_management::runtime_response_scope(&host.runtime)
+}
+
+pub(crate) fn native_captured_response_scope(
+    host: &Host,
+    sink: &crate::oauth::native_management::Sink,
+) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+    crate::oauth::native_management::captured_runtime_response_scope(&host.runtime, sink)
 }
 
 pub(crate) async fn native_pump(
@@ -3956,6 +3972,7 @@ mod native_startup_tests {
                 receiver,
                 concurrency,
                 current,
+                admission,
             )
         });
         assert_eq!(

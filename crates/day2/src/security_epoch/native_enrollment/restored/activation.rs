@@ -1,6 +1,6 @@
 //! Consume the frozen App file only after its own authenticated current read.
 //! Keep the actual first SQLite connection through acknowledgement and release.
-//! These resources do not construct an ordinary role or serving owner.
+//! Only the fixed native handoff can join them to the ordinary Host.
 use super::super::{RestoredCurrentPeerPort, RestoredPeerSource};
 use super::{
     AcceptedRestoredApp, ActiveRestoredFile, ActiveRestoredReadIdentity, AppInstalledHandoff,
@@ -11,6 +11,7 @@ use super::{
     RestoredObservationOwner, RestoredReadIdentity, RestoredRuntimeBirth,
     RestoredWriterReadPending, RoleReceiveAttempt,
 };
+use crate::deployment::RestoredHostInstallation;
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::{
     restore_peer_wire::RestoreBody,
@@ -2343,6 +2344,29 @@ impl AcceptedRestoredApp {
 }
 
 impl AcceptedRestoredApp {
+    /// Join only this actual accepted App to the fixed consuming bootstrap
+    /// adapter. Its selected store remains comparison DATA checked against
+    /// the same retained native policy; no pending owner or lineage escapes.
+    pub(in crate::security_epoch::native_enrollment) fn install_host(
+        self,
+        selection: &day2_capabilities::security_epoch::EpochStore,
+        listener: tokio::net::TcpListener,
+        concurrency: usize,
+        admission: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<RestoredHostInstallation> {
+        // Reject foreign comparison inputs before any native/runtime work.
+        // The bootstrap adapter still performs its own genuine pending read.
+        let _ = self.restored_reader_data(selection)?;
+        let pending = self.prepare_ordinary_role()?;
+        crate::security_epoch::bootstrap::install_restored_app_host(
+            pending,
+            selection,
+            listener,
+            concurrency,
+            admission,
+        )
+    }
+
     /// Consumes the actual accepted owner before the first check, clone or role
     /// construction. Only fixed installation work can use the returned pending
     /// owner; no ordinary request, signing or SQL entry point is exposed.
@@ -4101,6 +4125,80 @@ mod common_factory_source_tests {
                 })
             })
             .unwrap()
+    }
+
+    #[test]
+    fn actual_accepted_host_entry_consumes_the_real_pending_owner_without_exporting_lineage() {
+        let actual = method(
+            include_str!("activation.rs"),
+            "AcceptedRestoredApp",
+            "install_host",
+        );
+        assert!(actual.sig.generics.params.is_empty());
+        assert!(actual.sig.asyncness.is_none());
+        let expected: syn::Block = syn::parse_quote!({
+            let _ = self.restored_reader_data(selection)?;
+            let pending = self.prepare_ordinary_role()?;
+            crate::security_epoch::bootstrap::install_restored_app_host(
+                pending,
+                selection,
+                listener,
+                concurrency,
+                admission,
+            )
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        for index in 0..actual.block.stmts.len() {
+            let mut omitted = actual.block.clone();
+            omitted.stmts.remove(index);
+            assert!(!guarded(&omitted));
+        }
+        for body in [
+            syn::parse_quote!({
+                let _ = self.restored_reader_data(selection)?;
+                let pending = self.prepare_ordinary_role()?;
+                crate::security_epoch::bootstrap::install_restored_app_host(
+                    other_pending,
+                    selection,
+                    listener,
+                    concurrency,
+                    admission,
+                )
+            }),
+            syn::parse_quote!({
+                let _ = self.restored_reader_data(selection)?;
+                let pending = self.prepare_ordinary_role()?;
+                crate::security_epoch::bootstrap::install_restored_app_host(
+                    pending,
+                    other_selection,
+                    listener,
+                    concurrency,
+                    admission,
+                )
+            }),
+            syn::parse_quote!({
+                let _ = self.restored_reader_data(selection)?;
+                let pending = self.prepare_ordinary_role()?;
+                Ok(pending)
+            }),
+            syn::parse_quote!({
+                let _ = self.restored_reader_data(selection);
+                let pending = self.prepare_ordinary_role()?;
+                crate::security_epoch::bootstrap::install_restored_app_host(
+                    pending,
+                    selection,
+                    listener,
+                    concurrency,
+                    admission,
+                )
+            }),
+        ] {
+            let body: syn::Block = body;
+            assert!(!guarded(&body));
+        }
     }
 
     fn unguarded_factory(method: &syn::ImplItemFn, name: &str) -> bool {

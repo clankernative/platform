@@ -14,8 +14,8 @@ mod restored;
 mod shell;
 
 pub(crate) use restored::{
-    CapturedRestoredServingRequest, RestoredAppServingOwner, RestoredResponseCurrent,
-    RestoredRuntimeCurrent, RestoredServingScope,
+    CapturedRestoredServingRequest, RestoredAppServingOwner, RestoredHumanCurrent,
+    RestoredResponseCurrent, RestoredRuntimeCurrent, RestoredServingScope, RestoredSqlCurrent,
 };
 
 /// Purpose selection DATA, not execution permission. Each later irreversible

@@ -727,8 +727,8 @@ pub(crate) struct NativeAppStartup {
 /// configure callback, initial-store source or positive readiness witness.
 /// Only the genuine consuming native supplier can join it to the retained
 /// restored Runtime and install the resulting Host on its actual executor.
-/// Construction and installation are intentionally unavailable until those
-/// real closed consumer operations are wired in place.
+/// Resource preparation runs only inside the native supplier's already
+/// captured setup; the resource value itself is never native authority.
 pub(crate) struct NativeRestoredHostInputs {
     listener: tokio::net::TcpListener,
     declared: Instance,
@@ -751,15 +751,74 @@ pub(crate) struct ConfiguredRestoredHost {
     local: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-/// The accepting installation is closed until the actual startup SQL and
-/// final-executor publication supplier are joined. No DATA can create this
-/// value and no method can expose a Runtime, native owner or callback.
+/// The fixed installer retains the actual listener and executor guard. No
+/// DATA can create this value, and no method can expose a Runtime, native
+/// owner or arbitrary callback.
 pub(crate) struct RestoredHostInstallation {
-    _unavailable: std::convert::Infallible,
-    local: std::marker::PhantomData<std::rc::Rc<()>>,
+    listener: crate::web::InstalledRestoredListener,
+}
+
+impl RestoredHostInstallation {
+    pub(crate) fn from_listener(listener: crate::web::InstalledRestoredListener) -> Self {
+        Self { listener }
+    }
+
+    pub(crate) async fn serve(self, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
+        self.listener.serve(shutdown).await
+    }
 }
 
 impl NativeRestoredHostInputs {
+    /// Resource-only preparation, called inside the genuine captured native
+    /// setup. The native supplier keeps its own owner and independent posts;
+    /// neither this Runtime reference nor the returned resources grant Current.
+    pub(crate) fn prepare(
+        runtime: &Runtime,
+        listener: tokio::net::TcpListener,
+        concurrency: usize,
+        admission: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        ensure!(
+            runtime.uses_native_storage(),
+            "restored native Runtime required"
+        );
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "restored host setup closed"
+        );
+        ensure!((1..=32).contains(&concurrency), "invalid HTTP concurrency");
+        listener.local_addr()?;
+        let declared = Instance::load(runtime.instance_path())?;
+        declared.edge(runtime.app())?;
+        let selected =
+            crate::oauth::native_management::selected_profiles(&declared, Some(runtime.app()))?;
+        ensure!(
+            selected.len() == 1 && selected[0].scope().app.as_str() == runtime.app(),
+            "restored native App selection required"
+        );
+        let providers = crate::oauth::host::Providers::from_gke_runtime(runtime)?;
+        ensure!(
+            crate::oauth::host::require_providers(
+                &declared,
+                runtime.app(),
+                true,
+                Some(&providers)
+            )?,
+            "restored OAuth host required"
+        );
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "restored host setup closed"
+        );
+        Ok(Self {
+            listener,
+            declared,
+            providers,
+            concurrency,
+            admission,
+        })
+    }
+
     /// Fixed setup only, under the native supplier's already captured request
     /// and negative guard. Reads the actual Instance but performs no serving
     /// SQL, native acquisition, owner publication or ready transition.
@@ -822,7 +881,10 @@ impl ConfiguredRestoredHost {
         self,
         runtime: Arc<Runtime>,
         current: &mut crate::oauth::native_management::RuntimeConsumer<'_, '_>,
-    ) -> Result<crate::web::BoundRestoredListener> {
+    ) -> Result<(
+        crate::web::BoundRestoredListener,
+        crate::oauth::native_management::NativeSelection,
+    )> {
         ensure!(
             self.runtime
                 .upgrade()
@@ -830,6 +892,18 @@ impl ConfiguredRestoredHost {
             "restored configured Runtime changed"
         );
         current.require_restored_startup_sql(&runtime)?;
+        // Selection remains desired DATA, parsed by the same existing catalog.
+        // The genuine native parent and exact Runtime still supply authority.
+        let mut selections = crate::oauth::native_management::selected_profiles(
+            &self.declared,
+            Some(runtime.app()),
+        )?;
+        ensure!(
+            selections.len() == 1,
+            "restored Host requires its one selected native App"
+        );
+        let selection = selections.pop().expect("one selected native App");
+        current.require_restored_startup_selection(&runtime, &selection)?;
         ensure!(
             self.admission.load(Ordering::Acquire),
             "restored host setup closed"
@@ -843,18 +917,19 @@ impl ConfiguredRestoredHost {
             self.receiver,
             self.concurrency,
             current,
+            Arc::clone(&self.admission),
         )?;
         ensure!(
             self.admission.load(Ordering::Acquire),
             "restored host setup closed"
         );
-        Ok(server)
+        Ok((server, selection))
     }
 
-    /// Closed consuming bridge agreed with the native supplier. It never
-    /// delegates to initial-store admission, a fresh enrollment or an ordinary
-    /// Host constructor. The real startup Current/SQL port replaces this
-    /// refusal in place before any Endpoint/LIVE/pump publication can succeed.
+    /// Consume the same configured resources, retained native parent and
+    /// preconfiguration request. Startup SQL and its distinct final request
+    /// settle before the fixed installer can publish the whole executor.
+    /// No initial-store admission, fresh enrollment or ordinary Host fallback.
     pub(crate) fn install(
         self,
         runtime: Arc<Runtime>,
@@ -865,10 +940,15 @@ impl ConfiguredRestoredHost {
             .runtime
             .upgrade()
             .is_some_and(|actual| Arc::ptr_eq(&actual, &runtime));
-        captured.refuse();
-        parent.refuse();
-        ensure!(selected, "restored configured Runtime changed");
-        anyhow::bail!("restored startup SQL and final-executor installation not wired")
+        if !selected {
+            captured.refuse();
+            parent.refuse();
+            anyhow::bail!("restored configured Runtime changed");
+        }
+        let routing = crate::oauth::native_management::prepare_restored_listener(
+            self, runtime, parent, captured,
+        )?;
+        crate::oauth::native_management::install_restored_host(routing)
     }
 }
 
@@ -888,6 +968,16 @@ mod restored_host_setup_source_tests {
                 "restored configured Runtime changed"
             );
             current.require_restored_startup_sql(&runtime)?;
+            let mut selections = crate::oauth::native_management::selected_profiles(
+                &self.declared,
+                Some(runtime.app()),
+            )?;
+            ensure!(
+                selections.len() == 1,
+                "restored Host requires its one selected native App"
+            );
+            let selection = selections.pop().expect("one selected native App");
+            current.require_restored_startup_selection(&runtime, &selection)?;
             ensure!(
                 self.admission.load(Ordering::Acquire),
                 "restored host setup closed"
@@ -901,12 +991,13 @@ mod restored_host_setup_source_tests {
                 self.receiver,
                 self.concurrency,
                 current,
+                Arc::clone(&self.admission),
             )?;
             ensure!(
                 self.admission.load(Ordering::Acquire),
                 "restored host setup closed"
             );
-            Ok(server)
+            Ok((server, selection))
         });
         fn normalized(stream: proc_macro2::TokenStream) -> String {
             let mut tokens = stream.into_iter().collect::<Vec<_>>();
@@ -934,11 +1025,17 @@ mod restored_host_setup_source_tests {
             assert!(!guarded(&changed), "configured listener step {cut}");
         }
         let mut ordinary = actual.block.clone();
-        ordinary.stmts[4] = syn::parse_quote!(let mut server = LocalServer::bind_edge_listener(runtime, self.listener, edge, self.verifier, self.concurrency)?;);
+        let server = ordinary.stmts.iter().position(|statement| matches!(statement,
+            syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(pattern) if pattern.ident == "server"))).unwrap();
+        ordinary.stmts[server] = syn::parse_quote!(let mut server = LocalServer::bind_edge_listener(runtime, self.listener, edge, self.verifier, self.concurrency)?;);
         assert!(!guarded(&ordinary));
         let mut early = actual.block.clone();
-        early.stmts.swap(5, 6);
+        let last = early.stmts.len() - 1;
+        early.stmts.swap(last - 1, last);
         assert!(!guarded(&early));
+        let mut foreign_catalog = actual.block.clone();
+        foreign_catalog.stmts[2] = syn::parse_quote!(let mut selections = crate::oauth::native_management::selected_profiles(&self.declared, None)?;);
+        assert!(!guarded(&foreign_catalog));
     }
 
     fn method(owner: &str, name: &str) -> syn::ImplItemFn {
@@ -1101,27 +1198,132 @@ mod restored_host_setup_source_tests {
     }
 
     #[test]
-    fn unwired_startup_installation_refuses_both_actual_owners_without_initial_fallback() {
+    fn restored_resource_preparation_uses_only_the_actual_runtime_and_fixed_resources() {
+        let actual = method("NativeRestoredHostInputs", "prepare");
+        assert!(actual.sig.generics.params.is_empty());
+        assert_eq!(actual.sig.inputs.len(), 4);
+        let expected: syn::Block = syn::parse_quote!({
+            ensure!(
+                runtime.uses_native_storage(),
+                "restored native Runtime required"
+            );
+            ensure!(
+                admission.load(Ordering::Acquire),
+                "restored host setup closed"
+            );
+            ensure!((1..=32).contains(&concurrency), "invalid HTTP concurrency");
+            listener.local_addr()?;
+            let declared = Instance::load(runtime.instance_path())?;
+            declared.edge(runtime.app())?;
+            let selected =
+                crate::oauth::native_management::selected_profiles(&declared, Some(runtime.app()))?;
+            ensure!(
+                selected.len() == 1 && selected[0].scope().app.as_str() == runtime.app(),
+                "restored native App selection required"
+            );
+            let providers = crate::oauth::host::Providers::from_gke_runtime(runtime)?;
+            ensure!(
+                crate::oauth::host::require_providers(
+                    &declared,
+                    runtime.app(),
+                    true,
+                    Some(&providers)
+                )?,
+                "restored OAuth host required"
+            );
+            ensure!(
+                admission.load(Ordering::Acquire),
+                "restored host setup closed"
+            );
+            Ok(Self {
+                listener,
+                declared,
+                providers,
+                concurrency,
+                admission,
+            })
+        });
+        fn canonical(mut body: syn::Block) -> Option<String> {
+            use syn::parse::Parser;
+            for statement in &mut body.stmts {
+                if let syn::Stmt::Macro(statement) = statement
+                    && statement.mac.path.is_ident("ensure")
+                {
+                    let arguments =
+                        syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                            .parse2(statement.mac.tokens.clone())
+                            .ok()?;
+                    statement.mac.tokens = arguments.to_token_stream();
+                }
+            }
+            Some(body.to_token_stream().to_string())
+        }
+        let expected = canonical(expected).expect("fixed preparation syntax");
+        let guarded = |body: &syn::Block| {
+            // Parse only these actual top-level ensure arguments before
+            // rendering. Typed operators retain jointness; no token is dropped.
+            canonical(body.clone()).as_ref() == Some(&expected)
+        };
+        let logical: syn::Block = syn::parse_quote!({
+            ensure!(true && true, "closed");
+        });
+        let borrowed: syn::Block = syn::parse_quote!({
+            ensure!(true & &true, "closed");
+        });
+        assert_ne!(canonical(logical), canonical(borrowed));
+        assert!(guarded(&actual.block));
+        for index in 0..actual.block.stmts.len() {
+            let mut changed = actual.block.clone();
+            changed.stmts.remove(index);
+            assert!(!guarded(&changed));
+        }
+        let providers = actual.block.stmts.iter().position(|stmt| matches!(stmt,
+            syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(name) if name.ident == "providers")
+        )).expect("actual fixed provider preparation");
+        let mut early = actual.block.clone();
+        early.stmts.swap(0, providers);
+        assert!(!guarded(&early));
+        let mut foreign = actual.block.clone();
+        foreign.stmts[providers] = syn::parse_quote!(let providers = crate::oauth::host::Providers::from_gke_runtime(other_runtime)?;);
+        assert!(!guarded(&foreign));
+        let mut widened = actual.block.clone();
+        widened.stmts[2] = syn::parse_quote!(ensure!((1..=256).contains(&concurrency), "invalid HTTP concurrency"););
+        assert!(!guarded(&widened));
+    }
+
+    #[test]
+    fn startup_installation_retains_both_actual_owners_through_the_fixed_current_and_executor() {
         let actual = method("ConfiguredRestoredHost", "install");
         let expected: syn::Block = syn::parse_quote!({
             let selected = self
                 .runtime
                 .upgrade()
                 .is_some_and(|actual| Arc::ptr_eq(&actual, &runtime));
-            captured.refuse();
-            parent.refuse();
-            ensure!(selected, "restored configured Runtime changed");
-            anyhow::bail!("restored startup SQL and final-executor installation not wired")
+            if !selected {
+                captured.refuse();
+                parent.refuse();
+                anyhow::bail!("restored configured Runtime changed");
+            }
+            let routing = crate::oauth::native_management::prepare_restored_listener(
+                self, runtime, parent, captured,
+            )?;
+            crate::oauth::native_management::install_restored_host(routing)
         });
         let guarded = |body: &syn::Block| {
             body.to_token_stream().to_string() == expected.to_token_stream().to_string()
         };
         assert!(guarded(&actual.block));
-        for index in [1, 2] {
+        for index in 0..actual.block.stmts.len() {
             let mut missing = actual.block.clone();
             missing.stmts.remove(index);
             assert!(!guarded(&missing));
         }
+        let mut reset = actual.block.clone();
+        reset.stmts[2] = syn::parse_quote!(let routing = crate::oauth::native_management::prepare_restored_listener(self, runtime, parent, recaptured)?;);
+        assert!(!guarded(&reset));
+        let mut early_publication = actual.block.clone();
+        early_publication.stmts.swap(2, 3);
+        assert!(!guarded(&early_publication));
         let mut fallback = actual.block.clone();
         *fallback.stmts.last_mut().unwrap() = syn::Stmt::Expr(syn::parse_quote!(Ok(())), None);
         assert!(!guarded(&fallback));

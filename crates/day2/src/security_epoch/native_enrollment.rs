@@ -23,6 +23,10 @@ mod issuer_peer;
 #[cfg(target_os = "linux")]
 mod operations;
 mod owner;
+#[cfg(test)]
+pub(crate) use owner::restored_parent_refusal_tests::{
+    negative_parent_refusal_roots, new_negative_parent_refusal_fixture,
+};
 #[cfg(any(target_os = "linux", test))]
 mod peer_idle;
 mod policy;
@@ -35,6 +39,7 @@ mod restore_peer_wire;
 mod restore_writer;
 pub(in crate::security_epoch) use restore_writer::{ReceiverAction, ReceiverProgress};
 mod restored;
+pub(crate) use restored::install_restored_app_host;
 pub(crate) use restored::{RestoredArtifactAdmission, RestoredKeeperBirth, RestoredRuntimeBirth};
 mod root_kms;
 #[cfg(target_os = "linux")]
@@ -274,7 +279,7 @@ pub(in crate::security_epoch) use owner::{
 pub(crate) use owner::{
     EnrolledCurrentRequest, EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage,
     EnrolledStorageStage, FrozenRoleIssuer, NativeConsumerCompletion, NativeConsumerOrigin,
-    RestoredAppRequestSettlement, SameEnrolledOwner, UnselectedShellRequest,
+    RestoredAppRefusal, RestoredAppRequestSettlement, SameEnrolledOwner, UnselectedShellRequest,
 };
 pub(in crate::security_epoch) use protocol::StagePurpose;
 
