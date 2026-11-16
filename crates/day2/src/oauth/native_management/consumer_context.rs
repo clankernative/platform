@@ -1526,30 +1526,67 @@ mod tests {
     }
 
     fn factory_inputs_armed(actual: &syn::ImplItemFn, human: bool) -> bool {
-        let expected: syn::Stmt = if human {
-            syn::parse_quote!(let mut attempt = FinalContextFactoryAttempt {
+        // Compare complete named-field expressions while ignoring only the
+        // outer field-list separator chosen by the native formatter.
+        fn fields(value: &syn::ExprStruct) -> Vec<(String, String)> {
+            value.fields.iter().map(|field| (
+                field.member.to_token_stream().to_string(),
+                field.expr.to_token_stream().to_string(),
+            )).collect()
+        }
+        fn local<'a>(block: &'a syn::Block, name: &str) -> Option<&'a syn::Expr> {
+            let mut found = block.stmts.iter().filter_map(|stmt| {
+                let syn::Stmt::Local(local) = stmt else { return None; };
+                if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident==name) { return None; }
+                Some(&*local.init.as_ref()?.expr)
+            });
+            let value = found.next()?;
+            found.next().is_none().then_some(value)
+        }
+        let expected_attempt: syn::ExprStruct = if human {
+            syn::parse_quote!(FinalContextFactoryAttempt {
                 original: Some(original), sink, lease: Some(lease), origin: None, complete: false,
-            };)
+            })
         } else {
-            syn::parse_quote!(let mut attempt = FinalContextFactoryAttempt {
+            syn::parse_quote!(FinalContextFactoryAttempt {
                 original: None, sink, lease: Some(lease), origin: None, complete: false,
-            };)
+            })
         };
+        let expected_context: syn::ExprStruct = if human {
+            syn::parse_quote!(Self {
+                source: FinalOriginal::Bound(attempt.original.take().expect("actual human original")),
+                completion: FinalCompletion::Response(completed), runtime,
+                origin: attempt.origin.take().expect("actual response origin"), affinity, complete: false,
+            })
+        } else {
+            syn::parse_quote!(Self {
+                source: FinalOriginal::Runtime,
+                completion: FinalCompletion::Response(completed), runtime,
+                origin: attempt.origin.take().expect("actual response origin"), affinity, complete: false,
+            })
+        };
+        let Some(syn::Expr::Struct(attempt)) = local(&actual.block, "attempt") else { return false; };
+        let Some(syn::Expr::Struct(context)) = local(&actual.block, "context") else { return false; };
+        let Some(syn::Expr::Struct(affinity)) = local(&actual.block, "affinity") else { return false; };
+        let expected_affinity: syn::ExprStruct = syn::parse_quote!(NativeConsumerAffinity { same: Rc::new(()) });
+        let Some(syn::Stmt::Local(first)) = actual.block.stmts.first() else { return false; };
+        if !matches!(&first.pat, syn::Pat::Ident(name) if name.ident=="attempt") { return false; }
         let source = actual.block.to_token_stream().to_string();
-        let affinity: syn::Stmt = syn::parse_quote!(let affinity = NativeConsumerAffinity { same: Rc::new(()) };);
-        let affinity = affinity.to_token_stream().to_string();
-        let context = "let context = Self";
         let disarm: syn::Stmt = syn::parse_quote!(attempt.complete = true;);
         let disarm = disarm.to_token_stream().to_string();
         let returned = expr("Ok(context)");
-        actual.block.stmts.first().map(ToTokens::to_token_stream).map(|s| s.to_string())
-            == Some(expected.to_token_stream().to_string())
-            && source.matches(&affinity).count() == 1
-            && source.matches(context).count() == 1
-            && source.matches(&disarm).count() == 1
-            && source.matches(&returned).count() == 1
-            && source.find(&affinity) < source.find(context)
-            && source.find(context) < source.find(&disarm)
+        attempt.path.is_ident("FinalContextFactoryAttempt") && attempt.rest.is_none()
+            && fields(attempt)==fields(&expected_attempt)
+            && context.path.is_ident("Self") && context.rest.is_none()
+            && fields(context)==fields(&expected_context)
+            && affinity.path.is_ident("NativeConsumerAffinity") && affinity.rest.is_none()
+            && fields(affinity)==fields(&expected_affinity)
+            && source.matches("let affinity").count()==1
+            && source.matches("let context").count()==1
+            && source.matches(&disarm).count()==1
+            && source.matches(&returned).count()==1
+            && source.find("let affinity") < source.find("let context")
+            && source.find("let context") < source.find(&disarm)
             && source.find(&disarm) < source.find(&returned)
     }
 
@@ -1557,14 +1594,16 @@ mod tests {
     fn actual_factory_completion_guard_burns_early_marker_dead_lease_and_unwind_inputs() {
         for cut in 0..3 {
             let sink = Sink::new();
-            let foreign_sink = Sink::new();
             let (lease, refused, live) = super::super::response::runtime_lease_for_factory_tests(&sink);
             let completed = CompletedResponse {
                 sequence: 7,
                 refused: if cut == 0 { Rc::new(std::cell::Cell::new(false)) } else { refused.clone() },
                 published: false,
             };
-            if cut == 1 { live.set(false); }
+            let replacement = if cut == 1 {
+                live.set(false);
+                Some(super::super::response::runtime_lease_for_factory_tests(&sink))
+            } else { None };
             if cut == 2 {
                 let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _attempt = FinalContextFactoryAttempt {
@@ -1583,8 +1622,29 @@ mod tests {
                 assert!(failed.is_err());
             }
             assert!(refused.get(), "the actual attempted input lease is terminal");
-            assert!(foreign_sink.is_open(), "no unrelated Sink is refused");
-            if cut != 1 { assert!(!sink.is_open()); }
+            if let Some((replacement, replacement_refused, replacement_live)) = replacement {
+                assert!(sink.is_open(), "a dead lease cannot burn its replacement Sink");
+                assert!(replacement_live.get() && !replacement_refused.get());
+                assert!(replacement.check(&sink).is_ok());
+            } else {
+                assert!(!sink.is_open());
+            }
+        }
+        for dead in [false, true] {
+            let victim = Sink::new();
+            let foreign = Sink::new();
+            let (lease, refused, live) = super::super::response::runtime_lease_for_factory_tests(&foreign);
+            if dead { live.set(false); }
+            let completed = CompletedResponse { sequence: 7, refused: refused.clone(), published: false };
+            let failed = {
+                let mut attempt = FinalContextFactoryAttempt {
+                    original: None, sink: &victim, lease: Some(lease), origin: None, complete: false,
+                };
+                attempt.require_completion(&completed)
+            };
+            assert!(failed.is_err() && refused.get());
+            assert!(victim.is_open(), "a foreign lease cannot burn the actual victim Sink");
+            assert!(foreign.is_open(), "an unrelated Sink is never mutated");
         }
         let actual = host_factory("FinalContextFactoryAttempt", "require_completion");
         let expected: syn::Block = syn::parse_quote!({
@@ -1619,6 +1679,20 @@ mod tests {
                 }
             }
             assert!(!factory_inputs_armed(&disarmed, human));
+            let mut late_allocation = actual.clone();
+            for statement in &mut late_allocation.block.stmts {
+                if let syn::Stmt::Local(local) = statement
+                    && matches!(&local.pat, syn::Pat::Ident(name) if name.ident=="context")
+                    && let syn::Expr::Struct(value) = &mut *local.init.as_mut().unwrap().expr
+                {
+                    for field in &mut value.fields {
+                        if matches!(&field.member, syn::Member::Named(name) if name=="affinity") {
+                            field.expr = syn::parse_quote!(NativeConsumerAffinity { same: Rc::new(()) });
+                        }
+                    }
+                }
+            }
+            assert!(!factory_inputs_armed(&late_allocation, human));
             if human {
                 let mut no_original = actual.clone();
                 let syn::Stmt::Local(local) = &mut no_original.block.stmts[0] else { panic!("actual attempt"); };
