@@ -4,7 +4,9 @@
 
 use super::request::ConsumerRequestOrigin;
 use super::response::ConsumerLeaseOrigin;
-use super::{EnrolledClock, OriginalPhase, Phase, Sink, SinkState, sql_runtime_scope};
+use super::{
+    CompletedResponse, EnrolledClock, OriginalPhase, Phase, Sink, SinkState, sql_runtime_scope,
+};
 use crate::oauth::fresh_auth::FreshIntent;
 use crate::oauth::native_original::Original;
 use crate::security_epoch::{
@@ -51,10 +53,18 @@ pub(crate) struct NativeConsumerContext<'request, 'original> {
 /// saved request and this final original remain live until native settlement.
 pub(crate) struct NativeRequestFinalContext<'request, 'original> {
     source: FinalOriginal<'request, 'original>,
+    completion: FinalCompletion<'request>,
     runtime: &'request Runtime,
     origin: ConsumerOrigin<'request>,
     affinity: NativeConsumerAffinity,
     complete: bool,
+}
+
+// Only startup has no response transport. The response variant borrows the
+// actual private completion produced by its loop, not a bool or receipt.
+enum FinalCompletion<'request> {
+    Startup,
+    Response(&'request CompletedResponse),
 }
 
 enum FinalOriginal<'request, 'original> {
@@ -148,6 +158,47 @@ impl ConsumerOrigin<'_> {
             }
             Self::Autonomous(_) => Ok(()),
         }
+    }
+
+    /// Select the actual HTTP source before any stage or original sample.
+    /// A bound human or an already leased response cannot be reclassified as
+    /// autonomous work. These checks grant no native permission.
+    fn require_runtime_input(&self, runtime: &Runtime) -> Result<()> {
+        self.require_request()?;
+        ensure!(
+            runtime.uses_native_storage(),
+            "native runtime file required"
+        );
+        match self {
+            Self::Http { sink, .. } => {
+                ensure!(sink.is_open(), "native runtime HTTP origin refused");
+                ensure!(
+                    sink.bindings.try_borrow()?.is_empty(),
+                    "native human original cannot become Runtime"
+                );
+                ensure!(
+                    sink.runtime.try_borrow()?.is_none(),
+                    "native response cannot become a new Runtime operation"
+                );
+            }
+            Self::Response { sink, lease, .. } => {
+                lease.require_runtime(sink)?;
+                ensure!(
+                    sink.bindings.try_borrow()?.is_empty(),
+                    "native human response cannot become Runtime"
+                );
+                let scope = sql_runtime_scope(runtime)?;
+                let binding = sink.runtime.try_borrow()?;
+                ensure!(
+                    binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.scope == scope),
+                    "native runtime response binding absent"
+                );
+            }
+            Self::Autonomous(_) => anyhow::bail!("native HTTP origin required"),
+        }
+        Ok(())
     }
 
     fn check_current(&self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
@@ -263,6 +314,41 @@ impl<'request, 'original> NativeConsumerContext<'request, 'original> {
                 lease,
             },
         )
+    }
+
+    /// The Pending creator lends its real unbound human original. This is not
+    /// a Runtime-only factory; the first native check still samples that same
+    /// original against the actual saved stage before SQL or entropy.
+    pub(super) fn captured(
+        runtime: &'request Runtime,
+        original: &'request mut Original<EnrolledClock>,
+        sink: &'request Sink,
+        native: ConsumerRequestOrigin,
+    ) -> Result<Self> {
+        let origin = ConsumerOrigin::Http { sink, native };
+        let selected = (|| {
+            origin.require_runtime_input(runtime)?;
+            let purpose = RuntimeServingUse::PendingCapture;
+            let binding = Digest::of(&("day2-native-runtime-serving-v1", purpose))?;
+            Ok((binding, purpose))
+        })();
+        let (binding, purpose) = match selected {
+            Ok(selected) => selected,
+            Err(error) => {
+                original.refuse();
+                origin.refuse();
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            source: ConsumerOriginal::Captured(original),
+            runtime,
+            origin,
+            binding,
+            purpose: ScopePurpose::Runtime(purpose),
+            affinity: NativeConsumerAffinity { same: Rc::new(()) },
+            complete: false,
+        })
     }
 
     fn bound(
@@ -682,6 +768,87 @@ impl<'request, 'original> NativeConsumerContext<'request, 'original> {
 }
 
 impl<'request> NativeConsumerContext<'request, 'static> {
+    /// Only the fixed Runtime driver supplies this real saved HTTP request.
+    /// Purpose selection uses the existing closed RuntimePhase mapping; initial
+    /// storage and response authority have different factories.
+    pub(super) fn runtime_http(
+        runtime: &'request Runtime,
+        phase: super::RuntimePhase,
+        sink: &'request Sink,
+        native: ConsumerRequestOrigin,
+    ) -> Result<Self> {
+        let origin = ConsumerOrigin::Http { sink, native };
+        let purpose = match super::runtime_serving_use(phase) {
+            Ok(purpose) => purpose,
+            Err(error) => {
+                origin.refuse();
+                return Err(error);
+            }
+        };
+        Self::runtime_input(runtime, origin, purpose)
+    }
+
+    /// The genuine leased response, not an HTTP status or a completed SQL
+    /// unit, selects transport. The same lease identity is checked throughout.
+    pub(super) fn runtime_response(
+        runtime: &'request Runtime,
+        sink: &'request Sink,
+        native: ConsumerRequestOrigin,
+        lease: ConsumerLeaseOrigin,
+    ) -> Result<Self> {
+        let origin = ConsumerOrigin::Response {
+            sink,
+            native,
+            lease,
+        };
+        Self::runtime_input(runtime, origin, RuntimeServingUse::Response)
+    }
+
+    fn runtime_input(
+        runtime: &'request Runtime,
+        origin: ConsumerOrigin<'request>,
+        purpose: RuntimeServingUse,
+    ) -> Result<Self> {
+        let selected = (|| {
+            origin.require_runtime_input(runtime)?;
+            ensure!(
+                match (&origin, purpose) {
+                    (
+                        ConsumerOrigin::Http { .. },
+                        RuntimeServingUse::Registration
+                        | RuntimeServingUse::Read
+                        | RuntimeServingUse::Refresh
+                        | RuntimeServingUse::SqlRead
+                        | RuntimeServingUse::SqlWrite,
+                    ) => true,
+                    (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response) => true,
+                    _ => false,
+                },
+                "native Runtime origin purpose changed"
+            );
+            Ok((
+                Digest::of(&("day2-native-runtime-serving-v1", purpose))?,
+                purpose,
+            ))
+        })();
+        let (binding, purpose) = match selected {
+            Ok(selected) => selected,
+            Err(error) => {
+                origin.refuse();
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            source: ConsumerOriginal::Runtime,
+            runtime,
+            origin,
+            binding,
+            purpose: ScopePurpose::Runtime(purpose),
+            affinity: NativeConsumerAffinity { same: Rc::new(()) },
+            complete: false,
+        })
+    }
+
     /// Fixed startup SQL only. The closed input owns the real preconfiguration
     /// capture; no HTTP/human original, scalar timestamp or provider purpose
     /// can be supplied or reclassified by this constructor.
@@ -712,20 +879,92 @@ impl Drop for NativeConsumerContext<'_, '_> {
 }
 
 impl<'request, 'original> NativeRequestFinalContext<'request, 'original> {
+    /// Only the actual response driver calls this after transport and native
+    /// scope completion. It borrows the SAME original now in ResponseComplete;
+    /// a unit context, copied intent or completion DATA cannot replace it.
+    pub(super) fn human_response(
+        runtime: &'request Runtime,
+        original: &'request mut OriginalPhase<'original>,
+        sink: &'request Sink,
+        request: &super::request::Lease,
+        lease: ConsumerLeaseOrigin,
+        completed: &'request CompletedResponse,
+    ) -> Result<Self> {
+        // Derive this lease origin before mutably borrowing the original from
+        // its actual Owners. The real completion must belong to the same lease.
+        completed.require_lease(sink, &lease)?;
+        let selected = (|| {
+            let native = request.consumer_origin()?;
+            native.require_request(&sink.request)?;
+            ensure!(
+                runtime.uses_native_storage(),
+                "native final Runtime required"
+            );
+            ensure!(
+                original.intent.app() == runtime.app(),
+                "native final human app changed"
+            );
+            original.intent.require_oauth_management()?;
+            ensure!(
+                original.phase == Phase::ResponseComplete,
+                "native final human response not completed"
+            );
+            ensure!(
+                sink.runtime.try_borrow()?.is_none(),
+                "native human response reclassified"
+            );
+            lease.require_human(sink, original.intent)?;
+            Ok(native)
+        })();
+        let native = match selected {
+            Ok(native) => native,
+            Err(error) => {
+                original.refuse();
+                lease.refuse_sink(sink);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            source: FinalOriginal::Bound(original),
+            completion: FinalCompletion::Response(completed),
+            runtime,
+            origin: ConsumerOrigin::Response {
+                sink,
+                native,
+                lease,
+            },
+            affinity: NativeConsumerAffinity { same: Rc::new(()) },
+            complete: false,
+        })
+    }
+
     fn require_response_binding(&mut self) -> Result<()> {
         if let Err(error) = self.origin.require_request() {
             self.refuse();
             return Err(error);
         }
-        let result = match (&self.source, &self.origin) {
-            (FinalOriginal::Bound(original), ConsumerOrigin::Response { sink, lease, .. }) => {
+        let result = (|| match (&self.source, &self.origin, &self.completion) {
+            (
+                FinalOriginal::Bound(original),
+                ConsumerOrigin::Response { sink, lease, .. },
+                FinalCompletion::Response(completed),
+            ) => {
+                completed.require_lease(sink, lease)?;
                 lease.require_human(sink, original.intent)
             }
-            (FinalOriginal::Runtime, ConsumerOrigin::Response { sink, lease, .. }) => {
+            (
+                FinalOriginal::Runtime,
+                ConsumerOrigin::Response { sink, lease, .. },
+                FinalCompletion::Response(completed),
+            ) => {
+                completed.require_lease(sink, lease)?;
                 lease.require_runtime(sink)
             }
-            _ => Ok(()),
-        };
+            (FinalOriginal::Runtime, ConsumerOrigin::Autonomous(_), FinalCompletion::Startup) => {
+                Ok(())
+            }
+            _ => anyhow::bail!("native final completion source changed"),
+        })();
         if result.is_err() {
             self.refuse();
         }
@@ -838,6 +1077,43 @@ impl Drop for NativeRequestFinalContext<'_, '_> {
 }
 
 impl<'request> NativeRequestFinalContext<'request, 'static> {
+    /// A final Runtime response still requires its actual leased request.
+    /// No new capture, stage, timer, owner or completion witness is created.
+    pub(super) fn runtime_response(
+        runtime: &'request Runtime,
+        sink: &'request Sink,
+        request: &super::request::Lease,
+        lease: ConsumerLeaseOrigin,
+        completed: &'request CompletedResponse,
+    ) -> Result<Self> {
+        completed.require_lease(sink, &lease)?;
+        lease.require_runtime(sink)?;
+        let native = match request.consumer_origin() {
+            Ok(native) => native,
+            Err(error) => {
+                lease.refuse_sink(sink);
+                return Err(error);
+            }
+        };
+        let origin = ConsumerOrigin::Response {
+            sink,
+            native,
+            lease,
+        };
+        if let Err(error) = origin.require_runtime_input(runtime) {
+            origin.refuse();
+            return Err(error);
+        }
+        Ok(Self {
+            source: FinalOriginal::Runtime,
+            completion: FinalCompletion::Response(completed),
+            runtime,
+            origin,
+            affinity: NativeConsumerAffinity { same: Rc::new(()) },
+            complete: false,
+        })
+    }
+
     pub(super) fn startup(
         runtime: &'request Runtime,
         request: &super::request::StartupLease,
@@ -845,6 +1121,7 @@ impl<'request> NativeRequestFinalContext<'request, 'static> {
         let native = request.consumer_origin(runtime)?;
         Ok(Self {
             source: FinalOriginal::Runtime,
+            completion: FinalCompletion::Startup,
             runtime,
             origin: ConsumerOrigin::Autonomous(native),
             affinity: NativeConsumerAffinity { same: Rc::new(()) },
@@ -897,6 +1174,470 @@ mod tests {
     use quote::ToTokens;
     use syn::parse::Parser;
     use syn::visit::Visit;
+
+    fn host_factory(owner: &str, name: &str) -> syn::ImplItemFn {
+        let file = syn::parse_file(include_str!("consumer_context.rs")).unwrap();
+        let mut found = file
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty, syn::Type::Path(path)
+                if path.path.segments.last().unwrap().ident == owner) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .flat_map(|item| item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            });
+        let actual = found.next().unwrap();
+        assert!(found.next().is_none(), "one actual factory");
+        actual
+    }
+
+    #[derive(Default)]
+    struct HostFactoryFacts {
+        guards: Vec<String>,
+        propagated: Vec<String>,
+        refused: Vec<String>,
+        source: Vec<String>,
+        origins: Vec<(String, Vec<(String, String)>)>,
+    }
+
+    impl<'ast> Visit<'ast> for HostFactoryFacts {
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if mac.path.is_ident("ensure") {
+                // Parse the actual first expression. Never erase punctuation:
+                // tuple arity, equality, negation and argument identity matter.
+                let expressions =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                        .parse2(mac.tokens.clone())
+                        .unwrap();
+                self.guards
+                    .push(expressions.first().unwrap().to_token_stream().to_string());
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+        fn visit_expr_try(&mut self, tried: &'ast syn::ExprTry) {
+            self.propagated
+                .push(tried.expr.to_token_stream().to_string());
+            syn::visit::visit_expr_try(self, tried);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "refuse" || call.method == "refuse_sink" {
+                self.refused
+                    .push(call.receiver.to_token_stream().to_string());
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+        fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
+            if value
+                .path
+                .segments
+                .first()
+                .is_some_and(|part| part.ident == "ConsumerOrigin")
+            {
+                assert!(value.rest.is_none());
+                self.origins.push((
+                    value.path.to_token_stream().to_string(),
+                    value
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.member.to_token_stream().to_string(),
+                                field.expr.to_token_stream().to_string(),
+                            )
+                        })
+                        .collect(),
+                ));
+            }
+            if value.path.is_ident("Self") {
+                let actual = value
+                    .fields
+                    .iter()
+                    .find(|field| {
+                        matches!(&field.member,
+                    syn::Member::Named(name) if name == "source")
+                    })
+                    .unwrap();
+                self.source.push(actual.expr.to_token_stream().to_string());
+                let complete = value
+                    .fields
+                    .iter()
+                    .find(|field| {
+                        matches!(&field.member,
+                    syn::Member::Named(name) if name == "complete")
+                    })
+                    .unwrap();
+                assert!(matches!(&complete.expr, syn::Expr::Lit(value)
+                    if matches!(&value.lit, syn::Lit::Bool(value) if !value.value)));
+            }
+            syn::visit::visit_expr_struct(self, value);
+        }
+    }
+
+    fn host_facts(method: &syn::ImplItemFn) -> HostFactoryFacts {
+        let mut facts = HostFactoryFacts::default();
+        facts.visit_block(&method.block);
+        facts
+    }
+
+    fn host_origin(response: bool) -> Vec<(String, Vec<(String, String)>)> {
+        let mut fields = vec![
+            ("sink".into(), "sink".into()),
+            ("native".into(), "native".into()),
+        ];
+        if response {
+            fields.push(("lease".into(), "lease".into()));
+        }
+        vec![(
+            if response {
+                "ConsumerOrigin :: Response"
+            } else {
+                "ConsumerOrigin :: Http"
+            }
+            .into(),
+            fields,
+        )]
+    }
+
+    fn expr(value: &str) -> String {
+        syn::parse_str::<syn::Expr>(value)
+            .unwrap()
+            .to_token_stream()
+            .to_string()
+    }
+
+    fn replace_host_source(method: &syn::ImplItemFn, before: &str, after: &str) -> syn::ImplItemFn {
+        let source = method.to_token_stream().to_string();
+        let before = expr(before);
+        let after = expr(after);
+        assert_eq!(source.matches(&before).count(), 1, "exact mutation target");
+        syn::parse_str(&source.replacen(&before, &after, 1)).unwrap()
+    }
+
+    #[test]
+    fn host_runtime_origin_requires_actual_request_and_refuses_human_or_response_reclassification()
+    {
+        let actual = host_factory("ConsumerOrigin", "require_runtime_input");
+        let guarded = |actual: &syn::ImplItemFn| {
+            let facts = host_facts(actual);
+            facts.propagated.first() == Some(&expr("self.require_request()"))
+                && facts.guards
+                    == [
+                        expr("runtime.uses_native_storage()"),
+                        expr("sink.is_open()"),
+                        expr("sink.bindings.try_borrow()?.is_empty()"),
+                        expr("sink.runtime.try_borrow()?.is_none()"),
+                        expr("sink.bindings.try_borrow()?.is_empty()"),
+                        expr("binding.as_ref().is_some_and(|binding| binding.scope == scope)"),
+                    ]
+                && facts
+                    .propagated
+                    .contains(&expr("lease.require_runtime(sink)"))
+                && facts
+                    .propagated
+                    .contains(&expr("sql_runtime_scope(runtime)"))
+        };
+        assert!(guarded(&actual));
+        let mut unchecked = actual.clone();
+        unchecked.block.stmts.remove(0);
+        assert!(!guarded(&unchecked));
+        for (before, after) in [
+            ("runtime.uses_native_storage()", "true"),
+            ("sink.is_open()", "true"),
+            ("sink.runtime.try_borrow()?.is_none()", "true"),
+            (
+                "binding.as_ref().is_some_and(|binding| binding.scope == scope)",
+                "true",
+            ),
+            ("lease.require_runtime(sink)", "lease.check(sink)"),
+        ] {
+            assert!(!guarded(&replace_host_source(&actual, before, after)));
+        }
+        // Removing only one of the two human-binding checks must also fail.
+        let source = actual.to_token_stream().to_string();
+        let needle = expr("sink.bindings.try_borrow()?.is_empty()");
+        assert_eq!(source.matches(&needle).count(), 2);
+        assert!(!guarded(
+            &syn::parse_str(&source.replacen(&needle, "true", 1)).unwrap()
+        ));
+    }
+
+    #[test]
+    fn captured_host_factory_retains_the_actual_original_and_poison_on_selection_failure() {
+        let actual = host_factory("NativeConsumerContext", "captured");
+        let guarded = |actual: &syn::ImplItemFn| {
+            let facts = host_facts(actual);
+            facts.propagated.first() == Some(&expr("origin.require_runtime_input(runtime)"))
+                && facts.refused == ["original", "origin"]
+                && facts.source == [expr("ConsumerOriginal::Captured(original)")]
+                && facts.origins == host_origin(false)
+                && actual.sig.inputs.iter().any(|input| matches!(input, syn::FnArg::Typed(input)
+                    if input.ty.to_token_stream().to_string() == "& 'request mut Original < EnrolledClock >"))
+        };
+        assert!(guarded(&actual));
+        for (before, after) in [
+            ("origin.require_runtime_input(runtime)", "Ok(())"),
+            ("original.refuse()", "unrelated()"),
+            ("origin.refuse()", "unrelated()"),
+            (
+                "ConsumerOriginal::Captured(original)",
+                "ConsumerOriginal::Runtime",
+            ),
+        ] {
+            assert!(!guarded(&replace_host_source(&actual, before, after)));
+        }
+    }
+
+    #[test]
+    fn runtime_host_factory_checks_origin_before_binding_and_cannot_select_capture_or_completion() {
+        let actual = host_factory("NativeConsumerContext", "runtime_input");
+        let allowed: syn::Expr = syn::parse_quote!(match (&origin, purpose) {
+            (
+                ConsumerOrigin::Http { .. },
+                RuntimeServingUse::Registration
+                | RuntimeServingUse::Read
+                | RuntimeServingUse::Refresh
+                | RuntimeServingUse::SqlRead
+                | RuntimeServingUse::SqlWrite,
+            ) => true,
+            (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response) => true,
+            _ => false,
+        });
+        let guarded = |actual: &syn::ImplItemFn| {
+            let facts = host_facts(actual);
+            facts.propagated.first() == Some(&expr("origin.require_runtime_input(runtime)"))
+                && facts.guards == [allowed.to_token_stream().to_string()]
+                && facts.refused == ["origin"]
+                && facts.source == [expr("ConsumerOriginal::Runtime")]
+        };
+        assert!(guarded(&actual));
+        for (before, after) in [
+            ("origin.require_runtime_input(runtime)", "Ok(())"),
+            ("origin.refuse()", "unrelated()"),
+            (
+                "ConsumerOriginal::Runtime",
+                "ConsumerOriginal::Captured(original)",
+            ),
+        ] {
+            assert!(!guarded(&replace_host_source(&actual, before, after)));
+        }
+        let source = actual.to_token_stream().to_string();
+        let needle = allowed.to_token_stream().to_string();
+        assert_eq!(source.matches(&needle).count(), 1);
+        assert!(!guarded(
+            &syn::parse_str(&source.replacen(&needle, "true", 1)).unwrap()
+        ));
+        for (before, after) in [
+            (
+                "RuntimeServingUse::Read",
+                "RuntimeServingUse::PendingCapture",
+            ),
+            (
+                "RuntimeServingUse::Response",
+                "RuntimeServingUse::ResponseComplete",
+            ),
+        ] {
+            let source = source.replacen(&expr(before), &expr(after), 1);
+            assert!(!guarded(&syn::parse_str(&source).unwrap()));
+        }
+    }
+
+    #[test]
+    fn actual_runtime_entry_factories_pin_the_closed_phase_and_same_lease_inputs() {
+        let http = host_factory("NativeConsumerContext", "runtime_http");
+        let response = host_factory("NativeConsumerContext", "runtime_response");
+        let guarded_http = |actual: &syn::ImplItemFn| {
+            let facts = host_facts(actual);
+            let source = actual.to_token_stream().to_string();
+            source.contains(&expr("super::runtime_serving_use(phase)"))
+                && facts.refused == ["origin"]
+                && facts.origins == host_origin(false)
+                && source.contains(&expr("Self::runtime_input(runtime, origin, purpose)"))
+        };
+        let guarded_response = |actual: &syn::ImplItemFn| {
+            let source = actual.to_token_stream().to_string();
+            source.contains(&expr(
+                "Self::runtime_input(runtime, origin, RuntimeServingUse::Response)",
+            )) && host_facts(actual).origins == host_origin(true)
+        };
+        assert!(guarded_http(&http));
+        assert!(guarded_response(&response));
+        assert!(!guarded_http(&replace_host_source(
+            &http,
+            "super::runtime_serving_use(phase)",
+            "Ok(RuntimeServingUse::SqlWrite)"
+        )));
+        assert!(!guarded_response(&replace_host_source(
+            &response,
+            "Self::runtime_input(runtime, origin, RuntimeServingUse::Response)",
+            "Self::runtime_input(runtime, origin, RuntimeServingUse::SqlWrite)"
+        )));
+    }
+
+    #[test]
+    fn final_human_factory_requires_the_actual_completed_original_and_same_live_lease() {
+        let actual = host_factory("NativeRequestFinalContext", "human_response");
+        let guarded = |actual: &syn::ImplItemFn| {
+            let facts = host_facts(actual);
+            facts.propagated.iter().take(3).cloned().collect::<Vec<_>>()
+                == [
+                    expr("completed.require_lease(sink, &lease)"),
+                    expr("request.consumer_origin()"),
+                    expr("native.require_request(&sink.request)"),
+                ]
+                && facts.guards
+                    == [
+                        expr("runtime.uses_native_storage()"),
+                        expr("original.intent.app() == runtime.app()"),
+                        expr("original.phase == Phase::ResponseComplete"),
+                        expr("sink.runtime.try_borrow()?.is_none()"),
+                    ]
+                && facts
+                    .propagated
+                    .contains(&expr("original.intent.require_oauth_management()"))
+                && facts.refused == ["original", "lease"]
+                && facts.source == [expr("FinalOriginal::Bound(original)")]
+                && actual
+                    .to_token_stream()
+                    .to_string()
+                    .contains(&expr("FinalCompletion::Response(completed)"))
+                && facts.origins == host_origin(true)
+                && actual
+                    .to_token_stream()
+                    .to_string()
+                    .contains(&expr("lease.require_human(sink, original.intent)"))
+        };
+        assert!(guarded(&actual));
+        let inputs = actual
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                syn::FnArg::Typed(input) => Some(input.ty.to_token_stream().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(inputs.contains(&"& super :: request :: Lease".into()));
+        assert!(inputs.contains(&"ConsumerLeaseOrigin".into()));
+        assert!(inputs.contains(&"& 'request CompletedResponse".into()));
+        for (before, after) in [
+            ("completed.require_lease(sink, &lease)", "Ok(())"),
+            ("request.consumer_origin()", "other.consumer_origin()"),
+            ("native.require_request(&sink.request)", "Ok(())"),
+            (
+                "original.phase == Phase::ResponseComplete",
+                "original.phase == Phase::Response",
+            ),
+            ("original.intent.app() == runtime.app()", "true"),
+            ("sink.runtime.try_borrow()?.is_none()", "true"),
+            (
+                "lease.require_human(sink, original.intent)",
+                "lease.check(sink)",
+            ),
+            ("original.refuse()", "unrelated()"),
+            ("lease.refuse_sink(sink)", "unrelated()"),
+            ("FinalOriginal::Bound(original)", "FinalOriginal::Runtime"),
+            (
+                "FinalCompletion::Response(completed)",
+                "FinalCompletion::Startup",
+            ),
+        ] {
+            assert!(!guarded(&replace_host_source(&actual, before, after)));
+        }
+    }
+
+    #[test]
+    fn final_runtime_factory_requires_genuine_runtime_response_origin_and_negative_drop_stays_armed()
+     {
+        let actual = host_factory("NativeRequestFinalContext", "runtime_response");
+        let guarded = |actual: &syn::ImplItemFn| {
+            let facts = host_facts(actual);
+            facts.refused == ["lease", "origin"]
+                && facts.source == [expr("FinalOriginal::Runtime")]
+                && actual
+                    .to_token_stream()
+                    .to_string()
+                    .contains(&expr("FinalCompletion::Response(completed)"))
+                && facts.propagated.iter().take(2).cloned().collect::<Vec<_>>()
+                    == [
+                        expr("completed.require_lease(sink, &lease)"),
+                        expr("lease.require_runtime(sink)"),
+                    ]
+                && actual
+                    .to_token_stream()
+                    .to_string()
+                    .contains(&expr("request.consumer_origin()"))
+                && actual
+                    .to_token_stream()
+                    .to_string()
+                    .contains(&expr("origin.require_runtime_input(runtime)"))
+                && facts.origins == host_origin(true)
+        };
+        assert!(guarded(&actual));
+        let inputs = actual
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                syn::FnArg::Typed(input) => Some(input.ty.to_token_stream().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(inputs.contains(&"& super :: request :: Lease".into()));
+        assert!(inputs.contains(&"ConsumerLeaseOrigin".into()));
+        assert!(inputs.contains(&"& 'request CompletedResponse".into()));
+        for (before, after) in [
+            ("completed.require_lease(sink, &lease)", "Ok(())"),
+            ("request.consumer_origin()", "other.consumer_origin()"),
+            ("lease.require_runtime(sink)", "lease.check(sink)"),
+            ("lease.refuse_sink(sink)", "unrelated()"),
+            ("origin.require_runtime_input(runtime)", "Ok(())"),
+            ("origin.refuse()", "unrelated()"),
+            ("FinalOriginal::Runtime", "FinalOriginal::Bound(original)"),
+            (
+                "FinalCompletion::Response(completed)",
+                "FinalCompletion::Startup",
+            ),
+        ] {
+            assert!(!guarded(&replace_host_source(&actual, before, after)));
+        }
+        let drop = host_factory("NativeRequestFinalContext", "drop");
+        let source = drop.to_token_stream().to_string();
+        assert!(
+            source.contains(&expr("!self.complete")) && source.contains(&expr("self.refuse()"))
+        );
+    }
+
+    #[test]
+    fn actual_final_posts_require_transport_marker_for_both_response_origins_and_keep_startup_separate()
+     {
+        let actual = host_factory("NativeRequestFinalContext", "require_response_binding");
+        let source = actual.to_token_stream().to_string();
+        let predicate = expr("completed.require_lease(sink, lease)");
+        assert_eq!(source.matches(&predicate).count(), 2);
+        assert_eq!(
+            source
+                .matches("FinalCompletion :: Response (completed)")
+                .count(),
+            2
+        );
+        assert_eq!(source.matches("FinalCompletion :: Startup").count(), 1);
+        let native = source.find("self . origin . require_request ()").unwrap();
+        assert!(native < source.find(&predicate).unwrap());
+        let removed = source.replacen(&predicate, "Ok(())", 1);
+        assert_eq!(
+            removed.matches(&predicate).count(),
+            1,
+            "removing either real post is detected"
+        );
+    }
 
     #[test]
     fn response_binding_is_rechecked_before_each_native_current_or_final_origin_join() {
@@ -1303,6 +2044,7 @@ mod tests {
             } else {
                 syn::parse_quote!(Self {
                     source: FinalOriginal::Runtime,
+                    completion: FinalCompletion::Startup,
                     runtime,
                     origin: ConsumerOrigin::Autonomous(native),
                     affinity: NativeConsumerAffinity { same: Rc::new(()) },

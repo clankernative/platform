@@ -82,6 +82,24 @@ struct Owners {
     response_rights: response_tickets::ResponseRights,
 }
 
+/// Produced only by the actual response loop after its Complete operation
+/// and mandatory native/original posts. It is not a delivery receipt: final
+/// request settlement and result publication are still owed by the same driver.
+/// The private refusal identity ties it to that exact live response lease.
+struct CompletedResponse {
+    sequence: u64,
+    refused: Rc<std::cell::Cell<bool>>,
+    published: bool,
+}
+
+impl Drop for CompletedResponse {
+    fn drop(&mut self) {
+        if !self.published {
+            self.refused.set(true);
+        }
+    }
+}
+
 struct StoredOriginal<C: Clock> {
     original: Original<C>,
     response: ResponseBinding,
@@ -1115,9 +1133,11 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <PreparedRestoredListener as Ambiguous<_>>::check;
+            let _ = <CompletedResponse as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
     assert_not_impl!(Default);
     assert_not_impl!(std::fmt::Debug);
     assert_not_impl!(Send);

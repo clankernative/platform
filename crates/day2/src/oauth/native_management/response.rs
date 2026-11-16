@@ -4,7 +4,10 @@
 
 #[cfg(test)]
 use super::fixtures;
-use super::{AppStorage, OWNERS, OriginalPhase, Owners, Phase, PhaseOriginal, Sink, SinkState};
+use super::{
+    AppStorage, CompletedResponse, OWNERS, OriginalPhase, Owners, Phase, PhaseOriginal, Sink,
+    SinkState,
+};
 use crate::oauth::fresh_auth::FreshIntent;
 use crate::oauth::native_http::response_io::{Operation, Transport};
 use crate::security_epoch::{
@@ -402,7 +405,7 @@ impl<T: LeaseMaterial> Lease<T> {
 }
 
 impl Lease<Owners> {
-    fn consumer_origin(&self) -> Result<ConsumerLeaseOrigin> {
+    pub(super) fn consumer_origin(&self) -> Result<ConsumerLeaseOrigin> {
         ensure!(
             self.owners.is_some() && !self.known && !self.refused.get() && self.live.get(),
             "native response lease unavailable"
@@ -524,6 +527,20 @@ impl<T: LeaseMaterial> Drop for Lease<T> {
     }
 }
 
+impl CompletedResponse {
+    pub(super) fn require_lease(&self, sink: &Sink, lease: &ConsumerLeaseOrigin) -> Result<()> {
+        if !Rc::ptr_eq(&self.refused, &lease.refused) {
+            self.refused.set(true);
+            anyhow::bail!("native completed response lease changed");
+        }
+        ensure!(
+            !self.published && !self.refused.get(),
+            "native completed response refused"
+        );
+        lease.check(sink)
+    }
+}
+
 struct ResponseBorrow<'scope, 'role, 'original> {
     source: ResponseSource<'scope, 'role, 'original>,
     refused: Rc<Cell<bool>>,
@@ -572,7 +589,7 @@ impl ResponseBorrow<'_, '_, '_> {
         &mut self,
         transport: &mut Transport<T>,
         mut request: (u64, Operation),
-    ) -> Result<u64> {
+    ) -> Result<CompletedResponse> {
         ensure!(
             request.1 != Operation::Complete,
             "native response completed before first I/O"
@@ -582,7 +599,11 @@ impl ResponseBorrow<'_, '_, '_> {
         loop {
             if request.1 == Operation::Complete {
                 self.complete()?;
-                break Ok(request.0);
+                break Ok(CompletedResponse {
+                    sequence: request.0,
+                    refused: self.refused.clone(),
+                    published: false,
+                });
             }
             transport
                 .execute(request.0, request.1, || self.check())
@@ -788,7 +809,7 @@ impl Sink {
                 Ok::<_, anyhow::Error>(sequence)
             })
             .await;
-        let sequence = result?;
+        let mut sequence = result?;
         ensure!(
             self.is_open() && !lease.refused.get(),
             "native response finalization aborted"
@@ -810,11 +831,12 @@ impl Sink {
         request_owner.finish(role.owner())?;
         // A rejected/lost result publication remains terminally unknown.
         // No await or fallible operation follows the positive disposition.
-        transport.complete(sequence)?;
+        transport.complete(sequence.sequence)?;
         role.known = true;
         lease.known = true;
         self.state.set(SinkState::Complete);
         terminal.complete();
+        sequence.published = true;
         Ok(())
     }
 }
@@ -823,6 +845,113 @@ impl Sink {
 mod restored_response_source_tests {
     use super::*;
     use quote::ToTokens;
+
+    #[test]
+    fn completed_response_marker_is_bound_to_live_lease_and_unknown_drop_refuses_it() {
+        for cut in 0..5 {
+            let sink = Sink::new();
+            let live = Rc::new(Cell::new(true));
+            let refused = Rc::new(Cell::new(false));
+            let lease = ConsumerLeaseOrigin {
+                identity: sink.identity.clone(),
+                refused: refused.clone(),
+                live: Rc::downgrade(&live),
+                consumer: LeaseConsumer::Runtime,
+            };
+            let mut completed = CompletedResponse {
+                sequence: 7,
+                refused: refused.clone(),
+                published: false,
+            };
+            match cut {
+                0 => {}
+                1 => live.set(false),
+                2 => refused.set(true),
+                3 => completed.published = true,
+                _ => {
+                    completed.refused = Rc::new(Cell::new(false));
+                }
+            }
+            assert_eq!(completed.require_lease(&sink, &lease).is_ok(), cut == 0);
+            if cut == 4 {
+                assert!(
+                    sink.is_open(),
+                    "foreign marker has no right to burn another Sink"
+                );
+            }
+            drop(completed);
+            if cut == 0 {
+                assert!(refused.get(), "abandonment after I/O is still unknown");
+            }
+        }
+    }
+
+    #[test]
+    fn actual_completed_response_producer_follows_real_complete_and_stays_armed_through_publication()
+     {
+        let drive = method("drive");
+        let expected: syn::ReturnType = syn::parse_quote!(-> Result<CompletedResponse>);
+        assert_eq!(
+            drive.sig.output.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        let source = drive.block.to_token_stream().to_string();
+        let complete = "self . complete () ? ;";
+        let construct = "CompletedResponse { sequence : request . 0 , refused : self . refused . clone () , published : false , }";
+        assert_eq!(source.matches(complete).count(), 1);
+        assert_eq!(source.matches(construct).count(), 1);
+        assert!(source.find(complete) < source.find(construct));
+        let actual = syn::parse_file(include_str!("response.rs")).unwrap();
+        let mut producers = 0;
+        for item in &actual.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            for item in &item.items {
+                let syn::ImplItem::Fn(item) = item else {
+                    continue;
+                };
+                struct Producers(usize);
+                impl<'ast> syn::visit::Visit<'ast> for Producers {
+                    fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
+                        if value.path.is_ident("CompletedResponse") {
+                            self.0 += 1;
+                        }
+                        syn::visit::visit_expr_struct(self, value);
+                    }
+                }
+                let mut count = Producers(0);
+                syn::visit::Visit::visit_block(&mut count, &item.block);
+                producers += count.0;
+            }
+        }
+        assert_eq!(
+            producers, 1,
+            "no scalar, DATA or alternate completion factory"
+        );
+        let delivered = actual
+            .items
+            .iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("Sink")) {
+                    return None;
+                }
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == "drive_response" => Some(item),
+                    _ => None,
+                })
+            })
+            .unwrap();
+        let source = delivered.block.to_token_stream().to_string();
+        let publication = "transport . complete (sequence . sequence) ?";
+        let disarm = "sequence . published = true";
+        assert_eq!(source.matches(publication).count(), 1);
+        assert_eq!(source.matches(disarm).count(), 1);
+        assert!(source.find(publication) < source.find(disarm));
+    }
 
     #[test]
     fn actual_lease_projection_derives_human_binding_only_from_its_retained_owner() {
@@ -1015,7 +1144,11 @@ mod restored_response_source_tests {
             loop {
                 if request.1 == Operation::Complete {
                     self.complete()?;
-                    break Ok(request.0);
+                    break Ok(CompletedResponse {
+                        sequence: request.0,
+                        refused: self.refused.clone(),
+                        published: false,
+                    });
                 }
                 transport
                     .execute(request.0, request.1, || self.check())
