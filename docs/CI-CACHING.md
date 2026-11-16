@@ -163,12 +163,15 @@ Mac failure or unavailable runner capacity cannot delay Linux `verify`, artifact
 selection or exact-commit queue receipt reuse.
 
 Preparation runs inputs, fixtures and tests jobs concurrently. Inputs retains
-formatting, CLI compilation, eight fixture builds, browser checks
-and lint. Fixtures builds the remaining eighteen fixtures; all imported-peer
-pairs stay in the inputs part in their original order. Both fixture parts retain
+formatting, CLI compilation, eight fixture builds and browser checks. Fixtures
+builds the remaining eighteen fixtures; all imported-peer pairs stay in the
+inputs part in their original order. Both fixture parts retain
 their existing compiler and artifact admission, and have separate cache keys.
 Tests builds the complete selected normal-program/harness graph once, then
-executes documentation tests. The join requires all three authenticated parts,
+executes documentation tests and the complete unchanged Clippy target catalog.
+Clippy runs fresh even when compiled test outputs are restored. Its mandatory
+`lint` effect belongs only to the tests receipt; the join refuses an omitted or
+duplicated effect. The join requires all three authenticated parts,
 exact current-run identities, disjoint and exhaustive effects, admitted fixtures and a complete
 executable inventory. Missing, swapped, duplicated or foreign parts refuse the
 join, including an incomplete second fixture set. Permission-preserving transport records its original run
@@ -190,12 +193,12 @@ The lane compiles the ordinary default graph and executes its focused campaign
 rather than substituting a Linux result. Neither real native campaign is cached.
 
 Linux jobs keep the pinned OCI image, private cgroup without swap, four CPU
-allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Inputs
-and test preparation get 8 GiB on the existing standard 16 GB Linux runner;
-fixture preparation, joins and runtime shards retain 6 GiB. Setup accepts only
-the explicit workflow purposes `standard` and `compiler-preparation`, checks their
-fixed finite ceilings, and records the selected purpose and actual allowance.
-This uses existing runner RAM, with no larger-runner allocation. Trusted
+allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Test
+preparation, including Clippy, keeps its existing 8 GiB allowance on the standard
+16 GB Linux runner. Inputs, fixture preparation, joins and runtime shards retain
+6 GiB. The unchanged `standard` and `test-preparation` purposes check and record
+their fixed ceilings. Moving Clippy preserves the native Roc compiler's separate
+6 GiB ceiling; neither a larger runner nor an admission relaxation is required. Trusted
 setup preserves and rechecks the checked-in ABI seed. Inner compiler/worker
 confinement and ELF/glibc/loader admission remain mandatory. This is separate
 from the production Mac private builder; no Linux production builder is added.
