@@ -355,6 +355,13 @@
       "consuming_methods": [],
       "owning_children": [
         {
+          "source": "crates/day2/src/deployment/operation.rs",
+          "registration": {
+            "source": "crates/day2/src/deployment.rs",
+            "module": "operation"
+          }
+        },
+        {
           "source": "crates/day2/src/deployment/terminal.rs",
           "registration": {
             "source": "crates/day2/src/deployment.rs",
@@ -391,6 +398,13 @@
       "consuming_methods": [],
       "owning_children": [
         {
+          "source": "crates/day2/src/deployment/operation.rs",
+          "registration": {
+            "source": "crates/day2/src/deployment.rs",
+            "module": "operation"
+          }
+        },
+        {
           "source": "crates/day2/src/deployment/terminal.rs",
           "registration": {
             "source": "crates/day2/src/deployment.rs",
@@ -416,6 +430,13 @@
       "kind": "private_material",
       "consuming_methods": [],
       "owning_children": [
+        {
+          "source": "crates/day2/src/deployment/operation.rs",
+          "registration": {
+            "source": "crates/day2/src/deployment.rs",
+            "module": "operation"
+          }
+        },
         {
           "source": "crates/day2/src/deployment/terminal.rs",
           "registration": {
