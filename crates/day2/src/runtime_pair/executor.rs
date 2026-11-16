@@ -189,7 +189,7 @@ fn admit_in(runtime: &Runtime, db: &Connection, id: &str) -> Result<Release> {
 /// This changes no active runtime, authority document, replica or serving phase.
 pub fn admit(runtime: &Runtime, id: &str, operator: &LocalOperator) -> Result<Release> {
     rollout::operator(runtime, operator)?;
-    let _operation = crate::deployment::operation::OperationLease::acquire(
+    let _operation = crate::deployment::OperationLease::acquire(
         runtime.db().parent().context("state root")?,
         runtime.app(),
     )?;
