@@ -575,7 +575,7 @@ mod edge {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                     let address = listener.local_addr()?;
                     let mut server = crate::web::LocalServer::bind_edge_listener(
-                        runtime, listener, &edge, verifier, 4,
+                        std::sync::Arc::new(runtime), listener, &edge, verifier, 4,
                     )?;
                     let captured = server.capture_request_timing()?;
                     send.send((format!("http://{address}"), captured))?;
