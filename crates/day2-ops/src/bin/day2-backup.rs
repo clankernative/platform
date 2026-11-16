@@ -110,7 +110,7 @@ fn run() -> Result<Value> {
     // Retain exclusion through verification and COMPLETE publication, not just
     // through SQLite copying. A release refuses while upload is still pending.
     let lease =
-        day2::deployment::operation::OperationLease::for_instance(&options.instance, &options.app)?;
+        day2::deployment::OperationLease::for_instance(&options.instance, &options.app)?;
     let taken = backup::take_with_lease(
         &options.instance,
         &options.app,
