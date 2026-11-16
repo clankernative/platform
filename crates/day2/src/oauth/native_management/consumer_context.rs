@@ -72,6 +72,40 @@ enum FinalOriginal<'request, 'original> {
     Runtime,
 }
 
+/// Own every supplied negative duty before the first fallible factory check.
+/// Moving fields into the final context is the only successful disposition;
+/// an error or unwind cannot leave an input original or lease reusable.
+struct FinalContextFactoryAttempt<'request, 'original> {
+    original: Option<&'request mut OriginalPhase<'original>>,
+    sink: &'request Sink,
+    lease: Option<ConsumerLeaseOrigin>,
+    origin: Option<ConsumerOrigin<'request>>,
+    complete: bool,
+}
+
+impl FinalContextFactoryAttempt<'_, '_> {
+    fn require_completion(&mut self, completed: &CompletedResponse) -> Result<()> {
+        completed.require_lease(self.sink, self.lease.as_ref().expect("actual input lease"))
+    }
+}
+
+impl Drop for FinalContextFactoryAttempt<'_, '_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            if let Some(original) = &mut self.original {
+                original.refuse();
+            }
+            if let Some(lease) = &self.lease {
+                lease.refuse_sink(self.sink);
+            }
+            if let Some(origin) = &self.origin {
+                origin.refuse();
+            }
+        }
+    }
+}
+
+
 enum ConsumerOriginal<'request, 'original> {
     Bound(&'request mut OriginalPhase<'original>),
     // The genuine AppCreator still owns this unbound original. A successful
@@ -908,52 +942,38 @@ impl<'request, 'original> NativeRequestFinalContext<'request, 'original> {
         lease: ConsumerLeaseOrigin,
         completed: &'request CompletedResponse,
     ) -> Result<Self> {
-        // Derive this lease origin before mutably borrowing the original from
-        // its actual Owners. The real completion must belong to the same lease.
-        completed.require_lease(sink, &lease)?;
-        let selected = (|| {
-            let native = request.consumer_origin()?;
-            native.require_request(&sink.request)?;
-            ensure!(
-                runtime.uses_native_storage(),
-                "native final Runtime required"
-            );
-            ensure!(
-                original.intent.app() == runtime.app(),
-                "native final human app changed"
-            );
-            original.intent.require_oauth_management()?;
-            ensure!(
-                original.phase == Phase::ResponseComplete,
-                "native final human response not completed"
-            );
-            ensure!(
-                sink.runtime.try_borrow()?.is_none(),
-                "native human response reclassified"
-            );
-            lease.require_human(sink, original.intent)?;
-            Ok(native)
-        })();
-        let native = match selected {
-            Ok(native) => native,
-            Err(error) => {
-                original.refuse();
-                lease.refuse_sink(sink);
-                return Err(error);
-            }
+        let mut attempt = FinalContextFactoryAttempt {
+            original: Some(original),
+            sink,
+            lease: Some(lease),
+            origin: None,
+            complete: false,
         };
-        Ok(Self {
-            source: FinalOriginal::Bound(original),
+        attempt.require_completion(completed)?;
+        let native = request.consumer_origin()?;
+        native.require_request(&sink.request)?;
+        ensure!(runtime.uses_native_storage(), "native final Runtime required");
+        let original = attempt.original.as_deref_mut().expect("actual human original");
+        ensure!(original.intent.app() == runtime.app(), "native final human app changed");
+        original.intent.require_oauth_management()?;
+        ensure!(original.phase == Phase::ResponseComplete, "native final human response not completed");
+        ensure!(sink.runtime.try_borrow()?.is_none(), "native human response reclassified");
+        attempt.lease.as_ref().expect("actual input lease").require_human(sink, original.intent)?;
+        let lease = attempt.lease.take().expect("actual input lease");
+        attempt.origin = Some(ConsumerOrigin::Response { sink, native, lease });
+        // Allocate while every real input remains armed. The following moves
+        // into the returned context perform no fallible work or callbacks.
+        let affinity = NativeConsumerAffinity { same: Rc::new(()) };
+        let context = Self {
+            source: FinalOriginal::Bound(attempt.original.take().expect("actual human original")),
             completion: FinalCompletion::Response(completed),
             runtime,
-            origin: ConsumerOrigin::Response {
-                sink,
-                native,
-                lease,
-            },
-            affinity: NativeConsumerAffinity { same: Rc::new(()) },
+            origin: attempt.origin.take().expect("actual response origin"),
+            affinity,
             complete: false,
-        })
+        };
+        attempt.complete = true;
+        Ok(context)
     }
 
     fn require_response_binding(&mut self) -> Result<()> {
@@ -1104,32 +1124,30 @@ impl<'request> NativeRequestFinalContext<'request, 'static> {
         lease: ConsumerLeaseOrigin,
         completed: &'request CompletedResponse,
     ) -> Result<Self> {
-        completed.require_lease(sink, &lease)?;
-        lease.require_runtime(sink)?;
-        let native = match request.consumer_origin() {
-            Ok(native) => native,
-            Err(error) => {
-                lease.refuse_sink(sink);
-                return Err(error);
-            }
-        };
-        let origin = ConsumerOrigin::Response {
+        let mut attempt = FinalContextFactoryAttempt {
+            original: None,
             sink,
-            native,
-            lease,
+            lease: Some(lease),
+            origin: None,
+            complete: false,
         };
-        if let Err(error) = origin.require_runtime_input(runtime) {
-            origin.refuse();
-            return Err(error);
-        }
-        Ok(Self {
+        attempt.require_completion(completed)?;
+        attempt.lease.as_ref().expect("actual input lease").require_runtime(sink)?;
+        let native = request.consumer_origin()?;
+        let lease = attempt.lease.take().expect("actual input lease");
+        attempt.origin = Some(ConsumerOrigin::Response { sink, native, lease });
+        attempt.origin.as_ref().expect("actual response origin").require_runtime_input(runtime)?;
+        let affinity = NativeConsumerAffinity { same: Rc::new(()) };
+        let context = Self {
             source: FinalOriginal::Runtime,
             completion: FinalCompletion::Response(completed),
             runtime,
-            origin,
-            affinity: NativeConsumerAffinity { same: Rc::new(()) },
+            origin: attempt.origin.take().expect("actual response origin"),
+            affinity,
             complete: false,
-        })
+        };
+        attempt.complete = true;
+        Ok(context)
     }
 
     pub(super) fn startup(
@@ -1159,6 +1177,14 @@ const _: () = {
             let _ = <$type as Ambiguous<_>>::check;
         }};
     }
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, Clone);
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, Copy);
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, Default);
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, std::fmt::Debug);
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, Send);
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, Sync);
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, serde::Serialize);
+    assert_not_impl!(FinalContextFactoryAttempt<'static, 'static>, serde::Deserialize<'static>);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Clone);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Copy);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Default);
@@ -1499,6 +1525,131 @@ mod tests {
         )));
     }
 
+    fn factory_inputs_armed(actual: &syn::ImplItemFn, human: bool) -> bool {
+        let expected: syn::Stmt = if human {
+            syn::parse_quote!(let mut attempt = FinalContextFactoryAttempt {
+                original: Some(original), sink, lease: Some(lease), origin: None, complete: false,
+            };)
+        } else {
+            syn::parse_quote!(let mut attempt = FinalContextFactoryAttempt {
+                original: None, sink, lease: Some(lease), origin: None, complete: false,
+            };)
+        };
+        let source = actual.block.to_token_stream().to_string();
+        let affinity: syn::Stmt = syn::parse_quote!(let affinity = NativeConsumerAffinity { same: Rc::new(()) };);
+        let affinity = affinity.to_token_stream().to_string();
+        let context = "let context = Self";
+        let disarm: syn::Stmt = syn::parse_quote!(attempt.complete = true;);
+        let disarm = disarm.to_token_stream().to_string();
+        let returned = expr("Ok(context)");
+        actual.block.stmts.first().map(ToTokens::to_token_stream).map(|s| s.to_string())
+            == Some(expected.to_token_stream().to_string())
+            && source.matches(&affinity).count() == 1
+            && source.matches(context).count() == 1
+            && source.matches(&disarm).count() == 1
+            && source.matches(&returned).count() == 1
+            && source.find(&affinity) < source.find(context)
+            && source.find(context) < source.find(&disarm)
+            && source.find(&disarm) < source.find(&returned)
+    }
+
+    #[test]
+    fn actual_factory_completion_guard_burns_early_marker_dead_lease_and_unwind_inputs() {
+        for cut in 0..3 {
+            let sink = Sink::new();
+            let foreign_sink = Sink::new();
+            let (lease, refused, live) = super::super::response::runtime_lease_for_factory_tests(&sink);
+            let completed = CompletedResponse {
+                sequence: 7,
+                refused: if cut == 0 { Rc::new(std::cell::Cell::new(false)) } else { refused.clone() },
+                published: false,
+            };
+            if cut == 1 { live.set(false); }
+            if cut == 2 {
+                let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _attempt = FinalContextFactoryAttempt {
+                        original: None, sink: &sink, lease: Some(lease), origin: None, complete: false,
+                    };
+                    panic!("closed factory fixture unwind");
+                }));
+                assert!(unwound.is_err());
+            } else {
+                let failed = {
+                    let mut attempt = FinalContextFactoryAttempt {
+                        original: None, sink: &sink, lease: Some(lease), origin: None, complete: false,
+                    };
+                    attempt.require_completion(&completed)
+                };
+                assert!(failed.is_err());
+            }
+            assert!(refused.get(), "the actual attempted input lease is terminal");
+            assert!(foreign_sink.is_open(), "no unrelated Sink is refused");
+            if cut != 1 { assert!(!sink.is_open()); }
+        }
+        let actual = host_factory("FinalContextFactoryAttempt", "require_completion");
+        let expected: syn::Block = syn::parse_quote!({
+            completed.require_lease(self.sink, self.lease.as_ref().expect("actual input lease"))
+        });
+        let guarded = |body: &syn::Block| body.to_token_stream().to_string()==expected.to_token_stream().to_string();
+        assert!(guarded(&actual.block));
+        assert!(!guarded(&replace_host_source(
+            &actual,
+            "completed.require_lease(self.sink, self.lease.as_ref().expect(\"actual input lease\"))",
+            "Ok(())"
+        ).block));
+    }
+
+    #[test]
+    fn final_factory_inputs_are_armed_before_marker_checks_and_disarm_after_context_move() {
+        for (name, human) in [("human_response", true), ("runtime_response", false)] {
+            let actual = host_factory("NativeRequestFinalContext", name);
+            assert!(factory_inputs_armed(&actual, human));
+            let mut no_guard = actual.clone();
+            no_guard.block.stmts.remove(0);
+            assert!(!factory_inputs_armed(&no_guard, human));
+            let mut late_guard = actual.clone();
+            late_guard.block.stmts.swap(0, 1);
+            assert!(!factory_inputs_armed(&late_guard, human));
+            let mut disarmed = actual.clone();
+            let syn::Stmt::Local(local) = &mut disarmed.block.stmts[0] else { panic!("actual attempt"); };
+            let syn::Expr::Struct(value) = &mut *local.init.as_mut().unwrap().expr else { panic!("actual inputs"); };
+            for field in &mut value.fields {
+                if matches!(&field.member, syn::Member::Named(name) if name=="complete") {
+                    field.expr = syn::parse_quote!(true);
+                }
+            }
+            assert!(!factory_inputs_armed(&disarmed, human));
+            if human {
+                let mut no_original = actual.clone();
+                let syn::Stmt::Local(local) = &mut no_original.block.stmts[0] else { panic!("actual attempt"); };
+                let syn::Expr::Struct(value) = &mut *local.init.as_mut().unwrap().expr else { panic!("actual inputs"); };
+                for field in &mut value.fields {
+                    if matches!(&field.member, syn::Member::Named(name) if name=="original") {
+                        field.expr = syn::parse_quote!(None);
+                    }
+                }
+                assert!(!factory_inputs_armed(&no_original, true));
+            }
+        }
+        let drop = host_factory("FinalContextFactoryAttempt", "drop");
+        let expected: syn::Block = syn::parse_quote!({
+            if !self.complete {
+                if let Some(original) = &mut self.original { original.refuse(); }
+                if let Some(lease) = &self.lease { lease.refuse_sink(self.sink); }
+                if let Some(origin) = &self.origin { origin.refuse(); }
+            }
+        });
+        let guarded = |body: &syn::Block| body.to_token_stream().to_string()==expected.to_token_stream().to_string();
+        assert!(guarded(&drop.block));
+        for (before, after) in [
+            ("original.refuse()", "unrelated()"),
+            ("lease.refuse_sink(self.sink)", "lease.refuse()"),
+            ("origin.refuse()", "unrelated()"),
+        ] {
+            assert!(!guarded(&replace_host_source(&drop, before, after).block));
+        }
+    }
+
     #[test]
     fn final_human_factory_requires_the_actual_completed_original_and_same_live_lease() {
         let actual = host_factory("NativeRequestFinalContext", "human_response");
@@ -1506,7 +1657,7 @@ mod tests {
             let facts = host_facts(actual);
             facts.propagated.iter().take(3).cloned().collect::<Vec<_>>()
                 == [
-                    expr("completed.require_lease(sink, &lease)"),
+                    expr(r#"attempt.require_completion(completed)"#),
                     expr("request.consumer_origin()"),
                     expr("native.require_request(&sink.request)"),
                 ]
@@ -1520,8 +1671,8 @@ mod tests {
                 && facts
                     .propagated
                     .contains(&expr("original.intent.require_oauth_management()"))
-                && facts.refused == ["original", "lease"]
-                && facts.source == [expr("FinalOriginal::Bound(original)")]
+                && facts.refused.is_empty() && factory_inputs_armed(actual, true)
+                && facts.source == [expr(r#"FinalOriginal::Bound(attempt.original.take().expect("actual human original"))"#)]
                 && actual
                     .to_token_stream()
                     .to_string()
@@ -1530,7 +1681,7 @@ mod tests {
                 && actual
                     .to_token_stream()
                     .to_string()
-                    .contains(&expr("lease.require_human(sink, original.intent)"))
+                    .contains(&expr(r#"attempt.lease.as_ref().expect("actual input lease").require_human(sink, original.intent)"#))
         };
         assert!(guarded(&actual));
         let inputs = actual
@@ -1546,7 +1697,7 @@ mod tests {
         assert!(inputs.contains(&"ConsumerLeaseOrigin".into()));
         assert!(inputs.contains(&"& 'request CompletedResponse".into()));
         for (before, after) in [
-            ("completed.require_lease(sink, &lease)", "Ok(())"),
+            (r#"attempt.require_completion(completed)"#, "Ok(())"),
             ("request.consumer_origin()", "other.consumer_origin()"),
             ("native.require_request(&sink.request)", "Ok(())"),
             (
@@ -1556,12 +1707,10 @@ mod tests {
             ("original.intent.app() == runtime.app()", "true"),
             ("sink.runtime.try_borrow()?.is_none()", "true"),
             (
-                "lease.require_human(sink, original.intent)",
+                r#"attempt.lease.as_ref().expect("actual input lease").require_human(sink, original.intent)"#,
                 "lease.check(sink)",
             ),
-            ("original.refuse()", "unrelated()"),
-            ("lease.refuse_sink(sink)", "unrelated()"),
-            ("FinalOriginal::Bound(original)", "FinalOriginal::Runtime"),
+            (r#"FinalOriginal::Bound(attempt.original.take().expect("actual human original"))"#, "FinalOriginal::Runtime"),
             (
                 "FinalCompletion::Response(completed)",
                 "FinalCompletion::Startup",
@@ -1577,7 +1726,7 @@ mod tests {
         let actual = host_factory("NativeRequestFinalContext", "runtime_response");
         let guarded = |actual: &syn::ImplItemFn| {
             let facts = host_facts(actual);
-            facts.refused == ["lease", "origin"]
+            facts.refused.is_empty() && factory_inputs_armed(actual, false)
                 && facts.source == [expr("FinalOriginal::Runtime")]
                 && actual
                     .to_token_stream()
@@ -1585,8 +1734,8 @@ mod tests {
                     .contains(&expr("FinalCompletion::Response(completed)"))
                 && facts.propagated.iter().take(2).cloned().collect::<Vec<_>>()
                     == [
-                        expr("completed.require_lease(sink, &lease)"),
-                        expr("lease.require_runtime(sink)"),
+                        expr(r#"attempt.require_completion(completed)"#),
+                        expr(r#"attempt.lease.as_ref().expect("actual input lease").require_runtime(sink)"#),
                     ]
                 && actual
                     .to_token_stream()
@@ -1595,7 +1744,7 @@ mod tests {
                 && actual
                     .to_token_stream()
                     .to_string()
-                    .contains(&expr("origin.require_runtime_input(runtime)"))
+                    .contains(&expr(r#"attempt.origin.as_ref().expect("actual response origin").require_runtime_input(runtime)"#))
                 && facts.origins == host_origin(true)
         };
         assert!(guarded(&actual));
@@ -1612,12 +1761,10 @@ mod tests {
         assert!(inputs.contains(&"ConsumerLeaseOrigin".into()));
         assert!(inputs.contains(&"& 'request CompletedResponse".into()));
         for (before, after) in [
-            ("completed.require_lease(sink, &lease)", "Ok(())"),
+            (r#"attempt.require_completion(completed)"#, "Ok(())"),
             ("request.consumer_origin()", "other.consumer_origin()"),
-            ("lease.require_runtime(sink)", "lease.check(sink)"),
-            ("lease.refuse_sink(sink)", "unrelated()"),
-            ("origin.require_runtime_input(runtime)", "Ok(())"),
-            ("origin.refuse()", "unrelated()"),
+            (r#"attempt.lease.as_ref().expect("actual input lease").require_runtime(sink)"#, "lease.check(sink)"),
+            (r#"attempt.origin.as_ref().expect("actual response origin").require_runtime_input(runtime)"#, "Ok(())"),
             ("FinalOriginal::Runtime", "FinalOriginal::Bound(original)"),
             (
                 "FinalCompletion::Response(completed)",
@@ -2702,6 +2849,52 @@ mod tests {
         let mut no_class = actual.block.clone();
         no_class.stmts.remove(1);
         assert!(!guarded(&no_class));
+    }
+
+    #[test]
+    fn startup_classifier_flows_through_the_real_sealed_view_and_native_postchecks() {
+        fn selected(source: &str, owner: &str) -> syn::ImplItemFn {
+            let file = syn::parse_file(source).unwrap();
+            let mut found = file.items.into_iter().filter_map(|item| match item {
+                syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path)
+                    if path.path.segments.last().unwrap().ident==owner) => Some(item),
+                _ => None,
+            }).flat_map(|item| item.items).filter_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident=="require_startup_sql" => Some(item),
+                _ => None,
+            });
+            let actual = found.next().unwrap();
+            assert!(found.next().is_none());
+            actual
+        }
+        let view = selected(include_str!("../../security_epoch/serving/restored.rs"), "CurrentView");
+        let expected: syn::Block = syn::parse_quote!({ self.native.require_startup_sql(runtime) });
+        let guarded = |body: &syn::Block| body.to_token_stream().to_string()==expected.to_token_stream().to_string();
+        assert!(guarded(&view.block));
+        assert!(!guarded(&replace_host_source(&view, "self.native.require_startup_sql(runtime)", "self.native.require_runtime(runtime)").block));
+        let native = selected(include_str!("../../security_epoch/native_enrollment/owner.rs"), "RestoredAppCurrentPeer");
+        let expected: syn::Block = syn::parse_quote!({
+            if !std::ptr::eq(self.runtime.as_ref(), runtime) {
+                self.refuse();
+                anyhow::bail!("restore_current_runtime_changed");
+            }
+            let requested = self.context.as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_current_context_missing"))
+                .and_then(|context| context.require_startup_sql(runtime));
+            let checked = self.check_local();
+            if requested.is_err() || checked.is_err() { self.refuse(); }
+            requested?;
+            checked
+        });
+        let guarded = |body: &syn::Block| body.to_token_stream().to_string()==expected.to_token_stream().to_string();
+        assert!(guarded(&native.block));
+        for (before, after) in [
+            ("context.require_startup_sql(runtime)", "context.require_runtime(runtime)"),
+            ("self.check_local()", "Ok(())"),
+            ("requested.is_err() || checked.is_err()", "requested.is_err()"),
+        ] {
+            assert!(!guarded(&replace_host_source(&native, before, after).block));
+        }
     }
 
 }

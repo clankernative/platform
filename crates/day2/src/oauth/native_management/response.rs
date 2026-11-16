@@ -841,6 +841,23 @@ impl Sink {
     }
 }
 
+/// Negative lease-view DATA for closed factory refusal tests only. No native
+/// role, original, request capture, installed owner or Current is constructed.
+#[cfg(test)]
+pub(super) fn runtime_lease_for_factory_tests(
+    sink: &Sink,
+) -> (ConsumerLeaseOrigin, Rc<Cell<bool>>, Rc<Cell<bool>>) {
+    let refused = Rc::new(Cell::new(false));
+    let live = Rc::new(Cell::new(true));
+    let lease = ConsumerLeaseOrigin {
+        identity: sink.identity.clone(),
+        refused: refused.clone(),
+        live: Rc::downgrade(&live),
+        consumer: LeaseConsumer::Runtime,
+    };
+    (lease, refused, live)
+}
+
 #[cfg(test)]
 mod restored_response_source_tests {
     use super::*;
