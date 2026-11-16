@@ -17,7 +17,8 @@ use std::{
 
 mod terminal;
 pub use terminal::NativeTerminalHold;
-pub mod operation;
+mod operation;
+pub use operation::{OperationLease, guard, ping};
 
 /// Container-entrypoint cleanup, after its readiness runtime has stopped.
 /// Success means every retained native HTTP owner has actually exited. The

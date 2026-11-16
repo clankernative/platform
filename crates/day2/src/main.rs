@@ -20,7 +20,7 @@ fn main() -> Result<()> {
         .as_slice()
     {
         ["operation-guard", state, app, socket, seconds] => {
-            day2::deployment::operation::guard(
+            day2::deployment::guard(
                 Path::new(state),
                 app,
                 Path::new(socket),
@@ -29,12 +29,12 @@ fn main() -> Result<()> {
             return Ok(());
         }
         ["operation-ping", socket] => {
-            day2::deployment::operation::ping(Path::new(socket))?;
+            day2::deployment::ping(Path::new(socket))?;
             serde_json::json!({"supervisor":true})
         }
         ["operation-claim", state, app] => {
             let _lease =
-                day2::deployment::operation::OperationLease::acquire(Path::new(state), app)?;
+                day2::deployment::OperationLease::acquire(Path::new(state), app)?;
             serde_json::json!({"claimed":true})
         }
         ["oauth-setup", instance] => day2::deployment::oauth_setup(Path::new(instance))?,

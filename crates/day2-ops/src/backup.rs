@@ -686,7 +686,7 @@ pub fn take_with_companion_state(
     state_subpaths: &[String],
     sqlite_paths: &[String],
 ) -> Result<Manifest> {
-    let lease = day2::deployment::operation::OperationLease::for_instance(instance_path, app)?;
+    let lease = day2::deployment::OperationLease::for_instance(instance_path, app)?;
     take_with_lease(
         instance_path,
         app,
@@ -705,7 +705,7 @@ pub fn take_with_lease(
     output: &Path,
     state_subpaths: &[String],
     sqlite_paths: &[String],
-    lease: &day2::deployment::operation::OperationLease,
+    lease: &day2::deployment::OperationLease,
 ) -> Result<Manifest> {
     validate_companion_selection(state_subpaths, sqlite_paths)?;
     let canonical = instance_path.canonicalize()?;
