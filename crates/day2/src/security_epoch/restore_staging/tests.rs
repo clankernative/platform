@@ -454,90 +454,113 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
             .collect::<String>()
             .replace(",)", ")")
     }
-    fn guarded(block: &syn::Block, expected: &[syn::Stmt]) -> bool {
-        // Do not accept a matching sequence parked in an unused function,
-        // deferred closure/future, conditional branch or short-circuit operand.
-        // The two reviewed synchronous entries use only an immediately called
-        // zero-argument closure and the checked capture.observe callback.
+    fn direct_window(block: &syn::Block, expected: &[syn::Stmt]) -> bool {
+        block.stmts.windows(expected.len()).filter(|window| {
+            window.iter().zip(expected).all(|(a,b)| compact(a)==compact(b))
+        }).count()==1
+    }
+    fn variables<'a>(block: &'a syn::Block, name: &str) -> Vec<(usize, &'a syn::Expr)> {
+        block.stmts.iter().enumerate().filter_map(|(index, stmt)| {
+            let syn::Stmt::Local(local) = stmt else { return None; };
+            if !local.attrs.is_empty() || !matches!(&local.pat, syn::Pat::Ident(binding)
+                if binding.ident==name && binding.mutability.is_none()) { return None; }
+            let init=local.init.as_ref()?;
+            init.diverge.is_none().then_some((index, &*init.expr))
+        }).collect()
+    }
+    fn synchronous(expression: &syn::Expr) -> Option<&syn::ExprClosure> {
+        match expression {
+            syn::Expr::Closure(closure) if closure.inputs.is_empty()
+                && closure.asyncness.is_none() && closure.attrs.is_empty() => Some(closure),
+            syn::Expr::Paren(paren) if paren.attrs.is_empty() => synchronous(&paren.expr),
+            _ => None,
+        }
+    }
+    fn image_window(block: &syn::Block) -> Option<&syn::Block> {
+        let mut roots=variables(block,"reset").into_iter().filter_map(|(index,expr)| {
+            let syn::Expr::Block(reset)=expr else {return None;};
+            reset.attrs.is_empty().then_some((index,&reset.block))
+        });
+        let (index,reset)=roots.next()?;
+        if roots.next().is_some() { return None; }
+        // The actual saved Result must survive independent posts and be
+        // propagated. An immediately executed but ignored IIFE is insufficient.
+        let tail: Vec<syn::Stmt>=vec![
+            syn::parse_quote!(drop(loan);),
+            syn::parse_quote!(let post=owner.local_sql();),
+            syn::parse_quote!(let reset=reset?;),
+            syn::parse_quote!(post?;),
+            syn::parse_quote!(close_sql_context(owner)?;),
+            syn::parse_quote!(Ok(reset)),
+        ];
+        let actual=block.stmts.get(index+1..)?;
+        if actual.len()!=tail.len() || !actual.iter().zip(&tail).all(|(a,b)|compact(a)==compact(b)) {return None;}
+        let prefix: Vec<syn::Stmt>=vec![
+            syn::parse_quote!(let current=&mut *loan.owner;),
+            syn::parse_quote!(let db=loan.db.as_mut().context("restore_sql_missing")?;),
+        ];
+        if reset.stmts.len()!=3 || !reset.stmts.iter().take(2).zip(&prefix).all(|(a,b)|compact(a)==compact(b)) {return None;}
+        let syn::Stmt::Expr(syn::Expr::Call(call),None)=&reset.stmts[2] else {return None;};
+        if !call.attrs.is_empty() || !call.args.is_empty() {return None;}
+        let closure=synchronous(&call.func)?;
+        let syn::Expr::Block(body)=&*closure.body else{return None;};
+        if !body.attrs.is_empty() {return None;}
+        let prefix: Vec<syn::Stmt>=vec![
+            syn::parse_quote!(db.pragma_update(None,"temp_store","MEMORY")?;),
+            syn::parse_quote!(let memory=MemoryAdmission::configure(db)?;),
+        ];
+        if !body.block.stmts.iter().take(2).zip(&prefix).all(|(a,b)|compact(a)==compact(b)) {return None;}
+        let syn::Stmt::Expr(syn::Expr::Block(scope),_)=body.block.stmts.get(2)? else{return None;};
+        let alias:syn::Stmt=syn::parse_quote!(let db=&mut *memory.db;);
+        if !scope.attrs.is_empty() || scope.block.stmts.first().map(compact)!=Some(compact(&alias)) {return None;}
+        Some(&scope.block)
+    }
+    fn capture_window(block: &syn::Block) -> Option<&syn::Block> {
+        let mut roots=variables(block,"previous").into_iter();
+        let (_, expression)=roots.next()?;
+        if roots.next().is_some() {return None;}
+        let syn::Expr::Try(tried)=expression else{return None;};
+        if !tried.attrs.is_empty() {return None;}
+        let syn::Expr::MethodCall(call)=&*tried.expr else{return None;};
+        if !call.attrs.is_empty() || call.method!="observe" || call.args.len()!=1
+            || !matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("capture")) {return None;}
+        let closure=synchronous(call.args.first()?)?;
+        let syn::Expr::Block(body)=&*closure.body else{return None;};
+        let prefix: Vec<syn::Stmt>=vec![
+            syn::parse_quote!(let mut db=rusqlite::Connection::open_in_memory()?;),
+            syn::parse_quote!(db.pragma_update(None,"temp_store","MEMORY")?;),
+            syn::parse_quote!(let memory=super::MemoryAdmission::configure(&mut db)?;),
+        ];
+        let returned:syn::Stmt=syn::parse_quote!(crate::backup_archive::verify_snapshot(&manifest,&artifact,memory.db));
+        if !body.attrs.is_empty() || body.block.stmts.len()!=7
+            || !body.block.stmts.iter().take(3).zip(&prefix).all(|(a,b)|compact(a)==compact(b))
+            || body.block.stmts.last().map(compact)!=Some(compact(&returned)) {return None;}
+        Some(&body.block)
+    }
+    fn guarded(block: &syn::Block, expected: &[syn::Stmt], entry: &str) -> bool {
         struct Calls(usize);
         impl<'ast> Visit<'ast> for Calls {
             fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                if matches!(&*call.func, syn::Expr::Path(path) if path.path.segments.last().is_some_and(|name| name.ident == "require_no_runtime_generation_objects")) {
-                    self.0 += 1;
-                }
-                visit::visit_expr_call(self, call);
+                if matches!(&*call.func,syn::Expr::Path(path) if path.path.segments.last().is_some_and(|name|name.ident=="require_no_runtime_generation_objects")) {self.0+=1;}
+                visit::visit_expr_call(self,call);
             }
         }
-        struct Sequences<'a> {
-            expected: &'a [syn::Stmt],
-            matches: usize,
-        }
-        fn immediate(expression: &syn::Expr) -> Option<&syn::ExprClosure> {
-            match expression {
-                syn::Expr::Closure(closure) if closure.inputs.is_empty() && closure.asyncness.is_none() && closure.attrs.is_empty() => Some(closure),
-                syn::Expr::Paren(paren) => immediate(&paren.expr),
-                _ => None,
-            }
-        }
-        impl<'ast> Visit<'ast> for Sequences<'_> {
-            fn visit_block(&mut self, block: &'ast syn::Block) {
-                self.matches += block.stmts.windows(self.expected.len()).filter(|window| {
-                    window.iter().zip(self.expected).all(|(a, b)| compact(a) == compact(b))
-                }).count();
-                visit::visit_block(self, block);
-            }
-            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                if !call.attrs.is_empty() { return; }
-                if call.args.is_empty() && let Some(closure) = immediate(&call.func) {
-                    self.visit_expr(&closure.body);
-                } else {
-                    visit::visit_expr_call(self, call);
-                }
-            }
-            fn visit_expr_try(&mut self, tried: &'ast syn::ExprTry) {
-                if !tried.attrs.is_empty() { return; }
-                if let syn::Expr::MethodCall(call) = &*tried.expr
-                    && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("capture"))
-                    && call.method == "observe" && call.args.len() == 1 && call.attrs.is_empty()
-                    && let Some(closure) = immediate(call.args.first().unwrap())
-                {
-                    self.visit_expr(&closure.body);
-                } else {
-                    visit::visit_expr_try(self, tried);
-                }
-            }
-            fn visit_expr_block(&mut self, block: &'ast syn::ExprBlock) {
-                if block.attrs.is_empty() { visit::visit_expr_block(self, block); }
-            }
-            fn visit_local(&mut self, local: &'ast syn::Local) {
-                if local.attrs.is_empty() { visit::visit_local(self, local); }
-            }
-            fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
-            fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
-            fn visit_expr_if(&mut self, _: &'ast syn::ExprIf) {}
-            fn visit_expr_match(&mut self, _: &'ast syn::ExprMatch) {}
-            fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {}
-            fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {}
-            fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {}
-            fn visit_expr_binary(&mut self, _: &'ast syn::ExprBinary) {}
-            fn visit_item(&mut self, _: &'ast syn::Item) {}
-        }
-        let mut calls = Calls(0);
-        calls.visit_block(block);
-        let mut observed = Sequences { expected, matches: 0 };
-        observed.visit_block(block);
-        observed.matches == 1 && calls.0 == 1
+        let window=match entry {
+            "prepare_image"=>image_window(block),
+            "capture_snapshot"=>capture_window(block),
+            "MemoryHook::enter"=>Some(block),
+            _=>None,
+        };
+        let mut calls=Calls(0);calls.visit_block(block);
+        calls.0==1 && window.is_some_and(|window|direct_window(window,expected))
     }
     fn function(source: &str, name: &str) -> syn::Block {
-        syn::parse_file(source)
-            .unwrap()
-            .items
-            .into_iter()
-            .find_map(|item| match item {
-                syn::Item::Fn(item) if item.sig.ident == name => Some(*item.block),
-                _ => None,
-            })
-            .unwrap()
+        let mut functions=syn::parse_file(source).unwrap().items.into_iter().filter_map(|item|match item {
+            syn::Item::Fn(item) if item.sig.ident==name=>Some(*item.block),_=>None,
+        });
+        let function=functions.next().unwrap();
+        assert!(functions.next().is_none(),"one actual production function");
+        function
     }
     let staging = include_str!("../restore_staging.rs");
     let archive = include_str!("archive.rs");
@@ -563,7 +586,7 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
             "super::require_no_runtime_generation_objects(memory.db)?;",
         ),
     ] {
-        assert!(guarded(&function(source, name), &expected));
+        assert!(guarded(&function(source, name), &expected, name));
         assert_eq!(source.matches(call).count(), 1);
         // Moving the WHOLE checked sequence into dead/deferred code used to
         // satisfy a recursive window search. These controls exercise that gap,
@@ -576,13 +599,14 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
             quote::quote!({ fn unused() -> Result<()> { #(#expected)* Ok(()) } }),
             quote::quote!({ let _unused = async { #(#expected)* }; }),
             quote::quote!({ let _unused = (async || -> Result<()> { #(#expected)* Ok(()) })(); }),
+            quote::quote!({ let _unused = (|| -> Result<()> { #(#expected)* Ok(()) })(); }),
             quote::quote!({ #[cfg(any())] { #(#expected)* } }),
             quote::quote!({ #[cfg(any())] let _unused = (|| -> Result<()> { #(#expected)* Ok(()) })(); }),
             quote::quote!({ let _unused = false && { #(#expected)* true }; }),
             quote::quote!({ capture.observe(|| -> Result<()> { #(#expected)* Ok(()) }); }),
         ] {
             let decoy: syn::Block = syn::parse2(decoy).unwrap();
-            assert!(!guarded(&decoy, &expected));
+            assert!(!guarded(&decoy, &expected, name));
         }
         for changed in [
             String::new(),
@@ -593,10 +617,29 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
         ] {
             assert!(!guarded(
                 &function(&source.replacen(call, &changed, 1), name),
-                &expected
+                &expected, name
             ));
         }
         let original = function(source, name);
+        if name=="prepare_image" {
+            let mut ignored=original.clone();
+            let propagated:syn::Stmt=syn::parse_quote!(let reset=reset?;);
+            let tail=ignored.stmts.iter().position(|stmt|compact(stmt)==compact(&propagated)).unwrap();
+            ignored.stmts[tail]=syn::parse_quote!(let reset=reset.unwrap_or_default(););
+            assert!(!guarded(&ignored,&expected,name));
+        } else {
+            let mut ignored=original.clone();
+            for statement in &mut ignored.stmts {
+                if let syn::Stmt::Local(local)=statement
+                    && matches!(&local.pat,syn::Pat::Ident(binding) if binding.ident=="previous")
+                {
+                    let init=local.init.as_mut().unwrap();
+                    let syn::Expr::Try(tried)=&*init.expr else {panic!("actual checked observation");};
+                    init.expr=tried.expr.clone();
+                }
+            }
+            assert!(!guarded(&ignored,&expected,name));
+        }
         struct ActualBlock<'a> {
             call: &'a syn::Stmt,
             found: Option<syn::Block>,
@@ -620,14 +663,14 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
         };
         selected.visit_block(&original);
         let mut ignored = selected.found.unwrap();
-        assert!(guarded(&ignored, &expected));
+        assert!(direct_window(&ignored, &expected));
         let index = ignored
             .stmts
             .iter()
             .position(|stmt| compact(stmt) == compact(&expected[2]))
             .unwrap();
         ignored.stmts.swap(index - 1, index);
-        assert!(!guarded(&ignored, &expected));
+        assert!(!direct_window(&ignored, &expected));
     }
     let file = syn::parse_file(staging).unwrap();
     let hook = file.items.iter().find_map(|item| match item {
@@ -639,7 +682,7 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
         syn::parse_quote!(memory_shape(tx, None)?;),
         syn::parse_quote!(self::require_no_runtime_generation_objects(tx)?;),
     ];
-    assert!(guarded(&hook, &expected));
+    assert!(guarded(&hook, &expected, "MemoryHook::enter"));
     for replacement in [
         syn::parse_quote!(Ok(())?;),
         syn::parse_quote!(let _ = self::require_no_runtime_generation_objects(tx);),
@@ -651,7 +694,7 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
             .position(|stmt| compact(stmt) == compact(&expected[1]))
             .unwrap();
         ignored.stmts[index] = replacement;
-        assert!(!guarded(&ignored, &expected));
+        assert!(!guarded(&ignored, &expected, "MemoryHook::enter"));
     }
 }
 
