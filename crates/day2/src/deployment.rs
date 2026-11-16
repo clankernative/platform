@@ -524,7 +524,7 @@ fn kernel_guards(instance_path: &Path, state: &Path, resources: &Resources) -> R
     Ok(())
 }
 
-async fn termination() -> Result<()> {
+pub(crate) async fn termination() -> Result<()> {
     #[cfg(unix)]
     {
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -547,6 +547,22 @@ pub enum Access<'a> {
     },
     /// Behind the installation's identity provider, at the app's edge address.
     Edge,
+}
+
+/// Same ordinary RWO kernel/serving exclusion for an isolated candidate or a
+/// headless source executor. This supplies no maintenance/schema authority.
+pub(crate) fn pair_executor_lease(instance: &Path, app: &str) -> Result<File> {
+    ensure!(
+        Instance::load(instance)?
+            .native_bootstrap_for(app)?
+            .is_none(),
+        "ordinary_rolling_profile_required"
+    );
+    let (instance, profile, state) = layout(instance, app)?;
+    ensure!(profile.rolling(), "ordinary_rolling_profile_required");
+    kernel_guards(&instance, &state, profile.resources())?;
+    crate::worker::qualify_sandbox()?;
+    serving_lock(&state, app, true)
 }
 
 pub async fn serve(instance_path: &Path, app: &str, access: Access<'_>) -> Result<()> {
@@ -983,6 +999,7 @@ async fn serve_configured(
     if let Some(requirements) = &security {
         requirements.require_runtime()?;
     }
+    crate::runtime_generation::register_active(&runtime)?;
     let runtime = tokio::task::spawn_blocking(move || configure(runtime)).await??;
     let concurrency = usize::from(profile.resources().http_concurrency());
     let server = match access {

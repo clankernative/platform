@@ -114,6 +114,73 @@ operation lease with backups. R3–R5 still precede live app adoption. These own
 tables change the private SQLite contract in place; they supply no legacy-owner
 migration or permission to execute unowned historical work.
 
+## R2b isolated candidate and source recovery
+
+The runtime-pair journal now has a required closed executor state: unadmitted,
+or admitted source/candidate generation IDs and a candidate-check attempt. The
+release-journal protocol is version 3. Old records are not upgraded or backfilled.
+Ordinary target serving and every public promotion transition still refuse.
+
+The actual RWO serving process registers its runtime generation after native
+executable admission and before HTTP/pump startup. Operator inspection never
+registers itself as the app executor. `runtime-pair-admit INSTANCE APP ID OPERATOR`
+requires the existing exact `rollout-bind` placement, a registered source matching
+its qualified supervisor/launcher, current authority and unchanged actual store
+shape. It shares the native backup/release operation lease for this transaction.
+Unknown side stores or retained credential/OAuth history refuse the local-only
+profile. Admission records expected target code without changing the active
+runtime, native security requirements, source readiness or replica count.
+
+A closed executor selection carries the release ID, source/candidate role, exact
+recorded placement and immutable image. Instance/artifact/scope are checked from
+the loaded runtime against the same durable release. Selection files are bounded,
+regular files and cannot follow symlinks. Placement/image facts are host/operator
+DATA, not pod attestation; actual supervisor and launcher bytes must independently
+match the qualified role. The remaining controller recipe must collect and
+revalidate the real Kubernetes observations. A selection, label or receipt alone
+cannot supply those observations or admit different executable bytes.
+
+Both execution modes run from the qualified **day2-serve** binary, so an operator
+CLI cannot impersonate the pinned supervisor:
+
+- `day2-serve INSTANCE APP --runtime-candidate SELECTION EVIDENCE_DIRECTORY` starts
+  a standby listener after schema admission and app-owned property checks on one
+  complete bounded read snapshot. Properties have no effect interpreter. Their
+  worker evaluation runs outside the business transaction; failed app checks keep
+  artifact-bound replay evidence in the supplied protected directory. Only health
+  endpoints exist. `/health/candidate` describes the current admitted check;
+  `/health/ready` and all app routes return unavailable. No HTTP/pump for business
+  work is constructed, and candidate startup runs no initialization DDL.
+- `--runtime-candidate-check SELECTION EVIDENCE_DIRECTORY` performs the same
+  bounded candidate check and exits, using the same supervisor executable.
+- `--runtime-source-executor SELECTION BUDGET` runs one bounded headless source
+  drain tick. It holds the ordinary shared serving/kernel lease, admits only the
+  exact source code/placement and executes work through the existing current
+  authority, captured owner and kernel execution-stripe guards. It accepts no new
+  HTTP root requests. A fresh source process reads the original durable owner;
+  a candidate never substitutes its runtime for that work. Source recovery also
+  remains available after an abort while the original authority/binding remains
+  current. Revocation or restore fences old selections.
+
+A new candidate check clears the old positive before snapshot/evaluation. Its
+monotone attempt and complete release binding are compared again before publishing
+success. A failed/crashed check stays unready; competing or stale completions
+cannot win, and the exact successful completion can be recovered after a lost
+response. Check digests contain no model/provider values. A candidate observation
+never authorizes public serving, a business write, or a later promotion.
+Executor process failures use one fixed refusal label; source output contains
+only the bounded settlement count, with raw failed-check evidence kept private.
+
+This is the executor primitive layer, not a Kubernetes deployment recipe or a
+native pair qualification receipt. Local SQLite/model/HTTP-refusal tests establish
+its guard semantics; actual two-image Linux startup, source death, recovery and
+availability still require the R3 campaign. R2 must still implement atomic public
+promotion with source retention, real LB health/drain and durable controller
+recovery/backup coordination. Promotion stays blocked until those exist. Nothing
+here changes an installed app, controller, PVC safeguard or data. Compiled runtime
+and app artifacts remain reusable; no app deployment rebuilds Platform for this
+protocol.
+
 ## Current mechanisms
 
 - [Maintain.roc](../ops/Maintain.roc) prepares artifacts and a sized helper while

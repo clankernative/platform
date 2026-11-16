@@ -1,6 +1,7 @@
 //! Ordinary RWO executor ownership in the existing release journal. These rows
 //! describe installed code and accepted work; they never replace live authority.
-//! Runtime-pair startup/promotion remains blocked until the online recipe exists.
+//! Isolated candidates have no invocation admission. Public runtime-pair
+//! promotion remains blocked until the online recipe exists.
 use crate::{
     authority_state,
     runtime_pair::RuntimeIdentity,
@@ -124,6 +125,80 @@ fn initial(runtime: &Runtime, tx: &Transaction<'_>) -> Result<String> {
     // A later retry may recreate that exact row; this is not a retained grant.
     pin_process(runtime, &id)?;
     Ok(id)
+}
+
+/// Called by an actual serving executor after native code admission, never by
+/// operator store-inspection helpers. Only DML binds a fresh process choice.
+pub(crate) fn register_active(runtime: &Runtime) -> Result<()> {
+    if !runtime.rolling() {
+        return Ok(());
+    }
+    runtime.sql_write(|tx| {
+        runtime.check_binding(tx)?;
+        if active(tx)?.is_some() {
+            selected(runtime, tx)?;
+        } else {
+            initial(runtime, tx)?;
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn expected_id(scope: &str, identity: &RuntimeIdentity) -> Result<String> {
+    Installed {
+        runtime: identity.clone(),
+        code: identity.code()?,
+    }
+    .id(scope)
+}
+
+/// Register expected candidate code as DATA only. Execution must still measure
+/// the actual process and match a current, scoped release admission at every use.
+pub(crate) fn register_expected(
+    db: &Connection,
+    scope: &str,
+    identity: &RuntimeIdentity,
+) -> Result<String> {
+    let installed = Installed {
+        runtime: identity.clone(),
+        code: identity.code()?,
+    };
+    let id = installed.id(scope)?;
+    db.execute(
+        "INSERT INTO day2_rollout_generations VALUES(?1,?2,?3) ON CONFLICT(id) DO NOTHING",
+        params![id, scope, serde_json::to_string(&installed)?],
+    )?;
+    ensure!(
+        load(db, scope, &id)? == installed,
+        "runtime_generation_binding_changed"
+    );
+    Ok(id)
+}
+
+pub(crate) fn require_expected(
+    db: &Connection,
+    scope: &str,
+    id: &str,
+    identity: &RuntimeIdentity,
+) -> Result<()> {
+    ensure!(
+        id == expected_id(scope, identity)?
+            && load(db, scope, id)?
+                == Installed {
+                    runtime: identity.clone(),
+                    code: identity.code()?
+                },
+        "runtime_generation_binding_changed"
+    );
+    Ok(())
+}
+
+pub(crate) fn require_active(db: &Connection, id: &str) -> Result<()> {
+    ensure!(
+        active(db)?.as_deref() == Some(id),
+        "runtime_generation_not_admitted"
+    );
+    Ok(())
 }
 
 pub(crate) fn capture(

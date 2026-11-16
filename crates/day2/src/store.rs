@@ -2534,32 +2534,44 @@ impl Runtime {
         })
     }
 
+    pub(crate) fn application_snapshot_in(
+        &self,
+        snapshot: &Connection,
+    ) -> Result<LivePropertySnapshot> {
+        ensure!(!snapshot.is_autocommit(), "snapshot_transaction_required");
+        Ok(LivePropertySnapshot(
+            self.snapshot_in(snapshot, SnapshotScope::Live)?,
+        ))
+    }
+
     fn snapshot(&self, scope: SnapshotScope) -> Result<Value> {
-        self.sql_read(|snapshot| {
-            self.check_binding(snapshot)?;
-            let limits = &self.artifact.contract().verification_limits;
-            let models = read_model_snapshot_bounded(
-                snapshot,
-                &self.artifact.contract().schema,
-                scope,
-                limits.rows_per_model,
-                limits.total_facts,
-                limits.snapshot_bytes,
-            )?;
-            let encoded = serde_json::to_vec(&models)?;
+        self.sql_read(|snapshot| self.snapshot_in(snapshot, scope))
+    }
+
+    fn snapshot_in(&self, snapshot: &Connection, scope: SnapshotScope) -> Result<Value> {
+        self.check_binding(snapshot)?;
+        let limits = &self.artifact.contract().verification_limits;
+        let models = read_model_snapshot_bounded(
+            snapshot,
+            &self.artifact.contract().schema,
+            scope,
+            limits.rows_per_model,
+            limits.total_facts,
+            limits.snapshot_bytes,
+        )?;
+        let encoded = serde_json::to_vec(&models)?;
+        ensure!(
+            encoded.len() <= limits.snapshot_bytes,
+            "verification_snapshot_byte_budget"
+        );
+        for rollup in &self.artifact.contract().schema.rollups {
             ensure!(
-                encoded.len() <= limits.snapshot_bytes,
-                "verification_snapshot_byte_budget"
+                rollup.mismatches(snapshot)? == 0,
+                "rollup_recount_mismatch: {}",
+                rollup.table()
             );
-            for rollup in &self.artifact.contract().schema.rollups {
-                ensure!(
-                    rollup.mismatches(snapshot)? == 0,
-                    "rollup_recount_mismatch: {}",
-                    rollup.table()
-                );
-            }
-            Ok(models)
-        })
+        }
+        Ok(models)
     }
 }
 

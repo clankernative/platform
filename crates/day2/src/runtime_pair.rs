@@ -1,7 +1,7 @@
-//! Directed, operator-reviewed runtime compatibility DATA. R1 can prepare a
-//! release, never start or promote its candidate. This is neither signed build
-//! provenance nor permission to execute business work. R2 owns serving/drain;
-//! R3 owns production of the native pair campaign and published compiled outputs.
+//! Directed, operator-reviewed runtime compatibility DATA. A separately admitted
+//! candidate can run isolated checks; public promotion stays blocked. This is
+//! neither signed provenance nor permission to execute business work on a target.
+//! R3 owns the native pair campaign and published compiled outputs.
 use crate::{
     artifact::{Instance, LoadedArtifact},
     authority_state::{self, LocalOperator},
@@ -12,6 +12,11 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+
+mod executor;
+pub use executor::{
+    Candidate, CandidateCheck, Execution, ExecutorRole, Selection, admit, source_drain,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +37,33 @@ impl RuntimeIdentity {
             platform_inventory: crate::security_admission::platform_inventory_digest(artifact)?,
             containment: requirements.map(|value| value.containment.clone()),
         })
+    }
+
+    pub(crate) fn code(&self) -> Result<crate::security_admission::HostCode> {
+        self.require_qualified()?;
+        let Some(Containment::LinuxQualifiedV1 { evidence }) = &self.containment else {
+            anyhow::bail!("runtime_pair_requires_linux_qualification")
+        };
+        Ok(crate::security_admission::HostCode {
+            os: "linux".into(),
+            supervisor: evidence.runtime_supervisor.clone(),
+            sandbox: Some(evidence.runtime_sandbox.clone()),
+        })
+    }
+
+    fn require_image(&self, image: &str) -> Result<()> {
+        self.require_qualified()?;
+        rollout::image(image)?;
+        let Some(Containment::LinuxQualifiedV1 { evidence }) = &self.containment else {
+            anyhow::bail!("runtime_pair_requires_linux_qualification")
+        };
+        ensure!(
+            image
+                .rsplit_once('@')
+                .is_some_and(|(_, digest)| digest == evidence.runtime_image),
+            "runtime_pair_image_changed"
+        );
+        Ok(())
     }
 
     fn require_qualified(&self) -> Result<()> {
@@ -83,7 +115,7 @@ impl Protocols {
             serving_lease: 1,
             operation_lease: 1,
             execution_lease: 1,
-            release_journal: 2,
+            release_journal: 3,
             authority: 1,
             invocation_effect: 2,
             web_ticket: 1,
@@ -218,6 +250,26 @@ impl Admission {
             receipt_digest: expected.into(),
             receipt,
         })
+    }
+
+    pub(crate) fn validate_record(&self) -> Result<()> {
+        day2_assets::hash_part(&self.receipt_digest)?;
+        ensure!(
+            self.receipt.version == 1 && self.receipt.checks == Check::required(),
+            "runtime_pair_qualification_incomplete"
+        );
+        day2_assets::hash_part(&self.receipt.verifier)?;
+        day2_assets::hash_part(&self.receipt.recipe)?;
+        self.receipt.source.runtime.require_qualified()?;
+        self.receipt.target.runtime.require_qualified()?;
+        self.receipt.source.protocols.require_current()?;
+        self.receipt.target.protocols.require_current()?;
+        ensure!(
+            self.receipt.source.runtime != self.receipt.target.runtime
+                && self.receipt.source.protocols == self.receipt.target.protocols,
+            "runtime_pair_protocol_changed"
+        );
+        Ok(())
     }
 
     /// No target host may pick up source work merely because its app artifact
@@ -410,6 +462,7 @@ pub fn prepare(
             rollout::storage_shape(runtime, tx)? == expected.shape,
             "runtime_pair_store_shape_changed"
         );
+        crate::store::require_no_managed_credential_restore_state(tx)?;
         let identity = match crate::runtime_generation::identity(runtime, tx)? {
             Some(installed) => installed,
             None => RuntimeIdentity::from_artifact(
@@ -441,6 +494,7 @@ pub fn prepare(
             ),
             kind: ReleaseKind::RuntimePair {
                 admission: Box::new(admission),
+                execution: Execution::Unadmitted,
             },
             target_instance_digest: candidate_bytes_digest.clone(),
             probe: None,
@@ -461,7 +515,14 @@ fn persist(db: &rusqlite::Connection, release: Release) -> Result<Release> {
     );
     if let Some(previous) = rollout::state(db)? {
         if previous.id == release.id {
-            ensure!(previous == release, "rollout_id_conflict");
+            // Repeating preparation after a lost response must retain later
+            // placement/admission/check progress, never reset its executors.
+            let mut binding = previous.clone();
+            binding.placement = None;
+            if let ReleaseKind::RuntimePair { execution, .. } = &mut binding.kind {
+                *execution = Execution::Unadmitted;
+            }
+            ensure!(binding == release, "rollout_id_conflict");
             return Ok(previous);
         }
         ensure!(
@@ -480,7 +541,7 @@ mod tests {
     use rusqlite::{Connection, params};
 
     // Synthetic metadata exercises admission, never native qualification.
-    fn manifest(label: &[u8]) -> Manifest {
+    pub(super) fn manifest(label: &[u8]) -> Manifest {
         let digest = crate::digest(label);
         Manifest {
             runtime: RuntimeIdentity {
@@ -507,7 +568,7 @@ mod tests {
         }
     }
 
-    fn receipt() -> Receipt {
+    pub(super) fn receipt() -> Receipt {
         Receipt {
             version: 1,
             source: manifest(b"source"),
@@ -520,7 +581,7 @@ mod tests {
         }
     }
 
-    fn review(receipt: &Receipt, source: &Manifest) -> Result<Admission> {
+    pub(super) fn review(receipt: &Receipt, source: &Manifest) -> Result<Admission> {
         let bytes = serde_json::to_vec(receipt)?;
         Admission::review(&bytes, &crate::digest(&bytes), source)
     }
@@ -627,6 +688,7 @@ mod tests {
             target: generation(receipt.target.runtime.clone(), "target"),
             kind: ReleaseKind::RuntimePair {
                 admission: Box::new(review(&receipt, &receipt.source)?),
+                execution: Execution::Unadmitted,
             },
             authority: AuthorityStamp {
                 epoch: crate::digest(b"epoch"),
