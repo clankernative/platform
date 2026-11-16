@@ -5431,6 +5431,22 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
                         let syn::ImplItem::Fn(method) = item else {
                             return false;
                         };
+                        if method.sig.ident == "retained_refusal" {
+                            let expected: syn::ImplItemFn = syn::parse_quote! {
+                                pub(in crate::security_epoch) fn retained_refusal(&self) -> RestoredAppRefusal {
+                                    RestoredAppRefusal {
+                                        gate: Rc::clone(&self.request_state),
+                                        history: Rc::clone(&self.installed.prepared.pending.history),
+                                    }
+                                }
+                            };
+                            if method.vis.to_token_stream().to_string() != expected.vis.to_token_stream().to_string()
+                                || method.sig.to_token_stream().to_string() != expected.sig.to_token_stream().to_string()
+                                || method.block.to_token_stream().to_string() != expected.block.to_token_stream().to_string()
+                            {
+                                return false;
+                            }
+                        }
                         if !methods.insert(method.sig.ident.to_string()) {
                             return false;
                         }
@@ -5441,7 +5457,7 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
         inherent == 1
             && drops == 1
             && methods
-                == ["capture_request", "install_host", "prepare_host_native"]
+                == ["capture_request", "install_host", "prepare_host_native", "retained_refusal"]
                     .into_iter()
                     .map(str::to_owned)
                     .collect::<std::collections::BTreeSet<_>>()
@@ -5461,6 +5477,29 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
         }
     ));
     assert!(!retired_methods_admitted(&getter));
+    let replacements: [syn::Block; 2] = [
+        syn::parse_quote!({ RestoredAppRefusal {
+            gate: Rc::clone(&other.request_state),
+            history: Rc::clone(&self.installed.prepared.pending.history),
+        } }),
+        syn::parse_quote!({ RestoredAppRefusal {
+            gate: Rc::clone(&self.request_state),
+            history: Rc::clone(&other.installed.prepared.pending.history),
+        } }),
+    ];
+    for block in replacements {
+        let mut changed_refusal = file.clone();
+        let syn::Item::Impl(item) = &mut changed_refusal.items[actual_impl] else { unreachable!(); };
+        let mut changed = 0;
+        for method in &mut item.items {
+            if let syn::ImplItem::Fn(method) = method && method.sig.ident == "retained_refusal" {
+                method.block = block.clone();
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 1, "one actual negative projection");
+        assert!(!retired_methods_admitted(&changed_refusal));
+    }
     let mut missing_setup = file.clone();
     let syn::Item::Impl(item) = &mut missing_setup.items[actual_impl] else {
         unreachable!();
