@@ -1005,6 +1005,62 @@ impl RequestOwner {
         }
     }
 
+    /// Stage-free response classification against the same already captured
+    /// human original. True is DATA only: the real restored response driver
+    /// still acquires/checks its Current before any disclosure and settles the
+    /// actual request after transport. Only captured Initial may use its
+    /// existing registry participant; every other unavailable source refuses.
+    fn prepare_finite_human(&self, sink: &Sink, intent: &FreshIntent) -> Result<bool> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure!(!self.refused.get() && sink.is_open(), "native request owner refused");
+            let source = self.source.try_borrow()?;
+            match &*source {
+                RequestOwnerSource::Initial => Ok(false),
+                RequestOwnerSource::Restored(lease) => {
+                    require_finite_http_lease(lease, intent.app(), &sink.identity)?;
+                    let owner = lease.owners.as_ref().context("native finite owner missing")?;
+                    ensure!(
+                        owner.kind == NativeRole::AppHost
+                            && owner.selection.scope().app.as_str() == intent.app(),
+                        "native finite owner selection changed"
+                    );
+                    let stored = owner.originals.get(intent.attempt())
+                        .context("native finite original missing")?;
+                    stored.response.require_bound(intent, &sink.identity)?;
+                    let OwnerSource::Restored { routing, .. } = &owner.source else {
+                        anyhow::bail!("native finite parent changed");
+                    };
+                    let EnrolledClockSource::Restored(expected) = &stored.original.clock.source else {
+                        anyhow::bail!("native finite clock source changed");
+                    };
+                    ensure!(
+                        owner.selection == stored.original.clock.selection
+                            && Rc::ptr_eq(&routing.slot, &expected.slot),
+                        "native finite clock parent changed"
+                    );
+                    sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?
+                        .require_request(&sink.request)?;
+                    Ok(true)
+                }
+                _ => anyhow::bail!("native finite request owner unavailable"),
+            }
+        }));
+        match result {
+            Ok(result) => {
+                if result.is_err() {
+                    self.refuse();
+                    sink.abort();
+                }
+                result
+            }
+            Err(payload) => {
+                self.refuse();
+                sink.abort();
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
     /// The same early lease is transferred once, never resolved again from
     /// app DATA. Busy/failed/moved sources cannot fall back to initial owners.
     fn take_response(
@@ -1619,6 +1675,9 @@ pub(super) fn require_finite_binding(sink: &Sink) -> Result<()> {
     if fixtures::active() {
         return fixtures::require_response(&binding.intent, *role, &sink.identity);
     }
+    if sink.request_owner.prepare_finite_human(sink, &binding.intent)? {
+        return Ok(());
+    }
     OWNERS.with(|entries| {
         let mut entries = entries.try_borrow_mut()?;
         let owners = entries
@@ -1644,6 +1703,22 @@ pub(super) fn require_finite_binding(sink: &Sink) -> Result<()> {
             &sink.identity,
         )
     })
+}
+
+// Pure checks of the actual retained lease, also exercised with inert DATA
+// by portable tests. This never returns material, a stage or a native owner.
+fn require_finite_http_lease<T: LeaseMaterial>(
+    lease: &Lease<T>,
+    app: &str,
+    identity: &ResponseIdentity,
+) -> Result<()> {
+    ensure!(
+        !lease.known && !lease.refused.get() && lease.live.get()
+            && lease.key == app && lease.identity.same_http(identity)
+            && lease.owners.is_some(),
+        "native finite response lease changed"
+    );
+    Ok(())
 }
 
 impl<T: LeaseMaterial> Lease<T> {
@@ -4563,6 +4638,200 @@ mod lease_tests {
         drop(held);
         drop(lease);
         assert_eq!(dropped.get(), 1);
+    }
+
+    #[test]
+    fn finite_human_classification_keeps_the_actual_early_lease_when_registry_is_empty() -> Result<()> {
+        let intent = FreshIntent::fixture_oauth(
+            &crate::iap::Verified { email: "alice@example.com".into(), subject: "alice".into() },
+            "finite-human-original", &day2_capabilities::Digest::new(b"finite-human"),
+            "https://security.example.com", 5, 50,
+        )?;
+        // The actual reservation/identity/liveness predicate with inert DATA
+        // only. No native owner, participant or successful Current is forged.
+        let Fixture { registry, .. } = fixture();
+        let material = registry.borrow_mut().remove("calendar").unwrap();
+        registry.borrow_mut().insert(intent.app().into(), material);
+        let sink = Sink::new();
+        let lease = Lease::acquire(registry.clone(), intent.app(), &sink.identity, None)?;
+        assert!(registry.borrow().available.is_empty());
+        assert!(registry.borrow().reserved.contains_key(intent.app()));
+        require_finite_http_lease(&lease, intent.app(), &sink.identity)?;
+        let binding = super::super::ResponseBinding {
+            intent: intent.clone(), connection: Some(sink.identity.clone()),
+        };
+        binding.require_bound(&intent, &sink.identity)?;
+        let foreign = Sink::new();
+        assert!(require_finite_http_lease(&lease, intent.app(), &foreign.identity).is_err());
+        assert!(require_finite_http_lease(&lease, "another-app", &sink.identity).is_err());
+        assert!(binding.require_bound(&intent, &foreign.identity).is_err());
+        // Foreign classification DATA does not mutate the rightful lease.
+        require_finite_http_lease(&lease, intent.app(), &sink.identity)?;
+        assert!(!lease.refused.get());
+        registry.borrow_mut().clear();
+        assert!(require_finite_http_lease(&lease, intent.app(), &sink.identity).is_err());
+        for cut in 0..6 {
+            let Fixture { registry, .. } = fixture();
+            let sink = Sink::new();
+            let mut lease = Lease::acquire(registry, "calendar", &sink.identity, None)?;
+            match cut {
+                0 => lease.known = true,
+                1 => lease.refused.set(true),
+                2 => lease.live.set(false),
+                3 => { drop(lease.owners.take()); }
+                4 => lease.identity = LeaseIdentity::Runtime(Rc::new(())),
+                _ => lease.identity = LeaseIdentity::Http(Sink::new().identity.clone()),
+            }
+            assert!(require_finite_http_lease(&lease, "calendar", &sink.identity).is_err(), "cut {cut}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn actual_finite_human_dispatch_precedes_registry_and_cannot_fall_back_after_restored_failure() {
+        use quote::ToTokens;
+        fn dispatch(body: &syn::Block) -> bool {
+            let expected: syn::Stmt = syn::parse_quote! {
+                if sink.request_owner.prepare_finite_human(sink, &binding.intent)? {
+                    return Ok(());
+                }
+            };
+            let found = body.stmts.iter().enumerate().filter_map(|(i, item)|
+                (item.to_token_stream().to_string() == expected.to_token_stream().to_string()).then_some(i)
+            ).collect::<Vec<_>>();
+            found.len() == 1 && found[0] + 2 == body.stmts.len()
+                && matches!(body.stmts.last(), Some(syn::Stmt::Expr(syn::Expr::MethodCall(call), None))
+                    if call.method == "with" && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("OWNERS")))
+        }
+        let file = syn::parse_file(include_str!("response.rs")).unwrap();
+        let actual = file.items.iter().find_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "require_finite_binding" => Some(item), _ => None,
+        }).unwrap();
+        assert!(dispatch(&actual.block));
+        let index = actual.block.stmts.len() - 2;
+        let mut deleted = actual.block.clone();
+        deleted.stmts.remove(index);
+        assert!(!dispatch(&deleted), "the previous registry-only path must fail");
+        let mut late = actual.block.clone();
+        late.stmts.swap(index, index + 1);
+        assert!(!dispatch(&late));
+        let mut bypass = actual.block.clone();
+        bypass.stmts[index] = syn::parse_quote! {
+            if sink.request_owner.prepare_finite_human(sink, &binding.intent).unwrap_or(false) {
+                return Ok(());
+            }
+        };
+        assert!(!dispatch(&bypass));
+        let mut reclassified = actual.block.clone();
+        reclassified.stmts[index] = syn::parse_quote! { if false { return Ok(()); } };
+        assert!(!dispatch(&reclassified));
+    }
+
+    #[test]
+    fn actual_restored_finite_preflight_keeps_closed_source_clock_and_capture_checks() {
+        use quote::ToTokens;
+        use syn::{parse::Parser, visit_mut::VisitMut};
+        // Compare parsed expressions while ignoring optional call-list trailing
+        // punctuation only. Tuple arity, argument order and every expression
+        // node remain part of the guard.
+        fn same(left: &syn::Stmt, right: &syn::Stmt) -> bool {
+            struct Calls;
+            impl VisitMut for Calls {
+                fn visit_expr_call_mut(&mut self, item: &mut syn::ExprCall) {
+                    item.args = item.args.iter().cloned().collect();
+                    syn::visit_mut::visit_expr_call_mut(self, item);
+                }
+                fn visit_expr_method_call_mut(&mut self, item: &mut syn::ExprMethodCall) {
+                    item.args = item.args.iter().cloned().collect();
+                    syn::visit_mut::visit_expr_method_call_mut(self, item);
+                }
+            }
+            let (mut left, mut right) = (left.clone(), right.clone());
+            Calls.visit_stmt_mut(&mut left);
+            Calls.visit_stmt_mut(&mut right);
+            left.to_token_stream().to_string() == right.to_token_stream().to_string()
+        }
+        fn ensured(statement: &syn::Stmt, predicate: syn::Expr, message: &str) -> bool {
+            let mac = match statement {
+                syn::Stmt::Macro(item) => &item.mac,
+                syn::Stmt::Expr(syn::Expr::Macro(item), _) => &item.mac,
+                _ => return false,
+            };
+            if !mac.path.is_ident("ensure") { return false; }
+            let Ok(args) = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(mac.tokens.clone()) else { return false; };
+            args.len() == 2 && args[0].to_token_stream().to_string() == predicate.to_token_stream().to_string()
+                && matches!(&args[1], syn::Expr::Lit(item) if matches!(&item.lit, syn::Lit::Str(value) if value.value() == message))
+        }
+        fn restored(body: &syn::Block) -> bool {
+            if body.stmts.len() != 10 { return false; }
+            let expected: [(usize, syn::Stmt); 8] = [
+                (0, syn::parse_quote!(require_finite_http_lease(lease, intent.app(), &sink.identity)?;)),
+                (1, syn::parse_quote!(let owner = lease.owners.as_ref().context("native finite owner missing")?;)),
+                (3, syn::parse_quote!(let stored = owner.originals.get(intent.attempt()).context("native finite original missing")?;)),
+                (4, syn::parse_quote!(stored.response.require_bound(intent, &sink.identity)?;)),
+                (5, syn::parse_quote!(let OwnerSource::Restored { routing, .. } = &owner.source else { anyhow::bail!("native finite parent changed"); };)),
+                (6, syn::parse_quote!(let EnrolledClockSource::Restored(expected) = &stored.original.clock.source else { anyhow::bail!("native finite clock source changed"); };)),
+                (8, syn::parse_quote!(sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?.require_request(&sink.request)?;)),
+                (9, syn::Stmt::Expr(syn::parse_quote!(Ok(true)), None)),
+            ];
+            expected.iter().all(|(index, expected)| same(&body.stmts[*index], expected))
+                && ensured(&body.stmts[2], syn::parse_quote!(owner.kind == NativeRole::AppHost && owner.selection.scope().app.as_str() == intent.app()), "native finite owner selection changed")
+                && ensured(&body.stmts[7], syn::parse_quote!(owner.selection == stored.original.clock.selection && Rc::ptr_eq(&routing.slot, &expected.slot)), "native finite clock parent changed")
+        }
+        let actual = request_owner_method("prepare_finite_human");
+        let [syn::Stmt::Local(result), _] = actual.block.stmts.as_slice() else { panic!("actual guarded preflight"); };
+        assert!(matches!(&result.pat, syn::Pat::Ident(id) if id.ident == "result"));
+        let syn::Expr::Call(catch) = &*result.init.as_ref().unwrap().expr else { panic!("actual catch"); };
+        assert_eq!(catch.func.to_token_stream().to_string(), "std :: panic :: catch_unwind");
+        assert_eq!(catch.args.len(), 1);
+        let syn::Expr::Call(safe) = &catch.args[0] else { panic!("actual unwind-safe wrapper"); };
+        assert_eq!(safe.func.to_token_stream().to_string(), "std :: panic :: AssertUnwindSafe");
+        assert_eq!(safe.args.len(), 1);
+        let syn::Expr::Closure(closed) = &safe.args[0] else { panic!("actual synchronous operation"); };
+        assert!(closed.inputs.is_empty() && closed.asyncness.is_none() && closed.capture.is_none());
+        let syn::Expr::Block(closed) = &*closed.body else { panic!("actual operation block"); };
+        let [entry, source, syn::Stmt::Expr(syn::Expr::Match(selected), None)] = closed.block.stmts.as_slice() else { panic!("entry check then same source and fixed dispatch only"); };
+        assert!(ensured(entry, syn::parse_quote!(!self.refused.get() && sink.is_open()), "native request owner refused"));
+        assert!(same(source, &syn::parse_quote!(let source = self.source.try_borrow()?;)));
+        assert_eq!(selected.expr.to_token_stream().to_string(), "& * source");
+        let initial: syn::Expr = syn::parse_quote!(Ok(false));
+        let refused: syn::Expr = syn::parse_quote!(anyhow::bail!("native finite request owner unavailable"));
+        assert_eq!(selected.arms.len(), 3);
+        assert!(selected.arms.iter().all(|arm| arm.guard.is_none()));
+        assert_eq!(selected.arms[0].pat.to_token_stream().to_string(), "RequestOwnerSource :: Initial");
+        assert_eq!(selected.arms[0].body.to_token_stream().to_string(), initial.to_token_stream().to_string());
+        assert_eq!(selected.arms[1].pat.to_token_stream().to_string(), "RequestOwnerSource :: Restored (lease)");
+        assert!(matches!(selected.arms[2].pat, syn::Pat::Wild(_)));
+        assert_eq!(selected.arms[2].body.to_token_stream().to_string(), refused.to_token_stream().to_string());
+        let syn::Expr::Block(actual_restored) = &*selected.arms[1].body else { panic!("actual restored preflight"); };
+        assert!(restored(&actual_restored.block));
+        for index in 0..actual_restored.block.stmts.len() {
+            let mut deleted = actual_restored.block.clone();
+            deleted.stmts.remove(index);
+            assert!(!restored(&deleted));
+        }
+        for (index, replacement) in [
+            (0, syn::parse_quote!(require_finite_http_lease(lease, intent.app(), &other.identity)?;)),
+            (4, syn::parse_quote!(stored.response.require_bound(other, &sink.identity)?;)),
+            (6, syn::parse_quote!(let EnrolledClockSource::Initial(expected) = &stored.original.clock.source else { anyhow::bail!("native finite clock source changed"); };)),
+            (7, syn::parse_quote!(ensure!(owner.selection == stored.original.clock.selection, "native finite clock parent changed");)),
+            (8, syn::parse_quote!(sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?.require_request(&other.request)?;)),
+        ] {
+            let mut changed = actual_restored.block.clone();
+            changed.stmts[index] = replacement;
+            assert!(!restored(&changed));
+        }
+        let wrapper: syn::Stmt = syn::parse_quote! {
+            match result {
+                Ok(result) => { if result.is_err() { self.refuse(); sink.abort(); } result }
+                Err(payload) => { self.refuse(); sink.abort(); std::panic::resume_unwind(payload) }
+            }
+        };
+        assert!(same(actual.block.stmts.last().unwrap(), &wrapper));
+        let body = actual.block.to_token_stream().to_string();
+        for forbidden in ["OWNERS", "begin_current", "NativeAcquisition", "prepare_runtime", "unwrap_or"] {
+            assert!(!body.contains(forbidden), "{forbidden}");
+        }
     }
 
     #[test]
