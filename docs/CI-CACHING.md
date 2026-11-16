@@ -70,8 +70,13 @@ Linux preparation, runtime shards and final verification restore only the
 existing source-keyed Actions compiler cache before their mandatory current-source
 Bazel bootstrap. They do not download compiler-action artifacts from preparation.
 A cache miss, error or four-minute restore timeout falls back to ordinary source
-compilation. A failed restore first discards its incomplete compiler-cache data;
-cleanup failure refuses the job. No cached verifier is installed directly, and
+compilation. After a failed restore, the job leaves the restore directory alone:
+a timed-out extractor may still be writing there. Bootstrap explicitly disables
+the disk cache, and a fixed CI flag makes every later xtask Bazel command disable
+both disk-cache reads and writes too. The directory is left for runner teardown;
+it is not deleted, renamed, promoted, or reused during the job. Successful
+restores retain the existing cache path and keys. The checksum-addressed source
+download cache is unchanged. No cached verifier is installed directly, and
 cache status cannot waive compilation, native context, authenticated artifact
 selection, source/byte/mode admission or the complete receipt join.
 

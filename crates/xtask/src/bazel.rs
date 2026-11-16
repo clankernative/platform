@@ -746,18 +746,25 @@ pub(crate) fn configuration_arguments(command: &mut Command) {
             "--config=ci-linux"
         });
         if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            command
-                .arg(format!(
-                    "--disk_cache={}",
-                    home.join(".cache/bazel-disk").display()
-                ))
-                .arg(format!(
-                    "--repository_cache={}",
-                    home.join(".cache/bazel-repo").display()
-                ));
+            let disabled = std::env::var("DAY2_CI_DISABLE_DISK_CACHE").as_deref() == Ok("true");
+            cache_arguments(command, &PathBuf::from(home), disabled);
         }
     }
+}
+
+// A failed Actions restore may still have a live extractor. Do not clean or use
+// its directory. Empty --disk_cache disables both reads and writes; the source
+// download cache and all configured resource/admission controls stay unchanged.
+fn cache_arguments(command: &mut Command, home: &Path, disabled: bool) {
+    command.arg(if disabled {
+        "--disk_cache=".to_owned()
+    } else {
+        format!("--disk_cache={}", home.join(".cache/bazel-disk").display())
+    });
+    command.arg(format!(
+        "--repository_cache={}",
+        home.join(".cache/bazel-repo").display()
+    ));
 }
 
 pub(crate) fn tool(root: &Path, name: &str) -> Result<PathBuf> {
@@ -1166,6 +1173,25 @@ pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_restore_disables_disk_reads_and_writes_but_preserves_source_downloads() {
+        use std::ffi::OsStr;
+        for disabled in [false, true] {
+            let mut command = Command::new("bazel");
+            cache_arguments(&mut command, Path::new("/reviewed/home"), disabled);
+            let expected = [
+                if disabled {
+                    "--disk_cache="
+                } else {
+                    "--disk_cache=/reviewed/home/.cache/bazel-disk"
+                },
+                "--repository_cache=/reviewed/home/.cache/bazel-repo",
+            ];
+            // These are fixed test arguments, never inherited argv or environment.
+            assert!(command.get_args().eq(expected.iter().map(OsStr::new)));
+        }
+    }
 
     #[test]
     fn formatter_preserves_all_targets_and_receives_bazel_configuration_before_operands()
