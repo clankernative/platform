@@ -307,12 +307,11 @@ fn finish_check(
         execution: Execution::Admitted { check: stored, .. },
         ..
     } = &mut pending.kind
+        && stored.as_ref() == Some(check)
     {
-        if stored.as_ref() == Some(check) {
-            *stored = None;
-            ensure!(pending == *expected, "runtime_pair_changed_during_check");
-            return Ok(());
-        }
+        *stored = None;
+        ensure!(pending == *expected, "runtime_pair_changed_during_check");
+        return Ok(());
     }
     ensure!(current == *expected, "runtime_pair_changed_during_check");
     let ReleaseKind::RuntimePair {
