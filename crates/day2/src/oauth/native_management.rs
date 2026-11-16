@@ -1467,7 +1467,7 @@ pub(crate) struct RestoredExecutorGuard {
     registry: Rc<RefCell<response::Registry<Owners>>>,
     app: String,
     refusal: Rc<RestoredAppRefusal>,
-    executor: std::thread::ThreadId,
+    executor: super::native_original::ExecutorThread,
 }
 
 impl RestoredExecutorGuard {
@@ -1479,9 +1479,9 @@ impl RestoredExecutorGuard {
     }
 
     pub(crate) fn require_executor(&self) -> Result<()> {
-        if self.executor != std::thread::current().id() {
+        if let Err(error) = self.executor.check() {
             self.refusal.refuse();
-            anyhow::bail!("restored executor thread changed");
+            return Err(error);
         }
         Ok(())
     }
@@ -1535,7 +1535,7 @@ pub(crate) fn install_restored_owner(
         registry,
         app,
         refusal,
-        executor: std::thread::current().id(),
+        executor: super::native_original::ExecutorThread::here(),
     })
 }
 
@@ -1583,6 +1583,36 @@ mod restored_executor_install_source_tests {
     }
 
     #[test]
+    fn actual_executor_check_uses_its_saved_binding_and_refuses_before_forwarding_error() {
+        let actual = method("require_executor");
+        let expected: syn::Block = syn::parse_quote!({
+            if let Err(error) = self.executor.check() {
+                self.refusal.refuse();
+                return Err(error);
+            }
+            Ok(())
+        });
+        let guarded = |body: &syn::Block| body.to_token_stream().to_string() == expected.to_token_stream().to_string();
+        assert!(guarded(&actual.block));
+        let mut omitted = actual.block.clone();
+        omitted.stmts.remove(0);
+        assert!(!guarded(&omitted));
+        let mut recaptured = actual.block.clone();
+        recaptured.stmts[0] = syn::parse_quote!(if let Err(error) = super::native_original::ExecutorThread::here().check() { self.refusal.refuse(); return Err(error); });
+        assert!(!guarded(&recaptured));
+        let mut swallowed = actual.block.clone();
+        swallowed.stmts[0] = syn::parse_quote!(if let Err(_error) = self.executor.check() { self.refusal.refuse(); return Ok(()); });
+        assert!(!guarded(&swallowed));
+        let mut late = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::If(branch), _) = &mut late.stmts[0] else { panic!("actual checked refusal branch"); };
+        branch.then_branch.stmts.swap(0,1);
+        assert!(!guarded(&late));
+        let mut replaced = actual.block.clone();
+        replaced.stmts.insert(0, syn::parse_quote!(let executor = super::native_original::ExecutorThread::here();));
+        assert!(!guarded(&replaced));
+    }
+
+    #[test]
     fn actual_first_install_consumes_the_whole_parent_after_exact_runtime_and_empty_registry() {
         let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
         let actual = file
@@ -1613,7 +1643,7 @@ mod restored_executor_install_source_tests {
                 registry,
                 app,
                 refusal,
-                executor: std::thread::current().id(),
+                executor: super::native_original::ExecutorThread::here(),
             })
         });
         let guarded = |body: &syn::Block| {
