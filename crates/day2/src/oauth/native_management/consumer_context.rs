@@ -868,10 +868,10 @@ impl<'request> NativeConsumerContext<'request, 'static> {
                     (
                         ConsumerOrigin::Http { .. },
                         RuntimeServingUse::Registration
-                        | RuntimeServingUse::Read
-                        | RuntimeServingUse::Refresh
-                        | RuntimeServingUse::SqlRead
-                        | RuntimeServingUse::SqlWrite,
+                            | RuntimeServingUse::Read
+                            | RuntimeServingUse::Refresh
+                            | RuntimeServingUse::SqlRead
+                            | RuntimeServingUse::SqlWrite,
                     ) | (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response)
                 ),
                 "native Runtime origin purpose changed"
@@ -1551,10 +1551,10 @@ mod tests {
             (
                 ConsumerOrigin::Http { .. },
                 RuntimeServingUse::Registration
-                | RuntimeServingUse::Read
-                | RuntimeServingUse::Refresh
-                | RuntimeServingUse::SqlRead
-                | RuntimeServingUse::SqlWrite,
+                    | RuntimeServingUse::Read
+                    | RuntimeServingUse::Refresh
+                    | RuntimeServingUse::SqlRead
+                    | RuntimeServingUse::SqlWrite,
             ) | (ConsumerOrigin::Response { .. }, RuntimeServingUse::Response)
         ));
         let guarded = |actual: &syn::ImplItemFn| {
