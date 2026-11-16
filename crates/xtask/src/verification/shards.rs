@@ -769,9 +769,9 @@ fn part_steps(part: &str) -> Result<BTreeSet<String>> {
     Ok(preparation_steps()?
         .into_iter()
         .filter(|step| match part {
-            "inputs" => !step.starts_with("test-") && !remaining_fixture(step),
+            "inputs" => !step.starts_with("test-") && step != "lint" && !remaining_fixture(step),
             "fixtures" => remaining_fixture(step),
-            "tests" => step.starts_with("test-"),
+            "tests" => step.starts_with("test-") || step == "lint",
             _ => true,
         })
         .collect())
@@ -1674,6 +1674,71 @@ mod tests {
             );
         }
         assert_eq!(part_steps("fixtures")?.len(), 18);
+        assert!(!part_steps("inputs")?.contains("lint"));
+        assert_eq!(
+            part_steps("tests")?,
+            BTreeSet::from(["lint".into(), "test-binaries".into(), "test-docs".into()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preparation_requires_fresh_lint_in_the_test_part_only() -> Result<()> {
+        for stale in [false, true] {
+            let mut parts = sample_parts()?;
+            assert!(parts[2].passed.remove("lint"));
+            parts[2].timings_ms.remove("lint");
+            if stale {
+                parts[0].passed.insert("lint".into());
+                parts[0].timings_ms.insert("lint".into(), 1);
+            }
+            assert!(combine_parts(parts, &sample_identity()).is_err());
+        }
+        let mut duplicated = sample_parts()?;
+        duplicated[0].passed.insert("lint".into());
+        duplicated[0].timings_ms.insert("lint".into(), 1);
+        assert!(combine_parts(duplicated, &sample_identity()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_preparation_recipe_always_lints_after_build_and_docs() -> Result<()> {
+        let source = day2::automation::SOURCES
+            .iter()
+            .find(|(name, _)| *name == "ops/Verify.roc")
+            .context("verification recipe")?
+            .1;
+        let source = std::str::from_utf8(source)?;
+        let part = source
+            .split_once("prepare_part! = |part, host!| {")
+            .context("preparation recipe")?
+            .1;
+        let tests = part
+            .split_once("\"tests\" => {")
+            .context("test preparation branch")?
+            .1
+            .split_once("\n\t\t\t}")
+            .context("complete test preparation branch")?
+            .0;
+        assert_eq!(
+            tests.split_whitespace().collect::<Vec<_>>().join(" "),
+            concat!(
+                "_ = Capability.call!(\"verify-test-build\", \"{}\", host!)? ",
+                "_ = Capability.call!(\"verify-test-docs\", \"{}\", host!)? ",
+                "Capability.call!(\"verify-lint\", \"{}\", host!)"
+            )
+        );
+        let inputs = part
+            .split_once("\"inputs\" => {")
+            .context("input preparation branch")?
+            .1
+            .split_once("\n\t\t\t}")
+            .context("complete input preparation branch")?
+            .0;
+        assert!(!inputs.contains("verify-lint"));
+        assert!(source.contains(
+            "input_finish! = |host!| Capability.call!(\"verify-browser\", \"{}\", host!)"
+        ));
         Ok(())
     }
 
