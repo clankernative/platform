@@ -1012,25 +1012,34 @@ impl RequestOwner {
     /// existing registry participant; every other unavailable source refuses.
     fn prepare_finite_human(&self, sink: &Sink, intent: &FreshIntent) -> Result<bool> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ensure!(!self.refused.get() && sink.is_open(), "native request owner refused");
+            ensure!(
+                !self.refused.get() && sink.is_open(),
+                "native request owner refused"
+            );
             let source = self.source.try_borrow()?;
             match &*source {
                 RequestOwnerSource::Initial => Ok(false),
                 RequestOwnerSource::Restored(lease) => {
                     require_finite_http_lease(lease, intent.app(), &sink.identity)?;
-                    let owner = lease.owners.as_ref().context("native finite owner missing")?;
+                    let owner = lease
+                        .owners
+                        .as_ref()
+                        .context("native finite owner missing")?;
                     ensure!(
                         owner.kind == NativeRole::AppHost
                             && owner.selection.scope().app.as_str() == intent.app(),
                         "native finite owner selection changed"
                     );
-                    let stored = owner.originals.get(intent.attempt())
+                    let stored = owner
+                        .originals
+                        .get(intent.attempt())
                         .context("native finite original missing")?;
                     stored.response.require_bound(intent, &sink.identity)?;
                     let OwnerSource::Restored { routing, .. } = &owner.source else {
                         anyhow::bail!("native finite parent changed");
                     };
-                    let EnrolledClockSource::Restored(expected) = &stored.original.clock.source else {
+                    let EnrolledClockSource::Restored(expected) = &stored.original.clock.source
+                    else {
                         anyhow::bail!("native finite clock source changed");
                     };
                     ensure!(
@@ -1038,7 +1047,8 @@ impl RequestOwner {
                             && Rc::ptr_eq(&routing.slot, &expected.slot),
                         "native finite clock parent changed"
                     );
-                    sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?
+                    sink.request
+                        .consumer_origin(owner.selection.scope(), NativeRole::AppHost)?
                         .require_request(&sink.request)?;
                     Ok(true)
                 }
@@ -1675,7 +1685,10 @@ pub(super) fn require_finite_binding(sink: &Sink) -> Result<()> {
     if fixtures::active() {
         return fixtures::require_response(&binding.intent, *role, &sink.identity);
     }
-    if sink.request_owner.prepare_finite_human(sink, &binding.intent)? {
+    if sink
+        .request_owner
+        .prepare_finite_human(sink, &binding.intent)?
+    {
         return Ok(());
     }
     OWNERS.with(|entries| {
@@ -1713,8 +1726,11 @@ fn require_finite_http_lease<T: LeaseMaterial>(
     identity: &ResponseIdentity,
 ) -> Result<()> {
     ensure!(
-        !lease.known && !lease.refused.get() && lease.live.get()
-            && lease.key == app && lease.identity.same_http(identity)
+        !lease.known
+            && !lease.refused.get()
+            && lease.live.get()
+            && lease.key == app
+            && lease.identity.same_http(identity)
             && lease.owners.is_some(),
         "native finite response lease changed"
     );
@@ -4641,11 +4657,18 @@ mod lease_tests {
     }
 
     #[test]
-    fn finite_human_classification_keeps_the_actual_early_lease_when_registry_is_empty() -> Result<()> {
+    fn finite_human_classification_keeps_the_actual_early_lease_when_registry_is_empty()
+    -> Result<()> {
         let intent = FreshIntent::fixture_oauth(
-            &crate::iap::Verified { email: "alice@example.com".into(), subject: "alice".into() },
-            "finite-human-original", &day2_capabilities::Digest::new(b"finite-human"),
-            "https://security.example.com", 5, 50,
+            &crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "alice".into(),
+            },
+            "finite-human-original",
+            &day2_capabilities::Digest::new(b"finite-human"),
+            "https://security.example.com",
+            5,
+            50,
         )?;
         // The actual reservation/identity/liveness predicate with inert DATA
         // only. No native owner, participant or successful Current is forged.
@@ -4658,7 +4681,8 @@ mod lease_tests {
         assert!(registry.borrow().reserved.contains_key(intent.app()));
         require_finite_http_lease(&lease, intent.app(), &sink.identity)?;
         let binding = super::super::ResponseBinding {
-            intent: intent.clone(), connection: Some(sink.identity.clone()),
+            intent: intent.clone(),
+            connection: Some(sink.identity.clone()),
         };
         binding.require_bound(&intent, &sink.identity)?;
         let foreign = Sink::new();
@@ -4678,17 +4702,23 @@ mod lease_tests {
                 0 => lease.known = true,
                 1 => lease.refused.set(true),
                 2 => lease.live.set(false),
-                3 => { drop(lease.owners.take()); }
+                3 => {
+                    drop(lease.owners.take());
+                }
                 4 => lease.identity = LeaseIdentity::Runtime(Rc::new(())),
                 _ => lease.identity = LeaseIdentity::Http(Sink::new().identity.clone()),
             }
-            assert!(require_finite_http_lease(&lease, "calendar", &sink.identity).is_err(), "cut {cut}");
+            assert!(
+                require_finite_http_lease(&lease, "calendar", &sink.identity).is_err(),
+                "cut {cut}"
+            );
         }
         Ok(())
     }
 
     #[test]
-    fn actual_finite_human_dispatch_precedes_registry_and_cannot_fall_back_after_restored_failure() {
+    fn actual_finite_human_dispatch_precedes_registry_and_cannot_fall_back_after_restored_failure()
+    {
         use quote::ToTokens;
         fn dispatch(body: &syn::Block) -> bool {
             let expected: syn::Stmt = syn::parse_quote! {
@@ -4696,22 +4726,37 @@ mod lease_tests {
                     return Ok(());
                 }
             };
-            let found = body.stmts.iter().enumerate().filter_map(|(i, item)|
-                (item.to_token_stream().to_string() == expected.to_token_stream().to_string()).then_some(i)
-            ).collect::<Vec<_>>();
-            found.len() == 1 && found[0] + 2 == body.stmts.len()
+            let found = body
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    (item.to_token_stream().to_string() == expected.to_token_stream().to_string())
+                        .then_some(i)
+                })
+                .collect::<Vec<_>>();
+            found.len() == 1
+                && found[0] + 2 == body.stmts.len()
                 && matches!(body.stmts.last(), Some(syn::Stmt::Expr(syn::Expr::MethodCall(call), None))
                     if call.method == "with" && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("OWNERS")))
         }
         let file = syn::parse_file(include_str!("response.rs")).unwrap();
-        let actual = file.items.iter().find_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == "require_finite_binding" => Some(item), _ => None,
-        }).unwrap();
+        let actual = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "require_finite_binding" => Some(item),
+                _ => None,
+            })
+            .unwrap();
         assert!(dispatch(&actual.block));
         let index = actual.block.stmts.len() - 2;
         let mut deleted = actual.block.clone();
         deleted.stmts.remove(index);
-        assert!(!dispatch(&deleted), "the previous registry-only path must fail");
+        assert!(
+            !dispatch(&deleted),
+            "the previous registry-only path must fail"
+        );
         let mut late = actual.block.clone();
         late.stmts.swap(index, index + 1);
         assert!(!dispatch(&late));
@@ -4757,53 +4802,145 @@ mod lease_tests {
                 syn::Stmt::Expr(syn::Expr::Macro(item), _) => &item.mac,
                 _ => return false,
             };
-            if !mac.path.is_ident("ensure") { return false; }
-            let Ok(args) = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(mac.tokens.clone()) else { return false; };
-            args.len() == 2 && args[0].to_token_stream().to_string() == predicate.to_token_stream().to_string()
+            if !mac.path.is_ident("ensure") {
+                return false;
+            }
+            let Ok(args) =
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                    .parse2(mac.tokens.clone())
+            else {
+                return false;
+            };
+            args.len() == 2
+                && args[0].to_token_stream().to_string() == predicate.to_token_stream().to_string()
                 && matches!(&args[1], syn::Expr::Lit(item) if matches!(&item.lit, syn::Lit::Str(value) if value.value() == message))
         }
         fn restored(body: &syn::Block) -> bool {
-            if body.stmts.len() != 10 { return false; }
+            if body.stmts.len() != 10 {
+                return false;
+            }
             let expected: [(usize, syn::Stmt); 8] = [
-                (0, syn::parse_quote!(require_finite_http_lease(lease, intent.app(), &sink.identity)?;)),
-                (1, syn::parse_quote!(let owner = lease.owners.as_ref().context("native finite owner missing")?;)),
-                (3, syn::parse_quote!(let stored = owner.originals.get(intent.attempt()).context("native finite original missing")?;)),
-                (4, syn::parse_quote!(stored.response.require_bound(intent, &sink.identity)?;)),
-                (5, syn::parse_quote!(let OwnerSource::Restored { routing, .. } = &owner.source else { anyhow::bail!("native finite parent changed"); };)),
-                (6, syn::parse_quote!(let EnrolledClockSource::Restored(expected) = &stored.original.clock.source else { anyhow::bail!("native finite clock source changed"); };)),
-                (8, syn::parse_quote!(sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?.require_request(&sink.request)?;)),
+                (
+                    0,
+                    syn::parse_quote!(require_finite_http_lease(lease, intent.app(), &sink.identity)?;),
+                ),
+                (
+                    1,
+                    syn::parse_quote!(let owner = lease.owners.as_ref().context("native finite owner missing")?;),
+                ),
+                (
+                    3,
+                    syn::parse_quote!(let stored = owner.originals.get(intent.attempt()).context("native finite original missing")?;),
+                ),
+                (
+                    4,
+                    syn::parse_quote!(stored.response.require_bound(intent, &sink.identity)?;),
+                ),
+                (
+                    5,
+                    syn::parse_quote!(let OwnerSource::Restored { routing, .. } = &owner.source else { anyhow::bail!("native finite parent changed"); };),
+                ),
+                (
+                    6,
+                    syn::parse_quote!(let EnrolledClockSource::Restored(expected) = &stored.original.clock.source else { anyhow::bail!("native finite clock source changed"); };),
+                ),
+                (
+                    8,
+                    syn::parse_quote!(sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?.require_request(&sink.request)?;),
+                ),
                 (9, syn::Stmt::Expr(syn::parse_quote!(Ok(true)), None)),
             ];
-            expected.iter().all(|(index, expected)| same(&body.stmts[*index], expected))
-                && ensured(&body.stmts[2], syn::parse_quote!(owner.kind == NativeRole::AppHost && owner.selection.scope().app.as_str() == intent.app()), "native finite owner selection changed")
-                && ensured(&body.stmts[7], syn::parse_quote!(owner.selection == stored.original.clock.selection && Rc::ptr_eq(&routing.slot, &expected.slot)), "native finite clock parent changed")
+            expected
+                .iter()
+                .all(|(index, expected)| same(&body.stmts[*index], expected))
+                && ensured(
+                    &body.stmts[2],
+                    syn::parse_quote!(
+                        owner.kind == NativeRole::AppHost
+                            && owner.selection.scope().app.as_str() == intent.app()
+                    ),
+                    "native finite owner selection changed",
+                )
+                && ensured(
+                    &body.stmts[7],
+                    syn::parse_quote!(
+                        owner.selection == stored.original.clock.selection
+                            && Rc::ptr_eq(&routing.slot, &expected.slot)
+                    ),
+                    "native finite clock parent changed",
+                )
         }
         let actual = request_owner_method("prepare_finite_human");
-        let [syn::Stmt::Local(result), _] = actual.block.stmts.as_slice() else { panic!("actual guarded preflight"); };
+        let [syn::Stmt::Local(result), _] = actual.block.stmts.as_slice() else {
+            panic!("actual guarded preflight");
+        };
         assert!(matches!(&result.pat, syn::Pat::Ident(id) if id.ident == "result"));
-        let syn::Expr::Call(catch) = &*result.init.as_ref().unwrap().expr else { panic!("actual catch"); };
-        assert_eq!(catch.func.to_token_stream().to_string(), "std :: panic :: catch_unwind");
+        let syn::Expr::Call(catch) = &*result.init.as_ref().unwrap().expr else {
+            panic!("actual catch");
+        };
+        assert_eq!(
+            catch.func.to_token_stream().to_string(),
+            "std :: panic :: catch_unwind"
+        );
         assert_eq!(catch.args.len(), 1);
-        let syn::Expr::Call(safe) = &catch.args[0] else { panic!("actual unwind-safe wrapper"); };
-        assert_eq!(safe.func.to_token_stream().to_string(), "std :: panic :: AssertUnwindSafe");
+        let syn::Expr::Call(safe) = &catch.args[0] else {
+            panic!("actual unwind-safe wrapper");
+        };
+        assert_eq!(
+            safe.func.to_token_stream().to_string(),
+            "std :: panic :: AssertUnwindSafe"
+        );
         assert_eq!(safe.args.len(), 1);
-        let syn::Expr::Closure(closed) = &safe.args[0] else { panic!("actual synchronous operation"); };
+        let syn::Expr::Closure(closed) = &safe.args[0] else {
+            panic!("actual synchronous operation");
+        };
         assert!(closed.inputs.is_empty() && closed.asyncness.is_none() && closed.capture.is_none());
-        let syn::Expr::Block(closed) = &*closed.body else { panic!("actual operation block"); };
-        let [entry, source, syn::Stmt::Expr(syn::Expr::Match(selected), None)] = closed.block.stmts.as_slice() else { panic!("entry check then same source and fixed dispatch only"); };
-        assert!(ensured(entry, syn::parse_quote!(!self.refused.get() && sink.is_open()), "native request owner refused"));
-        assert!(same(source, &syn::parse_quote!(let source = self.source.try_borrow()?;)));
+        let syn::Expr::Block(closed) = &*closed.body else {
+            panic!("actual operation block");
+        };
+        let [
+            entry,
+            source,
+            syn::Stmt::Expr(syn::Expr::Match(selected), None),
+        ] = closed.block.stmts.as_slice()
+        else {
+            panic!("entry check then same source and fixed dispatch only");
+        };
+        assert!(ensured(
+            entry,
+            syn::parse_quote!(!self.refused.get() && sink.is_open()),
+            "native request owner refused"
+        ));
+        assert!(same(
+            source,
+            &syn::parse_quote!(let source = self.source.try_borrow()?;)
+        ));
         assert_eq!(selected.expr.to_token_stream().to_string(), "& * source");
         let initial: syn::Expr = syn::parse_quote!(Ok(false));
-        let refused: syn::Expr = syn::parse_quote!(anyhow::bail!("native finite request owner unavailable"));
+        let refused: syn::Expr =
+            syn::parse_quote!(anyhow::bail!("native finite request owner unavailable"));
         assert_eq!(selected.arms.len(), 3);
         assert!(selected.arms.iter().all(|arm| arm.guard.is_none()));
-        assert_eq!(selected.arms[0].pat.to_token_stream().to_string(), "RequestOwnerSource :: Initial");
-        assert_eq!(selected.arms[0].body.to_token_stream().to_string(), initial.to_token_stream().to_string());
-        assert_eq!(selected.arms[1].pat.to_token_stream().to_string(), "RequestOwnerSource :: Restored (lease)");
+        assert_eq!(
+            selected.arms[0].pat.to_token_stream().to_string(),
+            "RequestOwnerSource :: Initial"
+        );
+        assert_eq!(
+            selected.arms[0].body.to_token_stream().to_string(),
+            initial.to_token_stream().to_string()
+        );
+        assert_eq!(
+            selected.arms[1].pat.to_token_stream().to_string(),
+            "RequestOwnerSource :: Restored (lease)"
+        );
         assert!(matches!(selected.arms[2].pat, syn::Pat::Wild(_)));
-        assert_eq!(selected.arms[2].body.to_token_stream().to_string(), refused.to_token_stream().to_string());
-        let syn::Expr::Block(actual_restored) = &*selected.arms[1].body else { panic!("actual restored preflight"); };
+        assert_eq!(
+            selected.arms[2].body.to_token_stream().to_string(),
+            refused.to_token_stream().to_string()
+        );
+        let syn::Expr::Block(actual_restored) = &*selected.arms[1].body else {
+            panic!("actual restored preflight");
+        };
         assert!(restored(&actual_restored.block));
         for index in 0..actual_restored.block.stmts.len() {
             let mut deleted = actual_restored.block.clone();
@@ -4811,11 +4948,26 @@ mod lease_tests {
             assert!(!restored(&deleted));
         }
         for (index, replacement) in [
-            (0, syn::parse_quote!(require_finite_http_lease(lease, intent.app(), &other.identity)?;)),
-            (4, syn::parse_quote!(stored.response.require_bound(other, &sink.identity)?;)),
-            (6, syn::parse_quote!(let EnrolledClockSource::Initial(expected) = &stored.original.clock.source else { anyhow::bail!("native finite clock source changed"); };)),
-            (7, syn::parse_quote!(ensure!(owner.selection == stored.original.clock.selection, "native finite clock parent changed");)),
-            (8, syn::parse_quote!(sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?.require_request(&other.request)?;)),
+            (
+                0,
+                syn::parse_quote!(require_finite_http_lease(lease, intent.app(), &other.identity)?;),
+            ),
+            (
+                4,
+                syn::parse_quote!(stored.response.require_bound(other, &sink.identity)?;),
+            ),
+            (
+                6,
+                syn::parse_quote!(let EnrolledClockSource::Initial(expected) = &stored.original.clock.source else { anyhow::bail!("native finite clock source changed"); };),
+            ),
+            (
+                7,
+                syn::parse_quote!(ensure!(owner.selection == stored.original.clock.selection, "native finite clock parent changed");),
+            ),
+            (
+                8,
+                syn::parse_quote!(sink.request.consumer_origin(owner.selection.scope(), NativeRole::AppHost)?.require_request(&other.request)?;),
+            ),
         ] {
             let mut changed = actual_restored.block.clone();
             changed.stmts[index] = replacement;
@@ -4829,7 +4981,13 @@ mod lease_tests {
         };
         assert!(same(actual.block.stmts.last().unwrap(), &wrapper));
         let body = actual.block.to_token_stream().to_string();
-        for forbidden in ["OWNERS", "begin_current", "NativeAcquisition", "prepare_runtime", "unwrap_or"] {
+        for forbidden in [
+            "OWNERS",
+            "begin_current",
+            "NativeAcquisition",
+            "prepare_runtime",
+            "unwrap_or",
+        ] {
             assert!(!body.contains(forbidden), "{forbidden}");
         }
     }
