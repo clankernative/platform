@@ -1541,7 +1541,9 @@ pub(crate) fn install_restored_owner(
 
 #[cfg(test)]
 mod restored_executor_install_source_tests {
+    use super::{Owners, RestoredExecutorGuard, response};
     use quote::ToTokens;
+    use std::{cell::RefCell, rc::Rc};
 
     fn method(name: &str) -> syn::ImplItemFn {
         syn::parse_file(include_str!("native_management.rs")).unwrap().items.into_iter().find_map(|item| {
