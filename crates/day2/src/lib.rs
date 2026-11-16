@@ -12,6 +12,7 @@ pub mod audit;
 pub mod authority;
 pub mod authority_state;
 pub mod automation;
+pub mod backup_archive;
 pub mod branding;
 pub mod budget;
 pub mod build_dependencies;

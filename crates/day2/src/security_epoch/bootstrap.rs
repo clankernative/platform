@@ -4,15 +4,17 @@
 
 use super::{
     InitialStorageContinuity,
-    authenticated_reads::ControllerPort,
+    authenticated_reads::{ControllerPort, CounterRequest, RestoredEpochObservation},
     control_slot::{AttemptCore, LogicalCore, SettlementCore, SlotState},
     control_slot_io,
     controller::evidence::{PreparationFailure, PreparationStep},
+    controller::serving_timing::{ServingStep, ServingTiming},
     controller::{bootstrap_timing::BootstrapTiming, preparation_timing::Operation},
-    firestore::{Names, Port},
+    firestore::{EpochObservation, Names, Port, RestoreWriterPeerRead},
     journal::{CurrentBootstrapExecution, Purpose},
     kernel::{self, Outcome, Request, Snapshot},
-    native_enrollment::EnrolledRoleStage,
+    native_enrollment::{EnrolledRoleStage, NativeRole},
+    self_check_profile::{self, Category},
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
@@ -22,16 +24,527 @@ use day2_capabilities::{
 use std::{cell::RefCell, rc::Rc};
 
 mod admin_read;
-pub(crate) use admin_read::FencedReadUnit;
 pub(in crate::security_epoch) use admin_read::{
-    CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation,
-    RestoreAuthenticationAction, RestoreWriteLoan,
+    AuthenticatedRestoreExecution, CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan,
+    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
+    RestoreAuthenticationAction, RestoreFinalInstallationLoan, RestoreTargetCheck,
+    RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
+    RestoreWriterExchangeContext, RestoreWriterReleaseLoan, TargetSettlementSourceLoan,
+    WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
+};
+pub(crate) use admin_read::{
+    FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit,
 };
 mod app_serving;
+#[cfg(test)]
+mod lineage;
 pub(crate) use admin_read::{
     ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData,
 };
+#[cfg(test)]
 mod controller_serving;
+
+// Fixed comparison lineage and genuine observations. Effective helper scope
+// remains bootstrap and its descendants; no parts or native owner escape.
+pub(in crate::security_epoch) struct ActiveLineage {
+    kind: LineageKind,
+}
+
+struct InitialLineage {
+    completion: Request,
+    activation: Digest,
+}
+
+enum LineageKind {
+    Initial(Box<InitialLineage>),
+    // Only the genuine accepting-owner handoff may construct this branch.
+    // There is deliberately no public or DATA-only restored constructor.
+    Restored(Box<RestoreWriterPeerRead>),
+}
+
+pub(in crate::security_epoch) struct ActiveObservation {
+    binding: Digest,
+    kind: ObservationKind,
+}
+
+enum ObservationKind {
+    Initial(Box<EpochObservation>),
+    Restored(Box<RestoredEpochObservation>),
+}
+
+impl ActiveObservation {
+    fn refuse(&mut self) {
+        match &mut self.kind {
+            ObservationKind::Initial(observed) => observed.refuse(),
+            ObservationKind::Restored(observed) => observed.refuse(),
+        }
+    }
+}
+
+impl ActiveLineage {
+    /// Selection DATA from the existing fixed successful initial bootstrap.
+    /// This does not admit a reader or construct active physical continuity.
+    fn initial(completion: Request, activation: Digest) -> Self {
+        Self {
+            kind: LineageKind::Initial(Box::new(InitialLineage {
+                completion,
+                activation,
+            })),
+        }
+    }
+
+    /// Comparison DATA from the genuine pending App only. The caller must
+    /// retain that same owner through physical conversion and real installed
+    /// acknowledgement/posts; this metadata neither installs nor serves it.
+    /// A fresh observation still comes only from the actual request in read().
+    fn from_app_install(
+        pending: &mut crate::security_epoch::native_enrollment::PendingRestoredEnrollment,
+        selection: &EpochStore,
+    ) -> Result<Self> {
+        let reader = pending.checked_restored_reader_data(selection)?;
+        Ok(Self {
+            kind: LineageKind::Restored(Box::new(reader)),
+        })
+    }
+
+    /// Negative comparison only. The actual pending owner derives the expected
+    /// reader under its full checks and refuses itself on any mismatch before
+    /// admitting a counter/read. Equality is not a native owner or permission.
+    pub(in crate::security_epoch) fn require_restored_reader_data(
+        &self,
+        expected: &RestoreWriterPeerRead,
+    ) -> Result<()> {
+        match &self.kind {
+            LineageKind::Restored(reader) => {
+                ensure!(
+                    reader.binding_data()? == expected.binding_data()?,
+                    "active_lineage_restored_reader_changed"
+                );
+                Ok(())
+            }
+            LineageKind::Initial(_) => anyhow::bail!("active_lineage_restored_required"),
+        }
+    }
+
+    fn binding_data(&self) -> Result<Digest> {
+        match &self.kind {
+            LineageKind::Initial(initial) => Digest::of(&(
+                "day2-initial-active-lineage-v1",
+                initial.completion.digest()?,
+                &initial.activation,
+            )),
+            LineageKind::Restored(reader) => reader.binding_data(),
+        }
+    }
+
+    fn require_selection_data(&self, selection: &EpochStore) -> Result<()> {
+        match &self.kind {
+            LineageKind::Initial(initial) => {
+                ensure!(
+                    matches!(
+                        &initial.completion,
+                        Request::CompleteInitialFirstActivation { .. }
+                    ),
+                    "active_lineage_initial_completion_required"
+                );
+                initial.completion.validate(selection)
+            }
+            LineageKind::Restored(reader) => {
+                ensure!(
+                    reader.matches_selection_data(selection),
+                    "active_lineage_store_changed"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn require_pair_data(&self, observed: &ActiveObservation) -> Result<()> {
+        ensure!(
+            matches!(
+                (&self.kind, &observed.kind),
+                (LineageKind::Initial(_), ObservationKind::Initial(_))
+                    | (LineageKind::Restored(_), ObservationKind::Restored(_))
+            ) && observed.binding == self.binding_data()?,
+            "active_lineage_observation_changed"
+        );
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn read(
+        &self,
+        selection: &EpochStore,
+        reads: &mut CounterRequest<'_>,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<ActiveObservation> {
+        let requested = (|| {
+            self.require_selection_data(selection)?;
+            let binding = self.binding_data()?;
+            let kind = match &self.kind {
+                LineageKind::Initial(initial) => {
+                    let names = request_names(selection, &initial.completion)?;
+                    let mut observed = reads.read(stage, selection, &names)?;
+                    if let Err(error) = check_active_snapshot(
+                        selection,
+                        &initial.completion,
+                        &initial.activation,
+                        observed.snapshot(),
+                    ) {
+                        observed.refuse();
+                        return Err(error);
+                    }
+                    ObservationKind::Initial(Box::new(observed))
+                }
+                LineageKind::Restored(reader) => ObservationKind::Restored(Box::new(
+                    reads.read_restored(stage, selection, reader)?,
+                )),
+            };
+            Ok(ActiveObservation { binding, kind })
+        })();
+        if requested.is_err() {
+            reads.refuse();
+        }
+        requested
+    }
+
+    /// Check the OLD actual observation before a subsequent read. A wrong
+    /// pairing is refused directly, without a fake selection or new sample.
+    pub(in crate::security_epoch) fn check(
+        &self,
+        selection: &EpochStore,
+        reads: &mut CounterRequest<'_>,
+        stage: &mut EnrolledRoleStage<'_>,
+        observed: &mut ActiveObservation,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.require_selection_data(selection)?;
+            self.require_pair_data(observed)?;
+            match (&self.kind, &mut observed.kind) {
+                (LineageKind::Initial(initial), ObservationKind::Initial(observed)) => {
+                    // Preserve the existing local guard's primary-error order:
+                    // actual native/observation checks precede pure snapshot DATA.
+                    reads.check_observation(stage, observed)?;
+                    check_active_snapshot(
+                        selection,
+                        &initial.completion,
+                        &initial.activation,
+                        observed.snapshot(),
+                    )
+                }
+                (LineageKind::Restored(reader), ObservationKind::Restored(observed)) => {
+                    reads.check_restored_observation(stage, reader, observed)
+                }
+                _ => anyhow::bail!("active_lineage_observation_changed"),
+            }
+        })();
+        if requested.is_err() {
+            observed.refuse();
+            reads.refuse();
+        }
+        requested
+    }
+
+    /// Historical commitment only, after the caller's actual check. Any error
+    /// remains in that fixed caller's permanent-refusal path.
+    pub(in crate::security_epoch) fn snapshot_data(
+        &self,
+        observed: &ActiveObservation,
+    ) -> Result<Digest> {
+        self.require_pair_data(observed)?;
+        match &observed.kind {
+            ObservationKind::Initial(observed) => {
+                crate::security_epoch::journal::snapshot_digest(observed.snapshot())
+            }
+            ObservationKind::Restored(observed) => Ok(observed.snapshot_data().clone()),
+        }
+    }
+
+    /// The existing first-restore approval kernel accepts only an initial
+    /// predecessor. This never casts restored history back to epoch one.
+    fn initial_restore_snapshot_data(
+        &self,
+        observed: &ActiveObservation,
+    ) -> Result<crate::security_epoch::kernel::Snapshot> {
+        self.require_pair_data(observed)?;
+        match &observed.kind {
+            ObservationKind::Initial(observed) => Ok(observed.snapshot().clone()),
+            ObservationKind::Restored(_) => anyhow::bail!("initial_restore_lineage_required"),
+        }
+    }
+
+    /// Initial database birth only; the caller still checks its actual
+    /// InitialStorage purpose, native keeper and reviewed runtime selection.
+    fn initial_runtime_artifact_data(&self) -> Result<&Digest> {
+        match &self.kind {
+            LineageKind::Initial(initial) => Ok(&initial.completion.bootstrap().manifest.artifact),
+            LineageKind::Restored(_) => anyhow::bail!("initial_restore_lineage_required"),
+        }
+    }
+
+    /// The fixed first-restore read units retain the initial document names
+    /// even after fencing. Restored lineage cannot enter those old-history loans.
+    fn initial_restore_names_data(
+        &self,
+        selection: &EpochStore,
+    ) -> Result<crate::security_epoch::firestore::Names> {
+        self.require_selection_data(selection)?;
+        match &self.kind {
+            LineageKind::Initial(initial) => request_names(selection, &initial.completion),
+            LineageKind::Restored(_) => anyhow::bail!("initial_restore_lineage_required"),
+        }
+    }
+
+    fn initial_restore_stop_selection_data(
+        &self,
+        selection: &EpochStore,
+        intent: &crate::security_epoch::kernel::restore::Intent,
+        before: &crate::security_epoch::kernel::Snapshot,
+    ) -> Result<crate::security_epoch::kernel::restore::StopSelection> {
+        self.require_selection_data(selection)?;
+        match &self.kind {
+            LineageKind::Initial(initial) => {
+                crate::security_epoch::kernel::restore::StopSelection::new(
+                    selection,
+                    intent,
+                    &initial.completion,
+                    before,
+                )
+            }
+            LineageKind::Restored(_) => anyhow::bail!("initial_restore_lineage_required"),
+        }
+    }
+
+    fn check_initial_restore_stop_data(
+        &self,
+        selection: &EpochStore,
+        operation: &Digest,
+        stop: &crate::security_epoch::kernel::restore::StopSelection,
+        observed: &crate::security_epoch::kernel::Snapshot,
+    ) -> Result<()> {
+        self.require_selection_data(selection)?;
+        match &self.kind {
+            LineageKind::Initial(initial) => {
+                stop.check_active_data(selection, operation, &initial.completion, observed)
+            }
+            LineageKind::Restored(_) => anyhow::bail!("initial_restore_lineage_required"),
+        }
+    }
+
+    fn initial_restore_confirmation_data(
+        &self,
+        selection: &EpochStore,
+        operation: &Digest,
+        stop: &crate::security_epoch::kernel::restore::StopSelection,
+        before: &crate::security_epoch::kernel::Snapshot,
+        confirmation: &crate::security_epoch::firestore::ReservationConfirmation,
+    ) -> Result<crate::security_epoch::firestore::RestoreConfirmationNames> {
+        self.require_selection_data(selection)?;
+        match &self.kind {
+            LineageKind::Initial(initial) => {
+                crate::security_epoch::firestore::RestoreConfirmationNames::new(
+                    selection,
+                    &initial.completion,
+                    operation,
+                    stop,
+                    before,
+                    confirmation,
+                )
+            }
+            LineageKind::Restored(_) => anyhow::bail!("initial_restore_lineage_required"),
+        }
+    }
+
+    pub(in crate::security_epoch) fn serving_binding(&self, binding: &Digest) -> Result<Digest> {
+        match &self.kind {
+            LineageKind::Initial(initial) => Digest::of(&(
+                "day2-current-active-app-storage-v1",
+                initial.completion.digest()?,
+                binding,
+            )),
+            LineageKind::Restored(reader) => Digest::of(&(
+                "day2-current-restored-app-storage-v1",
+                reader.binding_data()?,
+                binding,
+            )),
+        }
+    }
+
+    pub(in crate::security_epoch) fn admin_binding(&self, operation: &Digest) -> Result<Digest> {
+        match &self.kind {
+            LineageKind::Initial(initial) => Digest::of(&(
+                "day2-current-admin-read-v1",
+                initial.completion.digest()?,
+                operation,
+            )),
+            LineageKind::Restored(reader) => Digest::of(&(
+                "day2-current-restored-admin-read-v1",
+                reader.binding_data()?,
+                operation,
+            )),
+        }
+    }
+}
+
+// The actual observation retains all eight negative traits in the root guard below.
+
+// Fixed Controller callers retain their exact former bodies and guards.
+impl ActiveControllerStorageContinuity {
+    pub(in crate::security_epoch) fn app_pending(&mut self) -> Result<bool> {
+        ensure!(self.valid, "active_controller_storage_refused");
+        self.storage.app_pending()
+    }
+
+    pub(in crate::security_epoch) fn serve_app_current(
+        &mut self,
+        stage: EnrolledRoleStage<'_>,
+        trace: &ServingTiming,
+    ) -> Result<ServingObservation> {
+        let _profile = self_check_profile::enter(Category::ServingLocal);
+        ensure!(self.valid, "active_controller_storage_refused");
+        self.valid = false;
+        let result = (|| {
+            let (mut physical, mut reads) = trace.measure(ServingStep::PhysicalBegin, || {
+                let _profile = self_check_profile::enter(Category::PhysicalLocal);
+                self.storage.begin_current_app(
+                    stage,
+                    &self.policy,
+                    &self.store,
+                    &mut self.counter,
+                    trace,
+                )
+            })?;
+            // Authenticated request selection is DATA. This can only be the
+            // actual retained App enrollment and a fresh Current transcript.
+            let binding = trace.measure(ServingStep::RequestBinding, || {
+                Ok(physical.app_request()?.binding().clone())
+            })?;
+            let mut observed = trace.measure(ServingStep::CounterBefore, || {
+                self.lineage
+                    .read(&self.store, &mut reads, physical.controller_stage()?)
+            })?;
+            // The checked stage getter performs the complete physical
+            // post-read check once, immediately before observation use.
+            trace.measure(ServingStep::ProviderBefore, || {
+                self.lineage.check(
+                    &self.store,
+                    &mut reads,
+                    physical.controller_stage()?,
+                    &mut observed,
+                )
+            })?;
+            // Await the actual App consumer and original postchecks, then
+            // reobserve the fixed counter through one closed physical join.
+            observed = physical.announce_and_read_app_consumed(
+                &mut reads,
+                &self.store,
+                &self.lineage,
+                &mut observed,
+                trace,
+            )?;
+            trace.measure(ServingStep::ProviderAfter, || {
+                self.lineage.check(
+                    &self.store,
+                    &mut reads,
+                    physical.controller_stage()?,
+                    &mut observed,
+                )
+            })?;
+            // Snapshot commitment is bounded DATA work. The closed finisher
+            // performs the full post-validation check before release work.
+            let snapshot = trace.measure(ServingStep::Snapshot, || {
+                self.lineage.snapshot_data(&observed)
+            })?;
+            reads.finish(physical.controller_stage()?)?;
+            // The enclosing active owner remains closed until the actual
+            // physical/peer release succeeds too. A later failure refuses its
+            // retained connection; no new request can enter during release.
+            trace.measure(ServingStep::Release, || physical.finish_app_known())?;
+            Ok(ServingObservation { binding, snapshot })
+        })();
+        if result.is_ok() {
+            self.valid = true;
+        } else {
+            self.storage.refuse();
+            self.counter.refuse();
+        }
+        result
+    }
+}
+
+impl ActiveControllerStorageContinuity {
+    /// The Shell's actual role channel remains borrowed alongside the SAME
+    /// physical file/provider scope. Retained App liveness is retained here;
+    /// it is never interpreted as a fresh App role or Shell database identity.
+    pub(in crate::security_epoch) fn serve_shell_current(
+        &mut self,
+        mut stage: EnrolledRoleStage<'_>,
+        peer: &mut crate::security_epoch::native_enrollment::ControllerServingPeer,
+    ) -> Result<ServingObservation> {
+        ensure!(self.valid, "active_controller_storage_refused");
+        self.valid = false;
+        let result = (|| {
+            // Meet the already-admitted token ceiling before the first
+            // immutable Shell Current statement is constructed.
+            let mut reads = self.counter.request(
+                &mut stage,
+                &self.policy,
+                &self.store,
+                NativeRole::EpochController,
+            )?;
+            let pending = self.storage.begin_pending_current_controller()?;
+            let rendezvous = peer.prepare_current(&mut stage)?;
+            let mut physical = pending.acquire(stage)?;
+            let mut shell = rendezvous.accept_current(physical.controller_stage()?)?;
+            let binding = shell.request_binding().clone();
+            let mut observed =
+                self.lineage
+                    .read(&self.store, &mut reads, physical.controller_stage()?)?;
+            // The checked stage getter performs the complete physical
+            // post-read check once, immediately before observation use.
+            self.lineage.check(
+                &self.store,
+                &mut reads,
+                physical.controller_stage()?,
+                &mut observed,
+            )?;
+            shell.check(physical.controller_stage()?)?;
+            shell.announce_known(physical.controller_stage()?)?;
+            shell.await_consumed(physical.controller_stage()?)?;
+            // The wait cannot replace or repair the old observation's budget.
+            self.lineage.check(
+                &self.store,
+                &mut reads,
+                physical.controller_stage()?,
+                &mut observed,
+            )?;
+            observed = self
+                .lineage
+                .read(&self.store, &mut reads, physical.controller_stage()?)?;
+            self.lineage.check(
+                &self.store,
+                &mut reads,
+                physical.controller_stage()?,
+                &mut observed,
+            )?;
+            physical.check()?;
+            shell.check(physical.controller_stage()?)?;
+            shell.release(physical.controller_stage()?)?;
+            shell.finish_checked(physical.controller_stage()?)?;
+            let snapshot = self.lineage.snapshot_data(&observed)?;
+            reads.finish(physical.controller_stage()?)?;
+            physical.finish_controller_known()?;
+            Ok(ServingObservation { binding, snapshot })
+        })();
+        if result.is_ok() {
+            self.valid = true;
+        } else {
+            self.storage.refuse();
+            self.counter.refuse();
+            peer.refuse();
+        }
+        result
+    }
+}
 
 /// Historical result DATA, returned only after the actual consumer ACK,
 /// provider reobservation and physical/peer release have all succeeded.
@@ -49,14 +562,21 @@ pub(in crate::security_epoch) enum ServingDisposition {
     Refused,
 }
 
+// Initial creation image DATA belongs only to the fixed initial Runtime birth.
+// An ordinary Current request has no initial seed, including after restore.
+// This supplies no physical, role, keeper or database permission.
+enum AppRuntimeImage {
+    Existing,
+    Initial(Box<super::seed_core::OriginalSeedCore>),
+}
+
 pub(crate) struct CurrentAppServingPhase<'storage> {
     physical: super::CurrentAppStoragePhase<'storage>,
     reads: super::authenticated_reads::CounterRequest<'storage>,
-    observed: super::EpochObservation,
+    observed: ActiveObservation,
     selection: EpochStore,
-    completion: Request,
-    activation: Digest,
-    seed: super::seed_core::OriginalSeedCore,
+    lineage: &'storage ActiveLineage,
+    image: AppRuntimeImage,
     policy: InitialBootstrapPolicy,
     continuation: &'storage mut bool,
     disposition: ServingDisposition,
@@ -432,8 +952,7 @@ pub(crate) struct AppStorageBootstrap {
 pub(crate) struct ActiveAppStorageContinuity {
     storage: super::AppInitialStorageContinuity,
     counter: super::authenticated_reads::CounterConnectionSlot,
-    completion: Request,
-    activation: Digest,
+    lineage: ActiveLineage,
     policy: InitialBootstrapPolicy,
     store: EpochStore,
     valid: bool,
@@ -442,8 +961,7 @@ pub(crate) struct ActiveAppStorageContinuity {
 pub(crate) struct ActiveControllerStorageContinuity {
     storage: InitialStorageContinuity,
     counter: super::authenticated_reads::CounterConnectionSlot,
-    completion: Request,
-    activation: Digest,
+    lineage: ActiveLineage,
     policy: InitialBootstrapPolicy,
     store: EpochStore,
     valid: bool,
@@ -589,8 +1107,7 @@ impl AppStorageBootstrap {
             } => Ok(ActiveAppStorageContinuity {
                 storage,
                 counter: super::authenticated_reads::CounterConnectionSlot::new(),
-                completion,
-                activation,
+                lineage: ActiveLineage::initial(completion, activation),
                 policy,
                 store,
                 valid: true,
@@ -849,8 +1366,7 @@ pub(super) fn activate_controller(
             ControllerActivationOutcome::Active(Box::new(ActiveControllerStorageContinuity {
                 storage,
                 counter,
-                completion,
-                activation,
+                lineage: ActiveLineage::initial(completion, activation),
                 policy: policy.clone(),
                 store: selection.clone(),
                 valid: true,
@@ -913,6 +1429,7 @@ const _: () = {
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <FencedRestoreContinuation<'static, 'static, 'static> as Ambiguous<_>>::check;
             let _ = <RestoreWriteLoan<'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <ActiveObservation as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);

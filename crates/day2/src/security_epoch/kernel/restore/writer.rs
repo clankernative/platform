@@ -18,6 +18,12 @@ pub(in crate::security_epoch) struct State {
 }
 
 impl State {
+    /// Complete eight-record predecessor commitment DATA only. It cannot
+    /// admit a writer, reconstruct a clock or authorize another attempt.
+    pub(in crate::security_epoch) fn commitment_data(&self) -> Result<Digest> {
+        self.commitment()
+    }
+
     fn commitment(&self) -> Result<Digest> {
         Digest::of(&(
             "day2-restored-writer-before-v1",
@@ -121,6 +127,57 @@ mod report_json {
     }
 }
 
+/// Expected historical bindings at the receiving App's own read boundary.
+/// This contains no native owner or fresh authorization.
+pub(in crate::security_epoch) struct PeerBinding<'data> {
+    pub report: &'data completion::TargetReport,
+    pub holder: &'data Holder,
+    pub operation: &'data Digest,
+    pub before: &'data Digest,
+    pub consumed: &'data Digest,
+    pub approval_request: &'data Digest,
+    pub intent: &'data Digest,
+    pub full_archive: &'data Digest,
+    pub target: &'data crate::security_epoch::restore_approval::TargetBinding,
+}
+
+impl Receipt {
+    pub(in crate::security_epoch) fn require_peer_data(
+        &self,
+        selected: &EpochStore,
+        binding: &PeerBinding<'_>,
+        snapshot: &super::super::Snapshot,
+    ) -> Result<()> {
+        let root = snapshot
+            .root
+            .as_ref()
+            .context("restore_peer_writer_root_missing")?;
+        let sentinel = snapshot
+            .sentinel
+            .as_ref()
+            .context("restore_peer_writer_sentinel_missing")?;
+        root.value.bootstrap.validate_selection(selected)?;
+        sentinel.value.bootstrap.validate_selection(selected)?;
+        binding.holder.validate()?;
+        ensure!(
+            &self.restoration.report == binding.report
+                && &self.restoration.holder == binding.holder
+                && &self.restoration.operation == binding.operation
+                && &self.restoration.before == binding.before
+                && &self.restoration.consumed == binding.consumed
+                && root.value.bootstrap == sentinel.value.bootstrap
+                && root.value.epoch.value() == 2
+                && sentinel.value.initial_epoch.value() == 1
+                && matches!(&root.value.phase, Phase::RestoredFirstHolder { restoration } if restoration.as_ref() == &self.restoration)
+                && sentinel.value.phase == root.value.phase
+                && self.after_root == Digest::of(&root.value)?
+                && self.after_sentinel == Digest::of(&sentinel.value)?,
+            "restore_peer_writer_binding_changed"
+        );
+        Ok(())
+    }
+}
+
 pub(in crate::security_epoch) struct Plan {
     pub before: State,
     pub root: AuthorityRecord,
@@ -129,6 +186,23 @@ pub(in crate::security_epoch) struct Plan {
 }
 
 impl Request {
+    /// Historical metadata equality only; this never checks or renews a
+    /// native original or makes a parsed approval into permission.
+    pub(in crate::security_epoch) fn require_peer_data(
+        &self,
+        binding: &PeerBinding<'_>,
+    ) -> Result<()> {
+        ensure!(
+            self.authorization.grant.approval.commitment()? == *binding.approval_request
+                && self.authorization.grant.intent == *binding.intent
+                && self.authorization.grant.approval.full_archive_digest == *binding.full_archive
+                && self.authorization.target == *binding.target
+                && self.input.holder == *binding.holder,
+            "restore_peer_writer_request_binding_changed"
+        );
+        Ok(())
+    }
+
     pub(in crate::security_epoch) fn reservation_data(&self) -> &approval_use::Plan {
         &self.input.reservation
     }
@@ -291,6 +365,51 @@ impl Request {
 }
 
 impl Plan {
+    /// Equality DATA for the narrow interval in which THIS writer CAS may
+    /// already have applied. A single coherent snapshot must be either the
+    /// exact captured predecessor or the exact planned root/sentinel pair.
+    /// This never authorizes a send, reconstructs Known, or admits a reader
+    /// for serving. The native send loan separately retains all ten records,
+    /// the consumed grant, actual peer/target and the unchanged original.
+    pub(in crate::security_epoch) fn require_may_snapshot_data(
+        &self,
+        snapshot: &crate::security_epoch::kernel::Snapshot,
+    ) -> Result<()> {
+        let before = &self.before.settled.snapshot;
+        if snapshot == before {
+            return Ok(());
+        }
+        let root = snapshot
+            .root
+            .as_ref()
+            .context("restore_writer_may_root_missing")?;
+        let sentinel = snapshot
+            .sentinel
+            .as_ref()
+            .context("restore_writer_may_sentinel_missing")?;
+        let old_root = before
+            .root
+            .as_ref()
+            .context("restore_writer_may_before_root_missing")?;
+        let old_sentinel = before
+            .sentinel
+            .as_ref()
+            .context("restore_writer_may_before_sentinel_missing")?;
+        ensure!(
+            snapshot.create == before.create
+                && snapshot.activate == before.activate
+                && root.value == self.root
+                && sentinel.value == self.sentinel
+                && root.version == sentinel.version
+                && root.version.is_strictly_after_data(&old_root.version)?
+                && sentinel
+                    .version
+                    .is_strictly_after_data(&old_sentinel.version)?,
+            "restore_writer_may_snapshot_changed"
+        );
+        Ok(())
+    }
+
     pub(in crate::security_epoch) fn commitment(&self) -> Result<Digest> {
         Digest::of(&(
             "day2-restored-writer-plan-v1",
@@ -359,16 +478,19 @@ pub(in crate::security_epoch) fn reconcile(
             if root.value == plan.root
                 && sentinel.value == plan.sentinel
                 && writer.value == plan.receipt
-                && root.version != plan.before.settled.snapshot.root.as_ref().unwrap().version
-                && sentinel.version
-                    != plan
+                && root.version.is_strictly_after_data(
+                    &plan.before.settled.snapshot.root.as_ref().unwrap().version,
+                )?
+                && sentinel.version.is_strictly_after_data(
+                    &plan
                         .before
                         .settled
                         .snapshot
                         .sentinel
                         .as_ref()
                         .unwrap()
-                        .version
+                        .version,
+                )?
                 && root.version == sentinel.version
                 && root.version == writer.version =>
         {

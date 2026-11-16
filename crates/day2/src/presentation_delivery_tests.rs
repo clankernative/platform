@@ -163,7 +163,7 @@ async fn http_delivery_rechecks_revocation_after_render() -> anyhow::Result<()> 
         let (entered, paused) = mpsc::channel();
         let (resume, resumed) = mpsc::channel();
         let server = LocalServer::bind_listener(
-            runtime.clone(),
+            Arc::new(runtime.clone()),
             listener,
             authority,
             origin.clone(),

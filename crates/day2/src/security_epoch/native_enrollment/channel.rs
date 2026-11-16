@@ -6,6 +6,7 @@ use super::handshake::{
 };
 use super::issuer_costs::HashCosts;
 use super::peer_idle::{IdleRequest, PeerChannel};
+use super::{RestoredCurrentPeerPort, RestoredPeerSource, RestoredPeerTail};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     process::MessageProcess,
@@ -24,11 +25,11 @@ use std::{fs::File, io::IoSliceMut, marker::PhantomData, rc::Rc};
 mod serving;
 mod storage;
 pub(super) use serving::{ServingListener, ServingSender};
-pub(super) use storage::{StorageListener, StorageSender};
+pub(super) use storage::{StorageListener, StorageSender, require_connected};
 
 pub(super) struct Channel {
-    socket: File,
-    refused: bool,
+    socket: Rc<File>,
+    refused: Rc<std::cell::Cell<bool>>,
     // None only for the private issuer birth socket and kernel DATA fixtures.
     // Every production enrollment/storage/serving channel installs a transcript.
     transcript: Option<Transcript>,
@@ -39,6 +40,84 @@ pub(super) struct Channel {
 }
 
 impl Channel {
+    /// The sole fixed restore input owns the real descriptor/cursor. No caller
+    /// can supply a descriptor, transcript DATA or a replacement refusal gate.
+    /// The outer native transfer loan stays live until the complete core exists.
+    pub(super) fn take_restored(
+        input: &mut RestoredCurrentPeerPort<'_>,
+        stage: &mut super::EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let requested: Result<Self> = (|| {
+            use anyhow::Context;
+            ensure!(
+                !input.completed,
+                "restore_current_transfer_already_consumed"
+            );
+            stage.require_current_role()?;
+            let same = input
+                .same
+                .as_mut()
+                .context("restore_current_owner_missing")?;
+            let original = input
+                .original
+                .as_mut()
+                .context("restore_current_original_missing")?;
+            same.meet_current_read_view(stage, original)?;
+            original.exchange_current_views(acquisition)?;
+            same.meet_current_read_view(stage, acquisition)?;
+            let local = stage.storage()?.storage_statement()?;
+            ensure!(
+                input.local.same_enrollment(&local),
+                "restore_current_local_owner_changed"
+            );
+            let actor = match local.stage.data.role {
+                super::NativeRole::AppHost => Actor::App,
+                super::NativeRole::EpochController => Actor::Controller,
+                super::NativeRole::SecurityShell => anyhow::bail!("restore_current_shell_refused"),
+            };
+            input
+                .transcript
+                .as_ref()
+                .context("restore_current_cursor_missing")?
+                .require_installed_current_data(actor)?;
+            let mut channel = Self {
+                socket: input
+                    .socket
+                    .take()
+                    .context("restore_current_socket_already_spent")?,
+                refused: Rc::clone(&input.channel_refusal),
+                transcript: Some(
+                    input
+                        .transcript
+                        .take()
+                        .context("restore_current_cursor_already_spent")?,
+                ),
+                unprivileged_sender: None,
+                local: PhantomData,
+            };
+            channel.check_storage_open(stage, acquisition)?;
+            Ok(channel)
+        })();
+        let checked = stage
+            .storage()
+            .and_then(|mut storage| storage.check_storage_acquisition(acquisition));
+        if requested.is_err() || checked.is_err() {
+            input.channel_refusal.set(true);
+            if let Some(original) = &input.native_refusal {
+                original.refuse();
+            }
+            if let Some(tail) = &mut input.tail {
+                tail.refuse();
+            }
+            acquisition.refuse();
+            stage.refuse_serving();
+        }
+        let channel = requested?;
+        checked?;
+        Ok(channel)
+    }
+
     fn receive_unprivileged_sender(
         &mut self,
         packet: net::ReceivedPidfdPacket,
@@ -47,7 +126,7 @@ impl Channel {
     ) -> Result<MessageProcess> {
         let costs = HashCosts::disabled();
         let result = (|| {
-            ensure!(!self.refused, "native_enrollment_channel_refused");
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
             if let Some(admitted) = &mut self.unprivileged_sender {
                 ensure!(
                     admitted.data().code == *expected_code,
@@ -80,6 +159,31 @@ impl Channel {
         }
     }
 
+    /// Closed post-Hello meet for the genuine App-confirmation server path.
+    /// This clips an existing request; it cannot capture a new clock, change
+    /// origin/domain, rebuild a transcript or bypass the exact cursor checks.
+    pub(super) fn narrow_restore_app_confirmation(
+        &mut self,
+        acquisition: &mut NativeAcquisition,
+        ceiling: std::time::Duration,
+    ) -> Result<()> {
+        let requested = (|| {
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
+            acquisition.remaining()?;
+            *acquisition = acquisition.narrow(5, ceiling)?;
+            self.transcript
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("native_handshake_transcript_required"))?
+                .narrow_restore_app_confirmation(Self::observation(acquisition))?;
+            acquisition.remaining().map(|_| ())
+        })();
+        if requested.is_err() {
+            self.refuse();
+            acquisition.refuse();
+        }
+        requested
+    }
+
     fn begin_packet(
         &mut self,
         direction: Direction,
@@ -87,6 +191,11 @@ impl Channel {
         acquisition: &NativeAcquisition,
     ) -> Result<()> {
         if let Some(transcript) = &mut self.transcript {
+            if direction == Direction::Send {
+                transcript.select_frame(
+                    frame.ok_or_else(|| anyhow::anyhow!("native_handshake_packet_kind"))?,
+                )?;
+            }
             if direction == Direction::Send && transcript.next().map(|(_, next)| next) != frame {
                 transcript.refuse();
                 anyhow::bail!("native_handshake_send_order");
@@ -132,7 +241,7 @@ impl Channel {
     }
 
     fn refuse(&mut self) {
-        self.refused = true;
+        self.refused.set(true);
         if let Some(transcript) = &mut self.transcript {
             transcript.refuse();
         }
@@ -148,7 +257,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "native_handshake_channel_refused");
+            ensure!(!self.refused.get(), "native_handshake_channel_refused");
             self.transcript
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("native_handshake_transcript_required"))?
@@ -171,7 +280,7 @@ impl Channel {
         sequence: u64,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "native_enrollment_channel_refused");
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
             let bytes = IdleRequest::encode(channel, initial, sequence)?;
             idle_open(&self.socket)?;
             ensure!(
@@ -202,7 +311,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "native_enrollment_channel_refused");
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
             let mut bytes = [0; super::peer_idle::MAX_BYTES];
             loop {
                 acquisition.remaining()?;
@@ -231,6 +340,58 @@ impl Channel {
         result
     }
 
+    /// Join the actual retained channel/gate to the historical owner. Neither
+    /// descriptor numbers nor equal statement DATA substitute for Rc identity.
+    pub(super) fn check_restored_source(
+        &mut self,
+        tail: &mut RestoredPeerTail<'_>,
+        local: &super::storage_peer_wire::StageStatement,
+        remote: &super::storage_peer_wire::StageStatement,
+        binding: &Digest,
+        stage: &mut super::EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let source = RestoredPeerSource {
+            socket: &self.socket,
+            refusal: &self.refused,
+            local,
+            remote,
+            binding,
+        };
+        let requested = tail.check_source(&source);
+        let checked = self.check_storage_open(stage, acquisition);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            tail.refuse();
+            acquisition.refuse();
+            stage.refuse_serving();
+        }
+        requested?;
+        checked
+    }
+
+    /// Wait only for readiness bytes under the actual saved request. This
+    /// neither consumes a packet nor authenticates a grant; receive_storage
+    /// performs its own sender/signature checks after the wait.
+    pub(super) fn wait_storage_pending(
+        &mut self,
+        stage: &mut super::EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check_storage_open(stage, acquisition)?;
+            wait(&self.socket, PollFlags::IN, acquisition)
+        })();
+        let checked = self.check_storage_open(stage, acquisition);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            acquisition.refuse();
+            stage.refuse_serving();
+        }
+        requested?;
+        checked
+    }
+
     pub(super) fn connect(acquisition: &mut NativeAcquisition) -> Result<Self> {
         acquisition.remaining()?;
         let socket = net::socket_with(
@@ -246,8 +407,8 @@ impl Channel {
         )?;
         acquisition.remaining()?;
         Ok(Self {
-            socket: File::from(socket),
-            refused: false,
+            socket: Rc::new(File::from(socket)),
+            refused: Rc::new(std::cell::Cell::new(false)),
             unprivileged_sender: None,
             transcript: Some(Transcript::new(Protocol::Enrollment, Actor::Client)),
             local: PhantomData,
@@ -268,8 +429,8 @@ impl Channel {
         acquisition.remaining()?;
         Ok((
             Self {
-                socket: File::from(parent),
-                refused: false,
+                socket: Rc::new(File::from(parent)),
+                refused: Rc::new(std::cell::Cell::new(false)),
                 unprivileged_sender: None,
                 transcript: None,
                 local: PhantomData,
@@ -291,8 +452,8 @@ impl Channel {
         configure(&fd)?;
         acquisition.remaining()?;
         Ok(Self {
-            socket: File::from(fd),
-            refused: false,
+            socket: Rc::new(File::from(fd)),
+            refused: Rc::new(std::cell::Cell::new(false)),
             unprivileged_sender: None,
             transcript: None,
             local: PhantomData,
@@ -305,7 +466,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(!self.refused, "native_enrollment_channel_refused");
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
             let bytes = serde_json::to_vec(packet)?;
             ensure!(
                 !bytes.is_empty() && bytes.len() <= MAX_PACKET,
@@ -374,7 +535,13 @@ impl Channel {
                 ExpectedCode::Role(policy) => {
                     let role = match &packet {
                         Packet::StageHello { role, .. } => *role,
-                        Packet::FreezeHello { .. } => super::NativeRole::EpochController,
+                        Packet::FreezeHello { .. }
+                        | Packet::RestorePrepareHello { .. }
+                        | Packet::RestoreFinishHello { .. }
+                        | Packet::RestoreRoleHello { .. } => super::NativeRole::EpochController,
+                        Packet::RestoreAppHello { .. } | Packet::RestoreAppConfirmHello { .. } => {
+                            super::NativeRole::AppHost
+                        }
                         _ => anyhow::bail!("native_enrollment_role_order"),
                     };
                     policy.code(role)
@@ -419,7 +586,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<(Packet, net::ReceivedPidfdPacket)> {
         let result = (|| {
-            ensure!(!self.refused, "native_enrollment_channel_refused");
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
             let mut bytes = [0_u8; MAX_PACKET];
             acquisition.remaining()?;
             self.begin_packet(Direction::Receive, None, acquisition)?;
@@ -544,8 +711,8 @@ impl Listener {
             acquisition.remaining()?;
             return Ok((
                 Channel {
-                    socket: File::from(socket),
-                    refused: false,
+                    socket: Rc::new(File::from(socket)),
+                    refused: Rc::new(std::cell::Cell::new(false)),
                     unprivileged_sender: None,
                     transcript: Some(Transcript::new(Protocol::Enrollment, Actor::Issuer)),
                     local: PhantomData,
@@ -558,14 +725,18 @@ impl Listener {
 
 use std::os::fd::AsFd;
 
-fn configure(fd: &impl AsFd) -> Result<()> {
+pub(super) fn configure(fd: &impl AsFd) -> Result<()> {
     net::sockopt::set_socket_passcred(fd, true)?;
     // Probe the real kernel. No kernel-version assumption or weaker fallback.
     net::sockopt::set_socket_passpidfd(fd, true)?;
     Ok(())
 }
 
-fn wait(fd: &File, events: PollFlags, acquisition: &mut NativeAcquisition) -> Result<()> {
+pub(super) fn wait(
+    fd: &File,
+    events: PollFlags,
+    acquisition: &mut NativeAcquisition,
+) -> Result<()> {
     use super::handshake::{PollObservation, poll_decision};
     loop {
         let timeout = rustix::event::Timespec::try_from(acquisition.remaining()?)?;
@@ -601,13 +772,77 @@ mod tests {
         (
             left,
             Channel {
-                socket: File::from(right),
-                refused: false,
+                socket: Rc::new(File::from(right)),
+                refused: Rc::new(std::cell::Cell::new(false)),
                 unprivileged_sender: None,
                 transcript: None,
                 local: PhantomData,
             },
         )
+    }
+
+    #[test]
+    fn retained_socket_is_the_same_descriptor_and_refusal_survives_all_references() -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let mut acquisition = NativeAcquisition::begin(5)?;
+        let (mut left, right) = idle_channels(&mut acquisition);
+        let socket = Rc::clone(&left.socket);
+        let refusal = Rc::clone(&left.refused);
+        let descriptor = left.socket.as_raw_fd();
+        assert_eq!(socket.as_raw_fd(), descriptor);
+        assert!(Rc::ptr_eq(&socket, &left.socket));
+        left.refuse();
+        assert!(refusal.get());
+        // Kernel socket DATA only, already refused. This is no native role,
+        // admitted peer, storage owner or production continuation factory.
+        let mut refused_alias = Channel {
+            socket: Rc::clone(&socket),
+            refused: Rc::clone(&refusal),
+            transcript: None,
+            unprivileged_sender: None,
+            local: PhantomData,
+        };
+        assert!(refused_alias.storage_pending().is_err());
+        drop(left);
+        assert_eq!(refused_alias.socket.as_raw_fd(), descriptor);
+        assert!(refused_alias.storage_pending().is_err());
+        drop(refused_alias);
+        assert!(refusal.get());
+        let mut poll = [PollFd::new(
+            right.socket.as_ref(),
+            PollFlags::IN | PollFlags::RDHUP,
+        )];
+        rustix::event::poll(
+            &mut poll,
+            Some(&rustix::time::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
+        )?;
+        assert!(
+            !poll[0]
+                .revents()
+                .intersects(PollFlags::HUP | PollFlags::RDHUP)
+        );
+        drop(socket);
+        let mut poll = [PollFd::new(
+            right.socket.as_ref(),
+            PollFlags::IN | PollFlags::RDHUP,
+        )];
+        rustix::event::poll(
+            &mut poll,
+            Some(&rustix::time::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
+        )?;
+        assert!(
+            poll[0]
+                .revents()
+                .intersects(PollFlags::HUP | PollFlags::RDHUP)
+        );
+        assert!(refusal.get());
+        Ok(())
     }
 
     fn sender_packet(
@@ -676,7 +911,7 @@ mod tests {
         assert!(
             matches!(received, Err(ref error) if error.to_string() == "native_enrollment_packet_actor_changed")
         );
-        assert!(channel.refused);
+        assert!(channel.refused.get());
         assert!(request.remaining().is_err());
         // A valid packet from the original process and a fresh interval cannot
         // revive this SAME refused channel after the caught transfer failure.
@@ -760,7 +995,7 @@ mod tests {
         let initial = Digest::new(b"retained peer data");
         assert!(left.notify_idle(PeerChannel::Storage, &initial, 1).is_err());
         assert!(left.notify_idle(PeerChannel::Storage, &initial, 2).is_err());
-        assert!(left.refused);
+        assert!(left.refused.get());
     }
 
     struct ChildOwner(std::process::Child);

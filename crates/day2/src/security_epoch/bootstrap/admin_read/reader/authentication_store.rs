@@ -11,11 +11,15 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 
 mod producer;
-pub(crate) use producer::FencedReadUnit;
 pub(in crate::security_epoch) use producer::{
-    CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation,
-    RestoreWriteLoan,
+    AuthenticatedRestoreExecution, CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan,
+    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
+    RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
+    RestoreWriterActivationLoan, RestoreWriterConfirmation, RestoreWriterExchangeContext,
+    RestoreWriterReleaseLoan, TargetSettlementSourceLoan, WriterConfirmationSourceLoan,
+    WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
+pub(crate) use producer::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
 
 // SQLite closes first on unwinding; the unfinished file guard then poisons the
 // same shared original before the actual reader/peer/counter owner is released.

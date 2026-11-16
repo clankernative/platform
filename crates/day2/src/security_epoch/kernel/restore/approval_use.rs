@@ -22,6 +22,23 @@ pub(in crate::security_epoch) struct UseRecord {
 }
 
 impl UseRecord {
+    /// Pure binding of the receiving read to its signed approval/target and
+    /// immutable consumed-use history. This grants no live approval use.
+    pub(in crate::security_epoch) fn require_peer_data(
+        &self,
+        binding: &super::writer::PeerBinding<'_>,
+    ) -> Result<()> {
+        self.approval.validate()?;
+        ensure!(
+            self.approval.commitment()? == *binding.approval_request
+                && self.approval.full_archive_digest == *binding.full_archive
+                && self.approval.target == *binding.target
+                && self.operation == *binding.operation,
+            "restore_peer_consumed_approval_changed"
+        );
+        Ok(())
+    }
+
     pub(in crate::security_epoch) fn grant_id_data(&self) -> &Digest {
         &self.approval.grant_id
     }
@@ -34,16 +51,28 @@ impl UseRecord {
                 && self.approval.target.authority == selected.authority_key()?,
             "restore_use_selection_changed"
         );
-        Digest::of(&(
-            "day2-restore-approval-use-key-v1",
-            selected.authority_key()?,
-            &self.approval.grant_id,
-        ))
+        use_key_data(selected, &self.approval.grant_id)
     }
+}
+
+/// Exact historical selector DATA, never grant consumption or permission.
+pub(in crate::security_epoch) fn use_key_data(
+    selected: &EpochStore,
+    grant: &Digest,
+) -> Result<Digest> {
+    selected.validate()?;
+    Digest::of(&(
+        "day2-restore-approval-use-key-v1",
+        selected.authority_key()?,
+        grant,
+    ))
 }
 
 /// All five writes and every read-version/absence condition are one provider
 /// transaction. The existing four-record plan is revalidated, not reimplemented.
+// Copying preserves exact historical DATA; actual native owners and their
+// one-shot dispatch/original/postchecks remain separate and non-cloneable.
+#[derive(Clone)]
 pub(in crate::security_epoch) struct Plan {
     pub reservation: super::Plan,
     pub approval_use: UseRecord,
@@ -60,6 +89,35 @@ pub(in crate::security_epoch) struct Selectors {
 }
 
 impl Plan {
+    /// Exact input DATA for the retained native writer loan. This does not
+    /// authenticate an archive, namespace, approval or current owner. The loan
+    /// must separately keep its actual same-original pre/post checks live.
+    pub(in crate::security_epoch) fn require_staging_input_data(
+        &self,
+        selected: &EpochStore,
+        intent: &Intent,
+        namespace: &day2_capabilities::credentials::Namespace,
+    ) -> Result<()> {
+        self.selectors(selected)?;
+        namespace.validate()?;
+        let request = &self.reservation.receipt.request;
+        ensure!(
+            request.intent == *intent
+                && namespace.installation == selected.scope.installation
+                && namespace.environment == selected.scope.environment
+                && namespace.app == selected.scope.app
+                && namespace.binding_generation
+                    == request
+                        .authorization
+                        .grant
+                        .approval
+                        .target
+                        .binding_generation,
+            "restore_staging_input_changed"
+        );
+        Ok(())
+    }
+
     /// Request DATA to join the immutable signed publication to this exact
     /// reservation. Neither side supplies signature verification or authority.
     pub(in crate::security_epoch) fn require_publication_data(

@@ -496,8 +496,7 @@ fn online_backup_cli_snapshots_a_serving_instance_into_a_verified_bundle() -> Re
     };
     // Snapshot refusal precedes output creation, without taking the serving
     // lease or changing business state. This is the scheduled-backup path.
-    let operation =
-        day2::deployment::operation::OperationLease::for_instance(runtime.instance_path(), "app")?;
+    let operation = day2::deployment::OperationLease::for_instance(runtime.instance_path(), "app")?;
     let blocked_path = scratch.path().join("blocked-by-release");
     let blocked = run(runtime.instance_path(), "app", &blocked_path)?;
     assert!(!blocked.status.success() && blocked.stdout.is_empty());

@@ -508,7 +508,7 @@ impl wire::Port for ReservationPort {
                 } else {
                     serde_json::to_vec(&json!({
                         "writeResults":vec![json!({"updateTime":version(3)});5],
-                        "commitTime":version(3)
+                        "commitTime":version(if self.fault == 28 {4} else {3})
                     }))?
                 }
             } else {
@@ -593,6 +593,173 @@ fn reservation_port(
         domain: Digest::new(b"controlled-reservation-clock"),
         read_decodings: 0,
     })
+}
+
+#[test]
+fn known_reservation_confirmation_carries_actual_ack_and_every_record_version() -> Result<()> {
+    let (selection, before) = initial();
+    let (current, plan) = approval_use::plan(&selection, &before, 62)?;
+    let reply = initial_reply(&selection, &plan)?;
+    let expected = publication(&selection, &plan)?;
+    let names = names(&selection, &plan)?;
+    let db = Connection::open_in_memory()?;
+    seed(&db, &reply)?;
+    // A later actual commitTime than the five write versions distinguishes
+    // retained acknowledgement DATA from a time invented from the readback.
+    let mut port = reservation_port(db, &reply, names.clone(), 28)?;
+    let known = wire::RestoreNames::new(&selection, &plan, &expected)?
+        .transaction(&serde_json::to_vec(&reply)?)?
+        .commit_and_readback(
+            &mut port,
+            reservation_budget()?,
+            &selection,
+            &plan,
+            &current,
+            1000,
+        )?;
+    assert_eq!(port.calls, ["commit", "batchGet"]);
+    assert!(!port.refused);
+    let (observed, confirmation) = known.into_data()?;
+    assert_eq!(&confirmation.grant_id, plan.approval_use.grant_id_data());
+    assert_eq!(confirmation.committed_at, version(4));
+    assert_eq!(
+        confirmation.written_versions,
+        std::array::from_fn(|_| version(3))
+    );
+    assert_eq!(confirmation.records, observed.commitment_data()?);
+    for name in &names {
+        let original: String =
+            port.db
+                .query_row("SELECT version FROM records WHERE name=?1", [name], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(
+            port.db.execute(
+                "UPDATE records SET version=?1 WHERE name=?2",
+                rusqlite::params![String::from(version(4)), name],
+            )?,
+            1
+        );
+        // Identical values with just ONE changed version must change the
+        // complete transcript, including both immutable histories and the
+        // signed approval publication that the five-write CAS did not write.
+        let changed = wire::RestoreNames::new(&selection, &plan, &expected)?
+            .strong(&read_back(&port.db, &names)?)?;
+        assert_ne!(confirmation.records, changed.commitment_data()?, "{name}");
+        port.db.execute(
+            "UPDATE records SET version=?1 WHERE name=?2",
+            rusqlite::params![original, name],
+        )?;
+    }
+    let restored = wire::RestoreNames::new(&selection, &plan, &expected)?
+        .strong(&read_back(&port.db, &names)?)?;
+    assert_eq!(confirmation.records, restored.commitment_data()?);
+    Ok(())
+}
+
+#[test]
+fn same_peer_confirmation_uses_the_original_operation_and_exact_known_readback() -> Result<()> {
+    let (selection, before) = initial();
+    let (current, plan) = approval_use::plan(&selection, &before, 63)?;
+    let reply = initial_reply(&selection, &plan)?;
+    let expected = publication(&selection, &plan)?;
+    let names = names(&selection, &plan)?;
+    let db = Connection::open_in_memory()?;
+    seed(&db, &reply)?;
+    let mut port = reservation_port(db, &reply, names.clone(), 28)?;
+    let known = wire::RestoreNames::new(&selection, &plan, &expected)?
+        .transaction(&serde_json::to_vec(&reply)?)?
+        .commit_and_readback(
+            &mut port,
+            reservation_budget()?,
+            &selection,
+            &plan,
+            &current,
+            1000,
+        )?;
+    let (_, confirmation) = known.into_data()?;
+    let initial = &before.activate.as_ref().unwrap().value.request;
+    let intent = &plan.reservation.receipt.request.intent;
+    let stop = StopSelection::new(&selection, intent, initial, &before)?;
+    let selected = |confirmation: &wire::ReservationConfirmation| {
+        wire::RestoreConfirmationNames::new(
+            &selection,
+            initial,
+            &intent.operation,
+            &stop,
+            &before,
+            confirmation,
+        )
+    };
+    let peer = selected(&confirmation)?;
+    assert!(peer.matches_selection(&selection));
+    assert_eq!(
+        peer.body()?,
+        wire::RestoreNames::new(&selection, &plan, &expected)?.strong_body()?
+    );
+    assert!(peer.endpoint().ends_with("/documents:batchGet"));
+    let raw = read_back(&port.db, &names)?;
+    assert!(peer.confirm(&raw).is_ok());
+    assert!(
+        wire::RestoreConfirmationNames::new(
+            &selection,
+            initial,
+            &Digest::new(b"foreign-original"),
+            &stop,
+            &before,
+            &confirmation,
+        )
+        .is_err()
+    );
+    for cut in 0..12 {
+        let mut changed = confirmation.clone();
+        match cut {
+            0 => changed.grant_id = Digest::new(b"foreign-grant"),
+            1 => changed.committed_at = "2026-11-04T00:00:02Z".to_owned().try_into()?,
+            2..=6 => changed.written_versions[cut - 2] = version(4),
+            7 => changed.records = Digest::new(b"foreign-records"),
+            _ => {
+                let mut rows: Vec<Value> = crate::json::decode(&raw)?;
+                match cut {
+                    8 => {
+                        rows.remove(3);
+                    }
+                    9 => {
+                        rows.push(rows[0].clone());
+                    }
+                    10 => rows[0]["found"]["name"] = json!("foreign"),
+                    _ => rows[0]["readTime"] = json!(version(2)),
+                }
+                assert!(
+                    peer.confirm(&serde_json::to_vec(&rows)?).is_err(),
+                    "cut={cut}"
+                );
+                continue;
+            }
+        }
+        assert!(selected(&changed)?.confirm(&raw).is_err(), "cut={cut}");
+    }
+    for name in &names {
+        let original: String =
+            port.db
+                .query_row("SELECT version FROM records WHERE name=?1", [name], |row| {
+                    row.get(0)
+                })?;
+        port.db.execute(
+            "UPDATE records SET version=?1 WHERE name=?2",
+            rusqlite::params![String::from(version(4)), name],
+        )?;
+        assert!(
+            peer.confirm(&read_back(&port.db, &names)?).is_err(),
+            "{name}"
+        );
+        port.db.execute(
+            "UPDATE records SET version=?1 WHERE name=?2",
+            rusqlite::params![original, name],
+        )?;
+    }
+    assert!(peer.confirm(&read_back(&port.db, &names)?).is_ok());
+    Ok(())
 }
 
 #[test]

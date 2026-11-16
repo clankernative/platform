@@ -33,6 +33,13 @@ const PROFILE: &str = "/etc/day2-native/storage.json";
 const MAX_PROFILE: usize = 16_384;
 const PRIVATE_DIRECTORY: &str = "day2-native";
 
+/// Path DATA from the same fixed layout as native volume admission. This is
+/// not an admitted directory: the consuming restore must pin and validate the
+/// actual volume and private child before creating anything beneath it.
+pub(in crate::security_epoch) fn restore_staging_root_path_data() -> std::path::PathBuf {
+    std::path::Path::new(ROOT).join(PRIVATE_DIRECTORY)
+}
+
 struct ProviderReader<'role> {
     stage: EnrolledRoleStage<'role>,
     policy: InitialBootstrapPolicy,
@@ -1378,6 +1385,21 @@ impl CurrentVolumePhase<'_, '_> {
 }
 
 impl<'role> CurrentVolumePhase<'_, 'role> {
+    /// Permanently close the actual old volume before moving its OWNED stage
+    /// through the fixed native retirement. This is a native role borrow only:
+    /// no volume, file, epoch, writer or installed-ACK permission is returned.
+    pub(super) fn retire_restore_native(
+        mut self,
+    ) -> Result<crate::security_epoch::native_enrollment::RetainedControllerNative<'role>> {
+        let checked = self.resources.check_current(&mut self.reader);
+        self.resources.admission = VolumeAdmission::Refused;
+        if checked.is_err() {
+            self.reader.acquisition.refuse();
+        }
+        checked?;
+        self.reader.stage.retire_controller_native()
+    }
+
     /// Authentication DATA uses the actual owned stage without recursively
     /// acquiring file/P3 admission merely to borrow that stage. The facade must
     /// be the SAME state retained by this phase's provider, not a same-policy
@@ -1513,7 +1535,10 @@ fn mount(bytes: &[u8], expected: u64, major: u32, minor: u32) -> Result<()> {
     Ok(())
 }
 
-// Closed source interface for the retained physical root. No accepting constructor.
+/// The actual root remains owned from BEFORE the first staging effect through
+/// the consuming writer. No path, descriptor or native-stage getter is exposed.
+/// The fixed loan facade must bind its Fenced target internally and retain this
+/// with the SAME loan; this physical owner cannot authorize restore by itself.
 pub(in crate::security_epoch) struct RestoreCreatorRoot {
     volume: File,
     directory: File,
@@ -1522,20 +1547,149 @@ pub(in crate::security_epoch) struct RestoreCreatorRoot {
     original: NativeAcquisition,
 }
 
+#[cfg(target_os = "linux")]
+fn restore_pin_directory(parent: &File) -> Result<File> {
+    Ok(File::from(rustix::fs::openat(
+        parent,
+        PRIVATE_DIRECTORY,
+        rustix::fs::OFlags::PATH
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restore_pin_directory(_parent: &File) -> Result<File> {
+    anyhow::bail!("restore_writer_native_root_required")
+}
+
+#[cfg(target_os = "linux")]
+fn restore_private_directory(file: &File) -> Result<DirectoryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == rustix::process::geteuid().as_raw()
+            && metadata.mode() & 0o7777 == 0o700,
+        "restore_writer_root_profile"
+    );
+    directory_identity(file)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restore_private_directory(_file: &File) -> Result<DirectoryIdentity> {
+    anyhow::bail!("restore_writer_native_root_required")
+}
+
+impl CurrentVolumePhase<'_, '_> {
+    /// Called only by the fixed retained restore-loan facade. The input file is
+    /// checked against the actually retained native volume; it is never promoted
+    /// merely because it has a path, matching mode or caller-supplied identity.
+    pub(in crate::security_epoch::storage_authority) fn admit_restore_creator_root(
+        &mut self,
+        held_root: &File,
+        anchor: &DirectoryIdentity,
+    ) -> Result<RestoreCreatorRoot> {
+        let result = (|| {
+            self.reader
+                .stage
+                .require_purpose(StagePurpose::CurrentRole)?;
+            self.check_directory(held_root, anchor)?;
+            ensure!(
+                matches!(
+                    self.reader.authentication,
+                    ProviderAuthentication::ConnectionRequest
+                ),
+                "restore_writer_current_volume_required"
+            );
+            // Acquire and qualify on the actual current original. Meet the
+            // retained post-peer ceiling BEFORE any credential/provider IO.
+            let mut current = self
+                .reader
+                .stage
+                .narrow_io_acquisition(self.reader.store.max_lease_seconds)?;
+            current.exchange_current_views(&mut self.reader.acquisition)?;
+            let material = self.reader.acquire_material()?;
+            self.reader.authentication = ProviderAuthentication::Acquired(Box::new(material));
+            self.check_durability_profile()?;
+            self.check_directory(held_root, anchor)?;
+            let mut original = self
+                .reader
+                .stage
+                .narrow_io_acquisition(self.reader.store.max_lease_seconds)?;
+            original.exchange_current_views(&mut self.reader.acquisition)?;
+            let volume = self.resources.directory.try_clone()?;
+            let volume_identity = directory_identity(&volume)?;
+            let directory = restore_pin_directory(&volume)?;
+            let directory_identity = restore_private_directory(&directory)?;
+            ensure!(
+                directory_identity == *anchor
+                    && restore_private_directory(held_root)? == directory_identity,
+                "restore_writer_wrong_native_root"
+            );
+            let mut root = RestoreCreatorRoot {
+                volume,
+                directory,
+                volume_identity,
+                directory_identity,
+                original,
+            };
+            root.check(held_root)?;
+            // Physical admission does not retain provider-call authority for
+            // later local units. The SAME actual role/volume remains in the loan.
+            self.reader.authentication = ProviderAuthentication::ConnectionRequest;
+            self.check_directory(held_root, anchor)?;
+            Ok(root)
+        })();
+        if result.is_err() {
+            self.resources.admission = VolumeAdmission::Refused;
+            self.reader.acquisition.refuse();
+        }
+        result
+    }
+}
+
 impl RestoreCreatorRoot {
-    /// Keep the same signature as the actual physical implementation. Until
-    /// that implementation is installed, no supplied FD can pass this check.
-    pub(in crate::security_epoch) fn check(&mut self, _held_root: &File) -> Result<()> {
-        self.original.refuse();
-        anyhow::bail!("native_restore_creator_root_check_unavailable")
+    /// Check the staging State's held file as INPUT; no root/FD can escape.
+    /// The consuming Parent must also check its actual retained loan before
+    /// every effect. These physical checks alone are not current authority.
+    pub(in crate::security_epoch) fn check(&mut self, held_root: &File) -> Result<()> {
+        let result = (|| {
+            self.original.remaining()?;
+            ensure!(
+                directory_identity(&self.volume)? == self.volume_identity
+                    && restore_private_directory(&self.directory)? == self.directory_identity
+                    && restore_private_directory(held_root)? == self.directory_identity,
+                "restore_writer_root_changed"
+            );
+            let named = restore_pin_directory(&self.volume)?;
+            ensure!(
+                restore_private_directory(&named)? == self.directory_identity,
+                "restore_writer_named_root_changed"
+            );
+            self.original.remaining()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.original.refuse();
+        }
+        result
     }
 }
 
 impl Drop for RestoreCreatorRoot {
     fn drop(&mut self) {
+        // Losing this actual physical owner cannot leave its old action usable.
+        // It must move with the loan through the eventual writer handoff.
         self.original.refuse();
     }
 }
+
+#[cfg(test)]
+#[path = "native_volume/restore_writer/tests.rs"]
+mod restore_writer_tests;
 
 #[cfg(test)]
 mod tests {

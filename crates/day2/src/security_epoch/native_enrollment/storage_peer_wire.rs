@@ -341,7 +341,50 @@ pub(crate) enum StoragePeerRequest {
     AdminRead {
         binding: Digest,
         cohort: SqliteCohort,
+        action: AdminReadAction,
     },
+}
+
+/// Captured request DATA, distinct from authentication and authority. Restore
+/// execution carries BOTH the policy-selection intent and its original action
+/// operation; a plain administrative observation cannot be relabelled a stop.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum AdminReadAction {
+    Inspect { operation: Digest },
+    Restore { intent: Digest, operation: Digest },
+}
+
+impl AdminReadAction {
+    pub(crate) fn admin_operation_data(&self) -> &Digest {
+        match self {
+            Self::Inspect { operation } => operation,
+            Self::Restore { intent, .. } => intent,
+        }
+    }
+
+    pub(crate) fn restore_operation_data(&self) -> Result<&Digest> {
+        match self {
+            Self::Restore { operation, .. } => Ok(operation),
+            Self::Inspect { .. } => anyhow::bail!("native_restore_execution_action_required"),
+        }
+    }
+
+    pub(crate) fn require_admin_operation_data(&self, operation: &Digest) -> Result<()> {
+        ensure!(
+            self.admin_operation_data() == operation,
+            "native_admin_operation_changed"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn require_restore_operation_data(&self, operation: &Digest) -> Result<()> {
+        ensure!(
+            self.restore_operation_data()? == operation,
+            "native_restore_original_operation_changed"
+        );
+        Ok(())
+    }
 }
 
 /// Cross-process identity DATA for the actual retained SQLite cohort. File
@@ -413,7 +456,7 @@ impl SqliteCohort {
         Ok(data)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(in crate::security_epoch::native_enrollment) fn validate(&self) -> Result<()> {
         ensure!(
             self.main.1 > 0
                 && self.wal.1 > 0
@@ -466,6 +509,13 @@ impl StoragePeerRequest {
         cohort.validate()?;
         Ok(cohort)
     }
+
+    pub(crate) fn admin_action_data(&self) -> Result<&AdminReadAction> {
+        let Self::AdminRead { action, .. } = self else {
+            anyhow::bail!("storage_admin_purpose_required");
+        };
+        Ok(action)
+    }
 }
 
 /// Request selection DATA; actual peer authentication is still mandatory.
@@ -487,7 +537,7 @@ impl CurrentExpectation<'_> {
             Self::Serving => matches!(request, StoragePeerRequest::CurrentServing { .. }),
             Self::Exact(expected) => request == *expected,
             Self::AdminRead(binding) => {
-                matches!(request, StoragePeerRequest::AdminRead { binding: actual, cohort } if actual == *binding && cohort.validate().is_ok())
+                matches!(request, StoragePeerRequest::AdminRead { binding: actual, cohort, .. } if actual == *binding && cohort.validate().is_ok())
             }
         }
     }
@@ -599,6 +649,16 @@ pub(in crate::security_epoch::native_enrollment) enum Body {
         exchange: Digest,
         stopped: Digest,
     },
+    CurrentFence {
+        exchange: Digest,
+        stopped: Digest,
+        confirmation: Box<crate::security_epoch::firestore::ReservationConfirmation>,
+    },
+    CurrentFenceConfirmed {
+        exchange: Digest,
+        stopped: Digest,
+        confirmation: Digest,
+    },
     CurrentStopReleased {
         exchange: Digest,
         stopped: Digest,
@@ -628,7 +688,27 @@ impl Body {
     pub(super) fn frame(&self) -> super::handshake::Frame {
         use super::handshake::{Frame, Protocol, Step};
         let (protocol, step, sequence) = match self {
-            Self::Restore { payload } => (Protocol::RestoredStorage, payload.step(), None),
+            Self::Restore { payload } => (
+                match payload {
+                    super::restore_peer_wire::RestoreBody::RoleReady { .. } => {
+                        Protocol::RestoredRole
+                    }
+                    super::restore_peer_wire::RestoreBody::RoleDecision { .. } => {
+                        Protocol::RestoredDecision
+                    }
+                    super::restore_peer_wire::RestoreBody::AppPrepared { .. }
+                    | super::restore_peer_wire::RestoreBody::PreparedAccepted { .. } => {
+                        Protocol::RestoredConfirmation
+                    }
+                    super::restore_peer_wire::RestoreBody::AppInstalled { .. }
+                    | super::restore_peer_wire::RestoreBody::InstalledAccepted { .. } => {
+                        Protocol::RestoredInstallation
+                    }
+                    _ => Protocol::RestoredStorage,
+                },
+                payload.step(),
+                None,
+            ),
             Self::InitialReady { .. } => (Protocol::InitialStorage, Step::BeginReady, None),
             Self::Hello { .. } => (Protocol::InitialStorage, Step::Hello, None),
             Self::Offer { .. } => (Protocol::InitialStorage, Step::Offer, None),
@@ -648,14 +728,17 @@ impl Body {
             ),
             Self::CurrentAck { .. } => (Protocol::CurrentStorage, Step::Ack, None),
             Self::CurrentReady { .. } => (Protocol::CurrentStorage, Step::Ready, None),
-            Self::CurrentResult { .. } | Self::CurrentStop { .. } => {
-                (Protocol::CurrentStorage, Step::Known, None)
+            Self::CurrentResult { .. } => (Protocol::CurrentStorage, Step::Known, None),
+            Self::CurrentConsumed { .. } => (Protocol::CurrentStorage, Step::Consumed, None),
+            Self::CurrentReleased { .. } => (Protocol::CurrentStorage, Step::Released, None),
+            Self::CurrentStop { .. } => (Protocol::CurrentStorage, Step::Frozen, None),
+            Self::CurrentStopped { .. } => (Protocol::CurrentStorage, Step::Drained, None),
+            Self::CurrentFence { .. } => (Protocol::CurrentStorage, Step::Fenced, None),
+            Self::CurrentFenceConfirmed { .. } => {
+                (Protocol::CurrentStorage, Step::FenceConfirmed, None)
             }
-            Self::CurrentConsumed { .. } | Self::CurrentStopped { .. } => {
-                (Protocol::CurrentStorage, Step::Consumed, None)
-            }
-            Self::CurrentReleased { .. } | Self::CurrentStopReleased { .. } => {
-                (Protocol::CurrentStorage, Step::Released, None)
+            Self::CurrentStopReleased { .. } => {
+                (Protocol::CurrentStorage, Step::StopReleased, None)
             }
         };
         Frame {
@@ -727,6 +810,8 @@ impl Body {
             | Self::CurrentReleased { .. } => current()?,
             Self::CurrentStop { .. }
             | Self::CurrentStopped { .. }
+            | Self::CurrentFence { .. }
+            | Self::CurrentFenceConfirmed { .. }
             | Self::CurrentStopReleased { .. } => {
                 ensure!(
                     expected == StagePurpose::CurrentRole,
@@ -757,7 +842,8 @@ impl Body {
             | Self::CurrentHello { .. }
             | Self::CurrentAck { .. }
             | Self::CurrentConsumed { .. }
-            | Self::CurrentStopped { .. } => NativeRole::AppHost,
+            | Self::CurrentStopped { .. }
+            | Self::CurrentFenceConfirmed { .. } => NativeRole::AppHost,
             Self::InitialReady { .. }
             | Self::Offer { .. }
             | Self::Complete { .. }
@@ -767,6 +853,7 @@ impl Body {
             | Self::CurrentResult { .. }
             | Self::CurrentReleased { .. }
             | Self::CurrentStop { .. }
+            | Self::CurrentFence { .. }
             | Self::CurrentStopReleased { .. } => NativeRole::EpochController,
         }
     }
@@ -847,6 +934,10 @@ impl Message {
     }
 
     pub(super) fn verify(&self, statement: &StageStatement) -> Result<()> {
+        ensure!(
+            !matches!(&self.body, Body::Restore { payload } if payload.sender_role() == NativeRole::AppHost),
+            "restore_peer_distinct_app_admission_required"
+        );
         self.body
             .require_stage_purpose(statement.original.purpose)?;
         ensure!(
@@ -857,6 +948,29 @@ impl Message {
         protocol::verify(
             &statement.stage.data.public_key,
             "initial-storage-message",
+            &(&self.sender, &self.body),
+            &self.signature,
+        )
+    }
+
+    /// Restore candidates do not have an ordinary StageStatement. This
+    /// verifies only their signed DATA; the native adapter must additionally
+    /// retain and recheck the actual SCM sender and the same original.
+    pub(super) fn verify_restored_app(
+        &self,
+        statement: &super::restore_peer_wire::RestoreAppStatement,
+    ) -> Result<()> {
+        ensure!(
+            matches!(&self.body, Body::Restore { payload } if payload.sender_role() == NativeRole::AppHost),
+            "restore_peer_app_message_required"
+        );
+        ensure!(
+            self.sender == statement.digest()?,
+            "restore_peer_app_sender_changed"
+        );
+        protocol::verify(
+            &statement.admission.statement.public_key,
+            "restored-storage-message",
             &(&self.sender, &self.body),
             &self.signature,
         )
@@ -904,10 +1018,47 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
                 Some("ready" | "offer") => {
                     require_stage_objects(&value, "/body/payload/controller")?
                 }
-                Some("hello") => require_stage_objects(&value, "/body/payload/app")?,
-                Some(
-                    "confirm" | "durable" | "accepted" | "activated" | "activated_ack" | "released",
-                ) => {}
+                Some("hello") => require_restore_app_objects(&value, "/body/payload/app")?,
+                Some("activated_ack") => require_object(&value, "/body/payload/cohort")?,
+                Some("role_ready") => {
+                    for path in [
+                        "/body/payload/completion",
+                        "/body/payload/completion/statement",
+                        "/body/payload/completion/statement/data",
+                        "/body/payload/completion/statement/data/cohort",
+                    ] {
+                        require_object(&value, path)?;
+                    }
+                }
+                Some("role_decision") => {
+                    for path in [
+                        "/body/payload/decision",
+                        "/body/payload/decision/statement",
+                        "/body/payload/decision/statement/stage",
+                        "/body/payload/decision/statement/stage/data",
+                        "/body/payload/decision/statement/stage/data/process",
+                        "/body/payload/decision/statement/stage/data/process/namespaces",
+                        "/body/payload/decision/statement/stage/data/runtime",
+                        "/body/payload/decision/statement/stage/data/runtime/container",
+                    ] {
+                        require_object(&value, path)?;
+                    }
+                }
+                Some("app_prepared") => {
+                    for path in [
+                        "/body/payload/confirmation",
+                        "/body/payload/confirmation/statement",
+                        "/body/payload/cohort",
+                    ] {
+                        require_object(&value, path)?;
+                    }
+                }
+                Some("app_installed") => {
+                    require_object(&value, "/body/payload/cohort")?;
+                    require_stage_objects(&value, "/body/payload/app")?;
+                }
+                Some("prepared_accepted" | "installed_accepted") => {}
+                Some("confirm" | "durable" | "accepted" | "activated" | "released") => {}
                 _ => anyhow::bail!("storage_restore_phase"),
             }
         }
@@ -937,10 +1088,12 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         Some("current_stop") => {
             require_object(&value, "/body/frozen")?;
             require_object(&value, "/body/frozen/selection")?;
+            require_object(&value, "/body/frozen/selection/stop")?;
             require_stage_objects(&value, "/body/frozen/selection/app")?;
             require_stage_objects(&value, "/body/frozen/selection/controller")?;
         }
-        Some("current_stopped" | "current_stop_released") => {}
+        Some("current_fence") => require_object(&value, "/body/confirmation")?,
+        Some("current_stopped" | "current_fence_confirmed" | "current_stop_released") => {}
         Some(
             "confirm" | "complete" | "accepted" | "current_ack" | "current_ready"
             | "current_result" | "current_consumed" | "current_released",
@@ -958,6 +1111,35 @@ fn require_request_object(value: &serde_json::Value, path: &str) -> Result<()> {
         == Some("admin_read")
     {
         require_object(value, &format!("{path}/cohort"))?;
+        require_object(value, &format!("{path}/action"))?;
+    }
+    Ok(())
+}
+
+fn require_restore_app_objects(value: &serde_json::Value, prefix: &str) -> Result<()> {
+    for suffix in [
+        "",
+        "/certificate",
+        "/certificate/data",
+        "/certificate/data/process",
+        "/certificate/data/process/namespaces",
+        "/certificate/data/provisioner",
+        "/certificate/data/provisioner/namespaces",
+        "/authorization",
+        "/authorization/statement",
+        "/authorization/statement/data",
+        "/authorization/statement/data/target",
+        "/authorization/statement/data/target/scope",
+        "/authorization/statement/data/report",
+        "/admission",
+        "/admission/statement",
+        "/admission/statement/process",
+        "/admission/statement/process/namespaces",
+        "/admission/statement/runtime",
+        "/admission/statement/runtime/container",
+        "/original",
+    ] {
+        require_object(value, &format!("{prefix}{suffix}"))?;
     }
     Ok(())
 }

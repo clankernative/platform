@@ -563,6 +563,18 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 }
 
 impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
+    /// Final close of THIS old physical-file phase, not ordinary completion.
+    /// Its parent continuation stays refused. The volume consumes the actual
+    /// owned Controller stage only after all old physical checks are finished;
+    /// nothing may sample or reuse that old original after retirement.
+    pub(in crate::security_epoch::storage_authority) fn retire_restore_native(
+        mut self,
+    ) -> Result<crate::security_epoch::native_enrollment::RetainedControllerNative<'role>> {
+        self.check()?;
+        self.inner.disposition.refuse();
+        self.inner.phase.retire_restore_native()
+    }
+
     pub(in crate::security_epoch::storage_authority) fn capture_approval_source(
         &mut self,
         clock: UnfencedControllerClock,
@@ -626,6 +638,24 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
         let files = requested?;
         checked?;
         Ok(files)
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn admit_restore_creator_root(
+        &mut self,
+        held_root: &File,
+    ) -> Result<crate::security_epoch::storage_authority::RestoreCreatorRoot> {
+        self.check()?;
+        let requested = self
+            .inner
+            .phase
+            .admit_restore_creator_root(held_root, self.inner.anchor);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let root = requested?;
+        checked?;
+        Ok(root)
     }
 
     pub(in crate::security_epoch::storage_authority) fn check_opened_admin_database(
@@ -1148,5 +1178,97 @@ mod phase_disposition_tests {
         let mut continuation = false;
         assert!(FilePhaseDisposition::begin(&mut continuation).is_err());
         assert!(!continuation);
+    }
+}
+
+#[cfg(test)]
+mod restore_native_retirement_tests {
+    use quote::ToTokens;
+
+    fn method(source: &str, owner: &str) -> syn::ImplItemFn {
+        let file = syn::parse_file(source).unwrap();
+        let mut selected = file.items.iter().filter_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            if !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|part|part.ident==owner)) {
+                return None;
+            }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident=="retire_restore_native" => Some(method.clone()),
+                _ => None,
+            })
+        });
+        let actual = selected.next().unwrap();
+        assert!(selected.next().is_none());
+        actual
+    }
+
+    fn same_body(actual: &syn::Block, expected: &syn::Block) -> bool {
+        actual.to_token_stream().to_string() == expected.to_token_stream().to_string()
+    }
+
+    #[test]
+    fn actual_restore_native_finish_consumes_physical_and_volume_only_after_permanent_old_close() {
+        let cases = [
+            (
+                include_str!("continuity.rs"),
+                "CurrentPhysicalFilePhase",
+                syn::parse_quote!({
+                    self.check()?;
+                    self.inner.disposition.refuse();
+                    self.inner.phase.retire_restore_native()
+                }),
+            ),
+            (
+                include_str!("../native_volume.rs"),
+                "CurrentVolumePhase",
+                syn::parse_quote!({
+                    let checked = self.resources.check_current(&mut self.reader);
+                    self.resources.admission = VolumeAdmission::Refused;
+                    if checked.is_err() {
+                        self.reader.acquisition.refuse();
+                    }
+                    checked?;
+                    self.reader.stage.retire_controller_native()
+                }),
+            ),
+        ];
+        for (source, owner, expected) in cases {
+            let expected: syn::Block = expected;
+            let actual = method(source, owner);
+            assert_eq!(actual.sig.inputs.len(), 1);
+            assert!(
+                matches!(actual.sig.inputs.first(),Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_none() && receiver.colon_token.is_none())
+            );
+            let output: syn::ReturnType = syn::parse_quote!(->Result<crate::security_epoch::native_enrollment::RetainedControllerNative<'role>>);
+            assert_eq!(
+                actual.sig.output.to_token_stream().to_string(),
+                output.to_token_stream().to_string()
+            );
+            assert!(same_body(&actual.block, &expected));
+            // Remove every real guard/negative close/primary-error propagation,
+            // or exchange the first observation and close. Neither may pass.
+            for index in 0..actual.block.stmts.len() {
+                let mut changed = actual.block.clone();
+                changed.stmts.remove(index);
+                assert!(!same_body(&changed, &expected));
+            }
+            let mut reordered = actual.block.clone();
+            reordered.stmts.swap(0, 1);
+            assert!(!same_body(&reordered, &expected));
+        }
+    }
+
+    #[test]
+    fn permanent_old_file_close_cannot_complete_or_reopen_continuation() {
+        let mut continuation = true;
+        {
+            let mut actual = super::FilePhaseDisposition::begin(&mut continuation).unwrap();
+            actual.check().unwrap();
+            actual.refuse();
+            assert!(actual.check().is_err());
+            assert!(actual.complete().is_err());
+        }
+        assert!(!continuation);
+        assert!(super::FilePhaseDisposition::begin(&mut continuation).is_err());
     }
 }

@@ -1,171 +1,22 @@
-//! Fixed Controller-side active App serving operation. No callback can execute
-//! inside the Controller. The signed peer result is released only while the
-//! SAME current physical/first-holder and provider observations remain owned.
-use super::{
-    ActiveControllerStorageContinuity, ServingObservation, check_active_snapshot, request_names,
-};
-use crate::security_epoch::controller::serving_timing::{ServingStep, ServingTiming};
-use crate::security_epoch::native_enrollment::EnrolledRoleStage;
-use crate::security_epoch::self_check_profile::{self, Category};
-use anyhow::{Result, ensure};
-use day2_capabilities::security_epoch::bootstrap::NativeRole;
-
-impl ActiveControllerStorageContinuity {
-    pub(in crate::security_epoch) fn app_pending(&mut self) -> Result<bool> {
-        ensure!(self.valid, "active_controller_storage_refused");
-        self.storage.app_pending()
-    }
-
-    pub(in crate::security_epoch) fn serve_app_current(
-        &mut self,
-        stage: EnrolledRoleStage<'_>,
-        trace: &ServingTiming,
-    ) -> Result<ServingObservation> {
-        let _profile = self_check_profile::enter(Category::ServingLocal);
-        ensure!(self.valid, "active_controller_storage_refused");
-        self.valid = false;
-        let result = (|| {
-            let (mut physical, mut reads) = trace.measure(ServingStep::PhysicalBegin, || {
-                let _profile = self_check_profile::enter(Category::PhysicalLocal);
-                self.storage.begin_current_app(
-                    stage,
-                    &self.policy,
-                    &self.store,
-                    &mut self.counter,
-                    trace,
-                )
-            })?;
-            // Authenticated request selection is DATA. This can only be the
-            // original App enrollment and a fresh current-serving transcript.
-            let binding = trace.measure(ServingStep::RequestBinding, || {
-                Ok(physical.app_request()?.binding().clone())
-            })?;
-            let names = trace.measure(ServingStep::Names, || {
-                request_names(&self.store, &self.completion)
-            })?;
-            let mut observed = trace.measure(ServingStep::CounterBefore, || {
-                reads.read(physical.controller_stage()?, &self.store, &names)
-            })?;
-            trace.measure(ServingStep::ValidateBefore, || {
-                check_active_snapshot(
-                    &self.store,
-                    &self.completion,
-                    &self.activation,
-                    observed.snapshot(),
-                )
-            })?;
-            // The checked stage getter performs the complete physical
-            // post-read check once, immediately before observation use.
-            trace.measure(ServingStep::ProviderBefore, || {
-                reads.check_observation(physical.controller_stage()?, &mut observed)
-            })?;
-            // Await the actual App consumer and original postchecks, then
-            // reobserve the fixed counter through one closed physical join.
-            observed =
-                physical.announce_and_read_app_consumed(&mut reads, &self.store, &names, trace)?;
-            trace.measure(ServingStep::ValidateAfter, || {
-                check_active_snapshot(
-                    &self.store,
-                    &self.completion,
-                    &self.activation,
-                    observed.snapshot(),
-                )
-            })?;
-            trace.measure(ServingStep::ProviderAfter, || {
-                reads.check_observation(physical.controller_stage()?, &mut observed)
-            })?;
-            // Snapshot commitment is bounded DATA work. The closed finisher
-            // performs the full post-validation check before release work.
-            let snapshot = trace.measure(ServingStep::Snapshot, || {
-                super::super::journal::snapshot_digest(observed.snapshot())
-            })?;
-            reads.finish(physical.controller_stage()?)?;
-            // The enclosing active owner remains closed until the actual
-            // physical/peer release succeeds too. A later failure refuses its
-            // retained connection; no new request can enter during release.
-            trace.measure(ServingStep::Release, || physical.finish_app_known())?;
-            Ok(ServingObservation { binding, snapshot })
-        })();
-        if result.is_ok() {
-            self.valid = true;
-        } else {
-            self.storage.refuse();
-            self.counter.refuse();
-        }
-        result
-    }
-}
-
-impl ActiveControllerStorageContinuity {
-    /// The Shell's actual role channel remains borrowed alongside the SAME
-    /// physical file/provider scope. Original App liveness is retained here;
-    /// it is never interpreted as a fresh App role or Shell database identity.
-    pub(in crate::security_epoch) fn serve_shell_current(
-        &mut self,
-        mut stage: EnrolledRoleStage<'_>,
-        peer: &mut crate::security_epoch::native_enrollment::ControllerServingPeer,
-    ) -> Result<ServingObservation> {
-        ensure!(self.valid, "active_controller_storage_refused");
-        self.valid = false;
-        let result = (|| {
-            // Meet the already-admitted token ceiling before the first
-            // immutable Shell Current statement is constructed.
-            let mut reads = self.counter.request(
-                &mut stage,
-                &self.policy,
-                &self.store,
-                NativeRole::EpochController,
-            )?;
-            let pending = self.storage.begin_pending_current_controller()?;
-            let rendezvous = peer.prepare_current(&mut stage)?;
-            let mut physical = pending.acquire(stage)?;
-            let mut shell = rendezvous.accept_current(physical.controller_stage()?)?;
-            let binding = shell.request_binding().clone();
-            let names = request_names(&self.store, &self.completion)?;
-            let mut observed = reads.read(physical.controller_stage()?, &self.store, &names)?;
-            check_active_snapshot(
-                &self.store,
-                &self.completion,
-                &self.activation,
-                observed.snapshot(),
-            )?;
-            // The checked stage getter performs the complete physical
-            // post-read check once, immediately before observation use.
-            reads.check_observation(physical.controller_stage()?, &mut observed)?;
-            shell.check(physical.controller_stage()?)?;
-            shell.announce_known(physical.controller_stage()?)?;
-            shell.await_consumed(physical.controller_stage()?)?;
-            observed = reads.read(physical.controller_stage()?, &self.store, &names)?;
-            check_active_snapshot(
-                &self.store,
-                &self.completion,
-                &self.activation,
-                observed.snapshot(),
-            )?;
-            reads.check_observation(physical.controller_stage()?, &mut observed)?;
-            physical.check()?;
-            shell.check(physical.controller_stage()?)?;
-            shell.release(physical.controller_stage()?)?;
-            shell.finish_checked(physical.controller_stage()?)?;
-            let snapshot = super::super::journal::snapshot_digest(observed.snapshot())?;
-            reads.finish(physical.controller_stage()?)?;
-            physical.finish_controller_known()?;
-            Ok(ServingObservation { binding, snapshot })
-        })();
-        if result.is_ok() {
-            self.valid = true;
-        } else {
-            self.storage.refuse();
-            self.counter.refuse();
-            peer.refuse();
-        }
-        result
-    }
-}
-
 #[cfg(test)]
 mod observation_boundary_tests {
+    use quote::ToTokens;
     use syn::visit::Visit;
+
+    fn lineage_check(node: &syn::ExprMethodCall) -> bool {
+        node.method == "check"
+            && matches!(&*node.receiver, syn::Expr::Field(field)
+                if matches!(&field.member, syn::Member::Named(name) if name == "lineage")
+                && matches!(&*field.base, syn::Expr::Path(path) if path.path.is_ident("self")))
+    }
+
+    fn observations(method: &str) -> usize {
+        if method == "serve_shell_current" {
+            3
+        } else {
+            2
+        }
+    }
 
     // Inspect the actual fixed native callers. A helper fixture cannot catch
     // a repeated full check added at one of these call sites. This supplies
@@ -184,10 +35,10 @@ mod observation_boundary_tests {
                 {
                     self.standalone_physical_checks += 1;
                 }
-                if node.method == "check_observation" {
+                if lineage_check(node) {
                     self.observation_checks += 1;
                     self.checked_observation_stages += usize::from(matches!(
-                        node.args.first(),
+                        node.args.iter().nth(2),
                         Some(syn::Expr::Try(guard)) if matches!(&*guard.expr,
                             syn::Expr::MethodCall(stage) if stage.method == "controller_stage"
                             && matches!(&*stage.receiver, syn::Expr::Path(path) if path.path.is_ident("physical")))
@@ -227,57 +78,196 @@ mod observation_boundary_tests {
     #[test]
     fn app_and_shell_observation_consumers_keep_one_full_boundary_check() {
         for method in ["serve_app_current", "serve_shell_current"] {
-            // Both observations keep their full checked getter. App's final
-            // post-validation check is the closed finisher's entry check;
-            // Shell keeps its separate check before its own peer operations.
+            // Both reads retain their full checked getter. Shell also checks
+            // its OLD observation after waiting and before the new read.
             assert_eq!(
-                native_observation_shape(include_str!("controller_serving.rs"), method),
-                (usize::from(method == "serve_shell_current"), 2, 2)
+                native_observation_shape(include_str!("../bootstrap.rs"), method),
+                (
+                    usize::from(method == "serve_shell_current"),
+                    observations(method),
+                    observations(method)
+                )
             );
         }
     }
 
-    fn observation_consumer(source: &str, method: &str) -> usize {
-        let start = source.find(&format!("fn {method}(")).unwrap();
-        // Bound the mutation to THIS actual native method. The App's trace
-        // returns the check result directly; Shell uses an ordinary ? call.
-        // A missing App match must never fall through into the Shell body.
-        let end = start + source[start..].find("\n    }\n").unwrap();
-        let consumer = source[start..end]
-            .find("reads.check_observation(physical.controller_stage()?, &mut observed)")
-            .expect("checked observation consumer inside this native method");
-        start + consumer
+    fn observation_consumer(source: &str, method: &str) -> (String, syn::ExprMethodCall) {
+        let file = syn::parse_file(source).unwrap();
+        let actual = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty, syn::Type::Path(path)
+                if path.path.is_ident("ActiveControllerStorageContinuity")) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .flat_map(|item| &item.items)
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == method => Some(item),
+                _ => None,
+            })
+            .expect("exact actual Controller method");
+        struct Selected(Vec<syn::ExprMethodCall>);
+        impl<'ast> Visit<'ast> for Selected {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if lineage_check(call) {
+                    self.0.push(call.clone());
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let mut selected = Selected(Vec::new());
+        selected.visit_block(&actual.block);
+        assert_eq!(selected.0.len(), observations(method));
+        (
+            format!(
+                "impl ActiveControllerStorageContinuity {{ {} }}",
+                actual.to_token_stream()
+            ),
+            selected.0.remove(0),
+        )
     }
 
     #[test]
     fn each_native_caller_rejects_restoring_the_immediate_physical_repeat() {
-        let source = include_str!("controller_serving.rs");
+        let source = include_str!("../bootstrap.rs");
         for method in ["serve_app_current", "serve_shell_current"] {
-            let consumer = observation_consumer(source, method);
-            let mut repeated = source.to_owned();
-            repeated.insert_str(consumer, "physical.check()?; ");
+            let (actual, consumer) = observation_consumer(source, method);
+            let call = consumer.to_token_stream().to_string();
+            assert!(actual.contains(&call));
+            let repeated = actual.replacen(&call, &format!("{{ physical.check()?; {call} }}"), 1);
             assert_eq!(
                 native_observation_shape(&repeated, method),
-                (usize::from(method == "serve_shell_current") + 1, 2, 2)
+                (
+                    usize::from(method == "serve_shell_current") + 1,
+                    observations(method),
+                    observations(method)
+                )
             );
         }
     }
 
     #[test]
     fn each_observation_still_requires_the_full_checked_stage_getter() {
-        let source = include_str!("controller_serving.rs");
+        let source = include_str!("../bootstrap.rs");
         for method in ["serve_app_current", "serve_shell_current"] {
-            let consumer = observation_consumer(source, method);
-            let checked = "reads.check_observation(physical.controller_stage()?, &mut observed)";
-            let mut mutated = source.to_owned();
-            mutated.replace_range(
-                consumer..consumer + checked.len(),
-                "reads.check_observation(unchecked_stage, &mut observed)",
-            );
+            let (actual, consumer) = observation_consumer(source, method);
+            let checked = consumer.to_token_stream().to_string();
+            let mut unchecked = consumer.clone();
+            unchecked.args[2] = syn::parse_quote!(unchecked_stage);
+            assert!(actual.contains(&checked));
+            let mutated = actual.replacen(&checked, &unchecked.to_token_stream().to_string(), 1);
             assert_ne!(
                 native_observation_shape(&mutated, method),
-                (usize::from(method == "serve_shell_current"), 2, 2)
+                (
+                    usize::from(method == "serve_shell_current"),
+                    observations(method),
+                    observations(method)
+                )
             );
         }
+    }
+
+    #[test]
+    fn shell_checks_the_old_observation_after_consumed_and_before_reread() {
+        fn flow(source: &str) -> Vec<String> {
+            struct Flow(Vec<String>);
+            impl<'ast> Visit<'ast> for Flow {
+                fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                    let receiver = call.receiver.to_token_stream().to_string();
+                    if receiver == "self . lineage"
+                        && (call.method == "read" || call.method == "check")
+                    {
+                        self.0.push(call.method.to_string());
+                    }
+                    if receiver == "shell" && call.method == "await_consumed" {
+                        self.0.push("consumed".into());
+                    }
+                    syn::visit::visit_expr_method_call(self, call);
+                }
+            }
+            let file = syn::parse_file(source).unwrap();
+            let mut found = Flow(Vec::new());
+            found.visit_file(&file);
+            found.0
+        }
+        let (source, _) =
+            observation_consumer(include_str!("../bootstrap.rs"), "serve_shell_current");
+        let expected = ["read", "check", "consumed", "check", "read", "check"];
+        assert_eq!(flow(&source), expected);
+        let file = syn::parse_file(&source).unwrap();
+        struct Checks(Vec<String>);
+        impl<'ast> Visit<'ast> for Checks {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if lineage_check(call) {
+                    self.0.push(call.to_token_stream().to_string());
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let mut checks = Checks(Vec::new());
+        checks.visit_file(&file);
+        assert_eq!(checks.0.len(), 3);
+        let call = &checks.0[1];
+        assert!(checks.0.iter().all(|actual| actual == call));
+        let first = source.find(call).unwrap();
+        let second = first + call.len() + source[first + call.len()..].find(call).unwrap();
+        let mut removed = source.clone();
+        removed.replace_range(second..second + call.len(), "Ok::<(),anyhow::Error>(())");
+        assert_ne!(flow(&removed), expected);
+    }
+
+    #[test]
+    fn app_wait_read_receives_the_same_lineage_and_old_observation() {
+        fn calls(source: &str) -> Vec<syn::ExprMethodCall> {
+            struct Calls(Vec<syn::ExprMethodCall>);
+            impl<'ast> Visit<'ast> for Calls {
+                fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                    if call.method == "announce_and_read_app_consumed" {
+                        self.0.push(call.clone());
+                    }
+                    syn::visit::visit_expr_method_call(self, call);
+                }
+            }
+            let file = syn::parse_file(source).unwrap();
+            let mut found = Calls(Vec::new());
+            found.visit_file(&file);
+            found.0
+        }
+        let (source, _) =
+            observation_consumer(include_str!("../bootstrap.rs"), "serve_app_current");
+        let calls = calls(&source);
+        let [call] = calls.as_slice() else {
+            panic!("one actual closed wait/read");
+        };
+        let expected = [
+            "& mut reads",
+            "& self . store",
+            "& self . lineage",
+            "& mut observed",
+            "trace",
+        ];
+        assert_eq!(call.receiver.to_token_stream().to_string(), "physical");
+        assert_eq!(
+            call.args
+                .iter()
+                .map(|arg| arg.to_token_stream().to_string())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let mut other = call.clone();
+        other.args[3] = syn::parse_quote!(&mut other_observed);
+        assert_ne!(
+            other
+                .args
+                .iter()
+                .map(|arg| arg.to_token_stream().to_string())
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 }

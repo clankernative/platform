@@ -35,6 +35,30 @@ enum AuthenticationReader<'borrow, 'fenced, 'metadata, 'storage, 'role> {
             'role,
         >,
     ),
+    Writing(
+        &'borrow mut crate::security_epoch::bootstrap::WriterRegistryLoan<
+            'fenced,
+            'metadata,
+            'storage,
+            'role,
+        >,
+    ),
+    WriterMay(
+        &'borrow mut crate::security_epoch::bootstrap::WriterMayRegistryLoan<
+            'fenced,
+            'metadata,
+            'storage,
+            'role,
+        >,
+    ),
+    Reserving(
+        &'borrow mut crate::security_epoch::bootstrap::ReservationRegistryLoan<
+            'fenced,
+            'metadata,
+            'storage,
+            'role,
+        >,
+    ),
 }
 
 impl AuthenticationReader<'_, '_, '_, '_, '_> {
@@ -42,12 +66,18 @@ impl AuthenticationReader<'_, '_, '_, '_, '_> {
         match self {
             Self::Active(reader) => reader.check_registry_local(),
             Self::Fenced(reader) => reader.check_local(),
+            Self::Writing(reader) => reader.check_local(),
+            Self::WriterMay(reader) => reader.check_local(),
+            Self::Reserving(reader) => reader.check_local(),
         }
     }
     fn refuse(&mut self) {
         match self {
             Self::Active(reader) => reader.refuse(),
             Self::Fenced(reader) => reader.refuse(),
+            Self::Writing(reader) => reader.refuse(),
+            Self::WriterMay(reader) => reader.refuse(),
+            Self::Reserving(reader) => reader.refuse(),
         }
     }
 }
