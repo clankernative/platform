@@ -553,61 +553,6 @@ pub(in crate::security_epoch::native_enrollment) struct RestoredAppHistory {
     channel_refusal: Rc<Cell<bool>>,
 }
 
-// Resource-free negative roots only: no AcceptedRestoredApp, keeper, enrolled
-// owner, native stage or successful history loan is fabricated by these tests.
-#[cfg(test)]
-mod refusal_test_support {
-    use super::*;
-
-    impl RestoredAppHistory {
-        pub(in crate::security_epoch::native_enrollment) fn empty_refusal_test_root() -> Rc<Self> {
-            #[cfg(target_os = "linux")]
-            let negative_original = |label: &[u8]| {
-                NativeAcquisition::fixture(
-                    day2_capabilities::Digest::new(label),
-                    std::process::id(),
-                    std::time::Duration::from_secs(100),
-                    std::time::Duration::from_secs(5),
-                )
-                .retained_refusal()
-            };
-            Rc::new(Self {
-                retained: Cell::new(None),
-                refused: Cell::new(false),
-                #[cfg(target_os = "linux")]
-                receiver_refusal: negative_original(b"negative-only receiver fixture"),
-                #[cfg(target_os = "linux")]
-                reader_refusal: negative_original(b"negative-only reader fixture"),
-                #[cfg(target_os = "linux")]
-                channel_refusal: Rc::new(Cell::new(false)),
-            })
-        }
-
-        pub(in crate::security_epoch::native_enrollment) fn all_refusal_test_roots_set(
-            &self,
-        ) -> bool {
-            if !self.refused.get() {
-                return false;
-            }
-            #[cfg(target_os = "linux")]
-            {
-                self.receiver_refusal
-                    .require_same(&self.receiver_refusal)
-                    .is_err()
-                    && self
-                        .reader_refusal
-                        .require_same(&self.reader_refusal)
-                        .is_err()
-                    && self.channel_refusal.get()
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                true
-            }
-        }
-    }
-}
-
 /// Private fixed operation, never a generic callback, borrowed owner getter or
 /// permission. It owns the SAME whole history across waits and returns it before
 /// a positive result. Reentry sees an empty slot and poisons the shared roots.
@@ -747,4 +692,59 @@ struct ReceivedRestorePacket {
     #[cfg(target_os = "linux")]
     packet: rustix::net::ReceivedPidfdPacket,
     local_only: PhantomData<Rc<()>>,
+}
+
+// Resource-free negative roots only: no AcceptedRestoredApp, keeper, enrolled
+// owner, native stage or successful history loan is fabricated by these tests.
+#[cfg(test)]
+mod refusal_test_support {
+    use super::*;
+
+    impl RestoredAppHistory {
+        pub(in crate::security_epoch::native_enrollment) fn empty_refusal_test_root() -> Rc<Self> {
+            #[cfg(target_os = "linux")]
+            let negative_original = |label: &[u8]| {
+                NativeAcquisition::fixture(
+                    day2_capabilities::Digest::new(label),
+                    std::process::id(),
+                    std::time::Duration::from_secs(100),
+                    std::time::Duration::from_secs(5),
+                )
+                .retained_refusal()
+            };
+            Rc::new(Self {
+                retained: Cell::new(None),
+                refused: Cell::new(false),
+                #[cfg(target_os = "linux")]
+                receiver_refusal: negative_original(b"negative-only receiver fixture"),
+                #[cfg(target_os = "linux")]
+                reader_refusal: negative_original(b"negative-only reader fixture"),
+                #[cfg(target_os = "linux")]
+                channel_refusal: Rc::new(Cell::new(false)),
+            })
+        }
+
+        pub(in crate::security_epoch::native_enrollment) fn all_refusal_test_roots_set(
+            &self,
+        ) -> bool {
+            if !self.refused.get() {
+                return false;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                self.receiver_refusal
+                    .require_same(&self.receiver_refusal)
+                    .is_err()
+                    && self
+                        .reader_refusal
+                        .require_same(&self.reader_refusal)
+                        .is_err()
+                    && self.channel_refusal.get()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                true
+            }
+        }
+    }
 }
