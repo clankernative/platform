@@ -107,6 +107,21 @@ impl Drop for FinalContextFactoryAttempt<'_, '_> {
     }
 }
 
+/// The actual autonomous frame remains armed across context construction.
+/// The returned context owns refusal only after all fallible work and allocation.
+struct RuntimeContextFactoryAttempt<'request> {
+    frame: &'request RuntimeRequest,
+    complete: bool,
+}
+
+impl Drop for RuntimeContextFactoryAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.frame.refuse();
+        }
+    }
+}
+
 enum ConsumerOriginal<'request, 'original> {
     Bound(&'request mut OriginalPhase<'original>),
     // The genuine AppCreator still owns this unbound original. A successful
@@ -237,47 +252,6 @@ impl ConsumerOrigin<'_> {
                 );
             }
             Self::Startup(_) | Self::Runtime { .. } => anyhow::bail!("native HTTP origin required"),
-        }
-        Ok(())
-    }
-
-    /// Select the actual HTTP source before any stage or original sample.
-    /// A bound human or an already leased response cannot be reclassified as
-    /// autonomous work. These checks grant no native permission.
-    fn require_runtime_input(&self, runtime: &Runtime) -> Result<()> {
-        self.require_request()?;
-        ensure!(
-            runtime.uses_native_storage(),
-            "native runtime file required"
-        );
-        match self {
-            Self::Http { sink, .. } => {
-                ensure!(sink.is_open(), "native runtime HTTP origin refused");
-                ensure!(
-                    sink.bindings.try_borrow()?.is_empty(),
-                    "native human original cannot become Runtime"
-                );
-                ensure!(
-                    sink.runtime.try_borrow()?.is_none(),
-                    "native response cannot become a new Runtime operation"
-                );
-            }
-            Self::Response { sink, lease, .. } => {
-                lease.require_runtime(sink)?;
-                ensure!(
-                    sink.bindings.try_borrow()?.is_empty(),
-                    "native human response cannot become Runtime"
-                );
-                let scope = sql_runtime_scope(runtime)?;
-                let binding = sink.runtime.try_borrow()?;
-                ensure!(
-                    binding
-                        .as_ref()
-                        .is_some_and(|binding| binding.scope == scope),
-                    "native runtime response binding absent"
-                );
-            }
-            Self::Startup(_) => anyhow::bail!("native HTTP origin required"),
         }
         Ok(())
     }
@@ -988,18 +962,22 @@ impl<'request> NativeConsumerContext<'request, 'static> {
         phase: super::RuntimePhase,
         frame: &'request RuntimeRequest,
     ) -> Result<Self> {
+        let mut attempt = RuntimeContextFactoryAttempt { frame, complete: false };
         frame.require_runtime(runtime)?;
         let native = frame.consumer_origin(runtime)?;
         let purpose = super::runtime_serving_use(phase)?;
-        Ok(Self {
+        let affinity = NativeConsumerAffinity { same: Rc::new(()) };
+        let context = Self {
             source: ConsumerOriginal::Runtime,
             runtime,
             origin: ConsumerOrigin::Runtime { native, frame },
             binding: Digest::of(&("day2-native-runtime-serving-v1", purpose))?,
             purpose: ScopePurpose::Runtime(purpose),
-            affinity: NativeConsumerAffinity { same: Rc::new(()) },
+            affinity,
             complete: false,
-        })
+        };
+        attempt.complete = true;
+        Ok(context)
     }
 
     /// Fixed startup SQL only. The closed input owns the real preconfiguration
@@ -1293,6 +1271,30 @@ impl<'request> NativeRequestFinalContext<'request, 'static> {
         Ok(context)
     }
 
+    /// Keep the same actual Runtime frame armed through final-context setup.
+    /// No replacement origin, clock or native owner is acquired here.
+    pub(super) fn runtime_operation(
+        runtime: &'request Runtime,
+        frame: &'request RuntimeRequest,
+        request: &super::request::Lease,
+    ) -> Result<Self> {
+        let mut attempt = RuntimeContextFactoryAttempt { frame, complete: false };
+        frame.require_runtime(runtime)?;
+        let native = request.consumer_origin()?;
+        frame.require_origin(&native)?;
+        let affinity = NativeConsumerAffinity { same: Rc::new(()) };
+        let context = Self {
+            source: FinalOriginal::Runtime,
+            completion: FinalCompletion::RuntimeOperation,
+            runtime,
+            origin: ConsumerOrigin::Runtime { native, frame },
+            affinity,
+            complete: false,
+        };
+        attempt.complete = true;
+        Ok(context)
+    }
+
     pub(super) fn startup(
         runtime: &'request Runtime,
         request: &super::request::StartupLease,
@@ -1337,6 +1339,14 @@ const _: () = {
         FinalContextFactoryAttempt<'static, 'static>,
         serde::Deserialize<'static>
     );
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, Clone);
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, Copy);
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, Default);
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, std::fmt::Debug);
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, Send);
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, Sync);
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, serde::Serialize);
+    assert_not_impl!(RuntimeContextFactoryAttempt<'static>, serde::Deserialize<'static>);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Clone);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Copy);
     assert_not_impl!(NativeConsumerContext<'static, 'static>, Default);
@@ -2628,8 +2638,27 @@ mod tests {
             let first: syn::Stmt = syn::parse_quote!(frame.require_runtime(runtime)?;);
             let origin: syn::Expr = syn::parse_quote!(ConsumerOrigin::Runtime { native, frame });
             let guarded = |body: &syn::Block| {
+                let armed = matches!(body.stmts.first(), Some(syn::Stmt::Local(local))
+                    if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "attempt" && name.mutability.is_some())
+                    && matches!(local.init.as_ref().map(|value| &*value.expr), Some(syn::Expr::Struct(value))
+                        if value.path.is_ident("RuntimeContextFactoryAttempt") && value.rest.is_none()
+                        && value.fields.len() == 2
+                        && value.fields.iter().all(|field| match &field.member {
+                            syn::Member::Named(name) if name == "frame" => field.expr.to_token_stream().to_string() == "frame",
+                            syn::Member::Named(name) if name == "complete" => field.expr.to_token_stream().to_string() == "false",
+                            _ => false,
+                        })));
+                let source = body.to_token_stream().to_string();
+                let disarm = "attempt . complete = true";
+                let returned = "Ok (context)";
+                armed && source.matches(disarm).count() == 1
+                    && source.matches(returned).count() == 1
+                    && source.find("let context") < source.find(disarm)
+                    && source.find(disarm) < source.find(returned)
+                    && source.find("let affinity") < source.find("let context")
+                    &&
                 body.stmts
-                    .first()
+                    .get(1)
                     .map(|stmt| stmt.to_token_stream().to_string())
                     == Some(first.to_token_stream().to_string())
                     && body
@@ -2641,8 +2670,14 @@ mod tests {
             };
             assert!(guarded(&actual.block));
             let mut no_pointer = actual.block.clone();
-            no_pointer.stmts.remove(0);
+            no_pointer.stmts.remove(1);
             assert!(!guarded(&no_pointer));
+            let mut no_attempt = actual.block.clone();
+            no_attempt.stmts.remove(0);
+            assert!(!guarded(&no_attempt));
+            let mut early_disarm = actual.block.clone();
+            early_disarm.stmts.insert(1, syn::parse_quote!(attempt.complete = true;));
+            assert!(!guarded(&early_disarm));
             for substituted in [
                 quote::quote!(ConsumerOrigin::Startup(native)),
                 quote::quote!(ConsumerOrigin::Http { native, sink }),
@@ -2675,6 +2710,17 @@ mod tests {
             1
         );
         assert_eq!(source.matches("FinalCompletion :: Startup").count(), 1);
+        let drop = host_factory("RuntimeContextFactoryAttempt", "drop");
+        let expected: syn::Block = syn::parse_quote!({
+            if !self.complete {
+                self.frame.refuse();
+            }
+        });
+        let guarded = |body: &syn::Block| body.to_token_stream().to_string() == expected.to_token_stream().to_string();
+        assert!(guarded(&drop.block));
+        let mut no_refusal = drop.block.clone();
+        no_refusal.stmts.clear();
+        assert!(!guarded(&no_refusal));
     }
 
     #[test]
