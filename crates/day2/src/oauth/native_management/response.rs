@@ -4775,27 +4775,55 @@ mod lease_tests {
     #[test]
     fn actual_restored_finite_preflight_keeps_closed_source_clock_and_capture_checks() {
         use quote::ToTokens;
-        use syn::{parse::Parser, visit_mut::VisitMut};
-        // Compare parsed expressions while ignoring optional call-list trailing
-        // punctuation only. Tuple arity, argument order and every expression
-        // node remain part of the guard.
+        use syn::{parse::Parser, visit::Visit};
+        // Only optional trailing group punctuation is normalized. Independently
+        // retain parsed call and tuple arities, so a one-element tuple cannot
+        // become a parenthesized expression and no argument can disappear.
         fn same(left: &syn::Stmt, right: &syn::Stmt) -> bool {
-            struct Calls;
-            impl VisitMut for Calls {
-                fn visit_expr_call_mut(&mut self, item: &mut syn::ExprCall) {
-                    item.args = item.args.iter().cloned().collect();
-                    syn::visit_mut::visit_expr_call_mut(self, item);
+            struct Shape(Vec<(&'static str, usize)>);
+            impl<'ast> Visit<'ast> for Shape {
+                fn visit_expr_call(&mut self, item: &'ast syn::ExprCall) {
+                    self.0.push(("call", item.args.len()));
+                    syn::visit::visit_expr_call(self, item);
                 }
-                fn visit_expr_method_call_mut(&mut self, item: &mut syn::ExprMethodCall) {
-                    item.args = item.args.iter().cloned().collect();
-                    syn::visit_mut::visit_expr_method_call_mut(self, item);
+                fn visit_expr_method_call(&mut self, item: &'ast syn::ExprMethodCall) {
+                    self.0.push(("method", item.args.len()));
+                    syn::visit::visit_expr_method_call(self, item);
+                }
+                fn visit_expr_tuple(&mut self, item: &'ast syn::ExprTuple) {
+                    self.0.push(("tuple", item.elems.len()));
+                    syn::visit::visit_expr_tuple(self, item);
+                }
+                fn visit_pat_tuple(&mut self, item: &'ast syn::PatTuple) {
+                    self.0.push(("tuple-pattern", item.elems.len()));
+                    syn::visit::visit_pat_tuple(self, item);
+                }
+                fn visit_pat_tuple_struct(&mut self, item: &'ast syn::PatTupleStruct) {
+                    self.0.push(("variant-pattern", item.elems.len()));
+                    syn::visit::visit_pat_tuple_struct(self, item);
                 }
             }
-            let (mut left, mut right) = (left.clone(), right.clone());
-            Calls.visit_stmt_mut(&mut left);
-            Calls.visit_stmt_mut(&mut right);
-            left.to_token_stream().to_string() == right.to_token_stream().to_string()
+            fn tokens(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+                stream.into_iter().map(|token| match token {
+                    proc_macro2::TokenTree::Group(group) => {
+                        let mut inner = group.stream().into_iter().collect::<Vec<_>>();
+                        if matches!(inner.last(), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ',') {
+                            inner.pop();
+                        }
+                        proc_macro2::TokenTree::Group(proc_macro2::Group::new(group.delimiter(), tokens(inner.into_iter().collect())))
+                    }
+                    other => other,
+                }).collect()
+            }
+            let (mut left_shape, mut right_shape) = (Shape(Vec::new()), Shape(Vec::new()));
+            left_shape.visit_stmt(left);
+            right_shape.visit_stmt(right);
+            left_shape.0 == right_shape.0
+                && tokens(left.to_token_stream()).to_string() == tokens(right.to_token_stream()).to_string()
         }
+        assert!(same(&syn::parse_quote!(take(value);), &syn::parse_quote!(take(value,);)));
+        assert!(!same(&syn::parse_quote!(take(value);), &syn::parse_quote!(take(value, other);)));
+        assert!(!same(&syn::parse_quote!(take((value,));), &syn::parse_quote!(take((value));)));
         fn ensured(statement: &syn::Stmt, predicate: syn::Expr, message: &str) -> bool {
             let mac = match statement {
                 syn::Stmt::Macro(item) => &item.mac,
