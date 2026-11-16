@@ -318,13 +318,24 @@ fn require_generation_refusal(mut world: World) -> Result<()> {
     let source = refresh_fixture_source(&mut world)?;
     let before = application::tests::snapshot(&world.owner.application.db)?;
     let error = execute(&mut world.owner).unwrap_err();
-    assert_eq!(error.root_cause().to_string(), "native_restore_runtime_generation_unsupported");
+    assert_eq!(
+        error.root_cause().to_string(),
+        "native_restore_runtime_generation_unsupported"
+    );
     assert!(world.owner.refused && world.owner.state.attempted && !world.owner.state.complete);
     assert!(!world.owner.state.directory_may_exist && world.owner.state.creator.is_none());
     assert_eq!(world.owner.state.written, 0);
     assert!(!world.owner.state.target_dir()?.exists());
-    assert_eq!(std::fs::read(world.source.path().join("app.sqlite"))?, source);
-    let scratch = world.owner.state.sql.as_ref().context("refused scratch missing")?;
+    assert_eq!(
+        std::fs::read(world.source.path().join("app.sqlite"))?,
+        source
+    );
+    let scratch = world
+        .owner
+        .state
+        .sql
+        .as_ref()
+        .context("refused scratch missing")?;
     assert!(before == application::tests::snapshot(scratch)?);
     // Repairing the selected DATA cannot repair this actual spent fixture
     // owner. In particular it cannot reach target creation after refusal.
@@ -337,16 +348,23 @@ fn require_generation_refusal(mut world: World) -> Result<()> {
 }
 
 #[test]
-fn native_profile_refuses_each_generation_name_and_object_substitution_without_mutation() -> Result<()> {
+fn native_profile_refuses_each_generation_name_and_object_substitution_without_mutation()
+-> Result<()> {
     effects::scope(simulation::World::new(21010), || {
-        for name in ["day2_rollout_generations", "day2_rollout_runtime", "day2_invocation_runtime"] {
+        for name in [
+            "day2_rollout_generations",
+            "day2_rollout_runtime",
+            "day2_invocation_runtime",
+        ] {
             for name in [name.to_owned(), name.to_ascii_uppercase()] {
                 for definition in [
                     format!("CREATE TABLE {name}(id TEXT) STRICT"),
                     format!("CREATE TABLE {name}(wrong BLOB); INSERT INTO {name} VALUES(x'00')"),
                     format!("CREATE VIEW {name} AS SELECT 1 AS value"),
                     format!("CREATE INDEX {name} ON fixture_business(value)"),
-                    format!("CREATE TRIGGER {name} AFTER INSERT ON fixture_business BEGIN SELECT 1; END"),
+                    format!(
+                        "CREATE TRIGGER {name} AFTER INSERT ON fixture_business BEGIN SELECT 1; END"
+                    ),
                 ] {
                     let world = world()?;
                     world.owner.application.db.execute_batch(&definition)?;
@@ -359,15 +377,27 @@ fn native_profile_refuses_each_generation_name_and_object_substitution_without_m
 }
 
 #[test]
-fn active_and_inactive_generation_archives_keep_their_captured_executor_history_on_refusal() -> Result<()> {
+fn active_and_inactive_generation_archives_keep_their_captured_executor_history_on_refusal()
+-> Result<()> {
     effects::scope(simulation::World::new(21011), || {
         for active in [false, true] {
             let world = world()?;
             let id = world.owner.application.seed_runtime_generation_history()?;
             if !active {
-                world.owner.application.db.execute("DELETE FROM day2_rollout_runtime", [])?;
+                world
+                    .owner
+                    .application
+                    .db
+                    .execute("DELETE FROM day2_rollout_runtime", [])?;
             }
-            assert_eq!(world.owner.application.db.query_row("SELECT generation FROM day2_invocation_runtime WHERE invocation='old-work'", [], |row| row.get::<_, String>(0))?, id);
+            assert_eq!(
+                world.owner.application.db.query_row(
+                    "SELECT generation FROM day2_invocation_runtime WHERE invocation='old-work'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )?,
+                id
+            );
             require_generation_refusal(world)?;
         }
         Ok(())
@@ -389,10 +419,22 @@ fn native_reset_keeps_current_held_captures_and_digest_backed_trace_history() ->
         for _ in 0..2 {
             let db = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let restored = application::tests::snapshot(&db)?;
-            for table in ["day2_capture_deliveries", "day2_trace_policies", "day2_credential_receipts", "day2_app_outgoing"] {
-                assert!(captured[table] == restored[table], "historical archive DATA changed: {table}");
+            for table in [
+                "day2_capture_deliveries",
+                "day2_trace_policies",
+                "day2_credential_receipts",
+                "day2_app_outgoing",
+            ] {
+                assert!(
+                    captured[table] == restored[table],
+                    "historical archive DATA changed: {table}"
+                );
             }
-            let raw: String = db.query_row("SELECT trace FROM day2_invocations WHERE id='old-work'", [], |row| row.get(0))?;
+            let raw: String = db.query_row(
+                "SELECT trace FROM day2_invocations WHERE id='old-work'",
+                [],
+                |row| row.get(0),
+            )?;
             assert_eq!(crate::journal::load_trace(&db, &raw)?, trace);
             assert!(!crate::authority_state::current(&db)?.document.enabled);
             world.owner.application.require_image(&db, true)?;
@@ -405,65 +447,129 @@ fn native_reset_keeps_current_held_captures_and_digest_backed_trace_history() ->
 fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_database() {
     use quote::ToTokens;
     fn compact(value: &impl ToTokens) -> String {
-        value.to_token_stream().to_string().split_whitespace().collect::<String>().replace(",)", ")")
+        value
+            .to_token_stream()
+            .to_string()
+            .split_whitespace()
+            .collect::<String>()
+            .replace(",)", ")")
     }
     fn guarded(block: &syn::Block, expected: &[syn::Stmt]) -> bool {
-        struct Sequences<'a> { expected: &'a [syn::Stmt], matches: usize, calls: usize }
+        struct Sequences<'a> {
+            expected: &'a [syn::Stmt],
+            matches: usize,
+            calls: usize,
+        }
         impl<'ast> Visit<'ast> for Sequences<'_> {
             fn visit_block(&mut self, block: &'ast syn::Block) {
-                self.matches += block.stmts.windows(self.expected.len()).filter(|window| window.iter().zip(self.expected).all(|(a,b)| compact(a)==compact(b))).count();
+                self.matches += block
+                    .stmts
+                    .windows(self.expected.len())
+                    .filter(|window| {
+                        window
+                            .iter()
+                            .zip(self.expected)
+                            .all(|(a, b)| compact(a) == compact(b))
+                    })
+                    .count();
                 visit::visit_block(self, block);
             }
             fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                if matches!(&*call.func, syn::Expr::Path(path) if path.path.segments.last().is_some_and(|name| name.ident == "require_no_runtime_generation_objects")) { self.calls += 1; }
+                if matches!(&*call.func, syn::Expr::Path(path) if path.path.segments.last().is_some_and(|name| name.ident == "require_no_runtime_generation_objects"))
+                {
+                    self.calls += 1;
+                }
                 visit::visit_expr_call(self, call);
             }
         }
-        let mut observed = Sequences { expected, matches: 0, calls: 0 };
+        let mut observed = Sequences {
+            expected,
+            matches: 0,
+            calls: 0,
+        };
         observed.visit_block(block);
         observed.matches == 1 && observed.calls == 1
     }
     fn function(source: &str, name: &str) -> syn::Block {
-        syn::parse_file(source).unwrap().items.into_iter().find_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == name => Some(*item.block), _ => None,
-        }).unwrap()
+        syn::parse_file(source)
+            .unwrap()
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == name => Some(*item.block),
+                _ => None,
+            })
+            .unwrap()
     }
     let staging = include_str!("../restore_staging.rs");
     let archive = include_str!("archive.rs");
     for (source, name, expected, call) in [
-        (staging, "prepare_image", vec![
-            syn::parse_quote!(db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;),
-            syn::parse_quote!(memory_shape(db, Some(image.len()))?;),
-            syn::parse_quote!(self::require_no_runtime_generation_objects(db)?;),
-        ], "self::require_no_runtime_generation_objects(db)?;"),
-        (archive, "capture_snapshot", vec![
-            syn::parse_quote!(memory.db.deserialize_read_exact(rusqlite::MAIN_DB, &image[..], image.len(), false)?;),
-            syn::parse_quote!(super::memory_shape(memory.db, Some(image.len()))?;),
-            syn::parse_quote!(super::require_no_runtime_generation_objects(memory.db)?;),
-        ], "super::require_no_runtime_generation_objects(memory.db)?;"),
+        (
+            staging,
+            "prepare_image",
+            vec![
+                syn::parse_quote!(db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;),
+                syn::parse_quote!(memory_shape(db, Some(image.len()))?;),
+                syn::parse_quote!(self::require_no_runtime_generation_objects(db)?;),
+            ],
+            "self::require_no_runtime_generation_objects(db)?;",
+        ),
+        (
+            archive,
+            "capture_snapshot",
+            vec![
+                syn::parse_quote!(memory.db.deserialize_read_exact(rusqlite::MAIN_DB, &image[..], image.len(), false)?;),
+                syn::parse_quote!(super::memory_shape(memory.db, Some(image.len()))?;),
+                syn::parse_quote!(super::require_no_runtime_generation_objects(memory.db)?;),
+            ],
+            "super::require_no_runtime_generation_objects(memory.db)?;",
+        ),
     ] {
         assert!(guarded(&function(source, name), &expected));
         assert_eq!(source.matches(call).count(), 1);
-        for changed in [String::new(), format!("if false {{ {call} }}"), format!("let _ = {};", call.trim_end_matches("?;")), call.replace("(db)", "(foreign)").replace("(memory.db)", "(foreign)")] {
-            assert!(!guarded(&function(&source.replacen(call, &changed, 1), name), &expected));
+        for changed in [
+            String::new(),
+            format!("if false {{ {call} }}"),
+            format!("let _ = {};", call.trim_end_matches("?;")),
+            call.replace("(db)", "(foreign)")
+                .replace("(memory.db)", "(foreign)"),
+        ] {
+            assert!(!guarded(
+                &function(&source.replacen(call, &changed, 1), name),
+                &expected
+            ));
         }
         let original = function(source, name);
-        struct ActualBlock<'a> { call: &'a syn::Stmt, found: Option<syn::Block> }
+        struct ActualBlock<'a> {
+            call: &'a syn::Stmt,
+            found: Option<syn::Block>,
+        }
         impl<'ast> Visit<'ast> for ActualBlock<'_> {
             fn visit_block(&mut self, block: &'ast syn::Block) {
-                if block.stmts.iter().any(|stmt| compact(stmt) == compact(self.call)) {
+                if block
+                    .stmts
+                    .iter()
+                    .any(|stmt| compact(stmt) == compact(self.call))
+                {
                     assert!(self.found.is_none());
                     self.found = Some(block.clone());
                 }
                 visit::visit_block(self, block);
             }
         }
-        let mut selected = ActualBlock { call: &expected[2], found: None };
+        let mut selected = ActualBlock {
+            call: &expected[2],
+            found: None,
+        };
         selected.visit_block(&original);
         let mut ignored = selected.found.unwrap();
         assert!(guarded(&ignored, &expected));
-        let index = ignored.stmts.iter().position(|stmt| compact(stmt)==compact(&expected[2])).unwrap();
-        ignored.stmts.swap(index-1, index);
+        let index = ignored
+            .stmts
+            .iter()
+            .position(|stmt| compact(stmt) == compact(&expected[2]))
+            .unwrap();
+        ignored.stmts.swap(index - 1, index);
         assert!(!guarded(&ignored, &expected));
     }
     let file = syn::parse_file(staging).unwrap();
@@ -472,13 +578,23 @@ fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_da
             syn::ImplItem::Fn(item) if item.sig.ident=="enter" => Some(item.block.clone()), _=>None,
         }), _=>None,
     }).unwrap();
-    let expected = [syn::parse_quote!(memory_shape(tx, None)?;), syn::parse_quote!(self::require_no_runtime_generation_objects(tx)?;)];
+    let expected = [
+        syn::parse_quote!(memory_shape(tx, None)?;),
+        syn::parse_quote!(self::require_no_runtime_generation_objects(tx)?;),
+    ];
     assert!(guarded(&hook, &expected));
-    for replacement in [syn::parse_quote!(Ok(())?;), syn::parse_quote!(let _ = self::require_no_runtime_generation_objects(tx);)] {
-        let mut ignored=hook.clone();
-        let index=ignored.stmts.iter().position(|stmt|compact(stmt)==compact(&expected[1])).unwrap();
-        ignored.stmts[index]=replacement;
-        assert!(!guarded(&ignored,&expected));
+    for replacement in [
+        syn::parse_quote!(Ok(())?;),
+        syn::parse_quote!(let _ = self::require_no_runtime_generation_objects(tx);),
+    ] {
+        let mut ignored = hook.clone();
+        let index = ignored
+            .stmts
+            .iter()
+            .position(|stmt| compact(stmt) == compact(&expected[1]))
+            .unwrap();
+        ignored.stmts[index] = replacement;
+        assert!(!guarded(&ignored, &expected));
     }
 }
 
@@ -1695,10 +1811,7 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
     let source = include_str!("../restore_staging.rs");
     assert!(valid(source));
     for (from, to) in [
-        (
-            "self::require_no_runtime_generation_objects(db)?;",
-            "",
-        ),
+        ("self::require_no_runtime_generation_objects(db)?;", ""),
         (
             "self::require_no_runtime_generation_objects(db)?;",
             "self::require_no_runtime_generation_objects(foreign)?;",

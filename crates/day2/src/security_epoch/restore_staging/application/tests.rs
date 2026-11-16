@@ -229,7 +229,12 @@ impl Fixture {
     // Real current-schema DATA for the offline archive controls. This fixture
     // does not create a native owner, a backup lease or restore permission.
     pub(super) fn seed_current_backup_contents(&mut self) -> Result<crate::protocol::Trace> {
-        let scope = format!("{}/{}/{}", self.namespace.installation.as_str(), self.namespace.environment.as_str(), self.namespace.app.as_str());
+        let scope = format!(
+            "{}/{}/{}",
+            self.namespace.installation.as_str(),
+            self.namespace.environment.as_str(),
+            self.namespace.app.as_str()
+        );
         let trace = crate::protocol::Trace {
             format: 2,
             artifact: self.artifact.id().into(),
@@ -238,27 +243,60 @@ impl Fixture {
                 operation: "submit".into(),
                 input: "{}".into(),
                 context: crate::protocol::Context {
-                    invocation_id: "old-work".into(), actor: "alice@example.com".into(),
-                    now: 100, authentication: "request".into(), caller: Vec::new(),
-                    authenticated: String::new(), delegation_rule: String::new(),
+                    invocation_id: "old-work".into(),
+                    actor: "alice@example.com".into(),
+                    now: 100,
+                    authentication: "request".into(),
+                    caller: Vec::new(),
+                    authenticated: String::new(),
+                    delegation_rule: String::new(),
                 },
                 observations: Vec::new(),
             },
-            outcome: crate::protocol::Outcome { status: "pending".into(), result: serde_json::json!({}), error: String::new() },
+            outcome: crate::protocol::Outcome {
+                status: "pending".into(),
+                result: serde_json::json!({}),
+                error: String::new(),
+            },
             guard: Some(crate::protocol::ExecutionGuard {
-                policy: crate::authority::Policy { version: 1, admins: Default::default(), operations: Default::default(), constraints: Default::default(), delegations: Default::default() },
-                authority: Some(self.previous.stamp.clone()), precondition_row: None, error: String::new(),
+                policy: crate::authority::Policy {
+                    version: 1,
+                    admins: Default::default(),
+                    operations: Default::default(),
+                    constraints: Default::default(),
+                    delegations: Default::default(),
+                },
+                authority: Some(self.previous.stamp.clone()),
+                precondition_row: None,
+                error: String::new(),
             }),
         };
         let tx = self.db.transaction()?;
-        crate::capture_delivery::stage(&tx, crate::capture_delivery::Holder::Application, &crate::capture_delivery::Staged {
-            id: "retained-provider-capture".into(), kind: "carta.snapshot", authority: self.previous.stamp.epoch.clone(),
-            item_count: 1, pages: vec![r#"{"items":[{"id":"keep-current-capture"}]}"#.into()], starts: vec![0],
-        })?;
+        crate::capture_delivery::stage(
+            &tx,
+            crate::capture_delivery::Holder::Application,
+            &crate::capture_delivery::Staged {
+                id: "retained-provider-capture".into(),
+                kind: "carta.snapshot",
+                authority: self.previous.stamp.epoch.clone(),
+                item_count: 1,
+                pages: vec![r#"{"items":[{"id":"keep-current-capture"}]}"#.into()],
+                starts: vec![0],
+            },
+        )?;
         let stored = crate::journal::store_trace(&tx, &trace)?;
-        tx.execute("UPDATE day2_invocations SET trace=?1 WHERE id='old-work'", [&stored])?;
+        tx.execute(
+            "UPDATE day2_invocations SET trace=?1 WHERE id='old-work'",
+            [&stored],
+        )?;
         let captured = crate::oauth::restore::Snapshot::capture(&tx, &self.oauth_schema)?;
-        self.cut = restore_cut::fixture_for_storage_epoch(captured.digest().clone(), 909, &scope, self.artifact.contract().schema_digest.clone().try_into()?, 1)?;
+        self.cut = restore_cut::fixture_for_storage_epoch(
+            captured.digest().clone(),
+            909,
+            &scope,
+            self.artifact.contract().schema_digest.clone().try_into()?,
+            1,
+        )?;
         tx.commit()?;
         Ok(trace)
     }
@@ -269,7 +307,12 @@ impl Fixture {
             runtime: crate::runtime_pair::RuntimeIdentity,
             code: crate::security_admission::HostCode,
         }
-        let scope = format!("{}/{}/{}", self.namespace.installation.as_str(), self.namespace.environment.as_str(), self.namespace.app.as_str());
+        let scope = format!(
+            "{}/{}/{}",
+            self.namespace.installation.as_str(),
+            self.namespace.environment.as_str(),
+            self.namespace.app.as_str()
+        );
         let generation = Generation {
             // Structurally valid historical DATA, not a native owner or an
             // independently admitted executing runtime. The closed profile
@@ -282,9 +325,16 @@ impl Fixture {
         };
         let id = crate::digest(&serde_json::to_vec(&(&scope, &generation))?);
         crate::runtime_generation::install(&self.db)?;
-        self.db.execute("INSERT INTO day2_rollout_generations VALUES(?1,?2,?3)", rusqlite::params![id, scope, serde_json::to_string(&generation)?])?;
-        self.db.execute("INSERT INTO day2_rollout_runtime VALUES(1,?1)", [&id])?;
-        self.db.execute("INSERT INTO day2_invocation_runtime VALUES('old-work',?1)", [&id])?;
+        self.db.execute(
+            "INSERT INTO day2_rollout_generations VALUES(?1,?2,?3)",
+            rusqlite::params![id, scope, serde_json::to_string(&generation)?],
+        )?;
+        self.db
+            .execute("INSERT INTO day2_rollout_runtime VALUES(1,?1)", [&id])?;
+        self.db.execute(
+            "INSERT INTO day2_invocation_runtime VALUES('old-work',?1)",
+            [&id],
+        )?;
         Ok(id)
     }
 
@@ -370,7 +420,9 @@ fn rows(db: &Connection, table: &str) -> Result<Vec<Vec<Value>>> {
     Ok(values)
 }
 
-pub(in crate::security_epoch::restore_staging) fn snapshot(db: &Connection) -> Result<BTreeMap<String, Vec<Vec<Value>>>> {
+pub(in crate::security_epoch::restore_staging) fn snapshot(
+    db: &Connection,
+) -> Result<BTreeMap<String, Vec<Vec<Value>>>> {
     let mut statement=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
     let tables = statement
         .query_map([], |row| row.get::<_, String>(0))?
