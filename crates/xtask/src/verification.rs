@@ -3376,7 +3376,11 @@ mod tests {
     fn linux_context_swap_refusal_reports_bounded_current_quotas() {
         for (purpose, memory, swap) in [
             (LinuxContext::Standard, "4096\n", "max\n"),
-            (LinuxContext::CompilerPreparation, "8589934592\n", "1048576\n"),
+            (
+                LinuxContext::CompilerPreparation,
+                "8589934592\n",
+                "1048576\n",
+            ),
         ] {
             let error =
                 validate_linux_context(purpose, "verify-prepare-parts", "0::/", memory, swap)
