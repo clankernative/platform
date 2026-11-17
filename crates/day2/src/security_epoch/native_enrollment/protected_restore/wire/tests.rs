@@ -3,11 +3,21 @@
 use super::*;
 use crate::security_epoch::native_enrollment::protocol::KeyOwner;
 
+fn interval() -> OriginalInterval {
+    OriginalInterval {
+        purpose: StagePurpose::CurrentRole,
+        domain: Digest::new(b"sender-request-data-not-a-common-clock-proof"),
+        origin_ns: u64::MAX - 5_000_000_000,
+        deadline_ns: u64::MAX,
+    }
+}
+
 fn request(request: ProtectedRestoreRequest) -> Data {
     Data::request(
         Digest::new(b"connection"),
         Digest::new(b"sender"),
         u64::MAX,
+        interval(),
         request,
     )
     .unwrap()
@@ -18,6 +28,7 @@ fn reply(reply: ProtectedRestoreReply) -> Data {
         Digest::new(b"connection"),
         Digest::new(b"sender"),
         u64::MAX,
+        interval(),
         reply,
     )
     .unwrap()
@@ -34,6 +45,24 @@ fn fixture() -> Data {
     request(ProtectedRestoreRequest::Abandon {
         id: Digest::new(b"command"),
     })
+}
+
+#[test]
+fn command_frames_keep_the_exact_sequence_in_both_directions_and_no_serving_protocol() {
+    use crate::security_epoch::native_enrollment::handshake::{Frame, Protocol, Step};
+    for (data, step) in [
+        (fixture(), Step::Hello),
+        (reply(ProtectedRestoreReply::Abandoned), Step::Complete),
+    ] {
+        assert_eq!(
+            data.frame(),
+            Frame {
+                protocol: Protocol::ProtectedRestoreCommand,
+                step,
+                sequence: Some(u64::MAX),
+            }
+        );
+    }
 }
 
 #[test]
@@ -128,6 +157,13 @@ fn packet_signature_binds_every_field_and_cannot_cross_the_serving_domain() {
             "body",
             serde_json::json!({"kind":"abandon", "id":Digest::new(b"foreign command")}),
         ),
+        (
+            "original",
+            serde_json::json!(OriginalInterval {
+                domain: Digest::new(b"foreign request"),
+                ..interval()
+            }),
+        ),
     ] {
         let mut changed = original.clone();
         changed["data"][field] = value;
@@ -151,6 +187,82 @@ fn packet_signature_binds_every_field_and_cannot_cross_the_serving_domain() {
         UnverifiedPacket::decode(&bytes)
             .unwrap()
             .verify_data(&key.public())
+            .is_err()
+    );
+}
+
+#[test]
+fn sender_original_matches_every_fresh_field_and_is_bound_by_the_signature() {
+    let key = KeyOwner::generate().unwrap();
+    let data = fixture();
+    data.require_sender(&Digest::new(b"sender"), &interval(), Direction::Request)
+        .unwrap();
+    for cut in 0..4 {
+        let mut changed = interval();
+        match cut {
+            0 => changed.purpose = StagePurpose::InitialFirstHolder,
+            1 => changed.domain = Digest::new(b"other-sender-request"),
+            2 => changed.origin_ns += 1,
+            _ => changed.deadline_ns -= 1,
+        }
+        assert!(
+            data.require_sender(&Digest::new(b"sender"), &changed, Direction::Request)
+                .is_err(),
+            "sender field {cut}"
+        );
+        let mut encoded: serde_json::Value =
+            serde_json::from_slice(&signed(fixture(), &key)).unwrap();
+        encoded["data"]["original"] = serde_json::to_value(changed).unwrap();
+        let tampered = serde_json::to_vec(&encoded).unwrap();
+        match UnverifiedPacket::decode(&tampered) {
+            // A changed purpose is structurally invalid before signature work.
+            Err(_) => assert_eq!(cut, 0),
+            Ok(packet) => assert!(
+                packet.verify_data(&key.public()).is_err(),
+                "signed field {cut}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn original_shape_is_strict_but_never_claims_current_time_or_common_clock() {
+    let key = KeyOwner::generate().unwrap();
+    for cut in 0..5 {
+        let mut data = fixture();
+        match cut {
+            0 => data.original.purpose = StagePurpose::StorageMetadataObservation,
+            1 => data.original.deadline_ns = data.original.origin_ns,
+            2 => data.original.deadline_ns = data.original.origin_ns - 1,
+            3 => data.original.origin_ns -= 1,
+            _ => data.original.purpose = StagePurpose::InitialFirstHolder,
+        }
+        assert!(data.validate().is_err(), "invalid shape {cut}");
+        let signature = key
+            .sign(SIGNING_DOMAIN, &data.commitment().unwrap())
+            .unwrap();
+        assert!(UnverifiedPacket::encode(data, signature).is_err());
+    }
+    // This structurally valid interval is in the distant past. Even a real
+    // signature and exact DATA equality must NOT claim freshness or admission.
+    let mut stale = fixture();
+    stale.original.origin_ns = 0;
+    stale.original.deadline_ns = 1;
+    let stale_original = stale.original.clone();
+    let decoded = UnverifiedPacket::decode(&signed(stale, &key))
+        .unwrap()
+        .verify_data(&key.public())
+        .unwrap();
+    decoded
+        .require_sender(&Digest::new(b"sender"), &stale_original, Direction::Request)
+        .unwrap();
+    assert!(
+        decoded
+            .original
+            .validate_request(
+                std::time::Duration::from_nanos(1),
+                StagePurpose::CurrentRole
+            )
             .is_err()
     );
 }
@@ -198,11 +310,16 @@ fn strict_decoder_rejects_duplicate_unknown_truncated_oversize_and_wrong_domain_
     let text = String::from_utf8(bytes.clone()).unwrap();
     let duplicate = text.replace("\"sequence\":", "\"sequence\":0,\"sequence\":");
     assert!(UnverifiedPacket::decode(duplicate.as_bytes()).is_err());
+    let duplicate_original = text.replace("\"origin_ns\":", "\"origin_ns\":0,\"origin_ns\":");
+    assert!(UnverifiedPacket::decode(duplicate_original.as_bytes()).is_err());
     let mut unknown: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     unknown["data"]["privilege"] = serde_json::json!(true);
     assert!(UnverifiedPacket::decode(&serde_json::to_vec(&unknown).unwrap()).is_err());
     let mut unknown: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     unknown["data"]["body"]["permission"] = serde_json::json!(true);
+    assert!(UnverifiedPacket::decode(&serde_json::to_vec(&unknown).unwrap()).is_err());
+    let mut unknown: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    unknown["data"]["original"]["fresh"] = serde_json::json!(true);
     assert!(UnverifiedPacket::decode(&serde_json::to_vec(&unknown).unwrap()).is_err());
     let mut domain: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     domain["data"]["format"] = serde_json::json!("shell-controller-serving-message");
@@ -220,6 +337,7 @@ fn payload_and_signature_encodings_are_canonical_and_bounded_before_native_admis
                 Digest::new(b"c"),
                 Digest::new(b"s"),
                 0,
+                interval(),
                 ProtectedRestoreRequest::BeginApproval {
                     input: vec![0; size]
                 }
@@ -233,6 +351,7 @@ fn payload_and_signature_encodings_are_canonical_and_bounded_before_native_admis
                 Digest::new(b"c"),
                 Digest::new(b"s"),
                 0,
+                interval(),
                 ProtectedRestoreRequest::Authenticate {
                     id: Digest::new(b"i"),
                     assertion: vec![0; size]
@@ -281,6 +400,7 @@ fn both_fieldless_replies_reject_extra_signed_fields_and_all_envelope_array_shap
             value["data"]["connection"],
             value["data"]["sender"],
             value["data"]["sequence"],
+            value["data"]["original"],
             value["data"]["body"],
         ]);
         let mut body_array = value.clone();
@@ -290,7 +410,20 @@ fn both_fieldless_replies_reject_extra_signed_fields_and_all_envelope_array_shap
         let mut format_map = value.clone();
         format_map["data"]["format"] =
             serde_json::json!({"day2_protected_restore_packet_v1": null});
-        for malformed in [outer_array, data_array, body_array, format_map] {
+        let mut original_array = value.clone();
+        original_array["data"]["original"] = serde_json::json!([
+            value["data"]["original"]["purpose"],
+            value["data"]["original"]["domain"],
+            value["data"]["original"]["origin_ns"],
+            value["data"]["original"]["deadline_ns"],
+        ]);
+        for malformed in [
+            outer_array,
+            data_array,
+            body_array,
+            format_map,
+            original_array,
+        ] {
             assert!(UnverifiedPacket::from_value(malformed.clone()).is_err());
             assert!(UnverifiedPacket::decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
         }

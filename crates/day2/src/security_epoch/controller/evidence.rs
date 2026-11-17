@@ -321,10 +321,18 @@ pub(super) fn preparation_error_category(error: &anyhow::Error) -> PreparationEr
         Some("native_enrollment_socket_unexpected_events") => {
             return Category::SocketUnexpectedEvents;
         }
-        Some("storage_peer_channel_closed" | "storage_peer_idle_channel_closed") => {
+        Some(
+            "storage_peer_channel_closed"
+            | "storage_peer_idle_channel_closed"
+            | "native_peer_idle_channel_closed",
+        ) => {
             return Category::ChannelClosed;
         }
-        Some("storage_peer_channel_cloexec_required" | "storage_peer_listener_cloexec_lost") => {
+        Some(
+            "storage_peer_channel_cloexec_required"
+            | "storage_peer_listener_cloexec_lost"
+            | "native_peer_idle_socket_profile",
+        ) => {
             return Category::ChannelProfileChanged;
         }
         Some("storage_peer_remote_stage_expired") => return Category::RemoteStageExpired,
@@ -1639,6 +1647,16 @@ mod tests {
             ),
             ("storage_peer_channel_closed", Category::ChannelClosed),
             ("storage_peer_idle_channel_closed", Category::ChannelClosed),
+            ("native_peer_idle_channel_closed", Category::ChannelClosed),
+            (
+                "native_peer_idle_socket_profile",
+                Category::ChannelProfileChanged,
+            ),
+            ("native_peer_idle_channel_closed /SECRET", Category::Other),
+            ("native_peer_idle_socket_profile\0PRIVATE", Category::Other),
+            ("prefix/native_peer_idle_channel_closed", Category::Other),
+            ("native_enrollment_channel_refused", Category::Other),
+            ("storage_peer_channel_refused", Category::Other),
             (
                 "storage_peer_channel_cloexec_required",
                 Category::ChannelProfileChanged,
@@ -1722,6 +1740,68 @@ mod tests {
             preparation_error_category(&anyhow::Error::new(rustix::io::Errno::LOOP)),
             Category::PathResolution
         );
+    }
+
+    #[test]
+    fn shared_idle_categories_are_exact_and_never_format_foreign_errors() -> Result<()> {
+        struct Foreign;
+        impl std::fmt::Display for Foreign {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign Display must not run");
+            }
+        }
+        impl std::fmt::Debug for Foreign {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign Debug must not run");
+            }
+        }
+        impl std::error::Error for Foreign {}
+        for (code, expected, wire) in [
+            (
+                "native_peer_idle_channel_closed",
+                PreparationErrorCategory::ChannelClosed,
+                "channel_closed",
+            ),
+            (
+                "native_peer_idle_socket_profile",
+                PreparationErrorCategory::ChannelProfileChanged,
+                "channel_profile_changed",
+            ),
+            (
+                "native_peer_idle_channel_closed /PRIVATE",
+                PreparationErrorCategory::Other,
+                "other",
+            ),
+            (
+                "native_peer_idle_socket_profile\0PRIVATE",
+                PreparationErrorCategory::Other,
+                "other",
+            ),
+            (
+                "native_enrollment_channel_refused",
+                PreparationErrorCategory::Other,
+                "other",
+            ),
+            (
+                "storage_peer_channel_refused",
+                PreparationErrorCategory::Other,
+                "other",
+            ),
+        ] {
+            let error = anyhow::Error::new(Foreign).context(code);
+            let original = error.downcast_ref::<Foreign>().unwrap() as *const Foreign;
+            let category = preparation_error_category(&error);
+            assert_eq!(category, expected);
+            assert_eq!(
+                serde_json::to_value(category)?,
+                serde_json::Value::String(wire.into())
+            );
+            assert_eq!(
+                error.downcast_ref::<Foreign>().unwrap() as *const Foreign,
+                original
+            );
+        }
+        Ok(())
     }
 
     #[test]

@@ -2,17 +2,199 @@
 //! No parsed certificate, caller key, scalar clock or generic signing purpose
 //! can replace this owner. These hooks do not admit a native peer or Current.
 
+use super::request_frame::EnrolledStageFrame;
 use super::{
     EnrolledCurrentRequest, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeConsumerOrigin,
+    SameEnrolledOwner,
 };
-use crate::security_epoch::native_clock::StageAcquisition;
 use crate::security_epoch::native_enrollment::{
     NativeRole,
-    protected_restore::{ProtectedRestoreMessage, ProtectedRestoreTurn},
+    protected_restore::{
+        ProtectedRestoreActionGuard, ProtectedRestoreMessage, ProtectedRestoreTurn,
+    },
     protocol::StagePurpose,
     serving_peer_wire::Statement,
 };
 use anyhow::{Result, ensure};
+
+/// Fixed installed-output signer. The installed carrier is checked AFTER all
+/// native statement work, immediately before key use. Nothing can replace the
+/// retained turn, loan or original with decoded output DATA.
+pub(in crate::security_epoch::native_enrollment) fn sign_protected_restore_installed(
+    turn: &mut ProtectedRestoreTurn<'_>,
+    stage: &mut EnrolledRoleStage<'_>,
+    loan: &mut crate::security_epoch::bootstrap::RestoreInstalledOutputLoan<'_, '_, '_>,
+    original: &NativeConsumerOrigin,
+    data:&crate::security_epoch::native_enrollment::protected_restore::ProtectedRestoreInstalledData,
+) -> Result<String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = data;
+        turn.refuse();
+        stage.refuse_serving();
+        loan.refuse();
+        original.refuse();
+        anyhow::bail!("native_protected_restore_transport_unavailable");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let requested =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<String> {
+                turn.require_received_guard(stage)?;
+                turn.require_installed_binding(data)?;
+                let local = stage.protected_restore_statement()?;
+                data.require_signer(&local, turn.admitted_statement()?)?;
+                let commitment = data.commitment()?;
+                let output = {
+                    let mut storage = stage.storage()?;
+                    loan.check(&mut storage)?
+                };
+                data.require_output(&output)?;
+                check_protected_restore_installed_original(stage, original, data)?;
+                stage.owner.key.sign(
+            crate::security_epoch::native_enrollment::protected_restore::INSTALLED_SIGNING_DOMAIN,
+            &commitment,
+        )
+            }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            let output = {
+                let mut storage = stage.storage()?;
+                loan.check(&mut storage)?
+            };
+            data.require_output(&output)?;
+            check_protected_restore_installed_original(stage, original, data)
+        }));
+        let native = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.check()));
+        let checked =
+            crate::security_epoch::native_enrollment::protected_restore::select_guard_check(
+                checked, native,
+            );
+        if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) {
+            loan.refuse();
+            turn.refuse();
+            original.refuse();
+            stage.refuse_serving();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(signature)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(signature)
+                }
+            },
+        }
+    }
+}
+
+/// Only the same actual retained original and its already-narrowed interval.
+/// No native I/O or issuer work occurs between the last loan check and signing
+/// or sending. Equality/rewind/expiry still refuse on the actual original.
+pub(in crate::security_epoch::native_enrollment) fn check_protected_restore_installed_original(
+    stage: &mut EnrolledRoleStage<'_>,
+    original: &NativeConsumerOrigin,
+    data:&crate::security_epoch::native_enrollment::protected_restore::ProtectedRestoreInstalledData,
+) -> Result<()> {
+    let requested = (|| {
+        // require_purpose itself performs native I/O; the full native/role
+        // check already ran before the loan. This last join is deliberately
+        // identity/interval plus a fresh sample of the actual original only.
+        ensure!(
+            stage.purpose == StagePurpose::CurrentRole
+                && stage.owner.role == NativeRole::EpochController
+                && !stage.owner.refused,
+            "protected_restore_installed_native_role_changed"
+        );
+        original.require_acquisition(stage.acquisition.as_mut())?;
+        let (domain, origin, deadline, _) =
+            stage.acquisition.as_mut().historical_interval_observation();
+        let actual =
+            crate::security_epoch::native_enrollment::storage_peer_wire::OriginalInterval {
+                purpose: StagePurpose::CurrentRole,
+                domain,
+                origin_ns: u64::try_from(origin.as_nanos())?,
+                deadline_ns: u64::try_from(deadline.min(stage.deadline).as_nanos())?,
+            };
+        data.require_original(&actual)?;
+        stage.acquisition.as_mut().remaining().map(|_| ())
+    })();
+    if requested.is_err() {
+        original.refuse();
+        stage.refuse_serving();
+    }
+    requested
+}
+
+/// Only a genuine opaque receiver-produced guard can enter this hook. It is
+/// stored in the actual saved frame, not in a temporary stage or caller DTO.
+pub(in crate::security_epoch::native_enrollment) fn attach_protected_restore_guard(
+    stage: &mut EnrolledRoleStage<'_>,
+    guard: ProtectedRestoreActionGuard,
+) -> Result<()> {
+    let mut pending = Some(guard);
+    let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+        pending
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("protected_restore_request_guard_missing"))?
+            .require_stage(stage)?;
+        pending
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("protected_restore_request_guard_missing"))?
+            .check(stage.owner, stage.purpose, stage.acquisition.as_mut())?;
+        let guard = pending
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("protected_restore_request_guard_missing"))?;
+        if let Err(rejected) = stage.acquisition.attach(guard) {
+            // Retain THIS packet's resources through the independent post,
+            // including duplicate attachment. Refusal follows observation.
+            pending = Some(rejected);
+            anyhow::bail!("protected_restore_request_guard_already_attached");
+        }
+        Ok(())
+    }));
+    let pending_checked =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &mut pending {
+            Some(guard) => guard.check(stage.owner, stage.purpose, stage.acquisition.as_mut()),
+            None => Ok(()),
+        }));
+    let stage_checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.check()));
+    let checked = match pending_checked {
+        Ok(Ok(())) => stage_checked,
+        failed => failed,
+    };
+    if !matches!(&requested, Ok(Ok(()))) || !matches!(&checked, Ok(Ok(()))) {
+        if let Some(guard) = &mut pending {
+            guard.refuse();
+        }
+        stage.refuse_serving();
+    }
+    match requested {
+        Err(payload) => std::panic::resume_unwind(payload),
+        Ok(Err(error)) => Err(error),
+        Ok(Ok(())) => match checked {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(result) => result,
+        },
+    }
+}
+
+pub(in crate::security_epoch::native_enrollment) fn require_protected_restore_guard(
+    stage: &mut EnrolledRoleStage<'_>,
+    root: &std::rc::Rc<std::cell::Cell<bool>>,
+    original: &NativeConsumerOrigin,
+    connection: &day2_capabilities::Digest,
+    sequence: u64,
+) -> Result<()> {
+    let result = stage
+        .acquisition
+        .require_guard(root, original, connection, sequence);
+    if result.is_err() {
+        stage.refuse_serving();
+    }
+    result
+}
 
 /// A consuming transfer is still an outstanding use of the original. Failure
 /// or unwinding poisons both actual roots; taking the request is not settlement.
@@ -76,6 +258,7 @@ impl EnrolledProcessRoleOwner {
             turn.require_accepting_original(&attempt.original, owner)?;
             let mut stage = owner.borrow_current_request(&mut request)?;
             stage.require_protected_restore_role(NativeRole::EpochController)?;
+            turn.require_received_guard(&mut stage)?;
             attempt.original.check_current(&mut stage)
         }));
         // This observes the actual saved request even after a requested error
@@ -87,6 +270,7 @@ impl EnrolledProcessRoleOwner {
                 .ok_or_else(|| anyhow::anyhow!("protected_restore_transfer_owner_missing"))?;
             let mut stage = owner.borrow_current_request(&mut request)?;
             stage.require_protected_restore_role(NativeRole::EpochController)?;
+            turn.require_received_guard(&mut stage)?;
             attempt.original.check_current(&mut stage)?;
             Ok(stage.deadline)
         }));
@@ -104,7 +288,7 @@ impl EnrolledProcessRoleOwner {
             Err(payload) => std::panic::resume_unwind(payload),
             Ok(result) => result?,
         };
-        let acquisition = request
+        let frame = request
             .acquisition
             .take()
             .ok_or_else(|| anyhow::anyhow!("protected_restore_transfer_original_missing"))?;
@@ -118,11 +302,175 @@ impl EnrolledProcessRoleOwner {
         let stage = EnrolledRoleStage {
             owner,
             purpose: StagePurpose::CurrentRole,
-            acquisition: StageAcquisition::owned(acquisition),
+            acquisition: EnrolledStageFrame::owned(frame),
             deadline,
         };
         attempt.completed = true;
         Ok(stage)
+    }
+}
+
+impl SameEnrolledOwner {
+    /// Fixed Shell side of the admitted restore channel. This is an identity
+    /// and policy join, not a stage callback or native permission factory.
+    pub(in crate::security_epoch::native_enrollment) fn require_protected_restore_shell_owner(
+        &mut self,
+        role: &EnrolledProcessRoleOwner,
+        controller: &Statement,
+    ) -> Result<()> {
+        let requested = (|| {
+            ensure!(
+                !self.refused && !role.refused,
+                "protected_restore_native_owner_refused"
+            );
+            ensure!(
+                role.role == NativeRole::SecurityShell
+                    && role.process == std::process::id()
+                    && role.thread == std::thread::current().id(),
+                "protected_restore_native_owner_changed"
+            );
+            let original = self
+                .identity
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("native_enrollment_original_owner_dropped"))?;
+            ensure!(
+                std::rc::Rc::ptr_eq(&original, &role.identity)
+                    && self.incarnation == role.incarnation,
+                "native_enrollment_original_owner_replaced"
+            );
+            ensure!(
+                controller.certificate == role.certificate
+                    && controller.stage.data.policy == role.policy.digest()?
+                    && controller.stage.data.role == NativeRole::EpochController,
+                "protected_restore_shell_controller_identity_changed"
+            );
+            Ok(())
+        })();
+        if requested.is_err() {
+            self.refused = true;
+        }
+        requested
+    }
+
+    /// Idle peer exclusion only: the actual owner identity, role, process and
+    /// thread must still match before the caller captures a request. This
+    /// observes no clock, kernel handle or provider and returns no Current.
+    /// The later receive stage must independently check actual native facts.
+    pub(in crate::security_epoch::native_enrollment) fn require_protected_restore_owner(
+        &mut self,
+        role: &EnrolledProcessRoleOwner,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                !self.refused && !role.refused,
+                "protected_restore_native_owner_refused"
+            );
+            ensure!(
+                role.role == NativeRole::EpochController
+                    && role.process == std::process::id()
+                    && role.thread == std::thread::current().id(),
+                "protected_restore_native_owner_changed"
+            );
+            let original = self
+                .identity
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("native_enrollment_original_owner_dropped"))?;
+            ensure!(
+                std::rc::Rc::ptr_eq(&original, &role.identity)
+                    && self.incarnation == role.incarnation,
+                "native_enrollment_original_owner_replaced"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refused = true;
+        }
+        result
+    }
+}
+
+impl NativeConsumerOrigin {
+    /// Negative identity of the actual saved Shell HTTP request. No clock,
+    /// role or future response permission is exported by this fixed supplier.
+    pub(in crate::security_epoch::native_enrollment) fn protected_restore_shell_reply(
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<Self> {
+        let requested =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Self> {
+                stage.require_protected_restore_role(NativeRole::SecurityShell)?;
+                stage.acquisition.require_guard_slot()?;
+                Ok(Self {
+                    refusal: stage.acquisition.as_mut().retained_refusal(),
+                    domain: stage
+                        .acquisition
+                        .as_mut()
+                        .historical_interval_observation()
+                        .0,
+                })
+            }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.check()));
+        if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) {
+            stage.refuse_serving();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(origin)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(origin)
+                }
+            },
+        }
+    }
+
+    /// Negative identity comparison only, for the fixed peer guard's actual
+    /// acquisition. No clock observation or reusable checked token escapes.
+    pub(in crate::security_epoch::native_enrollment) fn require_acquisition(
+        &self,
+        acquisition: &crate::security_epoch::native_clock::NativeAcquisition,
+    ) -> Result<()> {
+        let actual = Self {
+            refusal: acquisition.retained_refusal(),
+            domain: acquisition.historical_interval_observation().0,
+        };
+        self.require_same(&actual)
+    }
+    /// Negative identity of the ACTUAL Controller request being received.
+    /// The result exposes no clock sample or acquisition, grants no native
+    /// admission and cannot move the saved request. The fixed receiver must
+    /// authenticate its actual peer, signed packet and cursor separately.
+    pub(in crate::security_epoch::native_enrollment) fn received_protected_restore(
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<Self> {
+        let requested =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Self> {
+                stage.require_protected_restore_role(NativeRole::EpochController)?;
+                Ok(Self {
+                    refusal: stage.acquisition.as_mut().retained_refusal(),
+                    domain: stage
+                        .acquisition
+                        .as_mut()
+                        .historical_interval_observation()
+                        .0,
+                })
+            }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.check()));
+        if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) {
+            stage.refuse_serving();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(origin)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(origin)
+                }
+            },
+        }
     }
 }
 
@@ -231,6 +579,7 @@ impl EnrolledRoleStage<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::request_frame::EnrolledRequestFrame;
     use super::*;
     use quote::ToTokens;
     use std::{marker::PhantomData, rc::Weak, time::Duration};
@@ -244,11 +593,13 @@ mod tests {
             role: NativeRole::EpochController,
             process: std::process::id(),
             thread: std::thread::current().id(),
-            acquisition: Some(crate::security_epoch::NativeAcquisition::fixture(
-                day2_capabilities::Digest::new(b"transfer-clock-domain"),
-                std::process::id(),
-                Duration::from_secs(100),
-                Duration::from_secs(5),
+            acquisition: Some(EnrolledRequestFrame::new(
+                crate::security_epoch::NativeAcquisition::fixture(
+                    day2_capabilities::Digest::new(b"transfer-clock-domain"),
+                    std::process::id(),
+                    Duration::from_secs(100),
+                    Duration::from_secs(5),
+                ),
             )),
             finished: false,
             local: PhantomData,
@@ -283,7 +634,7 @@ mod tests {
                             moved = Some(request.acquisition.take().unwrap());
                         }
                         if cut >= 2 {
-                            stage = Some(StageAcquisition::owned(moved.take().unwrap()));
+                            stage = Some(EnrolledStageFrame::owned(moved.take().unwrap()));
                         }
                         if unwind {
                             panic!("transfer fixture unwind");
@@ -297,10 +648,10 @@ mod tests {
                 }
                 assert!(original.require_same(&original).is_err());
                 if let Some(original) = &mut request.acquisition {
-                    assert!(original.sample().is_err());
+                    assert!(original.original_mut().sample().is_err());
                 }
                 if let Some(original) = &mut moved {
-                    assert!(original.sample().is_err());
+                    assert!(original.original_mut().sample().is_err());
                 }
                 if let Some(stage) = &mut stage {
                     assert!(stage.as_mut().sample().is_err());
@@ -316,7 +667,7 @@ mod tests {
     fn moving_the_actual_acquisition_preserves_identity_and_an_equal_clock_cannot_replace_it() {
         let mut request = fixture_request();
         let original = request.consumer_origin();
-        let mut stage = StageAcquisition::owned(request.acquisition.take().unwrap());
+        let mut stage = EnrolledStageFrame::owned(request.acquisition.take().unwrap());
         drop(request);
         let moved = NativeConsumerOrigin {
             refusal: stage.as_mut().retained_refusal(),
@@ -333,6 +684,117 @@ mod tests {
                 .require_same(&other.consumer_origin())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn received_negative_identity_from_a_real_saved_borrow_cannot_be_replaced_by_equal_clock_data()
+    {
+        let mut request = fixture_request();
+        let saved = request.consumer_origin();
+        let other = fixture_request();
+        {
+            // Actual saved acquisition borrow only. No enrolled owner, stage,
+            // peer or Current permission is manufactured by this fixture.
+            let mut borrowed = EnrolledStageFrame::borrowed(request.acquisition.as_mut().unwrap());
+            let received = NativeConsumerOrigin {
+                refusal: borrowed.as_mut().retained_refusal(),
+                domain: borrowed.as_mut().historical_interval_observation().0,
+            };
+            saved.require_same(&received).unwrap();
+            assert!(received.require_same(&other.consumer_origin()).is_err());
+            assert!(borrowed.as_mut().sample().is_err());
+        }
+        assert!(saved.require_same(&saved).is_err());
+        assert!(
+            request
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .original_mut()
+                .sample()
+                .is_err()
+        );
+        assert!(
+            other
+                .consumer_origin()
+                .require_same(&other.consumer_origin())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn actual_received_origin_captures_only_the_saved_negative_root_after_the_closed_role_guard() {
+        let actual = method("received_protected_restore");
+        assert_eq!(actual.sig.inputs.len(), 1);
+        assert_eq!(actual.block.stmts.len(), 4);
+        let capture = captured(&actual.block, "requested");
+        let expected: syn::Block = syn::parse_quote!({
+            stage.require_protected_restore_role(NativeRole::EpochController)?;
+            Ok(Self {
+                refusal: stage.acquisition.as_mut().retained_refusal(),
+                domain: stage
+                    .acquisition
+                    .as_mut()
+                    .historical_interval_observation()
+                    .0,
+            })
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&capture));
+        for replacement in [
+            syn::parse_quote!({
+                Ok(Self {
+                    refusal: stage.acquisition.as_mut().retained_refusal(),
+                    domain: stage
+                        .acquisition
+                        .as_mut()
+                        .historical_interval_observation()
+                        .0,
+                })
+            }),
+            syn::parse_quote!({
+                stage.require_protected_restore_role(NativeRole::SecurityShell)?;
+                Ok(Self {
+                    refusal: stage.acquisition.as_mut().retained_refusal(),
+                    domain: stage
+                        .acquisition
+                        .as_mut()
+                        .historical_interval_observation()
+                        .0,
+                })
+            }),
+            syn::parse_quote!({
+                stage.require_protected_restore_role(NativeRole::EpochController)?;
+                Ok(Self {
+                    refusal: other.acquisition.as_mut().retained_refusal(),
+                    domain: stage
+                        .acquisition
+                        .as_mut()
+                        .historical_interval_observation()
+                        .0,
+                })
+            }),
+        ] {
+            assert!(!guarded(&replacement));
+        }
+        let post: syn::Stmt = syn::parse_quote!(let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.check())););
+        assert!(same(&actual.block.stmts[1], &post));
+        let refused: syn::Stmt = syn::parse_quote! {
+            if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) { stage.refuse_serving(); }
+        };
+        assert!(same(&actual.block.stmts[2], &refused));
+        let text = actual.block.to_token_stream().to_string();
+        for forbidden in [
+            "NativeAcquisition",
+            "begin_current",
+            "sample",
+            "interval_data",
+            "narrow",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden}");
+        }
     }
 
     fn method(name: &str) -> syn::ImplItemFn {
@@ -356,6 +818,151 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(methods.len(), 1, "one actual {name}");
         methods.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn actual_idle_peer_exclusion_uses_the_retained_owner_without_a_current_or_clock() {
+        // Actual production wiring controls only. No enrolled owner, native
+        // peer or successful admission is invented by this portable test.
+        let actual = method("require_protected_restore_owner");
+        let expected: syn::Block = syn::parse_quote!({
+            let result = (|| {
+                ensure!(
+                    !self.refused && !role.refused,
+                    "protected_restore_native_owner_refused"
+                );
+                ensure!(
+                    role.role == NativeRole::EpochController
+                        && role.process == std::process::id()
+                        && role.thread == std::thread::current().id(),
+                    "protected_restore_native_owner_changed"
+                );
+                let original = self
+                    .identity
+                    .upgrade()
+                    .ok_or_else(|| anyhow::anyhow!("native_enrollment_original_owner_dropped"))?;
+                ensure!(
+                    std::rc::Rc::ptr_eq(&original, &role.identity)
+                        && self.incarnation == role.incarnation,
+                    "native_enrollment_original_owner_replaced"
+                );
+                Ok(())
+            })();
+            if result.is_err() {
+                self.refused = true;
+            }
+            result
+        });
+        fn exact(actual: &syn::Block, expected: &syn::Block) -> bool {
+            actual.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        }
+        assert!(exact(&actual.block, &expected));
+        fn signature(value: &syn::Signature) -> String {
+            let mut value = value.clone();
+            value.inputs.pop_punct();
+            value.to_token_stream().to_string()
+        }
+        let expected_signature: syn::Signature = syn::parse_quote!(fn require_protected_restore_owner(&mut self, role: &EnrolledProcessRoleOwner) -> Result<()>);
+        assert_eq!(signature(&actual.sig), signature(&expected_signature));
+        fn work(block: &mut syn::Block) -> &mut syn::Block {
+            let syn::Stmt::Local(local) = &mut block.stmts[0] else {
+                panic!("actual result");
+            };
+            let syn::Expr::Call(call) = &mut *local.init.as_mut().unwrap().expr else {
+                panic!("actual work");
+            };
+            let syn::Expr::Paren(paren) = &mut *call.func else {
+                panic!("direct closure");
+            };
+            let syn::Expr::Closure(closure) = &mut *paren.expr else {
+                panic!("closed work");
+            };
+            let syn::Expr::Block(body) = &mut *closure.body else {
+                panic!("actual work body");
+            };
+            &mut body.block
+        }
+        let mut selected = actual.block.clone();
+        assert_eq!(work(&mut selected).stmts.len(), 5);
+        for index in 0..5 {
+            let mut missing = actual.block.clone();
+            work(&mut missing).stmts.remove(index);
+            assert!(!exact(&missing, &expected));
+        }
+        for (index, changed) in [
+            (
+                0,
+                syn::parse_quote!(ensure!(true, "protected_restore_native_owner_refused");),
+            ),
+            (
+                1,
+                syn::parse_quote!(ensure!(role.role == NativeRole::EpochController, "protected_restore_native_owner_changed");),
+            ),
+            (
+                1,
+                syn::parse_quote!(ensure!(role.process == std::process::id() && role.thread == std::thread::current().id(), "protected_restore_native_owner_changed");),
+            ),
+            (
+                2,
+                syn::parse_quote!(let original = std::rc::Rc::new(super::super::OwnerIdentity);),
+            ),
+            (
+                3,
+                syn::parse_quote!(ensure!(self.incarnation == role.incarnation, "native_enrollment_original_owner_replaced");),
+            ),
+            (
+                3,
+                syn::parse_quote!(ensure!(std::rc::Rc::ptr_eq(&original, &other.identity), "native_enrollment_original_owner_replaced");),
+            ),
+        ] {
+            let mut wrong = actual.block.clone();
+            work(&mut wrong).stmts[index] = changed;
+            assert!(!exact(&wrong, &expected));
+        }
+        for index in 0..actual.block.stmts.len() {
+            let mut missing = actual.block.clone();
+            missing.stmts.remove(index);
+            assert!(!exact(&missing, &expected));
+        }
+        let mut reset = actual.block.clone();
+        reset.stmts[1] = syn::parse_quote!(if result.is_err() {
+            self.refused = false;
+        });
+        assert!(!exact(&reset, &expected));
+        let mut capture = actual.block.clone();
+        capture
+            .stmts
+            .insert(0, syn::parse_quote!(let _ = role.begin_current_request()?;));
+        assert!(!exact(&capture, &expected));
+
+        let peer = method_in(include_str!("../protected_restore.rs"), "require_owner");
+        let expected_signature: syn::Signature = syn::parse_quote!(fn require_owner(&mut self, role: &EnrolledProcessRoleOwner) -> Result<()>);
+        assert_eq!(signature(&peer.sig), signature(&expected_signature));
+        let expected: syn::Block = syn::parse_quote!({
+            let result = (|| {
+                ensure!(!self.refused.get(), "protected_restore_peer_refused");
+                self._same.require_protected_restore_owner(role)
+            })();
+            if result.is_err() {
+                self.refuse();
+            }
+            result
+        });
+        assert!(exact(&peer.block, &expected));
+        for index in 0..peer.block.stmts.len() {
+            let mut missing = peer.block.clone();
+            missing.stmts.remove(index);
+            assert!(!exact(&missing, &expected));
+        }
+        let mut other = peer.block.clone();
+        work(&mut other).stmts[1] = syn::Stmt::Expr(
+            syn::parse_quote!(other._same.require_protected_restore_owner(role)),
+            None,
+        );
+        assert!(!exact(&other, &expected));
+        let mut skipped = peer.block.clone();
+        work(&mut skipped).stmts[1] = syn::Stmt::Expr(syn::parse_quote!(Ok(())), None);
+        assert!(!exact(&skipped, &expected));
     }
 
     fn captured(block: &syn::Block, name: &str) -> syn::Block {
@@ -391,6 +998,160 @@ mod tests {
 
     fn same(actual: &syn::Stmt, expected: &syn::Stmt) -> bool {
         actual.to_token_stream().to_string() == expected.to_token_stream().to_string()
+    }
+
+    #[test]
+    fn actual_guard_attachment_keeps_pending_sender_observable_after_role_failure_panic_or_duplicate()
+     {
+        let methods = syn::parse_file(include_str!("protected_restore.rs"))
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "attach_protected_restore_guard" => {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(methods.len(), 1);
+        let actual = &methods[0].block;
+        let expected: syn::Block = syn::parse_quote!({
+            let pending_checked =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &mut pending {
+                    Some(guard) => {
+                        guard.check(stage.owner, stage.purpose, stage.acquisition.as_mut())
+                    }
+                    None => Ok(()),
+                }));
+            let stage_checked =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.check()));
+            let checked = match pending_checked {
+                Ok(Ok(())) => stage_checked,
+                failed => failed,
+            };
+            if !matches!(&requested, Ok(Ok(()))) || !matches!(&checked, Ok(Ok(()))) {
+                if let Some(guard) = &mut pending {
+                    guard.refuse();
+                }
+                stage.refuse_serving();
+            }
+            match requested {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(())) => match checked {
+                    Err(payload) => std::panic::resume_unwind(payload),
+                    Ok(result) => result,
+                },
+            }
+        });
+        fn same_guard_post(actual: &syn::Stmt, expected: &syn::Stmt) -> bool {
+            fn guard_call(value: &syn::Expr) -> bool {
+                let expected: syn::Expr = syn::parse_str(
+                    "guard.check(stage.owner, stage.purpose, stage.acquisition.as_mut())",
+                )
+                .unwrap();
+                value.to_token_stream().to_string() == expected.to_token_stream().to_string()
+            }
+            fn statement_value(statement: &mut syn::Stmt) {
+                match statement {
+                    syn::Stmt::Local(local) => {
+                        if let Some(init) = &mut local.init {
+                            expression(&mut init.expr);
+                        }
+                    }
+                    syn::Stmt::Expr(value, _) => expression(value),
+                    _ => {}
+                }
+            }
+            fn expression(value: &mut syn::Expr) {
+                match value {
+                    syn::Expr::Call(call) => {
+                        expression(&mut call.func);
+                        for arg in &mut call.args {
+                            expression(arg);
+                        }
+                    }
+                    syn::Expr::Closure(closure) => expression(&mut closure.body),
+                    syn::Expr::Match(value) => {
+                        for arm in &mut value.arms {
+                            expression(&mut arm.body);
+                            if guard_call(&arm.body) {
+                                arm.comma = Some(Default::default());
+                            }
+                        }
+                    }
+                    syn::Expr::Block(block) => {
+                        if block.attrs.is_empty()
+                            && block.label.is_none()
+                            && let [syn::Stmt::Expr(call, None)] = block.block.stmts.as_slice()
+                            && guard_call(call)
+                        {
+                            *value = call.clone();
+                            return;
+                        }
+                        for stmt in &mut block.block.stmts {
+                            statement_value(stmt);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let (mut actual, mut expected) = (actual.clone(), expected.clone());
+            statement_value(&mut actual);
+            statement_value(&mut expected);
+            same(&actual, &expected)
+        }
+
+        let posts = |body: &syn::Block| {
+            body.stmts.len() == 7
+                && body.stmts[2..]
+                    .iter()
+                    .zip(&expected.stmts)
+                    .all(|(a, b)| same_guard_post(a, b))
+        };
+        assert!(posts(actual));
+        for index in 2..7 {
+            let mut removed = (**actual).clone();
+            removed.stmts.remove(index);
+            assert!(!posts(&removed));
+        }
+        let mut reordered = (**actual).clone();
+        reordered.stmts.swap(2, 3);
+        assert!(!posts(&reordered));
+        let requested = syn::Block {
+            brace_token: actual.brace_token,
+            stmts: vec![actual.stmts[1].clone()],
+        };
+        let body = captured(&requested, "requested");
+        let duplicate: syn::Stmt =
+            syn::parse_quote!(if let Err(rejected) = stage.acquisition.attach(guard) {
+                pending = Some(rejected);
+                anyhow::bail!("protected_restore_request_guard_already_attached");
+            });
+        let retained = |body: &syn::Block| {
+            body.stmts
+                .iter()
+                .filter(|value| same(value, &duplicate))
+                .count()
+                == 1
+        };
+        assert!(retained(&body));
+        let index = body
+            .stmts
+            .iter()
+            .position(|value| same(value, &duplicate))
+            .unwrap();
+        let mut dropped = body.clone();
+        dropped.stmts[index] =
+            syn::parse_quote!(if let Err(mut rejected) = stage.acquisition.attach(guard) {
+                rejected.refuse();
+                anyhow::bail!("protected_restore_request_guard_already_attached");
+            });
+        assert!(!retained(&dropped));
+        let mut deferred = body.clone();
+        deferred.stmts[index] = syn::parse_quote!(if false { #duplicate });
+        assert!(!retained(&deferred));
     }
 
     fn transfer_statement_tokens(statement: &syn::Stmt) -> String {
@@ -505,6 +1266,7 @@ mod tests {
                     turn.require_accepting_original(&attempt.original, owner)?;
                     let mut stage = owner.borrow_current_request(&mut request)?;
                     stage.require_protected_restore_role(NativeRole::EpochController)?;
+                    turn.require_received_guard(&mut stage)?;
                     attempt.original.check_current(&mut stage)
                 }));
                 let checked =
@@ -514,6 +1276,7 @@ mod tests {
                         })?;
                         let mut stage = owner.borrow_current_request(&mut request)?;
                         stage.require_protected_restore_role(NativeRole::EpochController)?;
+                        turn.require_received_guard(&mut stage)?;
                         attempt.original.check_current(&mut stage)?;
                         Ok(stage.deadline)
                     }));
@@ -529,7 +1292,7 @@ mod tests {
                     Err(payload) => std::panic::resume_unwind(payload),
                     Ok(result) => result?,
                 };
-                let acquisition = request.acquisition.take().ok_or_else(|| {
+                let frame = request.acquisition.take().ok_or_else(|| {
                     anyhow::anyhow!("protected_restore_transfer_original_missing")
                 })?;
                 let owner = attempt
@@ -539,7 +1302,7 @@ mod tests {
                 let stage = EnrolledRoleStage {
                     owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::owned(acquisition),
+                    acquisition: EnrolledStageFrame::owned(frame),
                     deadline,
                 };
                 attempt.completed = true;
@@ -601,12 +1364,16 @@ mod tests {
                 String::new(),
             ),
             (
+                statement("turn.require_received_guard(&mut stage)?;"),
+                String::new(),
+            ),
+            (
                 expression("attempt.original.check_current(&mut stage)"),
                 expression("Ok(())"),
             ),
             (
-                expression("StageAcquisition::owned(acquisition)"),
-                expression("StageAcquisition::owned(acquisition.narrow(5,deadline)?)"),
+                expression("EnrolledStageFrame::owned(frame)"),
+                expression("EnrolledStageFrame::fresh(frame.original_mut().narrow(5,deadline)?)"),
             ),
             (
                 field("original:request.consumer_origin()"),
@@ -749,7 +1516,7 @@ mod tests {
         let refusal = method_in(include_str!("serving.rs"), "refuse_serving");
         let negative: syn::Block = syn::parse_quote!({
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
         });
         assert_eq!(
             refusal.block.to_token_stream().to_string(),

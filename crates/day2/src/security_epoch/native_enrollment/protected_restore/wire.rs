@@ -2,6 +2,7 @@
 //! signature, or a connection digest never supplies native admission. The fixed
 //! channel must independently retain the actual admitted peer and sender handles.
 
+use super::super::{protocol::StagePurpose, storage_peer_wire::OriginalInterval};
 use super::{MAX_ASSERTION_BYTES, MAX_INPUT_BYTES, ProtectedRestoreReply, ProtectedRestoreRequest};
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // Base64 keeps the bounded outer decoder below its normal JSON node budget;
 // serializing Vec<u8> as a JSON array would exceed it at this admitted size.
 // This bound does not change protocol::MAX_PACKET for existing serving traffic.
-pub(super) const MAX_PACKET_BYTES: usize = 48 * 1024;
+pub(in crate::security_epoch::native_enrollment) const MAX_PACKET_BYTES: usize = 48 * 1024;
 const SIGNATURE_BYTES: usize = 64;
 const SIGNATURE_TEXT_BYTES: usize = 86;
 pub(super) const SIGNING_DOMAIN: &str = "day2-protected-restore-packet-v1";
@@ -27,20 +28,23 @@ enum Format {
 /// original, permission or authenticated session, including after verification.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct UnverifiedPacket {
+pub(in crate::security_epoch::native_enrollment) struct UnverifiedPacket {
     data: Data,
     signature: String,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Data {
+pub(in crate::security_epoch::native_enrollment) struct Data {
     format: Format,
     connection: Digest,
     // Commitment to the actual connection's selected enrollment, not a new
     // certificate or an identity accepted merely because it appears here.
     sender: Digest,
     sequence: u64,
+    // Fresh sender request DATA, not the historical admission interval or a
+    // receiver clock. The actual signer must match this to its own original.
+    original: OriginalInterval,
     body: Body,
 }
 
@@ -135,16 +139,61 @@ pub(super) fn signature_shape(signature: &str) -> Result<()> {
 }
 
 impl Data {
+    /// Authenticated only after verify_data and the actual retained sender
+    /// checks. This immutable DATA cannot sample or construct a local clock.
+    pub(super) fn original(&self) -> &OriginalInterval {
+        &self.original
+    }
+
+    /// Cursor DATA only, distinct from the serving/storage protocols. The
+    /// actual native receiver still validates every signed field and sender.
+    pub(in crate::security_epoch::native_enrollment) fn frame(
+        &self,
+    ) -> super::super::handshake::Frame {
+        use super::super::handshake::{Frame, Protocol, Step};
+        Frame {
+            protocol: Protocol::ProtectedRestoreCommand,
+            step: match self.body.direction() {
+                Direction::Request => Step::Hello,
+                Direction::Reply => Step::Complete,
+            },
+            sequence: Some(self.sequence),
+        }
+    }
+
+    /// Structural DATA validation only: no time sample, common-clock proof,
+    /// native admission or replay permission follows from this predicate.
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.original.purpose == StagePurpose::CurrentRole
+                && self.original.deadline_ns > self.original.origin_ns
+                && u128::from(self.original.deadline_ns - self.original.origin_ns)
+                    <= StagePurpose::CurrentRole.limit().as_nanos(),
+            "protected_restore_wire_original_shape"
+        );
+        self.body.validate()
+    }
+
     /// Bind every actual field and payload byte while leaving the existing
     /// enrollment signature framing below its unchanged 8 KiB limit.
     pub(super) fn commitment(&self) -> Result<Digest> {
         Digest::of(&(SIGNING_DOMAIN, self))
     }
 
-    /// Local signer identity/direction only, not native channel admission or
-    /// cursor validation. The actual channel must separately supply and check
-    /// its retained connection, enrollment and expected sequence at each turn.
-    pub(super) fn require_sender(&self, sender: &Digest, direction: Direction) -> Result<()> {
+    /// Exact local signer identity, direction and fresh original DATA. The
+    /// caller must obtain the interval from its actual checked local stage,
+    /// never the historical admission. Receiver admission, common-clock
+    /// qualification, current expiry and replay checks remain independent.
+    pub(super) fn require_sender(
+        &self,
+        sender: &Digest,
+        original: &OriginalInterval,
+        direction: Direction,
+    ) -> Result<()> {
+        ensure!(
+            self.original == *original,
+            "protected_restore_wire_sender_original_changed"
+        );
         self.require_binding(&self.connection, sender, self.sequence, direction)
     }
 
@@ -152,6 +201,7 @@ impl Data {
         connection: Digest,
         sender: Digest,
         sequence: u64,
+        original: OriginalInterval,
         request: ProtectedRestoreRequest,
     ) -> Result<Self> {
         request.validate_data()?;
@@ -170,19 +220,23 @@ impl Data {
             },
             ProtectedRestoreRequest::Abandon { id } => Body::Abandon { id },
         };
-        Ok(Self {
+        let data = Self {
             format: Format::V1,
             connection,
             sender,
             sequence,
+            original,
             body,
-        })
+        };
+        data.validate()?;
+        Ok(data)
     }
 
     pub(super) fn reply(
         connection: Digest,
         sender: Digest,
         sequence: u64,
+        original: OriginalInterval,
         reply: ProtectedRestoreReply,
     ) -> Result<Self> {
         reply.validate_data()?;
@@ -201,13 +255,16 @@ impl Data {
             ProtectedRestoreReply::Abandoned => Body::Abandoned {},
             ProtectedRestoreReply::Refused => Body::Refused {},
         };
-        Ok(Self {
+        let data = Self {
             format: Format::V1,
             connection,
             sender,
             sequence,
+            original,
             body,
-        })
+        };
+        data.validate()?;
+        Ok(data)
     }
 
     /// Selection DATA only. The actual native channel must supply the expected
@@ -226,7 +283,7 @@ impl Data {
                 && self.body.direction() == direction,
             "protected_restore_wire_binding_changed"
         );
-        self.body.validate()
+        self.validate()
     }
 
     pub(super) fn into_request(self) -> Result<ProtectedRestoreRequest> {
@@ -269,11 +326,21 @@ impl Data {
 }
 
 impl UnverifiedPacket {
+    /// Unverified cursor DATA only, never sender authentication or completion.
+    pub(in crate::security_epoch::native_enrollment) fn frame(
+        &self,
+    ) -> super::super::handshake::Frame {
+        self.data.frame()
+    }
+
     /// Formatting DATA for the fixed future sender. Accepting these inputs is
     /// not a signature or native authority proof. The actual supplier must use
     /// its retained enrolled key and SIGNING_DOMAIN, then verify both on receive.
-    pub(super) fn encode(data: Data, signature: String) -> Result<Vec<u8>> {
-        data.body.validate()?;
+    pub(in crate::security_epoch::native_enrollment) fn encode(
+        data: Data,
+        signature: String,
+    ) -> Result<Vec<u8>> {
+        data.validate()?;
         signature_shape(&signature)?;
         let bytes = serde_json::to_vec(&Self { data, signature })?;
         ensure!(
@@ -283,7 +350,7 @@ impl UnverifiedPacket {
         Ok(bytes)
     }
 
-    pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
+    pub(in crate::security_epoch::native_enrollment) fn decode(bytes: &[u8]) -> Result<Self> {
         ensure!(
             !bytes.is_empty() && bytes.len() <= MAX_PACKET_BYTES,
             "protected_restore_wire_packet_bound"
@@ -302,6 +369,10 @@ impl UnverifiedPacket {
                 && value.get("data").is_some_and(serde_json::Value::is_object)
                 && value
                     .get("data")
+                    .and_then(|data| data.get("original"))
+                    .is_some_and(serde_json::Value::is_object)
+                && value
+                    .get("data")
                     .and_then(|data| data.get("format"))
                     .is_some_and(serde_json::Value::is_string)
                 && value
@@ -313,7 +384,7 @@ impl UnverifiedPacket {
         let packet: Self = serde_json::from_value(value)
             .map_err(|_| anyhow::anyhow!("protected_restore_wire_packet_encoding"))?;
         signature_shape(&packet.signature)?;
-        packet.data.body.validate()?;
+        packet.data.validate()?;
         Ok(packet)
     }
 

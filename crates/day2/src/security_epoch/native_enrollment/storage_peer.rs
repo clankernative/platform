@@ -185,7 +185,7 @@ impl InitialHolderConnection {
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("storage_peer_platform_unsupported");
             #[cfg(target_os = "linux")]
-            self.channel.storage_pending()
+            self.channel.idle_pending()
         })();
         if result.is_err() {
             self.valid = false;

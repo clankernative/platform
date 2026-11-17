@@ -22,9 +22,13 @@ use rustix::{
 };
 use std::{fs::File, io::IoSliceMut, marker::PhantomData, rc::Rc};
 
+mod protected_restore;
 mod serving;
 mod storage;
-pub(super) use serving::{ServingListener, ServingSender};
+pub(super) use protected_restore::{
+    ProtectedRestoreSocketListener, ProtectedRestoreSocketObserver,
+};
+pub(super) use serving::{ControllerReceipt, ServingListener, ServingSender};
 pub(super) use storage::{StorageListener, StorageSender, require_connected};
 
 pub(super) struct Channel {
@@ -40,6 +44,35 @@ pub(super) struct Channel {
 }
 
 impl Channel {
+    /// Only queued-DATA observation on this retained socket. No packet is
+    /// consumed, transcript advanced, role issued or clock acquired while idle.
+    pub(in crate::security_epoch::native_enrollment) fn idle_pending(&mut self) -> Result<bool> {
+        let result = (|| {
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
+            require_idle_socket_profile(&self.socket)?;
+            let mut fds = [PollFd::new(&self.socket, PollFlags::IN | PollFlags::RDHUP)];
+            rustix::event::poll(
+                &mut fds,
+                Some(&rustix::event::Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }),
+            )?;
+            let flags = fds[0].revents();
+            ensure!(
+                !flags.intersects(
+                    PollFlags::HUP | PollFlags::RDHUP | PollFlags::ERR | PollFlags::NVAL
+                ),
+                "native_peer_idle_channel_closed"
+            );
+            Ok(flags.contains(PollFlags::IN))
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     /// The sole fixed restore input owns the real descriptor/cursor. No caller
     /// can supply a descriptor, transcript DATA or a replacement refusal gate.
     /// The outer native transfer loan stays live until the complete core exists.
@@ -615,13 +648,18 @@ impl Channel {
     }
 }
 
-fn idle_open(socket: &File) -> Result<()> {
+fn require_idle_socket_profile(socket: &File) -> Result<()> {
     ensure!(
         rustix::io::fcntl_getfd(socket)?.contains(rustix::io::FdFlags::CLOEXEC)
             && net::sockopt::socket_type(socket)? == SocketType::SEQPACKET
             && net::sockopt::socket_domain(socket)? == AddressFamily::UNIX,
         "native_peer_idle_socket_profile"
     );
+    Ok(())
+}
+
+fn idle_open(socket: &File) -> Result<()> {
+    require_idle_socket_profile(socket)?;
     let mut fds = [PollFd::new(socket, PollFlags::RDHUP)];
     let zero = rustix::event::Timespec {
         tv_sec: 0,
@@ -766,6 +804,65 @@ mod tests {
     use super::*;
     use std::process::{Command, Stdio};
 
+    fn data_channel(kind: SocketType) -> Result<(Channel, OwnedFd)> {
+        // Raw socket DATA only. No acquisition, enrolled role, sender anchor,
+        // admitted peer, original or protocol transcript is fabricated.
+        let (left, right) = net::socketpair(
+            AddressFamily::UNIX,
+            kind,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        Ok((
+            Channel {
+                socket: Rc::new(File::from(left)),
+                refused: Rc::new(std::cell::Cell::new(false)),
+                transcript: None,
+                unprivileged_sender: None,
+                local: PhantomData,
+            },
+            right,
+        ))
+    }
+
+    #[test]
+    fn idle_data_probe_never_consumes_a_packet_and_buffered_death_is_terminal() -> Result<()> {
+        let (mut channel, sender) = data_channel(SocketType::SEQPACKET)?;
+        assert!(!channel.idle_pending()?);
+        assert_eq!(
+            net::send(
+                &sender,
+                b"readiness DATA",
+                SendFlags::DONTWAIT | SendFlags::NOSIGNAL
+            )?,
+            14
+        );
+        assert!(channel.idle_pending()?);
+        assert!(channel.idle_pending()?);
+        drop(sender);
+        // Queued bytes must not mask peer death, and a later probe cannot
+        // clear the actual channel's negative state.
+        assert!(channel.idle_pending().is_err());
+        assert!(channel.refused.get());
+        assert!(channel.idle_pending().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn idle_data_probe_refuses_wrong_socket_and_cannot_repair_lost_cloexec() -> Result<()> {
+        let (mut wrong, _sender) = data_channel(SocketType::DGRAM)?;
+        assert!(wrong.idle_pending().is_err());
+        assert!(wrong.refused.get());
+        let (mut channel, _sender) = data_channel(SocketType::SEQPACKET)?;
+        assert!(!channel.idle_pending()?);
+        rustix::io::fcntl_setfd(channel.socket.as_ref(), rustix::io::FdFlags::empty())?;
+        assert!(channel.idle_pending().is_err());
+        rustix::io::fcntl_setfd(channel.socket.as_ref(), rustix::io::FdFlags::CLOEXEC)?;
+        assert!(channel.idle_pending().is_err());
+        assert!(channel.refused.get());
+        Ok(())
+    }
+
     fn idle_channels(acquisition: &mut NativeAcquisition) -> (Channel, Channel) {
         // Socket DATA controls only: no enrolled role, file or serving owner.
         let (left, right) = Channel::pair(acquisition).unwrap();
@@ -802,10 +899,10 @@ mod tests {
             unprivileged_sender: None,
             local: PhantomData,
         };
-        assert!(refused_alias.storage_pending().is_err());
+        assert!(refused_alias.idle_pending().is_err());
         drop(left);
         assert_eq!(refused_alias.socket.as_raw_fd(), descriptor);
-        assert!(refused_alias.storage_pending().is_err());
+        assert!(refused_alias.idle_pending().is_err());
         drop(refused_alias);
         assert!(refusal.get());
         let mut poll = [PollFd::new(

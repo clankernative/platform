@@ -23,6 +23,105 @@ struct Fixture {
     connection: ConnectionData,
 }
 
+#[test]
+fn initial_connection_requires_the_actual_controller_nonce_and_both_first_statements() {
+    let fixture = fixture();
+    let nonce = Digest::new(b"fresh-native-controller-nonce-would-be-required");
+    fixture
+        .connection
+        .require_initial(&fixture.shell, &fixture.controller, &nonce)
+        .unwrap();
+    assert!(
+        fixture
+            .connection
+            .require_initial(
+                &fixture.shell,
+                &fixture.controller,
+                &Digest::new(b"another-controller-attempt")
+            )
+            .is_err()
+    );
+    for shell in [false, true] {
+        for changed in 0..7 {
+            let mut shell_statement = fixture.shell.clone();
+            let mut controller_statement = fixture.controller.clone();
+            let statement = if shell {
+                &mut shell_statement
+            } else {
+                &mut controller_statement
+            };
+            match changed {
+                0 => statement.original.domain = Digest::new(b"another-original"),
+                1 => statement.original.origin_ns += 1,
+                2 => statement.original.deadline_ns -= 1,
+                3 => statement.original.purpose = StagePurpose::StorageBootstrap,
+                4 => statement.stage.data.process.start_ticks += 1,
+                5 => statement.stage.data.runtime.container.restart_count += 1,
+                6 => statement.stage.signature.push('x'),
+                _ => unreachable!(),
+            }
+            assert!(
+                fixture
+                    .connection
+                    .require_initial(&shell_statement, &controller_statement, &nonce)
+                    .is_err(),
+                "side={shell}, mutation={changed}"
+            );
+        }
+    }
+    // The remote nonce is signed proof DATA, and is preserved exactly. The
+    // Controller cannot turn a proof from its earlier local challenge into a
+    // match merely by accepting the remote connection's saved nonce fields.
+    let other = ConnectionData::bind(
+        &fixture.shell,
+        &fixture.controller,
+        Digest::new(b"fresh-native-shell-nonce-would-be-required"),
+        Digest::new(b"earlier-controller-attempt"),
+    )
+    .unwrap();
+    assert!(
+        other
+            .require_initial(&fixture.shell, &fixture.controller, &nonce)
+            .is_err()
+    );
+}
+
+#[test]
+fn admission_frames_have_their_own_four_step_protocol_and_no_request_sequence() {
+    use crate::security_epoch::native_enrollment::handshake::{Frame, Protocol, Step};
+    let fixture = fixture();
+    let messages = [
+        Body::ControllerHello {
+            controller: Box::new(fixture.controller.clone()),
+            nonce: Digest::new(b"hello-nonce-data"),
+        },
+        Body::ShellProof {
+            shell: Box::new(fixture.shell.clone()),
+            connection: fixture.connection.clone(),
+        },
+        Body::ControllerAccept {
+            connection: fixture.connection.clone(),
+        },
+        Body::ShellConfirm {
+            connection: fixture.connection,
+        },
+    ];
+    for (message, step) in
+        messages
+            .into_iter()
+            .zip([Step::Hello, Step::Bind, Step::Grant, Step::Confirm])
+    {
+        assert_eq!(
+            message.frame(),
+            Frame {
+                protocol: Protocol::ProtectedRestoreAdmission,
+                step,
+                sequence: None,
+            }
+        );
+    }
+}
+
 fn process(code: Digest, process: u32) -> ProcessData {
     ProcessData {
         process,
@@ -134,6 +233,15 @@ fn fixture() -> Fixture {
     }
 }
 
+pub(super) fn fixture_statement_data(role: NativeRole) -> Statement {
+    let fixture = fixture();
+    match role {
+        NativeRole::EpochController => fixture.controller,
+        NativeRole::SecurityShell => fixture.shell,
+        NativeRole::AppHost => panic!("protected transport DATA fixture has no App role"),
+    }
+}
+
 fn signed(statement: &Statement, key: &KeyOwner, body: Body) -> Vec<u8> {
     let sender = enrollment(statement).unwrap();
     let signature = key
@@ -226,6 +334,173 @@ fn all_four_admission_steps_bind_full_statements_and_fit_the_unchanged_native_fr
 }
 
 #[test]
+fn narrowed_later_steps_keep_the_enrollment_but_not_a_reconstructed_connection_or_live_grant() {
+    use super::super::ProtectedRestoreMessage;
+    let f = fixture();
+    let mut shell = f.shell.clone();
+    let mut controller = f.controller.clone();
+    shell.original.deadline_ns -= 1_000_000_000;
+    controller.original.deadline_ns -= 2_000_000_000;
+    assert_eq!(enrollment(&shell).unwrap(), enrollment(&f.shell).unwrap());
+    assert_eq!(
+        enrollment(&controller).unwrap(),
+        enrollment(&f.controller).unwrap()
+    );
+    let reconstructed = ConnectionData::bind(
+        &shell,
+        &controller,
+        f.connection.shell_nonce.clone(),
+        f.connection.controller_nonce.clone(),
+    )
+    .unwrap();
+    assert_ne!(
+        reconstructed.digest().unwrap(),
+        f.connection.digest().unwrap()
+    );
+    for (statement, key, body) in [
+        (
+            &controller,
+            &f.controller_key,
+            Body::ControllerAccept {
+                connection: f.connection.clone(),
+            },
+        ),
+        (
+            &shell,
+            &f.shell_key,
+            Body::ShellConfirm {
+                connection: f.connection.clone(),
+            },
+        ),
+    ] {
+        let view = ProtectedRestoreMessage::admission(&body);
+        let signature = key
+            .sign(view.domain(), &view.commitment_for(statement).unwrap())
+            .unwrap();
+        let bytes = Packet::encode(enrollment(statement).unwrap(), body, signature).unwrap();
+        let packet = Packet::decode(&bytes).unwrap();
+        packet.verify_data(statement).unwrap();
+        if statement.stage.data.role == NativeRole::EpochController {
+            packet.require_accept(&f.connection).unwrap();
+        } else {
+            packet.require_confirm(&f.connection).unwrap();
+        }
+        // A valid DATA signature is not a clock/native grant. The shorter
+        // interval still refuses equality; the real receiver must already
+        // have met the authenticated bound into its retained acquisition.
+        assert!(
+            statement
+                .original
+                .validate_request(
+                    std::time::Duration::from_nanos(statement.original.deadline_ns),
+                    StagePurpose::CurrentRole
+                )
+                .is_err()
+        );
+    }
+    let mut changed = controller;
+    changed.stage.data.public_key = f.shell_key.public();
+    assert_ne!(
+        enrollment(&changed).unwrap(),
+        enrollment(&f.controller).unwrap()
+    );
+}
+
+#[test]
+fn stable_enrollment_never_allows_hello_or_proof_to_substitute_the_actual_original() {
+    use super::super::ProtectedRestoreMessage;
+    let f = fixture();
+    for (index, statement, key) in [
+        (0, &f.shell, &f.shell_key),
+        (1, &f.controller, &f.controller_key),
+    ] {
+        for field in 0..4 {
+            let mut changed = statement.clone();
+            match field {
+                0 => changed.original.purpose = StagePurpose::StorageBootstrap,
+                1 => changed.original.domain = Digest::new(b"another-original-domain"),
+                2 => changed.original.origin_ns += 1,
+                _ => changed.original.deadline_ns -= 1,
+            }
+            assert_eq!(
+                enrollment(&changed).unwrap(),
+                enrollment(statement).unwrap()
+            );
+            let body = if index == 0 {
+                let mut connection = f.connection.clone();
+                connection.shell_original = changed.original.clone();
+                Body::ShellProof {
+                    shell: Box::new(changed.clone()),
+                    connection,
+                }
+            } else {
+                Body::ControllerHello {
+                    controller: Box::new(changed.clone()),
+                    nonce: f.connection.controller_nonce.clone(),
+                }
+            };
+            assert!(
+                ProtectedRestoreMessage::admission(&body)
+                    .commitment_for(statement)
+                    .is_err()
+            );
+            // Deliberately sign hostile DATA with a fixture key. Production
+            // never exposes its key, and the actual signing view above refused.
+            let bytes = signed(&changed, key, body);
+            assert!(
+                Packet::decode(&bytes)
+                    .unwrap()
+                    .verify_data(statement)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn late_steps_refuse_new_originals_and_widening_even_with_a_valid_packet_and_connection() {
+    use super::super::ProtectedRestoreMessage;
+    let f = fixture();
+    let packets = all_packets(&f);
+    for (index, statement) in [(2, &f.controller), (3, &f.shell)] {
+        for field in 0..7 {
+            let packet = Packet::decode(&packets[index]).unwrap();
+            let mut changed = statement.clone();
+            match field {
+                0 => changed.original.purpose = StagePurpose::StorageBootstrap,
+                1 => changed.original.domain = Digest::new(b"fresh-other-current-original"),
+                2 => changed.original.origin_ns += 1,
+                3 => changed.original.deadline_ns += 1,
+                4 => changed.original.origin_ns -= 1,
+                5 => changed.original.deadline_ns = changed.original.origin_ns,
+                _ => changed.original.deadline_ns = changed.original.origin_ns - 1,
+            }
+            assert_eq!(
+                enrollment(&changed).unwrap(),
+                enrollment(statement).unwrap()
+            );
+            // Matching connection DATA and a valid old signature must not
+            // authenticate a renewed original, changed purpose or wider cap.
+            if index == 2 {
+                packet.require_accept(&f.connection).unwrap();
+            } else {
+                packet.require_confirm(&f.connection).unwrap();
+            }
+            assert!(
+                ProtectedRestoreMessage::admission(&packet.body)
+                    .commitment_for(&changed)
+                    .is_err(),
+                "signer step {index}, field {field}"
+            );
+            assert!(
+                packet.verify_data(&changed).is_err(),
+                "receiver step {index}, field {field}"
+            );
+        }
+    }
+}
+
+#[test]
 fn full_field_signature_and_purpose_bindings_reject_tampering_and_serving_signatures() {
     let f = fixture();
     let packets = all_packets(&f);
@@ -292,6 +567,22 @@ fn full_field_signature_and_purpose_bindings_reject_tampering_and_serving_signat
                 .is_err()
         );
         changed["body"]["connection"][field] = original;
+    }
+    for owner in ["shell_original", "controller_original"] {
+        for field in ["purpose", "domain", "origin_ns", "deadline_ns"] {
+            let mut changed: serde_json::Value = serde_json::from_slice(&packets[1]).unwrap();
+            let value = &mut changed["body"]["connection"][owner][field];
+            *value = match field {
+                "purpose" => serde_json::json!("storage_bootstrap"),
+                "domain" => serde_json::json!(Digest::new(b"tampered-connection-original")),
+                _ => serde_json::json!(value.as_u64().unwrap() + 1),
+            };
+            assert!(
+                Packet::decode(&serde_json::to_vec(&changed).unwrap())
+                    .and_then(|packet| packet.verify_data(&f.shell))
+                    .is_err()
+            );
+        }
     }
 }
 
@@ -361,9 +652,20 @@ fn correctly_signed_foreign_connections_and_wrong_steps_cannot_match_the_selecte
             .require_hello(&later, &f.connection.controller_nonce)
             .is_err()
     );
-    assert_ne!(
+    assert_eq!(
         enrollment(&later).unwrap(),
         enrollment(&f.controller).unwrap()
+    );
+    let later_connection = ConnectionData::bind(
+        &f.shell,
+        &later,
+        f.connection.shell_nonce.clone(),
+        f.connection.controller_nonce.clone(),
+    )
+    .unwrap();
+    assert_ne!(
+        later_connection.digest().unwrap(),
+        f.connection.digest().unwrap()
     );
 }
 
@@ -376,6 +678,8 @@ fn strict_admission_decoder_rejects_unknown_duplicate_array_and_alternate_versio
             "",
             "/body",
             "/body/connection",
+            "/body/connection/shell_original",
+            "/body/connection/controller_original",
             "/body/controller",
             "/body/shell",
         ] {
@@ -492,6 +796,7 @@ fn fixed_signing_views_bind_real_message_data_without_exposing_a_key_or_native_o
         connection.clone(),
         enrollment(&f.shell).unwrap(),
         7,
+        f.shell.original.clone(),
         ProtectedRestoreRequest::Abandon {
             id: Digest::new(b"closed-command"),
         },
@@ -504,12 +809,40 @@ fn fixed_signing_views_bind_real_message_data_without_exposing_a_key_or_native_o
         data.commitment().unwrap()
     );
     assert!(view.commitment_for(&f.controller).is_err());
+    for cut in 0..4 {
+        let mut changed = f.shell.clone();
+        match cut {
+            0 => changed.original.purpose = StagePurpose::InitialFirstHolder,
+            1 => changed.original.domain = Digest::new(b"substituted-sender-domain"),
+            2 => changed.original.origin_ns += 1,
+            _ => changed.original.deadline_ns -= 1,
+        }
+        assert!(
+            view.commitment_for(&changed).is_err(),
+            "original field {cut}"
+        );
+    }
     let mut later = f.shell.clone();
+    later.original.domain = Digest::new(b"later-distinct-sender-request");
     later.original.origin_ns += 1_000;
     later.original.deadline_ns += 1_000;
-    // Historical identity may remain admitted across distinct requests. Only
-    // the ACTUAL signing stage can establish the later original's validity.
-    assert!(view.commitment_for(&later).is_ok());
+    // The historical enrollment remains admitted, but its packet cannot be
+    // re-signed under a different actual request's original.
+    assert!(later.same_enrollment(&f.shell));
+    assert!(view.commitment_for(&later).is_err());
+    let fresh_data = wire::Data::request(
+        connection.clone(),
+        enrollment(&f.shell).unwrap(),
+        8,
+        later.original.clone(),
+        ProtectedRestoreRequest::Abandon {
+            id: Digest::new(b"closed-command"),
+        },
+    )
+    .unwrap();
+    let fresh_view = ProtectedRestoreMessage::command(&fresh_data, &f.shell);
+    assert!(fresh_view.commitment_for(&later).is_ok());
+    assert!(fresh_view.commitment_for(&f.shell).is_err());
     for cut in 0..4 {
         let mut changed = f.shell.clone();
         match cut {
@@ -524,6 +857,7 @@ fn fixed_signing_views_bind_real_message_data_without_exposing_a_key_or_native_o
         connection,
         enrollment(&f.controller).unwrap(),
         7,
+        f.controller.original.clone(),
         ProtectedRestoreReply::Refused,
     )
     .unwrap();

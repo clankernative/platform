@@ -399,7 +399,7 @@ impl<'tail> RestoredPeerConnection<'tail> {
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("storage_peer_platform_unsupported");
             #[cfg(target_os = "linux")]
-            self.owner.channel.storage_pending()
+            self.owner.channel.idle_pending()
         })();
         if requested.is_err() {
             self.owner.disposition.refuse();
@@ -814,7 +814,7 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("storage_peer_platform_unsupported");
             #[cfg(target_os = "linux")]
-            self.owner.channel.storage_pending()
+            self.owner.channel.idle_pending()
         })();
         if result.is_err() {
             self.owner.disposition.refuse();
@@ -971,7 +971,7 @@ impl ControllerHolderPeerContinuity {
         }
         #[cfg(target_os = "linux")]
         {
-            let result = self.owner.channel.storage_pending();
+            let result = self.owner.channel.idle_pending();
             if result.is_err() {
                 self.refuse();
             }

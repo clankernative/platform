@@ -23,11 +23,15 @@ pub(in crate::security_epoch) use lifecycle::{
 const MAX_EVENTS: usize = 512;
 const MAX_QUEUED: usize = 64;
 const MAX_BUNDLE: u64 = 8 * 1024 * 1024;
-const CAMPAIGNS: [(Protocol, StagePurpose); 4] = [
+const CAMPAIGNS: [(Protocol, StagePurpose); 5] = [
     (Protocol::Enrollment, StagePurpose::CurrentRole),
     (Protocol::InitialStorage, StagePurpose::CurrentRole),
     (Protocol::InitialStorage, StagePurpose::StorageBootstrap),
     (Protocol::InitialServing, StagePurpose::CurrentRole),
+    (
+        Protocol::ProtectedRestoreAdmission,
+        StagePurpose::CurrentRole,
+    ),
 ];
 
 trait Machine: Sized {
@@ -38,6 +42,7 @@ trait Machine: Sized {
     fn delivered(&mut self, frame: Frame, clock: Observation) -> Result<()>;
     fn current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()>;
     fn check_original(&mut self, clock: Observation) -> Result<()>;
+    fn narrow_protected_received(&mut self, clock: Observation) -> Result<()>;
     fn poll(observation: PollObservation) -> Result<TransportDecision>;
     fn refuse(&mut self);
     fn snapshot(&self) -> serde_json::Value;
@@ -71,6 +76,10 @@ impl Machine for Transcript {
     fn check_original(&mut self, clock: Observation) -> Result<()> {
         let result = self.observe(clock);
         self.finish_result(result)
+    }
+
+    fn narrow_protected_received(&mut self, clock: Observation) -> Result<()> {
+        self.narrow_protected_received(clock)
     }
 
     fn poll(observation: PollObservation) -> Result<TransportDecision> {
@@ -148,6 +157,10 @@ enum Event {
     ReplaceClock {
         endpoint: usize,
     },
+    NarrowProtectedReceive {
+        endpoint: usize,
+        limit_nanos: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,7 +216,9 @@ impl<M: Machine> World<M> {
         let actors = match program.protocol {
             Protocol::Enrollment => [Actor::Client, Actor::Issuer],
             Protocol::InitialStorage | Protocol::RestoredStorage => [Actor::App, Actor::Controller],
-            Protocol::InitialServing => [Actor::Shell, Actor::Controller],
+            Protocol::InitialServing | Protocol::ProtectedRestoreAdmission => {
+                [Actor::Shell, Actor::Controller]
+            }
             _ => anyhow::bail!("program must begin with an initial protocol"),
         };
         let limit = if program.protocol == Protocol::InitialStorage {
@@ -322,6 +337,30 @@ impl<M: Machine> World<M> {
                 clock.deadline = self.now + Duration::from_secs(5);
                 clock.now = self.now;
                 Outcome::Accepted
+            }
+            Event::NarrowProtectedReceive {
+                endpoint,
+                limit_nanos,
+            } => {
+                if !self.guard(endpoint) {
+                    Outcome::Refused
+                } else {
+                    let local = &mut self.endpoints[endpoint];
+                    local.clock.deadline = local
+                        .clock
+                        .origin
+                        .checked_add(Duration::from_nanos(limit_nanos))
+                        .context("reduced clock overflow")?;
+                    if local
+                        .machine
+                        .narrow_protected_received(local.clock.clone())
+                        .is_err()
+                    {
+                        self.refuse(endpoint)
+                    } else {
+                        Outcome::Accepted
+                    }
+                }
             }
             Event::BeginCurrent {
                 endpoint,
@@ -539,6 +578,7 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
             | Event::PartialSend { endpoint }
             | Event::NativeRefusal { endpoint }
             | Event::BeginCurrent { endpoint, .. }
+            | Event::NarrowProtectedReceive { endpoint, .. }
             | Event::ReplaceClock { endpoint } => *endpoint < 2,
             Event::Lose { sender }
             | Event::Duplicate { sender }
@@ -593,11 +633,17 @@ fn implementation() -> Digest {
         include_str!("simulation/connection_request.rs"),
         include_str!("simulation/connection_request/tests.rs"),
         include_str!("../channel.rs"),
+        include_str!("../channel/protected_restore.rs"),
         include_str!("../channel/storage.rs"),
         include_str!("../channel/serving.rs"),
         include_str!("../protocol.rs"),
         include_str!("../../native_enrollment.rs"),
         include_str!("../owner.rs"),
+        include_str!("../owner/protected_restore.rs"),
+        include_str!("../protected_restore.rs"),
+        include_str!("../protected_restore/admission.rs"),
+        include_str!("../protected_restore/native.rs"),
+        include_str!("../protected_restore/wire.rs"),
         include_str!("../service.rs"),
         include_str!("../storage_peer.rs"),
         include_str!("../storage_peer_wire.rs"),
@@ -785,6 +831,15 @@ fn exchange(protocol: Protocol, sequence: u64, random: &mut u64) -> Vec<Event> {
             Event::Call { endpoint: receiver },
             Event::Postcheck { endpoint: receiver },
         ]);
+        if matches!(
+            protocol,
+            Protocol::ProtectedRestoreAdmission | Protocol::ProtectedRestoreCommand
+        ) {
+            events.push(Event::NarrowProtectedReceive {
+                endpoint: receiver,
+                limit_nanos: 4_000_000_000,
+            });
+        }
     }
     events
 }
@@ -795,6 +850,7 @@ fn successful(seed: u64, protocol: Protocol, purpose: StagePurpose) -> Program {
     let current = match protocol {
         Protocol::InitialStorage => Some(Protocol::CurrentStorage),
         Protocol::InitialServing => Some(Protocol::CurrentServing),
+        Protocol::ProtectedRestoreAdmission => Some(Protocol::ProtectedRestoreCommand),
         _ => None,
     };
     if let Some(current) = current {
@@ -837,6 +893,7 @@ fn record_coverage(program: &Program, purpose: StagePurpose, records: &[Record])
         }
         (Protocol::InitialStorage, _) => Campaign::StorageCurrentHandshake,
         (Protocol::InitialServing, _) => Campaign::ServingHandshake,
+        (Protocol::ProtectedRestoreAdmission, _) => Campaign::ProtectedRestoreHandshake,
         _ => anyhow::bail!("undeclared handshake coverage campaign"),
     };
     dst::record(
@@ -883,9 +940,170 @@ fn record_coverage(program: &Program, purpose: StagePurpose, records: &[Record])
     Ok(())
 }
 
+fn completed_protected_admission(actor: Actor) -> Result<(Transcript, model::Model)> {
+    // DATA reducers and observations only. This cannot construct a native
+    // connection, role, saved request, issuer receipt or clock acquisition.
+    let mut actual = Transcript::new(Protocol::ProtectedRestoreAdmission, actor);
+    let mut reference = model::Model::new(Protocol::ProtectedRestoreAdmission, actor);
+    let clock = Observation {
+        domain: Digest::new(b"protected-admission-model-only"),
+        origin: Duration::from_secs(100),
+        deadline: Duration::from_secs(105),
+        now: Duration::from_secs(101),
+    };
+    for (sender, frame) in model::contract(Protocol::ProtectedRestoreAdmission, 0) {
+        let direction = if actor == sender {
+            Direction::Send
+        } else {
+            Direction::Receive
+        };
+        actual.begin(direction, clock.clone())?;
+        reference.begin(direction, clock.clone())?;
+        actual.delivered(frame, clock.clone())?;
+        reference.delivered(frame, clock.clone())?;
+    }
+    ensure!(
+        actual.complete() && reference.complete(),
+        "protected admission prefix"
+    );
+    ensure!(
+        actual.snapshot() == reference.snapshot(),
+        "protected admission model"
+    );
+    Ok((actual, reference))
+}
+
 #[test]
-fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_model() -> Result<()>
+fn protected_restore_requires_its_own_admission_role_purpose_and_exact_command_cursor() -> Result<()>
 {
+    use super::Step;
+    for actor in [Actor::Shell, Actor::Controller] {
+        let actual = Transcript::new(Protocol::ProtectedRestoreCommand, actor);
+        let reference = model::Model::new(Protocol::ProtectedRestoreCommand, actor);
+        ensure!(
+            actual.next().is_none() && reference.next().is_none(),
+            "fresh command without admission"
+        );
+        for purpose in [
+            StagePurpose::InitialFirstHolder,
+            StagePurpose::StorageBootstrap,
+            StagePurpose::StorageMetadataObservation,
+        ] {
+            let (mut actual, mut reference) = completed_protected_admission(actor)?;
+            ensure!(
+                actual.begin_current(1, purpose).is_err(),
+                "protected purpose widened"
+            );
+            ensure!(
+                reference.current(1, purpose).is_err(),
+                "reference purpose widened"
+            );
+            ensure!(
+                actual.snapshot() == reference.snapshot(),
+                "protected purpose refusal"
+            );
+        }
+        for sequence in [0, 2, u64::MAX] {
+            let (mut actual, mut reference) = completed_protected_admission(actor)?;
+            ensure!(
+                actual
+                    .begin_current(sequence, StagePurpose::CurrentRole)
+                    .is_err(),
+                "protected sequence skipped"
+            );
+            ensure!(
+                reference
+                    .current(sequence, StagePurpose::CurrentRole)
+                    .is_err(),
+                "reference sequence skipped"
+            );
+            ensure!(
+                actual.snapshot() == reference.snapshot(),
+                "protected sequence refusal"
+            );
+        }
+        for cut in 0..2 {
+            for fault in 0..9 {
+                let (mut actual, mut reference) = completed_protected_admission(actor)?;
+                actual.begin_current(1, StagePurpose::CurrentRole)?;
+                reference.current(1, StagePurpose::CurrentRole)?;
+                let clock = Observation {
+                    domain: Digest::new(b"distinct-current-model-data"),
+                    origin: Duration::from_secs(200),
+                    deadline: Duration::from_secs(205),
+                    now: Duration::from_secs(201),
+                };
+                for (position, (sender, mut frame)) in
+                    model::contract(Protocol::ProtectedRestoreCommand, 1)
+                        .into_iter()
+                        .enumerate()
+                {
+                    let direction = if actor == sender {
+                        Direction::Send
+                    } else {
+                        Direction::Receive
+                    };
+                    actual.begin(direction, clock.clone())?;
+                    reference.begin(direction, clock.clone())?;
+                    if position == cut {
+                        match fault {
+                            0 => frame.protocol = Protocol::InitialServing,
+                            1 => frame.protocol = Protocol::CurrentServing,
+                            2 => frame.protocol = Protocol::CurrentStorage,
+                            3 => frame.protocol = Protocol::ProtectedRestoreAdmission,
+                            4 => frame.sequence = None,
+                            5 => frame.sequence = Some(0),
+                            6 => frame.sequence = Some(2),
+                            7 => frame.sequence = Some(u64::MAX),
+                            _ => frame.step = Step::Grant,
+                        }
+                        ensure!(
+                            actual.delivered(frame, clock.clone()).is_err(),
+                            "protected frame substitution"
+                        );
+                        ensure!(
+                            reference.delivered(frame, clock.clone()).is_err(),
+                            "reference frame substitution"
+                        );
+                        ensure!(
+                            actual.begin_current(2, StagePurpose::CurrentRole).is_err(),
+                            "protected refusal revived"
+                        );
+                        ensure!(
+                            reference.current(2, StagePurpose::CurrentRole).is_err(),
+                            "reference refusal revived"
+                        );
+                        ensure!(
+                            actual.snapshot() == reference.snapshot(),
+                            "protected substitution refusal"
+                        );
+                        break;
+                    }
+                    actual.delivered(frame, clock.clone())?;
+                    reference.delivered(frame, clock.clone())?;
+                }
+            }
+        }
+    }
+    for actor in [Actor::App, Actor::Client, Actor::Issuer] {
+        ensure!(
+            Transcript::new(Protocol::ProtectedRestoreAdmission, actor)
+                .next()
+                .is_none(),
+            "protected wrong role"
+        );
+        ensure!(
+            model::Model::new(Protocol::ProtectedRestoreAdmission, actor)
+                .next()
+                .is_none(),
+            "reference wrong role"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn seeded_native_transcripts_replay_against_independent_model() -> Result<()> {
     for (protocol, purpose) in CAMPAIGNS {
         for seed in 1..=32 {
             let program = successful(seed, protocol, purpose);
@@ -900,6 +1118,8 @@ fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_
             let last = &records.last().unwrap().snapshot;
             let expected = if protocol == Protocol::Enrollment {
                 4
+            } else if protocol == Protocol::ProtectedRestoreAdmission {
+                2
             } else {
                 8
             };
@@ -911,6 +1131,18 @@ fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_
                         && endpoint["machine"]["refused"] == false,
                     "positive transcript incomplete"
                 );
+                if protocol == Protocol::ProtectedRestoreAdmission {
+                    let clock: Observation =
+                        serde_json::from_value(endpoint["machine"]["clock"].clone())?;
+                    ensure!(
+                        clock.deadline - clock.origin == Duration::from_secs(4),
+                        "protected receive cap lost"
+                    );
+                    ensure!(
+                        endpoint["machine"]["clock"] == endpoint["clock"],
+                        "protected observer/cursor cap diverged"
+                    );
+                }
             }
             ensure!(
                 last["queues"]
@@ -926,6 +1158,74 @@ fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_
 }
 
 #[test]
+fn protected_receive_meets_replay_equality_widening_foreign_clock_and_wrong_side_refusal()
+-> Result<()> {
+    let base = successful(
+        73,
+        Protocol::ProtectedRestoreAdmission,
+        StagePurpose::CurrentRole,
+    );
+    let mut reference = World::<model::Model>::new(&base)?;
+    for (index, event) in base.events.iter().enumerate() {
+        let Event::NarrowProtectedReceive { endpoint, .. } = *event else {
+            reference.step(event)?;
+            continue;
+        };
+        let elapsed: u64 = (reference.now - reference.endpoints[endpoint].clock.origin)
+            .as_nanos()
+            .try_into()?;
+        for fault in 0..5 {
+            let mut program = base.clone();
+            let event = match fault {
+                0 => Event::NarrowProtectedReceive {
+                    endpoint,
+                    limit_nanos: 6_000_000_000,
+                },
+                1 => Event::NarrowProtectedReceive {
+                    endpoint,
+                    limit_nanos: elapsed,
+                },
+                2 => Event::ReplaceClock { endpoint },
+                3 => Event::Rewind { nanos: 1 },
+                _ => Event::NarrowProtectedReceive {
+                    endpoint: 1 - endpoint,
+                    limit_nanos: 4_000_000_000,
+                },
+            };
+            program.events.insert(index, event);
+            program.events.extend([
+                Event::Advance { nanos: 1 },
+                Event::NarrowProtectedReceive {
+                    endpoint,
+                    limit_nanos: 4_000_000_000,
+                },
+                Event::BeginCurrent {
+                    endpoint,
+                    sequence: 99,
+                    purpose: StagePurpose::CurrentRole,
+                },
+            ]);
+            let records = check(&program)?;
+            let refused = if matches!(fault, 2 | 3) {
+                index + 1
+            } else {
+                index
+            };
+            ensure!(
+                records[refused].outcome == Outcome::Refused,
+                "protected receive fault not observed immediately"
+            );
+            ensure!(
+                records.last().unwrap().outcome == Outcome::Refused,
+                "protected receive fault renewed a grant"
+            );
+        }
+        reference.step(event)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts() -> Result<()> {
     let mut seed = 10_000;
     let mut coverage = std::collections::BTreeSet::new();
@@ -933,7 +1233,8 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
         let base = successful(seed, protocol, purpose);
         let mut oracle = World::<model::Model>::new(&base)?;
         // Fault every completed syscall before its final native postcheck,
-        // across enrollment, first holder and both current settlement rounds.
+        // across enrollment, first holder, serving and protected-restore
+        // admission, then both fresh current rounds where the protocol has them.
         for (index, event) in base.events.iter().enumerate() {
             let direction = match *event {
                 Event::Postcheck { endpoint } => oracle.endpoints[endpoint]
@@ -1040,7 +1341,13 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
             }
         }
     }
-    ensure!(coverage.len() == 40, "missing executed fault family");
+    let required = CAMPAIGNS
+        .into_iter()
+        .flat_map(|(protocol, purpose)| {
+            (0..10).map(move |fault| (format!("{protocol:?}/{purpose:?}"), fault))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    ensure!(coverage == required, "missing executed fault family");
     Ok(())
 }
 
@@ -1054,7 +1361,7 @@ fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal
             program.events.truncate(cut + 1);
             for _ in 0..96 {
                 let endpoint = (next(&mut random) % 2) as usize;
-                let event = match next(&mut random) % 15 {
+                let event = match next(&mut random) % 16 {
                     0 => Event::Begin { endpoint },
                     1 => Event::Call { endpoint },
                     2 => Event::Postcheck { endpoint },
@@ -1092,6 +1399,10 @@ fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal
                         },
                     },
                     13 => Event::NativeRefusal { endpoint },
+                    14 => Event::NarrowProtectedReceive {
+                        endpoint,
+                        limit_nanos: next(&mut random) % 6_000_000_001,
+                    },
                     _ => Event::ReplaceClock { endpoint },
                 };
                 program.events.push(event);
@@ -1105,7 +1416,11 @@ fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal
 
 #[test]
 fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() -> Result<()> {
-    for protocol in [Protocol::InitialStorage, Protocol::InitialServing] {
+    for protocol in [
+        Protocol::InitialStorage,
+        Protocol::InitialServing,
+        Protocol::ProtectedRestoreAdmission,
+    ] {
         for purpose in [
             StagePurpose::CurrentRole,
             StagePurpose::StorageBootstrap,
@@ -1171,12 +1486,17 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
                         5
                     };
                     let accepts = allowed && seconds <= limit && !at_deadline;
+                    let direction = if protocol == Protocol::ProtectedRestoreAdmission {
+                        Direction::Receive // the Shell sends this command
+                    } else {
+                        Direction::Send
+                    };
                     ensure!(
-                        actual.begin(Direction::Send, original.clone()).is_ok() == accepts,
+                        actual.begin(direction, original.clone()).is_ok() == accepts,
                         "purpose interval"
                     );
                     ensure!(
-                        expected.begin(Direction::Send, original.clone()).is_ok() == accepts,
+                        expected.begin(direction, original.clone()).is_ok() == accepts,
                         "model purpose interval"
                     );
                     ensure!(

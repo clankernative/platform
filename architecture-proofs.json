@@ -118,7 +118,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_clock.rs",
       "scope": "const",
-      "fingerprint": "sha256:3bbf7a0f67203acf8f4d1fb0b8fc222e970965bdada46e94ed80bcf7a44070e9",
+      "fingerprint": "sha256:52ee10b91d23dbce5a2bfeea6026d162fb3b450ab88eb5b493791f02f6014e9a",
       "registration": null
     },
     {
@@ -133,6 +133,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/protected_restore.rs",
+      "scope": "const",
+      "fingerprint": "sha256:9f534c41b9595a429c44f36c5fd5de9d675fb842a8f6f606372e6e7b361a82ed",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "scope": "const",
       "fingerprint": "sha256:893c53348f0e524c2b1c484fc4289182b2cc43cf07672f3819c7c0e9f0e43be8",
@@ -144,9 +150,22 @@
       "fingerprint": "sha256:58c1e15bf28300024662a2772ecfb101d3362b0d9880389e9b5306ca89061d1a"
     },
     {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+      "scope": "const",
+      "fingerprint": "sha256:64f8857935733481be328bce8bede458206b49011f8cbd6fce4e9085da416712",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
       "scope": "const",
-      "fingerprint": "sha256:2447fb7cd2192e80fa29c0419b68cc651062d8d7411830fb4be18ac009a2ea85"
+      "fingerprint": "sha256:6f8ca0aecf4bccbda5f3048a437cac010724b53865a7c856c810edaa20719fff",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f11ec126f00a84d2f5301ee25739c7f896b0ead59a79531756757bcc23f8a3e7",
+      "registration": null
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/restored.rs",
@@ -7954,18 +7973,6 @@
         {
           "owner": "NativeConnectionClock",
           "signature": "pub (super) fn bind_captured_current (& mut self , mut original : NativeAcquisition) -> Result < NativeAcquisition >"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn as_ref (& self) -> & NativeAcquisition"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn into_owned (self) -> Result < NativeAcquisition >"
         }
       ],
       "material_uses": [
@@ -8096,14 +8103,6 @@
         {
           "owner": "NativeConnectionClock",
           "signature": "pub (super) fn retire_checked (& mut self , original : & mut NativeAcquisition) -> Result < () >"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn borrowed (original : & 'a mut NativeAcquisition) -> Self"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn owned (original : NativeAcquisition) -> Self"
         }
       ],
       "proof_uses": [],
@@ -8124,6 +8123,7 @@
         "pub (super) fn begin_storage_metadata_observation (& mut self) -> Result < NativeAcquisition >",
         "pub (super) fn bind_captured_current (& mut self , mut original : NativeAcquisition) -> Result < NativeAcquisition >",
         "fn join_request (& mut self , mut request : NativeAcquisition) -> Result < NativeAcquisition >",
+        "pub (super) fn refuse (& mut self)",
         "pub (super) fn retire_checked (& mut self , original : & mut NativeAcquisition) -> Result < () >"
       ],
       "factories": [
@@ -8163,11 +8163,11 @@
         },
         {
           "owner": "NativeConnectionClock",
-          "signature": "pub (super) fn retire_checked (& mut self , original : & mut NativeAcquisition) -> Result < () >"
+          "signature": "pub (super) fn refuse (& mut self)"
         },
         {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn retire_owned (& mut self , clock : & mut NativeConnectionClock) -> Result < NativeOriginalRefusal >"
+          "owner": "NativeConnectionClock",
+          "signature": "pub (super) fn retire_checked (& mut self , original : & mut NativeAcquisition) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -8188,10 +8188,6 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn retained_refusal (& self) -> NativeOriginalRefusal"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn retire_owned (& mut self , clock : & mut NativeConnectionClock) -> Result < NativeOriginalRefusal >"
         }
       ],
       "material_uses": [
@@ -8205,52 +8201,6 @@
         }
       ],
       "proof_uses": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/native_clock.rs",
-      "type_name": "StageAcquisition",
-      "owning_children": [],
-      "methods": [
-        "pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition",
-        "pub (super) fn as_ref (& self) -> & NativeAcquisition",
-        "pub (super) fn borrowed (original : & 'a mut NativeAcquisition) -> Self",
-        "pub (super) fn into_owned (self) -> Result < NativeAcquisition >",
-        "pub (super) fn owned (original : NativeAcquisition) -> Self",
-        "pub (super) fn retire_owned (& mut self , clock : & mut NativeConnectionClock) -> Result < NativeOriginalRefusal >"
-      ],
-      "factories": [
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn borrowed (original : & 'a mut NativeAcquisition) -> Self"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn owned (original : NativeAcquisition) -> Self"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn as_ref (& self) -> & NativeAcquisition"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn into_owned (self) -> Result < NativeAcquisition >"
-        },
-        {
-          "owner": "StageAcquisition < 'a >",
-          "signature": "pub (super) fn retire_owned (& mut self , clock : & mut NativeConnectionClock) -> Result < NativeOriginalRefusal >"
-        }
-      ],
-      "proof_uses": [],
-      "kind": "private_material",
-      "consuming_methods": [
-        "into_owned"
-      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_connection_peer.rs",
@@ -8315,6 +8265,73 @@
       "kind": "private_material",
       "destructor": null,
       "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/protected_restore.rs",
+      "type_name": "ProtectedRestoreSocketListener",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn accept (& mut self , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < Channel >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn bind (stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "fn check_name (& self) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn pending (& self) -> Result < bool >"
+      ],
+      "factories": [
+        {
+          "owner": "ProtectedRestoreSocketListener",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn bind (stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedRestoreSocketListener",
+          "signature": "fn check_name (& self) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreSocketListener",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn accept (& mut self , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < Channel >"
+        },
+        {
+          "owner": "ProtectedRestoreSocketListener",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn pending (& self) -> Result < bool >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/protected_restore.rs",
+      "type_name": "ProtectedRestoreSocketObserver",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_channel (& self , channel : & Channel) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Channel",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn protected_restore_observer (& mut self , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < ProtectedRestoreSocketObserver >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedRestoreSocketObserver",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreSocketObserver",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& self)"
+        },
+        {
+          "owner": "ProtectedRestoreSocketObserver",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_channel (& self , channel : & Channel) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -8408,6 +8425,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -8447,6 +8471,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -8532,6 +8563,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -8769,6 +8807,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -8807,6 +8852,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -8849,7 +8901,7 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": [],
-      "destructor": "sha256:4ea53499006401cfb4a226b7aae61f237f9e84f37ba89320b0297957f6818ce3"
+      "destructor": "sha256:ba37e113e7c9050328590e2cc170a2f77479f56ce5b7bf5d8d5fabe6cb3ed2fb"
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -8862,6 +8914,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -8945,6 +9004,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -8976,6 +9042,7 @@
       "methods": [
         "pub (crate) fn consumer_origin (& self) -> NativeConsumerOrigin",
         "pub (crate) fn finish (mut self , owner : & mut EnrolledProcessRoleOwner) -> Result < () >",
+        "fn frame_mut (& mut self) -> Result < & mut EnrolledRequestFrame >",
         "fn original_mut (& mut self) -> Result < & mut NativeAcquisition >",
         "pub (crate) fn refuse (& mut self)"
       ],
@@ -8990,6 +9057,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "EnrolledCurrentRequest",
+          "signature": "fn frame_mut (& mut self) -> Result < & mut EnrolledRequestFrame >"
+        },
         {
           "owner": "EnrolledCurrentRequest",
           "signature": "fn original_mut (& mut self) -> Result < & mut NativeAcquisition >"
@@ -9032,6 +9103,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -9061,15 +9139,11 @@
         }
       ],
       "methods": [
+        "fn capture_at (stage : & mut EnrolledRoleStage < '_ > , origin : Duration , expected : NativeRole) -> Result < Self >",
         "pub (crate) fn origin (& self) -> Duration",
-        "pub (crate) fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Duration >",
-        "fn capture_at (stage : & mut EnrolledRoleStage < '_ > , origin : Duration , expected : NativeRole) -> Result < Self >"
+        "pub (crate) fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Duration >"
       ],
       "factories": [
-        {
-          "owner": "EnrolledProcessRoleOwner",
-          "signature": "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >"
-        },
         {
           "owner": "CapturedRestoredAppRequest",
           "signature": "pub (in crate :: security_epoch) fn capture_human_clock (& mut self , parent : & mut RetiredRestoredAppNative) -> Result < EnrolledOriginalClock >"
@@ -9077,9 +9151,17 @@
         {
           "owner": "EnrolledOriginalClock",
           "signature": "fn capture_at (stage : & mut EnrolledRoleStage < '_ > , origin : Duration , expected : NativeRole) -> Result < Self >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >"
         }
       ],
       "material_uses": [
+        {
+          "owner": "CapturedRestoredAppRequest",
+          "signature": "pub (in crate :: security_epoch) fn sample_human_clock (& mut self , parent : & mut RetiredRestoredAppNative , clock : & mut EnrolledOriginalClock) -> Result < Duration >"
+        },
         {
           "owner": "EnrolledOriginalClock",
           "signature": "pub (crate) fn origin (& self) -> Duration"
@@ -9087,10 +9169,6 @@
         {
           "owner": "EnrolledOriginalClock",
           "signature": "pub (crate) fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Duration >"
-        },
-        {
-          "owner": "CapturedRestoredAppRequest",
-          "signature": "pub (in crate :: security_epoch) fn sample_human_clock (& mut self , parent : & mut RetiredRestoredAppNative , clock : & mut EnrolledOriginalClock) -> Result < Duration >"
         }
       ],
       "proof_uses": [],
@@ -9106,6 +9184,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -9214,6 +9299,22 @@
         {
           "owner": "EnrolledProcessRoleOwner",
           "signature": "pub (in crate :: security_epoch) fn historical_incarnation_data (& self) -> Digest"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn app (original : & 'a mut NativeAcquisition , owner : & EnrolledProcessRoleOwner) -> Result < Self >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn check_guard (& mut self , owner : & EnrolledProcessRoleOwner , purpose : StagePurpose) -> Result < () >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_owner (& mut self , role : & EnrolledProcessRoleOwner) -> Result < () >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_shell_owner (& mut self , role : & EnrolledProcessRoleOwner , controller : & Statement) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -9229,6 +9330,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -9349,6 +9457,22 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn attach_protected_restore_guard (stage : & mut EnrolledRoleStage < '_ > , guard : ProtectedRestoreActionGuard) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_protected_restore_installed_original (stage : & mut EnrolledRoleStage < '_ > , original : & NativeConsumerOrigin , data : & crate :: security_epoch :: native_enrollment :: protected_restore :: ProtectedRestoreInstalledData) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_guard (stage : & mut EnrolledRoleStage < '_ > , root : & std :: rc :: Rc < std :: cell :: Cell < bool > > , original : & NativeConsumerOrigin , connection : & day2_capabilities :: Digest , sequence : u64) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn sign_protected_restore_installed (turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut crate :: security_epoch :: bootstrap :: RestoreInstalledOutputLoan < '_ , '_ , '_ > , original : & NativeConsumerOrigin , data : & crate :: security_epoch :: native_enrollment :: protected_restore :: ProtectedRestoreInstalledData) -> Result < String >"
+        },
         {
           "owner": "ClockAnchors",
           "signature": "fn capture (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
@@ -9504,6 +9628,14 @@
         {
           "owner": "NativeConsumerOrigin",
           "signature": "pub (crate) fn check_current (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "NativeConsumerOrigin",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn protected_restore_shell_reply (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerOrigin",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn received_protected_restore (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
         },
         {
           "owner": "RestoredAppFileContinuity",
@@ -10005,6 +10137,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -10043,6 +10182,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -10132,6 +10278,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -10198,6 +10351,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -10275,6 +10435,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -10397,6 +10564,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -10515,6 +10689,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -10607,6 +10788,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -10705,6 +10893,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -10746,6 +10941,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -10813,6 +11015,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -10843,7 +11052,10 @@
       ],
       "methods": [
         "pub (crate) fn check_current (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn protected_restore_shell_reply (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn received_protected_restore (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
         "pub (crate) fn refuse (& self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_acquisition (& self , acquisition : & crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >",
         "pub (crate) fn require_same (& self , other : & Self) -> Result < () >"
       ],
       "factories": [
@@ -10858,9 +11070,37 @@
         {
           "owner": "NativeConsumerOrigin",
           "signature": "pub (crate) fn check_current (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "NativeConsumerOrigin",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn protected_restore_shell_reply (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerOrigin",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn received_protected_restore (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerOrigin",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_acquisition (& self , acquisition : & crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
         }
       ],
       "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_protected_restore_installed_original (stage : & mut EnrolledRoleStage < '_ > , original : & NativeConsumerOrigin , data : & crate :: security_epoch :: native_enrollment :: protected_restore :: ProtectedRestoreInstalledData) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_guard (stage : & mut EnrolledRoleStage < '_ > , root : & std :: rc :: Rc < std :: cell :: Cell < bool > > , original : & NativeConsumerOrigin , connection : & day2_capabilities :: Digest , sequence : u64) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn sign_protected_restore_installed (turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut crate :: security_epoch :: bootstrap :: RestoreInstalledOutputLoan < '_ , '_ , '_ > , original : & NativeConsumerOrigin , data : & crate :: security_epoch :: native_enrollment :: protected_restore :: ProtectedRestoreInstalledData) -> Result < String >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn require_guard (& mut self , root : & Rc < std :: cell :: Cell < bool > > , origin : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >"
+        },
         {
           "owner": "NativeConsumerOrigin",
           "signature": "pub (crate) fn check_current (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
@@ -10872,6 +11112,10 @@
         {
           "owner": "NativeConsumerOrigin",
           "signature": "pub (crate) fn require_same (& self , other : & Self) -> Result < () >"
+        },
+        {
+          "owner": "NativeConsumerOrigin",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_acquisition (& self , acquisition : & crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
         }
       ],
       "proof_uses": []
@@ -10887,6 +11131,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -10952,6 +11203,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -11051,6 +11309,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -11117,6 +11382,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -11220,6 +11492,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -11260,6 +11539,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -11363,6 +11649,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -11545,6 +11838,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -11583,6 +11883,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -11660,6 +11967,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -11810,6 +12124,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -11872,6 +12193,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -11945,6 +12273,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -12002,6 +12337,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -12064,6 +12406,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -12123,6 +12472,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -12193,6 +12549,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -12242,6 +12605,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -12298,6 +12668,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -12348,6 +12725,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -12428,6 +12812,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -12480,6 +12871,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -12536,6 +12934,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -12584,6 +12989,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -12998,6 +13410,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -13036,6 +13455,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -13125,6 +13551,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -13234,6 +13667,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -13276,6 +13716,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -13306,7 +13753,9 @@
       ],
       "methods": [
         "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (in crate :: security_epoch) fn meet_current_read_view (& mut self , stage : & mut EnrolledRoleStage < '_ > , actual : & mut NativeAcquisition) -> Result < () >"
+        "pub (in crate :: security_epoch) fn meet_current_read_view (& mut self , stage : & mut EnrolledRoleStage < '_ > , actual : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_owner (& mut self , role : & EnrolledProcessRoleOwner) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_shell_owner (& mut self , role : & EnrolledProcessRoleOwner , controller : & Statement) -> Result < () >"
       ],
       "factories": [
         {
@@ -13318,6 +13767,14 @@
         {
           "owner": "SameEnrolledOwner",
           "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_owner (& mut self , role : & EnrolledProcessRoleOwner) -> Result < () >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_protected_restore_shell_owner (& mut self , role : & EnrolledProcessRoleOwner , controller : & Statement) -> Result < () >"
         },
         {
           "owner": "SameEnrolledOwner",
@@ -13337,6 +13794,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
             "module": "protected_restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "request_frame"
           }
         },
         {
@@ -13421,6 +13885,131 @@
       "destructor": "sha256:2ec4aec1f63f8e50ad7a217ca391ac727ca489220db1a67ae331a0eda1efc539"
     },
     {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+      "type_name": "EnrolledRequestFrame",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn new (original : NativeAcquisition) -> Self",
+        "pub (super) fn original (& self) -> & NativeAcquisition",
+        "pub (super) fn original_mut (& mut self) -> & mut NativeAcquisition",
+        "pub (super) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "EnrolledRequestFrame",
+          "signature": "pub (super) fn new (original : NativeAcquisition) -> Self"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn into_owned (self) -> Result < EnrolledRequestFrame >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "EnrolledRequestFrame",
+          "signature": "pub (super) fn original (& self) -> & NativeAcquisition"
+        },
+        {
+          "owner": "EnrolledRequestFrame",
+          "signature": "pub (super) fn original_mut (& mut self) -> & mut NativeAcquisition"
+        },
+        {
+          "owner": "EnrolledRequestFrame",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn borrowed (frame : & 'a mut EnrolledRequestFrame) -> Self"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn owned (frame : EnrolledRequestFrame) -> Self"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner/request_frame.rs",
+      "type_name": "EnrolledStageFrame",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn app (original : & 'a mut NativeAcquisition , owner : & EnrolledProcessRoleOwner) -> Result < Self >",
+        "pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition",
+        "pub (super) fn as_ref (& self) -> & NativeAcquisition",
+        "pub (super) fn attach (& mut self , guard : ProtectedRestoreActionGuard) -> std :: result :: Result < () , ProtectedRestoreActionGuard >",
+        "pub (super) fn borrowed (frame : & 'a mut EnrolledRequestFrame) -> Self",
+        "pub (super) fn check_guard (& mut self , owner : & EnrolledProcessRoleOwner , purpose : StagePurpose) -> Result < () >",
+        "pub (super) fn fresh (original : NativeAcquisition) -> Self",
+        "pub (super) fn into_owned (self) -> Result < EnrolledRequestFrame >",
+        "pub (super) fn owned (frame : EnrolledRequestFrame) -> Self",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn require_guard (& mut self , root : & Rc < std :: cell :: Cell < bool > > , origin : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >",
+        "pub (super) fn require_guard_slot (& mut self) -> Result < () >",
+        "pub (super) fn retire_owned (& mut self , clock : & mut NativeConnectionClock) -> Result < NativeOriginalRefusal >"
+      ],
+      "factories": [
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn app (original : & 'a mut NativeAcquisition , owner : & EnrolledProcessRoleOwner) -> Result < Self >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn borrowed (frame : & 'a mut EnrolledRequestFrame) -> Self"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn fresh (original : NativeAcquisition) -> Self"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn owned (frame : EnrolledRequestFrame) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn as_ref (& self) -> & NativeAcquisition"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn attach (& mut self , guard : ProtectedRestoreActionGuard) -> std :: result :: Result < () , ProtectedRestoreActionGuard >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn check_guard (& mut self , owner : & EnrolledProcessRoleOwner , purpose : StagePurpose) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn into_owned (self) -> Result < EnrolledRequestFrame >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn require_guard (& mut self , root : & Rc < std :: cell :: Cell < bool > > , origin : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn require_guard_slot (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledStageFrame < 'a >",
+          "signature": "pub (super) fn retire_owned (& mut self , clock : & mut NativeConnectionClock) -> Result < NativeOriginalRefusal >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
       "type_name": "ReceiverDurability",
       "kind": "private_material",
@@ -13463,9 +14052,66 @@
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
-      "type_name": "ProtectedRestoreListener",
+      "type_name": "ProtectedRestoreActionGuard",
       "kind": "private_material",
       "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn attach_to_request (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , owner : & EnrolledProcessRoleOwner , purpose : super :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >",
+        "fn from_controller (guard : ProtectedRestoreControllerGuard) -> Self",
+        "fn from_shell_reply (guard : ProtectedRestoreShellReplyGuard) -> Self",
+        "fn from_shell_terminal (guard : ProtectedRestoreShellTerminalGuard) -> Self",
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_binding (& mut self , root : & Rc < Cell < bool > > , original : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_retirement (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_stage (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn retire (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "fn from_controller (guard : ProtectedRestoreControllerGuard) -> Self"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "fn from_shell_reply (guard : ProtectedRestoreShellReplyGuard) -> Self"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "fn from_shell_terminal (guard : ProtectedRestoreShellTerminalGuard) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn attach_to_request (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , owner : & EnrolledProcessRoleOwner , purpose : super :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_binding (& mut self , root : & Rc < Cell < bool > > , original : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_retirement (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_stage (& self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn retire (& mut self)"
+        }
+      ],
+      "proof_uses": [],
       "owning_children": [
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
@@ -13475,33 +14121,156 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
             "module": "wire"
           }
         }
-      ],
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreControllerGuard",
+      "kind": "private_material",
+      "consuming_methods": [],
       "methods": [
-        "pub (in crate :: security_epoch) fn accept (& mut self , _role : & mut EnrolledProcessRoleOwner) -> Result < ProtectedRestorePeer >",
-        "pub (in crate :: security_epoch) fn bind (_role : & mut EnrolledProcessRoleOwner) -> Result < Self >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , owner : & EnrolledProcessRoleOwner , purpose : super :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_binding (& mut self , root : & Rc < Cell < bool > > , original : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn retire (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn receive (peer : & mut ProtectedRestorePeer , stage : & mut EnrolledRoleStage < '_ >) -> Result < Option < (ProtectedRestoreRequest , NativeConsumerOrigin , Digest) > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "fn from_controller (guard : ProtectedRestoreControllerGuard) -> Self"
+        },
+        {
+          "owner": "ProtectedRestoreControllerGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , owner : & EnrolledProcessRoleOwner , purpose : super :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreControllerGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ProtectedRestoreControllerGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_binding (& mut self , root : & Rc < Cell < bool > > , original : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreControllerGuard",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn retire (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "wire"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreListener",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn accept (& mut self , role : & mut EnrolledProcessRoleOwner) -> Result < ProtectedRestorePeer >",
+        "pub (in crate :: security_epoch) fn bind (role : & mut EnrolledProcessRoleOwner) -> Result < Self >",
         "pub (in crate :: security_epoch) fn pending (& mut self) -> Result < bool >",
         "fn refuse (& mut self)"
       ],
       "factories": [
         {
           "owner": "ProtectedRestoreListener",
-          "signature": "pub (in crate :: security_epoch) fn bind (_role : & mut EnrolledProcessRoleOwner) -> Result < Self >"
+          "signature": "pub (in crate :: security_epoch) fn bind (role : & mut EnrolledProcessRoleOwner) -> Result < Self >"
         }
       ],
       "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn accept (listener : & mut ProtectedRestoreListener , stage : & mut EnrolledRoleStage < '_ >) -> Result < ProtectedRestorePeer >"
+        },
         {
           "owner": "ProtectedRestoreListener",
           "signature": "fn refuse (& mut self)"
         },
         {
           "owner": "ProtectedRestoreListener",
-          "signature": "pub (in crate :: security_epoch) fn accept (& mut self , _role : & mut EnrolledProcessRoleOwner) -> Result < ProtectedRestorePeer >"
+          "signature": "pub (in crate :: security_epoch) fn accept (& mut self , role : & mut EnrolledProcessRoleOwner) -> Result < ProtectedRestorePeer >"
         },
         {
           "owner": "ProtectedRestoreListener",
@@ -13509,19 +14278,40 @@
         }
       ],
       "proof_uses": [],
-      "destructor": "sha256:11b4b35882373930d831bb5889416d090e5d820b91fa8307a66584bb51b898d3"
-    },
-    {
-      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
-      "type_name": "ProtectedRestoreMessage",
-      "kind": "private_material",
-      "consuming_methods": [],
       "owning_children": [
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
             "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
           }
         },
         {
@@ -13532,20 +14322,27 @@
           }
         }
       ],
+      "destructor": "sha256:11b4b35882373930d831bb5889416d090e5d820b91fa8307a66584bb51b898d3"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreMessage",
+      "kind": "private_material",
+      "consuming_methods": [],
       "methods": [
-        "fn admission (body : & 'message admission :: Body) -> Self",
-        "fn command (data : & 'message wire :: Data , admitted : & 'message super :: serving_peer_wire :: Statement) -> Self",
+        "pub (in crate :: security_epoch :: native_enrollment) fn admission (body : & 'message admission :: Body) -> Self",
+        "pub (in crate :: security_epoch :: native_enrollment) fn command (data : & 'message wire :: Data , admitted : & 'message super :: serving_peer_wire :: Statement) -> Self",
         "pub (in crate :: security_epoch :: native_enrollment) fn commitment_for (& self , local : & super :: serving_peer_wire :: Statement) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn domain (& self) -> & 'static str"
       ],
       "factories": [
         {
           "owner": "ProtectedRestoreMessage < 'message >",
-          "signature": "fn admission (body : & 'message admission :: Body) -> Self"
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn admission (body : & 'message admission :: Body) -> Self"
         },
         {
           "owner": "ProtectedRestoreMessage < 'message >",
-          "signature": "fn command (data : & 'message wire :: Data , admitted : & 'message super :: serving_peer_wire :: Statement) -> Self"
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn command (data : & 'message wire :: Data , admitted : & 'message super :: serving_peer_wire :: Statement) -> Self"
         }
       ],
       "material_uses": [
@@ -13558,13 +14355,7 @@
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn domain (& self) -> & 'static str"
         }
       ],
-      "proof_uses": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
-      "type_name": "ProtectedRestorePeer",
-      "kind": "private_material",
-      "consuming_methods": [],
+      "proof_uses": [],
       "owning_children": [
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
@@ -13574,27 +14365,77 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
             "module": "wire"
           }
         }
-      ],
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestorePeer",
+      "kind": "private_material",
+      "consuming_methods": [],
       "methods": [
         "pub (in crate :: security_epoch) fn pending (& mut self) -> Result < bool >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn require_owner (& mut self , _role : & EnrolledProcessRoleOwner) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require_owner (& mut self , role : & EnrolledProcessRoleOwner) -> Result < () >",
         "pub (in crate :: security_epoch) fn retained_refusal (& self) -> ProtectedRestoreRefusal",
         "pub (in crate :: security_epoch) fn try_receive < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Option < ProtectedRestoreTurn < 'peer > > >"
       ],
       "factories": [
         {
+          "owner": null,
+          "signature": "pub (super) fn accept (listener : & mut ProtectedRestoreListener , stage : & mut EnrolledRoleStage < '_ >) -> Result < ProtectedRestorePeer >"
+        },
+        {
           "owner": "ProtectedRestoreListener",
-          "signature": "pub (in crate :: security_epoch) fn accept (& mut self , _role : & mut EnrolledProcessRoleOwner) -> Result < ProtectedRestorePeer >"
+          "signature": "pub (in crate :: security_epoch) fn accept (& mut self , role : & mut EnrolledProcessRoleOwner) -> Result < ProtectedRestorePeer >"
         }
       ],
       "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn check_peer (peer : & mut ProtectedRestorePeer , pending : Option < & mut ProtectedRestorePending > , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn receive (peer : & mut ProtectedRestorePeer , stage : & mut EnrolledRoleStage < '_ >) -> Result < Option < (ProtectedRestoreRequest , NativeConsumerOrigin , Digest) > >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn reply (peer : & mut ProtectedRestorePeer , original : & NativeConsumerOrigin , stage : & mut EnrolledRoleStage < '_ > , reply : super :: ProtectedRestoreReply) -> Result < () >"
+        },
         {
           "owner": "ProtectedRestorePeer",
           "signature": "pub (in crate :: security_epoch) fn pending (& mut self) -> Result < bool >"
@@ -13605,7 +14446,7 @@
         },
         {
           "owner": "ProtectedRestorePeer",
-          "signature": "pub (in crate :: security_epoch) fn require_owner (& mut self , _role : & EnrolledProcessRoleOwner) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn require_owner (& mut self , role : & EnrolledProcessRoleOwner) -> Result < () >"
         },
         {
           "owner": "ProtectedRestorePeer",
@@ -13617,19 +14458,40 @@
         }
       ],
       "proof_uses": [],
-      "destructor": "sha256:a112475c374e027ca06300510500afe72d58b5fe942a063509b706bd0a9b035b"
-    },
-    {
-      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
-      "type_name": "ProtectedRestoreRefusal",
-      "kind": "private_material",
-      "consuming_methods": [],
       "owning_children": [
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
             "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
           }
         },
         {
@@ -13640,6 +14502,85 @@
           }
         }
       ],
+      "destructor": "sha256:a112475c374e027ca06300510500afe72d58b5fe942a063509b706bd0a9b035b"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestorePending",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn receive (peer : & mut ProtectedRestorePeer , stage : & mut EnrolledRoleStage < '_ >) -> Result < Option < (ProtectedRestoreRequest , NativeConsumerOrigin , Digest) > >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn request (shell : & mut ProtectedRestoreShell , stage : & mut EnrolledRoleStage < '_ > , request : ProtectedRestoreRequest) -> Result < ProtectedRestoreReply >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn check_peer (peer : & mut ProtectedRestorePeer , pending : Option < & mut ProtectedRestorePending > , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "fn check_shell (shell : & mut ProtectedRestoreShell , pending : Option < & mut ProtectedRestorePending > , bound : Option < & crate :: security_epoch :: native_enrollment :: serving_peer_wire :: Statement > , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "wire"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreRefusal",
+      "kind": "private_material",
+      "consuming_methods": [],
       "methods": [
         "pub (in crate :: security_epoch) fn refuse (& self)"
       ],
@@ -13655,13 +14596,7 @@
           "signature": "pub (in crate :: security_epoch) fn refuse (& self)"
         }
       ],
-      "proof_uses": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
-      "type_name": "ProtectedRestoreShell",
-      "kind": "private_material",
-      "consuming_methods": [],
+      "proof_uses": [],
       "owning_children": [
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
@@ -13671,26 +14606,76 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
             "module": "wire"
           }
         }
-      ],
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreShell",
+      "kind": "private_material",
+      "consuming_methods": [],
       "methods": [
         "pub (crate) fn authenticate (mut self : Box < Self > , stage : & mut EnrolledRoleStage < '_ > , id : & Digest , assertion : & [u8]) -> Result < RestoreInstalledOutputData >",
-        "pub (crate) fn connect (_stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn request (& mut self , stage : & mut EnrolledRoleStage < '_ > , request : ProtectedRestoreRequest) -> Result < ProtectedRestoreReply >"
       ],
       "factories": [
         {
+          "owner": null,
+          "signature": "pub (super) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < ProtectedRestoreShell >"
+        },
+        {
           "owner": "ProtectedRestoreShell",
-          "signature": "pub (crate) fn connect (_stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+          "signature": "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
         }
       ],
       "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn check_shell (shell : & mut ProtectedRestoreShell , pending : Option < & mut ProtectedRestorePending > , bound : Option < & crate :: security_epoch :: native_enrollment :: serving_peer_wire :: Statement > , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn authenticate (shell : Box < ProtectedRestoreShell > , stage : & mut EnrolledRoleStage < '_ > , id : & day2_capabilities :: Digest , assertion : & [u8]) -> Result < super :: RestoreInstalledOutputData >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn request (shell : & mut ProtectedRestoreShell , stage : & mut EnrolledRoleStage < '_ > , request : ProtectedRestoreRequest) -> Result < ProtectedRestoreReply >"
+        },
         {
           "owner": "ProtectedRestoreShell",
           "signature": "pub (crate) fn authenticate (mut self : Box < Self > , stage : & mut EnrolledRoleStage < '_ > , id : & Digest , assertion : & [u8]) -> Result < RestoreInstalledOutputData >"
@@ -13705,19 +14690,40 @@
         }
       ],
       "proof_uses": [],
-      "destructor": "sha256:bde68b97fa4b06c98e79fa75ecd63e160b37c9530c21f60aff05de44791843b0"
-    },
-    {
-      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
-      "type_name": "ProtectedRestoreTurn",
-      "kind": "private_material",
-      "consuming_methods": [],
       "owning_children": [
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
             "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
           }
         },
         {
@@ -13728,14 +14734,184 @@
           }
         }
       ],
+      "destructor": "sha256:bde68b97fa4b06c98e79fa75ecd63e160b37c9530c21f60aff05de44791843b0"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreShellReplyGuard",
+      "kind": "private_material",
+      "consuming_methods": [],
       "methods": [
+        "fn check (& mut self , owner : & EnrolledProcessRoleOwner , purpose : super :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >",
+        "fn refuse (& mut self)",
+        "fn require_binding (& mut self , root : & Rc < Cell < bool > > , original : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn request (shell : & mut ProtectedRestoreShell , stage : & mut EnrolledRoleStage < '_ > , request : ProtectedRestoreRequest) -> Result < ProtectedRestoreReply >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "fn from_shell_reply (guard : ProtectedRestoreShellReplyGuard) -> Self"
+        },
+        {
+          "owner": "ProtectedRestoreShellReplyGuard",
+          "signature": "fn check (& mut self , owner : & EnrolledProcessRoleOwner , purpose : super :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreShellReplyGuard",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "ProtectedRestoreShellReplyGuard",
+          "signature": "fn require_binding (& mut self , root : & Rc < Cell < bool > > , original : & NativeConsumerOrigin , connection : & Digest , sequence : u64) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "wire"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreShellTerminalGuard",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (super) fn check (& mut self , owner : & crate :: security_epoch :: native_enrollment :: EnrolledProcessRoleOwner , purpose : crate :: security_epoch :: native_enrollment :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn require_binding (& mut self , root : & std :: rc :: Rc < std :: cell :: Cell < bool > > , original : & crate :: security_epoch :: native_enrollment :: NativeConsumerOrigin , connection : & day2_capabilities :: Digest , sequence : u64) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn authenticate (shell : Box < ProtectedRestoreShell > , stage : & mut EnrolledRoleStage < '_ > , id : & day2_capabilities :: Digest , assertion : & [u8]) -> Result < super :: RestoreInstalledOutputData >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedRestoreActionGuard",
+          "signature": "fn from_shell_terminal (guard : ProtectedRestoreShellTerminalGuard) -> Self"
+        },
+        {
+          "owner": "ProtectedRestoreShellTerminalGuard",
+          "signature": "pub (super) fn check (& mut self , owner : & crate :: security_epoch :: native_enrollment :: EnrolledProcessRoleOwner , purpose : crate :: security_epoch :: native_enrollment :: protocol :: StagePurpose , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreShellTerminalGuard",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ProtectedRestoreShellTerminalGuard",
+          "signature": "pub (super) fn require_binding (& mut self , root : & std :: rc :: Rc < std :: cell :: Cell < bool > > , original : & crate :: security_epoch :: native_enrollment :: NativeConsumerOrigin , connection : & day2_capabilities :: Digest , sequence : u64) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "wire"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+      "type_name": "ProtectedRestoreTurn",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn admitted_statement (& self) -> Result < & super :: serving_peer_wire :: Statement >",
         "pub (in crate :: security_epoch) fn finish_installed < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection > (mut self , installation : crate :: security_epoch :: bootstrap :: PendingControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , >) -> Result < crate :: security_epoch :: bootstrap :: RetiredControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , > , >",
-        "pub (in crate :: security_epoch) fn installed_output (& mut self , stage : & mut EnrolledRoleStage < '_ > , loan : & mut crate :: security_epoch :: bootstrap :: RestoreInstalledOutputLoan < '_ , '_ , '_ > , _operation : ProtectedRestoreInstalledIo) -> Result < super :: ReceiverProgress >",
+        "pub (in crate :: security_epoch) fn installed_output (& mut self , stage : & mut EnrolledRoleStage < '_ > , loan : & mut crate :: security_epoch :: bootstrap :: RestoreInstalledOutputLoan < '_ , '_ , '_ > , operation : ProtectedRestoreInstalledIo) -> Result < super :: ReceiverProgress >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "pub (in crate :: security_epoch :: native_enrollment) fn refuse_transfer (& mut self)",
-        "pub (in crate :: security_epoch) fn reply (self , stage : & mut EnrolledRoleStage < '_ > , reply : ProtectedRestoreReply) -> Result < () >",
+        "pub (in crate :: security_epoch) fn reply (mut self , stage : & mut EnrolledRoleStage < '_ > , reply : ProtectedRestoreReply) -> Result < () >",
         "pub (in crate :: security_epoch) fn request_data (& self) -> & ProtectedRestoreRequest",
         "pub (in crate :: security_epoch :: native_enrollment) fn require_accepting_original (& mut self , original : & NativeConsumerOrigin , role : & EnrolledProcessRoleOwner) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_installed_binding (& self , data : & ProtectedRestoreInstalledData) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_received_guard (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn take_accepting_stage < 'role > (& mut self , request : EnrolledCurrentRequest , role : & 'role mut EnrolledProcessRoleOwner) -> Result < EnrolledRoleStage < 'role > >"
       ],
       "factories": [
@@ -13746,6 +14922,22 @@
       ],
       "material_uses": [
         {
+          "owner": null,
+          "signature": "pub (super) fn step (turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ > , operation : ProtectedRestoreInstalledIo) -> Result < ReceiverProgress >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (super) fn prepare (turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < Self >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (super) fn sign (& mut self , turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreTurn < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn admitted_statement (& self) -> Result < & super :: serving_peer_wire :: Statement >"
+        },
+        {
           "owner": "ProtectedRestoreTurn < '_ >",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse_transfer (& mut self)"
         },
@@ -13755,11 +14947,19 @@
         },
         {
           "owner": "ProtectedRestoreTurn < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_installed_binding (& self , data : & ProtectedRestoreInstalledData) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreTurn < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_received_guard (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreTurn < '_ >",
           "signature": "pub (in crate :: security_epoch) fn finish_installed < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection > (mut self , installation : crate :: security_epoch :: bootstrap :: PendingControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , >) -> Result < crate :: security_epoch :: bootstrap :: RetiredControllerCurrentInstallation < 'frame , 'confirm , 'metadata , 'storage , 'role , 'target , 'selection , > , >"
         },
         {
           "owner": "ProtectedRestoreTurn < '_ >",
-          "signature": "pub (in crate :: security_epoch) fn installed_output (& mut self , stage : & mut EnrolledRoleStage < '_ > , loan : & mut crate :: security_epoch :: bootstrap :: RestoreInstalledOutputLoan < '_ , '_ , '_ > , _operation : ProtectedRestoreInstalledIo) -> Result < super :: ReceiverProgress >"
+          "signature": "pub (in crate :: security_epoch) fn installed_output (& mut self , stage : & mut EnrolledRoleStage < '_ > , loan : & mut crate :: security_epoch :: bootstrap :: RestoreInstalledOutputLoan < '_ , '_ , '_ > , operation : ProtectedRestoreInstalledIo) -> Result < super :: ReceiverProgress >"
         },
         {
           "owner": "ProtectedRestoreTurn < '_ >",
@@ -13767,7 +14967,7 @@
         },
         {
           "owner": "ProtectedRestoreTurn < '_ >",
-          "signature": "pub (in crate :: security_epoch) fn reply (self , stage : & mut EnrolledRoleStage < '_ > , reply : ProtectedRestoreReply) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn reply (mut self , stage : & mut EnrolledRoleStage < '_ > , reply : ProtectedRestoreReply) -> Result < () >"
         },
         {
           "owner": "ProtectedRestoreTurn < '_ >",
@@ -13779,7 +14979,130 @@
         }
       ],
       "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/admission.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "admission"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/courier.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "courier"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/native.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "native"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "terminal"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/warm.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "warm"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
+            "module": "wire"
+          }
+        }
+      ],
       "destructor": "sha256:2e01f5673353895be3c488a288b5410ae114cd6bfa3d82a789084715ddbbc60a"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore/terminal.rs",
+      "type_name": "ProtectedRestoreOutputFrame",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn after_poll (& mut self , progress : ReceiverProgress) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn after_send (& mut self , progress : ReceiverProgress) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn begin_send (& mut self) -> Result < InstalledSendStart >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn bytes (& self) -> Result < & [u8] >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check_loan (& mut self , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check_socket (& mut self , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn packet_frame (& self) -> Frame",
+        "pub (super) fn prepare (turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < Self >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)",
+        "fn require_phase (& mut self , expected : OutputPhase) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_poll (& mut self) -> Result < () >",
+        "pub (super) fn sign (& mut self , turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < () >",
+        "fn transition (& mut self , event : OutputEvent) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (super) fn prepare (turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "fn require_phase (& mut self , expected : OutputPhase) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "fn transition (& mut self , event : OutputEvent) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn after_poll (& mut self , progress : ReceiverProgress) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn after_send (& mut self , progress : ReceiverProgress) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn begin_send (& mut self) -> Result < InstalledSendStart >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn bytes (& self) -> Result < & [u8] >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_loan (& mut self , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_socket (& mut self , acquisition : & mut crate :: security_epoch :: native_clock :: NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn packet_frame (& self) -> Frame"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_poll (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ProtectedRestoreOutputFrame",
+          "signature": "pub (super) fn sign (& mut self , turn : & mut ProtectedRestoreTurn < '_ > , stage : & mut EnrolledRoleStage < '_ > , loan : & mut RestoreInstalledOutputLoan < '_ , '_ , '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/restored.rs",

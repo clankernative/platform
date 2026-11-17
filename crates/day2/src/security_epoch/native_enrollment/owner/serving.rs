@@ -224,6 +224,6 @@ impl EnrolledRoleStage<'_> {
 
     pub(in crate::security_epoch) fn refuse_serving(&mut self) {
         self.owner.refused = true;
-        self.acquisition.as_mut().refuse();
+        self.acquisition.refuse();
     }
 }

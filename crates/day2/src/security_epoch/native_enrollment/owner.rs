@@ -6,9 +6,7 @@ use crate::oauth::native_management::{
     NativeConsumerAffinity, NativeConsumerContext, NativeRequestFinalContext,
 };
 use crate::security_epoch::bootstrap::ServingDisposition;
-use crate::security_epoch::native_clock::{
-    NativeAcquisition, NativeOriginalRefusal, StageAcquisition, boottime,
-};
+use crate::security_epoch::native_clock::{NativeAcquisition, NativeOriginalRefusal, boottime};
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 #[cfg(target_os = "linux")]
@@ -39,10 +37,17 @@ use std::{
 };
 
 mod protected_restore;
+mod request_frame;
 mod restore;
 mod restore_receiver;
 mod serving;
 mod storage;
+pub(super) use protected_restore::sign_protected_restore_installed;
+pub(super) use protected_restore::{
+    attach_protected_restore_guard, check_protected_restore_installed_original,
+    require_protected_restore_guard,
+};
+use request_frame::{EnrolledRequestFrame, EnrolledStageFrame};
 pub(in crate::security_epoch) use restore_receiver::ReceiverDurability;
 
 struct OwnerIdentity;
@@ -148,10 +153,12 @@ impl PreparedRestoredAppNative {
             #[cfg(target_os = "linux")]
             {
                 let (_, deadline) = self.pending.original.interval_data()?;
+                let acquisition =
+                    EnrolledStageFrame::app(&mut self.pending.original, &self.pending.owner)?;
                 let mut stage = EnrolledRoleStage {
                     owner: &mut self.pending.owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::borrowed(&mut self.pending.original),
+                    acquisition,
                     deadline,
                 };
                 self.file.check_current(&mut stage)?;
@@ -1943,10 +1950,14 @@ impl InstalledRestoredAppNative {
         {
             let requested: Result<()> = (|| {
                 let (_, deadline) = self.prepared.pending.original.interval_data()?;
+                let acquisition = EnrolledStageFrame::app(
+                    &mut self.prepared.pending.original,
+                    &self.prepared.pending.owner,
+                )?;
                 let mut stage = EnrolledRoleStage {
                     owner: &mut self.prepared.pending.owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::borrowed(&mut self.prepared.pending.original),
+                    acquisition,
                     deadline,
                 };
                 let mut acquisition = stage.narrow_io_acquisition(5)?;
@@ -2200,11 +2211,13 @@ impl PendingRestoredEnrollment {
                 // selector. Reject it before admitting a connection or reading.
                 lineage.require_restored_reader_data(&expected)?;
                 let (_, deadline) = attempt.owner.original.interval_data()?;
+                let acquisition =
+                    EnrolledStageFrame::app(&mut attempt.owner.original, &attempt.owner.owner)?;
                 let observed = {
                     let mut stage = EnrolledRoleStage {
                         owner: &mut attempt.owner.owner,
                         purpose: StagePurpose::CurrentRole,
-                        acquisition: StageAcquisition::borrowed(&mut attempt.owner.original),
+                        acquisition,
                         deadline,
                     };
                     attempt.owner.counter.admit(
@@ -2260,10 +2273,12 @@ impl PendingRestoredEnrollment {
             #[cfg(target_os = "linux")]
             {
                 let (_, deadline) = attempt.owner.original.interval_data()?;
+                let acquisition =
+                    EnrolledStageFrame::app(&mut attempt.owner.original, &attempt.owner.owner)?;
                 let mut stage = EnrolledRoleStage {
                     owner: &mut attempt.owner.owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::borrowed(&mut attempt.owner.original),
+                    acquisition,
                     deadline,
                 };
                 let same = stage.capture_same_owner()?;
@@ -2306,10 +2321,12 @@ impl PendingRestoredEnrollment {
             #[cfg(target_os = "linux")]
             {
                 let (_, deadline) = attempt.owner.original.interval_data()?;
+                let acquisition =
+                    EnrolledStageFrame::app(&mut attempt.owner.original, &attempt.owner.owner)?;
                 let mut stage = EnrolledRoleStage {
                     owner: &mut attempt.owner.owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::borrowed(&mut attempt.owner.original),
+                    acquisition,
                     deadline,
                 };
                 let same = stage.capture_same_owner()?;
@@ -2410,12 +2427,13 @@ impl PendingRestoredEnrollment {
             #[cfg(target_os = "linux")]
             {
                 let (_, deadline) = self.original.interval_data()?;
+                let acquisition = EnrolledStageFrame::app(&mut self.original, &self.owner)?;
                 // This is a borrow of the original already retained by the
                 // consumed attempt. No clock begin, capture, reset or renewal.
                 let mut stage = EnrolledRoleStage {
                     owner: &mut self.owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::borrowed(&mut self.original),
+                    acquisition,
                     deadline,
                 };
                 stage.check()
@@ -2934,7 +2952,7 @@ impl Drop for ControllerNativeRetirement<'_> {
             && let Some(stage) = &mut self.stage
         {
             stage.owner.refused = true;
-            stage.acquisition.as_mut().refuse();
+            stage.acquisition.refuse();
         }
     }
 }
@@ -3000,6 +3018,7 @@ impl<'role> EnrolledRoleStage<'role> {
                 // Allocate the future negative request gate while the old
                 // guarded original is still live, before its last sample.
                 let request_state = Rc::new(RestoredRequestGate::new());
+                stage.acquisition.check_guard(stage.owner, stage.purpose)?;
                 let refusal = stage.acquisition.retire_owned(&mut stage.owner.clock)?;
                 Ok((refusal, request_state))
             }
@@ -3024,7 +3043,7 @@ impl<'role> EnrolledRoleStage<'role> {
 pub(crate) struct EnrolledRoleStage<'a> {
     owner: &'a mut EnrolledProcessRoleOwner,
     purpose: StagePurpose,
-    acquisition: StageAcquisition<'a>,
+    acquisition: EnrolledStageFrame<'a>,
     deadline: Duration,
 }
 
@@ -3586,7 +3605,7 @@ pub(crate) struct EnrolledCurrentRequest {
     thread: ThreadId,
     // Some throughout borrowed use. Only the fixed consuming protected-turn
     // transfer can take this actual value; it never substitutes another clock.
-    acquisition: Option<NativeAcquisition>,
+    acquisition: Option<EnrolledRequestFrame>,
     finished: bool,
     local: PhantomData<Rc<()>>,
 }
@@ -3901,7 +3920,8 @@ impl EnrolledCurrentRequest {
         let original = self
             .acquisition
             .as_ref()
-            .expect("live enrolled request original");
+            .expect("live enrolled request original")
+            .original();
         NativeConsumerOrigin {
             refusal: original.retained_refusal(),
             domain: original.historical_interval_observation().0,
@@ -3927,6 +3947,10 @@ impl EnrolledCurrentRequest {
     }
 
     fn original_mut(&mut self) -> Result<&mut NativeAcquisition> {
+        Ok(self.frame_mut()?.original_mut())
+    }
+
+    fn frame_mut(&mut self) -> Result<&mut EnrolledRequestFrame> {
         self.acquisition
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_original_transferred"))
@@ -4099,7 +4123,7 @@ impl EnrolledProcessRoleOwner {
                     role: self.role,
                     process: self.process,
                     thread: self.thread,
-                    acquisition: Some(acquisition),
+                    acquisition: Some(EnrolledRequestFrame::new(acquisition)),
                     finished: false,
                     local: PhantomData,
                 };
@@ -4151,7 +4175,7 @@ impl EnrolledProcessRoleOwner {
         let mut stage = EnrolledRoleStage {
             owner: self,
             purpose: StagePurpose::CurrentRole,
-            acquisition: StageAcquisition::borrowed(request.original_mut()?),
+            acquisition: EnrolledStageFrame::borrowed(request.frame_mut()?),
             deadline,
         };
         stage.check()?;
@@ -4241,7 +4265,7 @@ impl EnrolledProcessRoleOwner {
                 let mut stage = EnrolledRoleStage {
                     owner: self,
                     purpose,
-                    acquisition: StageAcquisition::owned(acquisition),
+                    acquisition: EnrolledStageFrame::fresh(acquisition),
                     deadline,
                 };
                 stage.check()?;
@@ -4331,7 +4355,7 @@ impl EnrolledRoleStage<'_> {
         })();
         if result.is_err() {
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
         }
         result
     }
@@ -4378,7 +4402,7 @@ impl EnrolledRoleStage<'_> {
         })();
         if result.is_err() {
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
         }
         result
     }
@@ -4407,7 +4431,7 @@ impl EnrolledStorageStage<'_, '_> {
         if requested.is_err() || checked.is_err() {
             original.refuse();
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         requested?;
         checked
@@ -4426,7 +4450,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -4441,7 +4465,7 @@ impl EnrolledStorageStage<'_, '_> {
         if let Err(error) = self.require_storage_authentication_purpose() {
             child.refuse();
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
             return Err(error);
         }
         let result = (|| {
@@ -4461,7 +4485,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -4486,7 +4510,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -4512,7 +4536,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -4534,7 +4558,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -4547,7 +4571,7 @@ impl EnrolledRoleStage<'_> {
     ) -> Result<()> {
         if let Err(error) = self.purpose.require_exact(purpose) {
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
             return Err(error);
         }
         self.check()
@@ -4571,7 +4595,7 @@ impl EnrolledRoleStage<'_> {
         })();
         if result.is_err() {
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
         }
         result
     }
@@ -4606,7 +4630,7 @@ impl EnrolledRoleStage<'_> {
     ) -> Result<()> {
         if self.owner.policy.bootstrap != *policy || self.owner.policy.store != *store {
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
             anyhow::bail!("native_enrollment_full_selection_changed");
         }
         self.require_role_data(&policy.scope, role)
@@ -4627,14 +4651,14 @@ impl EnrolledRoleStage<'_> {
         let selected = self.owner.policy.bootstrap.scope == *scope && self.owner.role == role;
         if !selected {
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
             anyhow::bail!("native_enrollment_stage_selection_changed");
         }
         Ok(())
     }
 
     pub(crate) fn check(&mut self) -> Result<()> {
-        let result = (|| {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.owner.check_local()?;
             self.purpose.require_role(self.owner.role)?;
             match self.purpose {
@@ -4681,12 +4705,22 @@ impl EnrolledRoleStage<'_> {
             }
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("native_enrollment_platform_unsupported")
-        })();
-        if result.is_err() {
+        }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.acquisition.check_guard(self.owner, self.purpose)
+        }));
+        if !matches!(&requested, Ok(Ok(()))) || !matches!(&checked, Ok(Ok(()))) {
             self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
+            self.acquisition.refuse();
         }
-        result
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => result,
+            },
+        }
     }
 }
 
@@ -4708,7 +4742,7 @@ impl SameEnrolledOwner {
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
-            stage.acquisition.as_mut().refuse();
+            stage.acquisition.refuse();
             actual.refuse();
         }
         result
@@ -4731,7 +4765,7 @@ impl SameEnrolledOwner {
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
-            stage.acquisition.as_mut().refuse();
+            stage.acquisition.refuse();
         }
         result
     }
@@ -4772,7 +4806,7 @@ impl EnrolledOriginalClock {
         let checked = stage.check();
         if requested.is_err() || checked.is_err() {
             stage.owner.refused = true;
-            stage.acquisition.as_mut().refuse();
+            stage.acquisition.refuse();
         }
         let clock = requested?;
         checked?;
@@ -4808,7 +4842,7 @@ impl EnrolledOriginalClock {
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
-            stage.acquisition.as_mut().refuse();
+            stage.acquisition.refuse();
         }
         result
     }
@@ -5138,7 +5172,7 @@ impl FrozenRoleIssuer {
         let checked = stage.check();
         if requested.is_err() || checked.is_err() {
             stage.owner.refused = true;
-            stage.acquisition.as_mut().refuse();
+            stage.acquisition.refuse();
         }
         let mut frozen = requested?;
         checked?;
@@ -5388,7 +5422,7 @@ mod restored_app_current_source_tests {
             .filter(|c| !c.is_whitespace())
             .collect::<String>();
         let required = [
-            "letoriginal=self.acquisition.as_ref().expect(\"liveenrolledrequestoriginal\");",
+            "letoriginal=self.acquisition.as_ref().expect(\"liveenrolledrequestoriginal\").original();",
             "NativeConsumerOrigin{",
             "refusal:original.retained_refusal()",
             "domain:original.historical_interval_observation().0",
@@ -6556,7 +6590,7 @@ mod restored_app_current_source_tests {
                 "letchecked=stage.check();",
                 "requested.is_err()||checked.is_err()",
                 "stage.owner.refused=true",
-                "stage.acquisition.as_mut().refuse()",
+                "stage.acquisition.refuse()",
                 "letclock=requested?;",
                 "checked?;",
             ],
