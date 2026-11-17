@@ -1099,8 +1099,12 @@ locals {
   })
   backup_output = "/backup"
   # day2-backup appends /<UTC yyyymmddThhmmssZ> to the object prefix itself.
+  # --operation-lock must directly follow the output directory: maintenance
+  # recognizes coordinated backups by that exact position. An app on an image
+  # whose day2-backup predates the flag opts out per app (backup_operation_lock).
   backup_args = concat(
-    [local.instance_path, var.app_id, "${local.backup_output}/snapshot", "--operation-lock"],
+    [local.instance_path, var.app_id, "${local.backup_output}/snapshot"],
+    var.backup_operation_lock ? ["--operation-lock"] : [],
     flatten([for subpath in local.loopback_state_subpaths : ["--include-state-subpath", subpath]]),
     flatten([for path in local.loopback_sqlite_state : ["--include-state-sqlite", path]]),
     ["--upload-gcs", var.backup_bucket, "--object-prefix", var.app_id],

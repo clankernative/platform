@@ -69,7 +69,12 @@ Operator recovery deletes the captured helper UID and waits for termination
 before restoring a pre-fence source, as below.
 
 The scheduled backup command requires `--operation-lock`. Older binaries reject
-that argument before opening SQLite. Before claiming exclusion, the operator
+that argument before opening SQLite. The `day2-app` stack passes it unless the
+app sets `backup_operation_lock = false`, which an instance uses only while one
+app still runs an image whose `day2-backup` predates the flag. Its scheduled
+backups keep working, and maintenance from an operator that requires the lock
+refuses that app. Set it back to `true` immediately before the app's activation
+onto a supporting build. The other apps sharing the stack are unaffected. Before claiming exclusion, the operator
 refuses scheduled templates and unsettled Job workloads on the PVC that lack
 the marker or use an unsupported command/sidecar layout. Keep infrastructure
 changes and manual Job creation serialized with release operations. CronJob
