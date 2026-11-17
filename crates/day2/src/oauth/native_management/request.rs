@@ -416,6 +416,107 @@ impl Request {
         slot.install(Original::NonNative)
     }
 
+    /// Recheck only the already-bound Shell original. Socket polls must never
+    /// bind an unselected request or acquire a replacement role/original.
+    pub(super) fn check_bound_shell(&self) -> Result<()> {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure!(!self.refused.get(), "native request refused");
+            let mut slot = self.slot.try_borrow_mut()?;
+            match &mut *slot {
+                Slot::Live(Original::Selected {
+                    scope,
+                    kind: NativeRole::SecurityShell,
+                    current,
+                }) => {
+                    let SavedSource::Enrolled(current) = &mut current.source else {
+                        anyhow::bail!("native Shell response requires its enrolled request");
+                    };
+                    OWNERS.with(|owners| {
+                        let mut owners = owners.try_borrow_mut()?;
+                        let owner = owners
+                            .get_mut(scope.app.as_str())
+                            .context("native Shell response owner missing")?;
+                        ensure!(
+                            owner.kind == NativeRole::SecurityShell
+                                && owner.selection.scope() == &*scope,
+                            "native Shell response owner changed"
+                        );
+                        let OwnerSource::Initial(initial) = &mut owner.source else {
+                            anyhow::bail!("native Shell response source changed");
+                        };
+                        let mut role = initial.role.try_borrow_mut()?;
+                        let mut stage = role.borrow_current_request(current)?;
+                        stage.check_selection(
+                            &owner.selection.policy,
+                            &owner.selection.store,
+                            NativeRole::SecurityShell,
+                        )
+                    })
+                }
+                // These retain their separate existing response checks. An
+                // unselected Shell has not returned a protected native reply.
+                Slot::Empty
+                | Slot::Live(Original::Selected {
+                    kind: NativeRole::AppHost,
+                    ..
+                })
+                | Slot::Live(Original::Shell(_))
+                | Slot::Live(Original::LiteralHealth | Original::NonNative) => Ok(()),
+                #[cfg(test)]
+                Slot::Live(Original::Model(model)) => model.check(),
+                Slot::Capturing
+                | Slot::Leased
+                | Slot::Complete
+                | Slot::Refused
+                | Slot::Live(Original::Selected {
+                    kind: NativeRole::EpochController,
+                    ..
+                }) => {
+                    anyhow::bail!("native response request unavailable")
+                }
+            }
+        }));
+        match requested {
+            Ok(result) => {
+                if result.is_err() {
+                    self.refuse();
+                }
+                result
+            }
+            Err(payload) => {
+                self.refuse();
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    /// A protected reply phase requires the actual bound Shell request;
+    /// unlike unowned HTTP transport, another source is never a no-op here.
+    pub(super) fn check_shell_reply(&self, expected: &AuthorityScope) -> Result<()> {
+        let selected = (|| {
+            ensure!(!self.refused.get(), "native request refused");
+            let slot = self.slot.try_borrow()?;
+            let Slot::Live(Original::Selected {
+                scope,
+                kind: NativeRole::SecurityShell,
+                current,
+            }) = &*slot
+            else {
+                anyhow::bail!("protected reply requires the bound Shell request");
+            };
+            ensure!(
+                scope == expected && matches!(&current.source, SavedSource::Enrolled(_)),
+                "protected reply Shell request changed"
+            );
+            Ok(())
+        })();
+        if selected.is_err() {
+            self.refuse();
+        }
+        selected?;
+        self.check_bound_shell()
+    }
+
     pub(super) fn with_stage<T>(
         &self,
         role: &mut EnrolledProcessRoleOwner,
@@ -1246,6 +1347,137 @@ mod tests {
     }
 
     #[test]
+    fn saved_shell_delivery_model_refuses_before_io_and_between_pending_polls() -> Result<()> {
+        let time = Arc::new(Time {
+            domain: 917_771,
+            millis: AtomicU64::new(0),
+        });
+        effects::scope(time.clone(), || -> Result<()> {
+            let sink = super::super::Sink::new();
+            sink.request.capture_model()?;
+            let polls = Cell::new(0);
+            let pending: std::task::Poll<std::io::Result<()>> = sink.poll_io(|| {
+                polls.set(polls.get() + 1);
+                std::task::Poll::Pending
+            });
+            assert!(pending.is_pending());
+            time.millis.store(5_000, Ordering::SeqCst);
+            let refused = sink.poll_io(|| {
+                polls.set(polls.get() + 1);
+                std::task::Poll::Ready(Ok(()))
+            });
+            assert!(matches!(refused, std::task::Poll::Ready(Err(_))));
+            assert_eq!(polls.get(), 1, "expired original cannot poll again");
+            time.millis.store(0, Ordering::SeqCst);
+            assert!(matches!(
+                sink.poll_io(|| std::task::Poll::Ready(Ok(()))),
+                std::task::Poll::Ready(Err(_))
+            ));
+            assert!(!sink.is_open());
+            assert!(sink.request.finish().is_err());
+
+            let before = super::super::Sink::new();
+            before.request.capture_model()?;
+            time.millis.store(5_000, Ordering::SeqCst);
+            let calls = Cell::new(0);
+            let result = before.poll_io(|| {
+                calls.set(calls.get() + 1);
+                std::task::Poll::Ready(Ok(()))
+            });
+            assert!(matches!(result, std::task::Poll::Ready(Err(_))));
+            assert_eq!(
+                calls.get(),
+                0,
+                "pre-refusal precedes even the first header poll"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn saved_shell_delivery_model_postchecks_pending_progress_error_and_panic() -> Result<()> {
+        struct Primary;
+        impl std::fmt::Debug for Primary {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign primary must not be formatted");
+            }
+        }
+        impl std::fmt::Display for Primary {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign primary must not be formatted");
+            }
+        }
+        impl std::error::Error for Primary {}
+        let time = Arc::new(Time {
+            domain: 917_772,
+            millis: AtomicU64::new(0),
+        });
+        effects::scope(time.clone(), || -> Result<()> {
+            for pending in [false, true] {
+                time.millis.store(0, Ordering::SeqCst);
+                let sink = super::super::Sink::new();
+                sink.request.capture_model()?;
+                let result = sink.poll_io(|| {
+                    time.millis.store(5_000, Ordering::SeqCst);
+                    if pending {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Ok(()))
+                    }
+                });
+                assert!(matches!(result, std::task::Poll::Ready(Err(_))));
+                assert!(
+                    !sink.is_open(),
+                    "post-refusal never reports Pending or successful progress"
+                );
+            }
+            time.millis.store(0, Ordering::SeqCst);
+            let sink = super::super::Sink::new();
+            sink.request.capture_model()?;
+            let error = anyhow::Error::new(Primary);
+            let identity = error.downcast_ref::<Primary>().unwrap() as *const Primary;
+            let result: Result<()> =
+                sink.with_current_result_inner(super::super::Phase::Response, || {
+                    time.millis.store(5_000, Ordering::SeqCst);
+                    Err(error)
+                });
+            assert_eq!(
+                result.unwrap_err().downcast_ref::<Primary>().unwrap() as *const Primary,
+                identity
+            );
+            assert!(!sink.is_open());
+            time.millis.store(0, Ordering::SeqCst);
+            let sink = super::super::Sink::new();
+            sink.request.capture_model()?;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sink.with_current_result_inner::<()>(super::super::Phase::Response, || {
+                    time.millis.store(5_000, Ordering::SeqCst);
+                    std::panic::panic_any(47_u8)
+                })
+            }));
+            assert_eq!(*result.unwrap_err().downcast::<u8>().unwrap(), 47);
+            assert!(!sink.is_open());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn saved_shell_check_does_not_treat_unavailable_slots_as_an_unowned_response() -> Result<()> {
+        for value in [Slot::Capturing, Slot::Leased, Slot::Complete, Slot::Refused] {
+            let request = Request::new();
+            *request.slot.borrow_mut() = value;
+            assert!(request.check_bound_shell().is_err());
+            assert!(request.refused.get());
+        }
+        let request = Request::new();
+        request.capture_non_native()?;
+        request.check_bound_shell()?;
+        request.finish()?;
+        assert!(request.check_bound_shell().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn non_native_transport_cannot_supply_or_reclassify_native_authority() -> Result<()> {
         for abort in [false, true] {
             let request = Request::new();
@@ -1556,6 +1788,513 @@ mod tests {
         let mut calls = Calls(Vec::new());
         calls.visit_block(body);
         calls.0
+    }
+
+    fn shell_delivery_is_guarded(request: &str, sink: &str, http: &str) -> bool {
+        use quote::ToTokens;
+        fn compact(value: impl ToTokens) -> String {
+            value
+                .to_token_stream()
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect()
+        }
+        fn caught(stmt: &syn::Stmt, name: &str) -> Option<syn::Block> {
+            let syn::Stmt::Local(local) = stmt else {
+                return None;
+            };
+            if !matches!(&local.pat,syn::Pat::Ident(id) if id.ident==name) {
+                return None;
+            }
+            let syn::Expr::Call(catch) = &*local.init.as_ref()?.expr else {
+                return None;
+            };
+            if compact(&catch.func) != "std::panic::catch_unwind" || catch.args.len() != 1 {
+                return None;
+            }
+            let syn::Expr::Call(safe) = &catch.args[0] else {
+                return None;
+            };
+            if compact(&safe.func) != "std::panic::AssertUnwindSafe" || safe.args.len() != 1 {
+                return None;
+            }
+            let syn::Expr::Closure(closure) = &safe.args[0] else {
+                return None;
+            };
+            let syn::Expr::Block(body) = &*closure.body else {
+                return None;
+            };
+            Some(body.block.clone())
+        }
+        let check = selected_body(request, Some("Request"), "check_bound_shell");
+        let Some(local) = check.stmts.first().and_then(|s| caught(s, "requested")) else {
+            return false;
+        };
+        let Some(syn::Stmt::Expr(syn::Expr::Match(selected), None)) = local.stmts.last() else {
+            return false;
+        };
+        let expected: syn::Expr = syn::parse_quote!(match selected {
+            Slot::Live(Original::Selected {
+                scope,
+                kind: NativeRole::SecurityShell,
+                current,
+            }) => {
+                let SavedSource::Enrolled(current) = &mut current.source else {
+                    anyhow::bail!("native Shell response requires its enrolled request");
+                };
+                OWNERS.with(|owners| {
+                    let mut owners = owners.try_borrow_mut()?;
+                    let owner = owners
+                        .get_mut(scope.app.as_str())
+                        .context("native Shell response owner missing")?;
+                    ensure!(
+                        owner.kind == NativeRole::SecurityShell
+                            && owner.selection.scope() == &*scope,
+                        "native Shell response owner changed"
+                    );
+                    let OwnerSource::Initial(initial) = &mut owner.source else {
+                        anyhow::bail!("native Shell response source changed");
+                    };
+                    let mut role = initial.role.try_borrow_mut()?;
+                    let mut stage = role.borrow_current_request(current)?;
+                    stage.check_selection(
+                        &owner.selection.policy,
+                        &owner.selection.store,
+                        NativeRole::SecurityShell,
+                    )
+                })
+            }
+        });
+        let syn::Expr::Match(expected) = expected else {
+            return false;
+        };
+        fn block_arm(arm: &syn::Arm) -> String {
+            let mut arm = arm.clone();
+            if matches!(&*arm.body, syn::Expr::Block(_)) {
+                arm.comma = None;
+            }
+            compact(arm)
+        }
+        if compact(&selected.expr) != "&mut*slot"
+            || selected.arms.first().map(block_arm) != expected.arms.first().map(block_arm)
+        {
+            return false;
+        }
+        let calls = methods(&check);
+        if calls.iter().filter(|n| n.as_str() == "refuse").count() != 2
+            || calls.iter().any(|n| {
+                matches!(
+                    n.as_str(),
+                    "begin_current_request"
+                        | "begin_current_stage"
+                        | "bind_shell_request"
+                        | "take"
+                        | "finish"
+                        | "connect"
+                )
+            })
+        {
+            return false;
+        }
+        let body = selected_body(sink, Some("Sink"), "with_current_result_inner");
+        if body.stmts.len() != 5 {
+            return false;
+        }
+        let Some(primary) = caught(&body.stmts[1], "requested") else {
+            return false;
+        };
+        let pre: syn::Stmt = syn::parse_quote!(self.request.check_bound_shell()?;);
+        let post: syn::Block = syn::parse_quote!({ self.request.check_bound_shell() });
+        let refuse: syn::Stmt = syn::parse_quote!(if !matches!(&requested, Ok(Ok(_)))
+            || !matches!(&checked, Ok(Ok(())))
+        {
+            self.abort();
+        });
+        let result: syn::Stmt = syn::parse_quote!(match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(value)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(value)
+                }
+            },
+        });
+        if primary.stmts.first().map(compact) != Some(compact(pre))
+            || caught(&body.stmts[2], "checked").map(compact) != Some(compact(post))
+            || compact(&body.stmts[3]) != compact(refuse)
+            || compact(&body.stmts[4]) != compact(result)
+            || methods(&body)
+                .iter()
+                .filter(|n| n.as_str() == "check_bound_shell")
+                .count()
+                != 2
+        {
+            return false;
+        }
+        for name in ["poll_write", "poll_flush", "poll_shutdown"] {
+            let body = selected_body(http, Some("OwnerIo"), name);
+            let Some(syn::Stmt::Expr(syn::Expr::MethodCall(call), None)) = body.stmts.last() else {
+                return false;
+            };
+            if call.method != "poll_io"
+                || compact(&call.receiver) != "this.sink"
+                || call.args.len() != 1
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn protected_reply_selector_refuses_actual_unbound_and_nonnative_request_slots() -> Result<()> {
+        for mode in 0..4 {
+            let request = Request::new();
+            match mode {
+                0 => {}
+                1 => request.capture_non_native()?,
+                2 => request.capture_model()?,
+                3 => {
+                    *request.slot.borrow_mut() = Slot::Live(Original::LiteralHealth);
+                }
+                _ => unreachable!(),
+            }
+            assert!(request.check_shell_reply(&absent_scope()).is_err());
+            assert!(request.refused.get());
+            assert!(
+                request.check_bound_shell().is_err(),
+                "strict failure cannot fall back to unowned IO"
+            );
+        }
+        for value in [Slot::Capturing, Slot::Leased, Slot::Complete, Slot::Refused] {
+            let request = Request::new();
+            *request.slot.borrow_mut() = value;
+            assert!(request.check_shell_reply(&absent_scope()).is_err());
+            assert!(request.refused.get());
+        }
+        Ok(())
+    }
+
+    fn strict_reply_selector(body: &syn::Block) -> bool {
+        use quote::ToTokens;
+        use syn::parse::Parser as _;
+        fn compact(v: impl ToTokens) -> String {
+            v.to_token_stream()
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect()
+        }
+        if body.stmts.len() != 4 {
+            return false;
+        }
+        let syn::Stmt::Local(local) = &body.stmts[0] else {
+            return false;
+        };
+        if !matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="selected") {
+            return false;
+        }
+        let Some(init) = &local.init else {
+            return false;
+        };
+        let syn::Expr::Call(call) = &*init.expr else {
+            return false;
+        };
+        if !call.args.is_empty() {
+            return false;
+        }
+        let syn::Expr::Paren(paren) = &*call.func else {
+            return false;
+        };
+        let syn::Expr::Closure(closure) = &*paren.expr else {
+            return false;
+        };
+        let syn::Expr::Block(block) = &*closure.body else {
+            return false;
+        };
+        if block.block.stmts.len() != 5 {
+            return false;
+        }
+        let syn::Stmt::Local(selected) = &block.block.stmts[2] else {
+            return false;
+        };
+        let syn::Pat::TupleStruct(live) = &selected.pat else {
+            return false;
+        };
+        if compact(&live.path) != "Slot::Live" || live.elems.len() != 1 {
+            return false;
+        }
+        let syn::Pat::Struct(actual) = &live.elems[0] else {
+            return false;
+        };
+        if compact(&actual.path) != "Original::Selected"
+            || actual.fields.len() != 3
+            || actual.rest.is_some()
+        {
+            return false;
+        }
+        for (field, name, value) in [
+            (0, "scope", "scope"),
+            (1, "kind", "NativeRole::SecurityShell"),
+            (2, "current", "current"),
+        ] {
+            if !matches!(&actual.fields[field].member,syn::Member::Named(n) if n==name)
+                || compact(&actual.fields[field].pat) != value
+            {
+                return false;
+            }
+        }
+        let Some(init) = &selected.init else {
+            return false;
+        };
+        let unavailable: syn::Expr = syn::parse_quote!({
+            anyhow::bail!("protected reply requires the bound Shell request");
+        });
+        if compact(&init.expr) != "&*slot"
+            || init.diverge.as_ref().map(|(_, e)| compact(e)) != Some(compact(unavailable))
+        {
+            return false;
+        }
+        let syn::Stmt::Macro(ensure) = &block.block.stmts[3] else {
+            return false;
+        };
+        if compact(&ensure.mac.path) != "ensure" {
+            return false;
+        }
+        let Ok(arguments) =
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                .parse2(ensure.mac.tokens.clone())
+        else {
+            return false;
+        };
+        if arguments.len() != 2 {
+            return false;
+        }
+        let syn::Expr::Binary(condition) = &arguments[0] else {
+            return false;
+        };
+        if !matches!(condition.op, syn::BinOp::And(_))
+            || compact(&condition.left) != "scope==expected"
+        {
+            return false;
+        }
+        let syn::Expr::Macro(enrolled) = &*condition.right else {
+            return false;
+        };
+        let pattern = compact(&enrolled.mac.tokens);
+        if compact(&enrolled.mac.path) != "matches"
+            || pattern.strip_suffix(',').unwrap_or(&pattern)
+                != "&current.source,SavedSource::Enrolled(_)"
+        {
+            return false;
+        }
+        let refused: syn::Stmt = syn::parse_quote!(if selected.is_err() {
+            self.refuse();
+        });
+        let required: syn::Stmt = syn::parse_quote!(selected?;);
+        let delegate: syn::Expr = syn::parse_quote!(self.check_bound_shell());
+        compact(&body.stmts[1]) == compact(refused)
+            && compact(&body.stmts[2]) == compact(required)
+            && matches!(&body.stmts[3],syn::Stmt::Expr(e,None) if compact(e)==compact(delegate))
+    }
+
+    #[test]
+    fn actual_protected_reply_selector_requires_scope_shell_enrolled_and_sticky_refusal() {
+        use quote::ToTokens as _;
+        fn tokens(s: &str) -> String {
+            s.parse::<proc_macro2::TokenStream>().unwrap().to_string()
+        }
+        let actual = selected_body(
+            include_str!("request.rs"),
+            Some("Request"),
+            "check_shell_reply",
+        );
+        assert!(strict_reply_selector(&actual));
+        let source = actual.to_token_stream().to_string();
+        for (before, after) in [
+            ("scope==expected", "scope==scope"),
+            ("kind:NativeRole::SecurityShell", "kind:NativeRole::AppHost"),
+            ("SavedSource::Enrolled(_)", "SavedSource::Restored(_)"),
+            ("self.refuse();", ";"),
+        ] {
+            let before = tokens(before);
+            assert_eq!(
+                source.matches(&before).count(),
+                1,
+                "one actual strict selector mutation"
+            );
+            let changed =
+                syn::parse_str::<syn::Block>(&source.replacen(&before, &tokens(after), 1)).unwrap();
+            assert!(!strict_reply_selector(&changed));
+        }
+        let permissive: syn::Block = syn::parse_quote!({ self.check_bound_shell() });
+        assert!(!strict_reply_selector(&permissive));
+    }
+
+    #[test]
+    fn actual_shell_socket_path_requires_same_request_pre_and_independent_postchecks() {
+        use quote::ToTokens as _;
+        fn tokens(source: &str) -> String {
+            source
+                .parse::<proc_macro2::TokenStream>()
+                .unwrap()
+                .to_string()
+        }
+        fn replaced(source: &str, owner: &str, name: &str, body: syn::Block) -> String {
+            let mut file = syn::parse_file(source).unwrap();
+            let mut count = 0;
+            for item in &mut file.items {
+                if let syn::Item::Impl(item) = item
+                    && matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|p| p.ident==owner))
+                {
+                    for item in &mut item.items {
+                        if let syn::ImplItem::Fn(item) = item
+                            && item.sig.ident == name
+                        {
+                            item.block = body.clone();
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(count, 1, "replace only the actual production method");
+            file.to_token_stream().to_string()
+        }
+        let request = include_str!("request.rs");
+        let sink = include_str!("../native_management.rs");
+        let http = include_str!("../native_http.rs");
+        assert!(shell_delivery_is_guarded(request, sink, http));
+        let actual = selected_body(sink, Some("Sink"), "with_current_result_inner");
+        let body = actual.to_token_stream().to_string();
+        for (before, after) in [
+            ("self.request.check_bound_shell()? ;", "let _unobserved=();"),
+            ("{self.request.check_bound_shell()}", "{Ok(())}"),
+            (
+                "Ok(Err(error))=>Err(error)",
+                "Ok(Err(error))=>checked.and_then(|result|result).map(|_|unreachable!())",
+            ),
+        ] {
+            let before = tokens(before);
+            assert_eq!(
+                body.matches(&before).count(),
+                1,
+                "one actual Sink mutation target"
+            );
+            let changed =
+                syn::parse_str::<syn::Block>(&body.replacen(&before, &tokens(after), 1)).unwrap();
+            assert!(!shell_delivery_is_guarded(
+                request,
+                &replaced(sink, "Sink", "with_current_result_inner", changed),
+                http
+            ));
+        }
+        let mut conditional = actual;
+        let syn::Stmt::Local(local) = &conditional.stmts[2] else {
+            panic!("actual post local");
+        };
+        let observed = local.init.as_ref().unwrap().expr.clone();
+        conditional.stmts[2] =
+            syn::parse_quote!(let checked=if requested.is_ok(){#observed}else{Ok(Ok(()))};);
+        assert!(!shell_delivery_is_guarded(
+            request,
+            &replaced(sink, "Sink", "with_current_result_inner", conditional),
+            http
+        ));
+        fn shell_owner_body(body: &mut syn::Block) -> &mut syn::Block {
+            let syn::Stmt::Local(requested) = &mut body.stmts[0] else {
+                panic!("actual requested local");
+            };
+            let syn::Expr::Call(catch) = &mut *requested.init.as_mut().unwrap().expr else {
+                panic!("actual request catch");
+            };
+            let syn::Expr::Call(safe) = &mut catch.args[0] else {
+                panic!("actual request unwind wrapper");
+            };
+            let syn::Expr::Closure(closure) = &mut safe.args[0] else {
+                panic!("actual request closure");
+            };
+            let syn::Expr::Block(block) = &mut *closure.body else {
+                panic!("actual request body");
+            };
+            let Some(syn::Stmt::Expr(syn::Expr::Match(selected), None)) =
+                block.block.stmts.last_mut()
+            else {
+                panic!("actual selected request match");
+            };
+            let syn::Expr::Block(shell) = &mut *selected.arms[0].body else {
+                panic!("actual selected Shell arm");
+            };
+            let Some(syn::Stmt::Expr(syn::Expr::MethodCall(owners), None)) =
+                shell.block.stmts.last_mut()
+            else {
+                panic!("actual owner registry access");
+            };
+            assert_eq!(owners.method, "with");
+            let syn::Expr::Closure(closure) = &mut owners.args[0] else {
+                panic!("actual owner registry closure");
+            };
+            let syn::Expr::Block(block) = &mut *closure.body else {
+                panic!("actual owner registry body");
+            };
+            &mut block.block
+        }
+        fn compact(statement: &syn::Stmt) -> String {
+            statement
+                .to_token_stream()
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect()
+        }
+        let actual = selected_body(request, Some("Request"), "check_bound_shell");
+        for (index, expected, replacement) in [
+            (
+                5,
+                syn::parse_quote!(let mut stage = role.borrow_current_request(current)?;),
+                syn::parse_quote!(let mut stage = role.begin_current_stage()?;),
+            ),
+            (
+                2,
+                syn::parse_quote!(ensure!(owner.kind == NativeRole::SecurityShell && owner.selection.scope() == &*scope, "native Shell response owner changed");),
+                syn::parse_quote!(ensure!(owner.kind == NativeRole::SecurityShell && owner.selection.scope() == owner.selection.scope(), "native Shell response owner changed");),
+            ),
+            (
+                3,
+                syn::parse_quote!(let OwnerSource::Initial(initial) = &mut owner.source else { anyhow::bail!("native Shell response source changed"); };),
+                syn::parse_quote!(let OwnerSource::Restored { routing: initial, .. } = &mut owner.source else { anyhow::bail!("native Shell response source changed"); };),
+            ),
+        ] {
+            let mut changed = actual.clone();
+            let owner = shell_owner_body(&mut changed);
+            assert_eq!(owner.stmts.len(), 7, "actual closed owner body");
+            assert_eq!(
+                compact(&owner.stmts[index]),
+                compact(&expected),
+                "exact actual request mutation target"
+            );
+            owner.stmts[index] = replacement;
+            assert!(!shell_delivery_is_guarded(
+                &replaced(request, "Request", "check_bound_shell", changed),
+                sink,
+                http
+            ));
+        }
+        for name in ["poll_write", "poll_flush", "poll_shutdown"] {
+            let mut body = selected_body(http, Some("OwnerIo"), name);
+            let Some(syn::Stmt::Expr(syn::Expr::MethodCall(call), None)) = body.stmts.last_mut()
+            else {
+                panic!("actual socket poll");
+            };
+            call.method = syn::parse_quote!(unchecked_io);
+            assert!(!shell_delivery_is_guarded(
+                request,
+                sink,
+                &replaced(http, "OwnerIo", name, body)
+            ));
+        }
     }
 
     #[test]
@@ -2031,6 +2770,7 @@ mod tests {
 
     #[test]
     fn lexical_consumers_reborrow_the_actual_request_without_an_original_factory() {
+        use quote::ToTokens as _;
         let source = include_str!("../native_management.rs");
         for (owner, name) in [
             (Some("EnrolledClock"), "sample"),
@@ -2054,12 +2794,19 @@ mod tests {
             2
         );
         assert!(!calls.iter().any(|name| name == "begin_current_stage"));
-        let restored = source.replacen(
-            "role.borrow_current_request(current)?",
-            "role.begin_current_stage()?",
-            1,
+        let source = body.to_token_stream().to_string();
+        let before: syn::Expr = syn::parse_quote!(role.borrow_current_request(current)?);
+        let after: syn::Expr = syn::parse_quote!(role.begin_current_stage()?);
+        let before = before.to_token_stream().to_string();
+        assert_eq!(
+            source.matches(&before).count(),
+            2,
+            "both actual saved-request borrows"
         );
-        let calls = methods(&selected_body(&restored, Some("Request"), "with_stage"));
+        let restored: syn::Block =
+            syn::parse_str(&source.replacen(&before, &after.to_token_stream().to_string(), 1))
+                .unwrap();
+        let calls = methods(&restored);
         assert_eq!(
             calls
                 .iter()

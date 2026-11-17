@@ -365,6 +365,7 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
         let file = syn::parse_file(source).unwrap();
         let mut origins = 0;
         let mut restore_consumers = 0;
+        let mut restore_drivers = 0;
         for item in file.items {
             match item {
                 syn::Item::Enum(item) if item.ident == "AdmissionOrigin" => {
@@ -434,6 +435,9 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
                             let restore_consumer = restore
                                 && matches!(&f.vis, syn::Visibility::Restricted(v) if v.in_token.is_none() && v.path.is_ident("super"))
                                 && signature(&f.sig) == signature(&syn::parse_str::<syn::Signature>("fn consume(mut auth: crate::security_epoch::bootstrap::AuthenticatedRestoreExecution<'metadata, 'storage, 'role>, intent: &crate::security_epoch::kernel::restore::Intent, state: State, selection: super::application::Selection<'selection>, artifact: super::archive::CapturedRestoreArtifact<'selection>) -> Result<Self>").unwrap());
+                            let restore_driver = restore
+                                && matches!(&f.vis, syn::Visibility::Restricted(v) if v.in_token.is_none() && v.path.is_ident("super"))
+                                && signature(&f.sig) == signature(&syn::parse_str::<syn::Signature>("fn run_protected(&mut self, turn: crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'_>, attempt: crate::security_epoch::bootstrap::ProtectedRestoreAttempt) -> Result<()>").unwrap());
                             let cohort_method=cohort
                                 && matches!(&f.vis,syn::Visibility::Restricted(v) if v.in_token.is_some()
                                     && v.path.to_token_stream().to_string()=="crate :: security_epoch")
@@ -442,9 +446,11 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
                                     "fn check_current(&mut self,target:&mut NativeStagedTarget<'_,'_>,stage:&mut crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,creator:&crate::security_epoch::native_enrollment::RestoreCreatorData,report:&crate::security_epoch::kernel::restore::completion::TargetReport)->Result<crate::security_epoch::native_enrollment::SqliteCohort>",
                                 ].into_iter().any(|expected| signature(&f.sig)==signature(&syn::parse_str::<syn::Signature>(expected).unwrap()));
                             restore_consumers += usize::from(restore_consumer);
+                            restore_drivers += usize::from(restore_driver);
                             if !context_method
                                 && !target_method
                                 && !restore_consumer
+                                && !restore_driver
                                 && !cohort_method
                             {
                                 return false;
@@ -463,7 +469,7 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
                 _ => {}
             }
         }
-        origins == 1 && restore_consumers == 1
+        origins == 1 && restore_consumers == 1 && restore_drivers == 1
     }
     let source = include_str!("../writer.rs");
     assert!(closed(source));
@@ -554,6 +560,31 @@ fn closed_source_has_no_production_origin_impl_default_or_escaping_candidate_api
             consume.replacen(from, to, 1)
         )));
     }
+    // Only this exact reviewed three-argument fixed driver joins the closed
+    // surface. No getter, alternate origin, callback or duplicate registration.
+    let mut changed = syn::parse_file(source).unwrap();
+    let mut selected = 0;
+    for item in &mut changed.items {
+        if let syn::Item::Impl(item) = item {
+            for member in &mut item.items {
+                if let syn::ImplItem::Fn(method) = member
+                    && method.sig.ident == "run_protected"
+                {
+                    selected += 1;
+                    method
+                        .sig
+                        .inputs
+                        .push(syn::parse_quote!(callback:UntrustedData));
+                }
+            }
+        }
+    }
+    assert_eq!(selected, 1);
+    assert!(!closed(&changed.to_token_stream().to_string()));
+    assert!(!closed(
+        &(source.to_owned()
+            + "\nimpl NativeRestore<'metadata,'storage,'role,'selection>{pub(super) fn run_protected(&mut self,turn:crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'_>,attempt:crate::security_epoch::bootstrap::ProtectedRestoreAttempt)->Result<()>{unreachable!()}}")
+    ));
     for extra in [
         "impl NativeRestore<'static,'static,'static,'static> { pub(super) fn owner(&mut self) -> &mut UntrustedData { unreachable!() } }",
         "impl foreign::NativeRestore<'metadata,'storage,'role,'selection> { pub(super) fn consume(mut auth: crate::security_epoch::bootstrap::AuthenticatedRestoreExecution<'metadata,'storage,'role>, intent: &crate::security_epoch::kernel::restore::Intent, state: State, selection: super::application::Selection<'selection>, artifact: super::archive::CapturedRestoreArtifact<'selection>) -> Result<Self> { unreachable!() } }",
@@ -1161,6 +1192,7 @@ fn native_entry_binds_actual_loan_before_root_and_report_follows_real_reset() ->
             "self.artifact.install(&mut self.loan, &mut self.root, &mut self.state, intent)",
             "self.current()",
             "self.selection.reborrow()",
+            "projection.clone()",
             "self.installed.as_mut().context(\"restore_artifact_not_installed\")",
             "self.installed.as_mut()",
             "self.loan.settle_target(&mut target)",
@@ -1236,4 +1268,151 @@ fn native_entry_binds_actual_loan_before_root_and_report_follows_real_reset() ->
         assert!(!required(&parsed.replacen(&before, &after, 1))?);
     }
     Ok(())
+}
+
+#[test]
+fn actual_protected_restore_driver_keeps_one_native_parent_through_installed_output_and_serving() {
+    use quote::ToTokens;
+    let file = syn::parse_file(include_str!("../writer.rs")).unwrap();
+    let methods=file.items.iter().filter_map(|item|{
+        let syn::Item::Impl(item)=item else{return None;};
+        if item.trait_.is_some() || !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|s|s.ident=="NativeRestore")){return None;}
+        item.items.iter().find_map(|item|match item{syn::ImplItem::Fn(m) if m.sig.ident=="run_protected"=>Some(m),_=>None})
+    }).collect::<Vec<_>>();
+    assert_eq!(methods.len(), 1);
+    let actual = methods[0];
+    assert_eq!(
+        actual.sig.inputs.len(),
+        3,
+        "no DATA projection, native owner or callback input"
+    );
+    assert!(
+        matches!(&actual.sig.inputs[0],syn::FnArg::Receiver(receiver) if receiver.reference.is_some() && receiver.mutability.is_some())
+    );
+    let expected: syn::Block = syn::parse_quote!({
+        let intent = self.intent.clone();
+        let mut parent = self.begin()?;
+        let (projection, _receipt) = parent.stage_and_settle(&intent)?;
+        let mut target = NativeStagedTarget {
+            state: &mut parent.state,
+            root: &mut parent.root,
+            selection: parent.selection.reborrow(),
+            intent: &intent,
+            projection,
+            cohort_attempted: false,
+            artifact: parent
+                .installed
+                .as_mut()
+                .context("restore_artifact_not_installed")?,
+        };
+        let mut candidate = parent.loan.receive_writer(&mut target)?;
+        let mut confirmation = candidate.confirm(&mut parent.loan)?;
+        let mut activated = confirmation.activate_writer(candidate.target, &mut candidate.peer)?;
+        activated.release_keeper()?;
+        let installation = activated.install_controller()?;
+        let mut completed = installation.finish_issuer()?;
+        completed.release_app_role()?;
+        let activated = completed.activate_app_role()?;
+        let decision = activated.send_app_decision()?;
+        let prepared = decision.receive_prepared_app_confirmation()?;
+        let accepted = prepared.send_controller_acceptance()?;
+        let installed = accepted.receive_installed_app_confirmation()?;
+        let pending = installed.prepare_controller_current()?;
+        let retired = turn.finish_installed(pending)?;
+        attempt.serve_installed(retired)
+    });
+    let guarded = |body: &syn::Block| {
+        body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+    };
+    assert!(guarded(&actual.block));
+    for index in 0..actual.block.stmts.len() {
+        let mut removed = actual.block.clone();
+        removed.stmts.remove(index);
+        assert!(!guarded(&removed));
+    }
+    for (a, b) in [(0, 1), (2, 3), (6, 7), (9, 10), (13, 14), (16, 17)] {
+        let mut reordered = actual.block.clone();
+        reordered.stmts.swap(a, b);
+        assert!(!guarded(&reordered));
+    }
+    let mut wrong_loan = actual.block.clone();
+    wrong_loan.stmts[4] =
+        syn::parse_quote!(let mut candidate=other.loan.receive_writer(&mut target)?;);
+    assert!(!guarded(&wrong_loan));
+    let mut wrong_peer = actual.block.clone();
+    wrong_peer.stmts[6] = syn::parse_quote!(let mut activated=confirmation.activate_writer(candidate.target,&mut other.peer)?;);
+    assert!(!guarded(&wrong_peer));
+    let mut wrong_target = actual.block.clone();
+    let syn::Stmt::Local(target) = &mut wrong_target.stmts[3] else {
+        panic!("actual target construction");
+    };
+    let syn::Expr::Struct(target) = &mut *target.init.as_mut().unwrap().expr else {
+        panic!("actual private target");
+    };
+    target
+        .fields
+        .iter_mut()
+        .find(|field| matches!(&field.member,syn::Member::Named(name) if name=="state"))
+        .unwrap()
+        .expr = syn::parse_quote!(&mut other.state);
+    assert!(!guarded(&wrong_target));
+    let mut expired = actual.block.clone();
+    expired
+        .stmts
+        .insert(18, syn::parse_quote!(parent.loan.check_current()?;));
+    assert!(
+        !guarded(&expired),
+        "no old owner sampling after genuine retirement"
+    );
+}
+
+#[test]
+fn actual_receiving_bridge_lends_only_the_same_exclusive_writer_owner() {
+    use quote::ToTokens;
+    let file = syn::parse_file(include_str!(
+        "../../bootstrap/admin_read/reader/authentication_store/producer/consumer/stop.rs"
+    ))
+    .unwrap();
+    let methods=file.items.iter().filter_map(|item|{
+        let syn::Item::Impl(item)=item else{return None;};
+        if item.trait_.is_some() || !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|s|s.ident=="RestoreWriteLoan")){return None;}
+        item.items.iter().find_map(|item|match item{syn::ImplItem::Fn(m) if m.sig.ident=="receive_writer"=>Some(m),_=>None})
+    }).collect::<Vec<_>>();
+    assert_eq!(methods.len(), 1);
+    let actual = methods[0];
+    assert_eq!(actual.sig.inputs.len(), 2);
+    let expected: syn::Block = syn::parse_quote!({
+        crate::security_epoch::restore_staging::RestoredWriterCandidate::receive(
+            target,
+            &mut RestoreWriterExchangeContext {
+                owner: &mut *self.owner,
+            },
+        )
+    });
+    let guarded = |body: &syn::Block| {
+        body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+    };
+    assert!(guarded(&actual.block));
+    for changed in [
+        syn::parse_quote!({
+            crate::security_epoch::restore_staging::RestoredWriterCandidate::receive(
+                other,
+                &mut RestoreWriterExchangeContext {
+                    owner: &mut *self.owner,
+                },
+            )
+        }),
+        syn::parse_quote!({
+            crate::security_epoch::restore_staging::RestoredWriterCandidate::receive(
+                target,
+                &mut RestoreWriterExchangeContext {
+                    owner: &mut *other.owner,
+                },
+            )
+        }),
+        syn::parse_quote!({ callback(target) }),
+        syn::parse_quote!({ Ok(caller_data) }),
+    ] {
+        assert!(!guarded(&changed));
+    }
 }

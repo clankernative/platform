@@ -60,6 +60,86 @@ fn config_path(root: &Path) -> PathBuf {
 }
 
 #[test]
+fn principal_data_comes_from_the_selected_registry_key_and_binds_both_identity_fields() -> Result<()>
+{
+    let instance = configuration();
+    let current = admins();
+    let primary = day2_capabilities::Name::try_from("primary".to_owned())?;
+    let file = Digest::new(b"same retained registry file DATA");
+    let baseline = select(&instance, &current, file.clone())?;
+    assert_eq!(baseline.principal.email, "álîce@example.test");
+    assert_eq!(baseline.principal.subject, "opaque-主体");
+    // The existing admin commitment formula stays unchanged. The new complete
+    // principal DATA is additionally included in the enrollment commitment.
+    assert_eq!(
+        baseline.admin,
+        Digest::of(&(
+            "day2-restore-registry-admin-v1",
+            "company/canary/app",
+            "álîce@example.test",
+            "opaque-主体",
+            &current.stamp,
+        ))?
+    );
+    for email in [true, false] {
+        let mut changed = baseline.clone();
+        if email {
+            changed.principal.email = "foreign@example.test".into();
+        } else {
+            changed.principal.subject = "foreign-subject".into();
+        }
+        assert_eq!(changed.admin, baseline.admin);
+        assert_ne!(changed.binding_data()?, baseline.binding_data()?);
+        assert!(changed != baseline);
+    }
+    let mut replaced = instance.clone();
+    replaced
+        .control
+        .as_mut()
+        .unwrap()
+        .restore_passkeys
+        .as_mut()
+        .unwrap()
+        .keys
+        .get_mut(&primary)
+        .unwrap()
+        .subject = "replacement-subject".into();
+    let replacement = select(&replaced, &current, file.clone())?;
+    assert_eq!(replacement.principal.subject, "replacement-subject");
+    assert!(replacement != baseline);
+    assert_ne!(replacement.binding_data()?, baseline.binding_data()?);
+    let mut other = replaced;
+    other
+        .control
+        .as_mut()
+        .unwrap()
+        .restore_passkeys
+        .as_mut()
+        .unwrap()
+        .keys
+        .get_mut(&primary)
+        .unwrap()
+        .email = "another-admin@example.test".into();
+    let mut other_current = admins();
+    other_current.members = BTreeSet::from(["another-admin@example.test".into()]);
+    let other = select(&other, &other_current, file.clone())?;
+    assert_eq!(other.principal.email, "another-admin@example.test");
+    assert_eq!(other.principal.subject, "replacement-subject");
+    let mut removed = instance;
+    removed
+        .control
+        .as_mut()
+        .unwrap()
+        .restore_passkeys
+        .as_mut()
+        .unwrap()
+        .keys
+        .clear();
+    assert!(select(&removed, &current, file).is_err());
+    Ok(())
+}
+
+#[test]
 fn actual_current_admin_and_complete_selection_are_required_not_desired_policy_or_cached_record() {
     let instance = configuration();
     let current = admins();

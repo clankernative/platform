@@ -18,7 +18,7 @@ use std::{
 use writer::StagingContext;
 pub(in crate::security_epoch) use writer::{
     Disposition as RestoreDisposition, Flight as RestoreFlight, NativeStagedTarget,
-    RestoreControllerCohort,
+    RestoreControllerCohort, RestoredWriterCandidate,
 };
 use zeroize::Zeroizing;
 
@@ -48,6 +48,18 @@ impl<'metadata, 'storage, 'role> PreparedNativeRestoreArchive<'metadata, 'storag
     ) -> Result<Self> {
         let prepared = archive::NativeArchive::capture(executor, directory, intent)?.prepare()?;
         Ok(Self { prepared })
+    }
+
+    /// Keep this SAME admitted archive snapshot and prepared selection alive
+    /// while its one native writer consumes the authenticated executor. The
+    /// lexical driver returns no native target, owner parts or DTO permission.
+    pub(in crate::security_epoch) fn run_protected(
+        mut self,
+        turn: crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'_>,
+        attempt: crate::security_epoch::bootstrap::ProtectedRestoreAttempt,
+    ) -> Result<()> {
+        let mut native = self.prepared.start_native()?;
+        native.run_protected(turn, attempt)
     }
 }
 

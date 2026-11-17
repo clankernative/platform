@@ -36,11 +36,11 @@ use syn::{
 const POLICY: &str = "architecture-proofs.json";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 // The reviewed registry aggregates owners; candidate requests stay separately bounded.
-const MAX_POLICY_PROOFS: usize = 326;
+const MAX_POLICY_PROOFS: usize = 339;
 const MAX_CANDIDATE_PROOFS: usize = 128;
 const MAX_TRAIT_SOURCES: usize = 64;
 const MAX_BUFFER_DESTRUCTORS: usize = 128;
-const MAX_OWNING_CHILDREN: usize = 8;
+const MAX_OWNING_CHILDREN: usize = 10;
 // Closed owning-child families can expose more uses than inherent methods.
 // Every entry remains individually reviewed and compared with the exact AST.
 const MAX_MATERIAL_USES: usize = 128;
@@ -2711,18 +2711,18 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_proof_catalog_has_a_finite_326_entry_budget() -> Result<()> {
-        for count in [130, 256, 263, 320, 321, 326] {
+    fn reviewed_proof_catalog_has_a_finite_339_entry_budget() -> Result<()> {
+        for count in [130, 256, 263, 320, 321, 326, 339] {
             validate_policy(&serde_json::from_value(proof_catalog(count))?)?;
         }
-        for count in [0, 327] {
+        for count in [0, 340] {
             let error = validate_policy(&serde_json::from_value(proof_catalog(count))?)
                 .err()
                 .context("out-of-budget proof catalog admitted")?;
             ensure!(error.to_string() == "proof policy entry budget");
         }
-        let mut duplicate = proof_catalog(326);
-        duplicate["proofs"][325] = duplicate["proofs"][0].clone();
+        let mut duplicate = proof_catalog(339);
+        duplicate["proofs"][338] = duplicate["proofs"][0].clone();
         ensure!(
             validate_policy(&serde_json::from_value(duplicate)?)
                 .err()
@@ -2730,8 +2730,8 @@ mod tests {
                 .to_string()
                 == "duplicate proof policy entry"
         );
-        let mut reordered = proof_catalog(326);
-        reordered["proofs"].as_array_mut().unwrap().swap(324, 325);
+        let mut reordered = proof_catalog(339);
+        reordered["proofs"].as_array_mut().unwrap().swap(337, 338);
         ensure!(
             validate_policy(&serde_json::from_value(reordered)?)
                 .err()
@@ -2746,7 +2746,7 @@ mod tests {
     fn expanded_catalog_enforces_actual_source_after_the_former_limit() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path().canonicalize()?;
-        let policy = proof_catalog(326);
+        let policy = proof_catalog(339);
         fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
         let source =
             "struct Claim; pub struct Permit { claim: Claim } impl Permit { pub fn send(self) {} }";
@@ -2756,15 +2756,47 @@ mod tests {
             fs::write(&path, source)?;
         }
         check(&root)?;
-        let last = root.join(policy["proofs"][325]["source"].as_str().unwrap());
+        let last = root.join(policy["proofs"][338]["source"].as_str().unwrap());
         fs::write(
             &last,
             format!("{source} impl Permit {{ pub fn raw(&self) {{}} }}"),
         )?;
         let error = check(&root)
             .err()
-            .context("unreviewed API in the 326th source was not enforced")?;
+            .context("unreviewed API in the 339th source was not enforced")?;
         ensure!(format!("{error:#}").contains("unreviewed proof method"));
+        Ok(())
+    }
+
+    #[test]
+    fn reviewed_repository_catalog_decodes_with_explicit_private_consuming_lists() -> Result<()> {
+        // Exercise the actual authored policy through the SAME closed decoder,
+        // rather than only synthetic catalog-limit fixtures. Private material
+        // has no required consuming sink, but its list is still explicit DATA.
+        let bytes = include_bytes!("../../../architecture-proofs.json");
+        let policy: Policy = day2::json::decode_evidence(bytes)?;
+        validate_policy(&policy)?;
+        ensure!(
+            policy.proofs.len() == 339,
+            "reviewed repository proof count"
+        );
+        let mut changed: serde_json::Value = day2::json::decode_evidence(bytes)?;
+        let proof = changed["proofs"]
+            .as_array_mut()
+            .context("actual proof rows")?
+            .iter_mut()
+            .find(|row| row["type_name"] == "ProtectedRestoreTurn")
+            .context("actual new private-material proof")?;
+        ensure!(proof["consuming_methods"] == serde_json::json!([]));
+        proof
+            .as_object_mut()
+            .context("actual private proof object")?
+            .remove("consuming_methods")
+            .context("explicit consuming list")?;
+        ensure!(
+            day2::json::decode_evidence::<Policy>(&serde_json::to_vec(&changed)?).is_err(),
+            "missing required private consuming list admitted"
+        );
         Ok(())
     }
 
@@ -5571,6 +5603,34 @@ mod owning_children_tests {
             })
             .collect::<Vec<_>>();
         ensure!(validate_owning_children(owner, &excessive).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reviewed_ten_child_source_family_accepts_exactly_ten_and_refuses_eleven() -> Result<()> {
+        let owner = "crates/example/src/proofs.rs";
+        let mut children = (0..10)
+            .map(|index| {
+                child(
+                    &format!("crates/example/src/proofs/child{index}.rs"),
+                    owner,
+                    &format!("child{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_owning_children(owner, &children)?;
+        children.push(child(
+            "crates/example/src/proofs/child10.rs",
+            owner,
+            "child10",
+        ));
+        children.sort_by(|a, b| a.source.cmp(&b.source));
+        ensure!(
+            validate_owning_children(owner, &children)
+                .unwrap_err()
+                .to_string()
+                .contains("owning child catalog budget")
+        );
         Ok(())
     }
 

@@ -23,7 +23,9 @@ use std::{cell::Cell, rc::Rc};
 
 mod native_current;
 pub(in crate::security_epoch) use native_current::PendingControllerCurrentInstallation;
+pub(in crate::security_epoch) use native_current::RestoreInstalledOutputLoan;
 pub(in crate::security_epoch) use native_current::RestoredControllerCurrentReadLoan;
+pub(in crate::security_epoch) use native_current::RetiredControllerCurrentInstallation;
 
 /// A closed borrow of the actual authenticated executor's fields, keeping its
 /// native source separately borrowable. No factory accepts replacement fields
@@ -4722,6 +4724,30 @@ impl<'loan, 'metadata, 'storage, 'role> RestoreWriteLoan<'loan, 'metadata, 'stor
         self.owner.check_current()?;
         flight.known()?;
         Ok(receipt)
+    }
+
+    /// One fixed pre-CAS receiving driver, lending only the actual same
+    /// FencedRestoreContinuation already retained by this exclusive writer
+    /// loan. No source/role/file getter, callback or new capture is exposed.
+    pub(in crate::security_epoch) fn receive_writer<'target, 'state, 'selection>(
+        &mut self,
+        target: &'target mut crate::security_epoch::restore_staging::NativeStagedTarget<
+            'state,
+            'selection,
+        >,
+    ) -> Result<
+        crate::security_epoch::restore_staging::RestoredWriterCandidate<
+            'target,
+            'state,
+            'selection,
+        >,
+    > {
+        crate::security_epoch::restore_staging::RestoredWriterCandidate::receive(
+            target,
+            &mut RestoreWriterExchangeContext {
+                owner: &mut *self.owner,
+            },
+        )
     }
 
     /// The only positive Confirmation origin. Retains the actual candidate's

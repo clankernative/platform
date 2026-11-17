@@ -31,6 +31,7 @@ COMPILE_INPUTS = [
     "//:assets/reactive-queries.js",
     "//:assets/startup.js",
     "//:assets/restore-passkey-export.js",
+    "//:assets/protected-restore.js",
     "//:assets/web.css",
     "//:build-dependencies/clanker-ui.json",
     "//:deploy/gke/stacks/day2-app/tests/oauth-instance.json",

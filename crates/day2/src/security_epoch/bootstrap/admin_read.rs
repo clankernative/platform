@@ -17,15 +17,19 @@ use std::{marker::PhantomData, rc::Rc};
 mod reader;
 pub(in crate::security_epoch) use reader::{
     AuthenticatedRestoreExecution, CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan,
-    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
-    RestoreAuthenticationAction, RestoreFinalInstallationLoan, RestoreTargetCheck,
-    RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
+    FencedRestoreContinuation, PendingApproval, PendingRestoreExecution, ReservationRegistryLoan,
+    ReservationSourceLoan, RestoreAuthenticationAction, RestoreFinalInstallationLoan,
+    RestoreTargetCheck, RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
     RestoreWriterExchangeContext, RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan,
     TargetSettlementSourceLoan, WriterConfirmationSourceLoan, WriterMayRegistryLoan,
     WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use reader::{ControllerAdminReader, ControllerRegistryData};
 pub(crate) use reader::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
+pub(in crate::security_epoch) use reader::{
+    PendingControllerCurrentInstallation, RestoreInstalledOutputLoan,
+    RetiredControllerCurrentInstallation,
+};
 
 pub(crate) struct ControllerAdminReadLoan<'storage, 'role> {
     physical: Option<CurrentControllerStoragePhase<'storage, 'role>>,

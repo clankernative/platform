@@ -39,6 +39,8 @@ use tokio::{net::TcpListener, sync::OwnedSemaphorePermit};
 
 const COOKIE: &str = "__Host-day2_security_shell";
 mod passkey_export;
+mod protected_restore_browser;
+mod protected_restore_prompt;
 const PREFIX: &str = "/oauth/approvals/";
 const SESSION_SECONDS: i64 = 300;
 const MAX_SESSIONS: usize = 1024;
@@ -284,6 +286,7 @@ pub(crate) struct SecurityShell {
     signer: Arc<dyn shell_transport::ApprovalSigner>,
     authenticator: Arc<dyn FreshAuthenticator>,
     sessions: Mutex<HashMap<String, ShellSession>>,
+    restore_browser: protected_restore_browser::Browser,
     credentials: Option<Arc<credentials::Registry>>,
     canaries: Option<Arc<registration::shell::Canaries>>,
     guard: Option<Arc<dyn ShellGuard>>,
@@ -536,6 +539,7 @@ impl SecurityShell {
             signer,
             authenticator,
             sessions: Mutex::new(HashMap::new()),
+            restore_browser: protected_restore_browser::Browser::default(),
             credentials: None,
             canaries: None,
             guard: None,
@@ -690,7 +694,8 @@ impl SecurityShell {
         admission: Arc<AtomicBool>,
     ) -> Response {
         let (parts, body) = request.into_parts();
-        let body = match effects::timeout(Duration::from_secs(3), to_bytes(body, 4096)).await {
+        let limit = protected_restore_browser::body_limit(parts.uri.path());
+        let body = match effects::timeout(Duration::from_secs(3), to_bytes(body, limit)).await {
             Ok(Ok(body)) => body,
             Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
             Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
@@ -759,6 +764,20 @@ impl SecurityShell {
                     error
                 }
             })?;
+        }
+        if let Some(response) = self.restore_browser.dispatch(
+            self,
+            protected_restore_browser::BrowserRequest {
+                method,
+                path,
+                query,
+                headers,
+                body,
+                identity: &identity,
+                at,
+            },
+        )? {
+            return Ok(response);
         }
         if let Some(response) =
             passkey_export::dispatch(method, path, query, body, &identity, &self.origin)?
@@ -1733,6 +1752,7 @@ fn protected(mut response: Response) -> Response {
             .insert(name, value.parse().expect("static security header"));
     }
     passkey_export::protect_document(&mut response);
+    protected_restore_browser::protect_document(&mut response);
     response
 }
 
@@ -1917,6 +1937,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_restore_browser_uses_separate_session_actual_iap_and_exact_document_policy()
+    -> Result<()> {
+        let shell = isolated_shell()?;
+        let mut headers = HeaderMap::from_iter([(header::HOST, "security.example.com".parse()?)]);
+        let response = protected(shell.dispatch(
+            &Method::GET,
+            protected_restore_browser::PAGE,
+            None,
+            &headers,
+            &[],
+            5,
+        )?);
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE].to_str()?.to_owned();
+        assert!(
+            cookie.starts_with("__Host-day2_protected_restore=")
+                && cookie.contains("Secure; HttpOnly; SameSite=Strict; Max-Age=300")
+        );
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY].to_str()?;
+        assert!(
+            csp.contains("script-src https://security.example.com/restore/protected.js;")
+                && csp.contains("connect-src 'self'")
+                && csp.contains("form-action 'none'")
+                && !csp.contains("unsafe")
+        );
+        assert!(
+            response.headers()["permissions-policy"]
+                .to_str()?
+                .contains("publickey-credentials-create=(), publickey-credentials-get=(self)")
+        );
+        let page = String::from_utf8(to_bytes(response.into_body(), 16_384).await?.to_vec())?;
+        assert!(
+            page.contains("Native execution is not qualified on this private implementation.")
+                && page.contains("Approval, prompts and HTTP status do not establish completion.")
+                && page.contains("No restore has completed. Reload never retries a sent action.")
+                && !page.contains("<form")
+                && !page.contains("navigator.credentials")
+        );
+        headers.insert(header::COOKIE, cookie.split(';').next().unwrap().parse()?);
+        let reused = shell.dispatch(
+            &Method::GET,
+            protected_restore_browser::PAGE,
+            None,
+            &headers,
+            &[],
+            6,
+        )?;
+        assert!(!reused.headers().contains_key(header::SET_COOKIE));
+        headers.insert("test-subject", "another-subject".parse()?);
+        assert!(
+            shell
+                .dispatch(
+                    &Method::GET,
+                    protected_restore_browser::PAGE,
+                    None,
+                    &headers,
+                    &[],
+                    6
+                )
+                .is_err()
+        );
+        headers.remove("test-subject");
+        assert!(
+            shell
+                .dispatch(
+                    &Method::GET,
+                    protected_restore_browser::PAGE,
+                    None,
+                    &headers,
+                    &[],
+                    305
+                )
+                .is_err()
+        );
+        assert!(
+            shell
+                .dispatch(
+                    &Method::GET,
+                    protected_restore_browser::PAGE,
+                    Some("adopt=id"),
+                    &headers,
+                    &[],
+                    6
+                )
+                .is_err()
+        );
+        assert!(
+            shell
+                .dispatch(
+                    &Method::POST,
+                    protected_restore_browser::PAGE,
+                    None,
+                    &headers,
+                    &[],
+                    6
+                )
+                .is_err()
+        );
+        assert!(
+            shell
+                .dispatch(
+                    &Method::GET,
+                    protected_restore_browser::PAGE,
+                    None,
+                    &HeaderMap::new(),
+                    &[],
+                    6
+                )
+                .is_err()
+        );
+        assert!(shell.sessions.lock().unwrap().is_empty());
+        let script = protected(shell.dispatch(
+            &Method::GET,
+            "/restore/protected.js",
+            None,
+            &headers,
+            &[],
+            6,
+        )?);
+        assert_eq!(
+            script.headers()[header::CONTENT_SECURITY_POLICY],
+            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        );
+        assert!(
+            to_bytes(script.into_body(), 32_768)
+                .await?
+                .starts_with(b"// Browser presentation")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn passkey_export_is_get_only_and_keeps_shell_guards_and_existing_csp() -> Result<()> {
         let shell = isolated_shell()?;
         let headers = HeaderMap::from_iter([(header::HOST, "security.example.com".parse()?)]);
@@ -2011,7 +2163,12 @@ mod tests {
         let headers = HeaderMap::from_iter([(header::HOST, "security.example.com".parse()?)]);
         let mut shell = isolated_shell()?;
         Arc::get_mut(&mut shell).unwrap().guard = Some(Arc::new(DenyGuard));
-        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+        for path in [
+            passkey_export::PAGE,
+            passkey_export::SCRIPT,
+            protected_restore_browser::PAGE,
+            "/restore/protected.js",
+        ] {
             assert_eq!(
                 shell
                     .dispatch(&Method::GET, path, None, &headers, &[], 5)
@@ -2023,7 +2180,12 @@ mod tests {
         let shell_mut = Arc::get_mut(&mut shell).unwrap();
         shell_mut.guard = None;
         shell_mut.authenticator = Arc::new(DenyIdentity);
-        for path in [passkey_export::PAGE, passkey_export::SCRIPT] {
+        for path in [
+            passkey_export::PAGE,
+            passkey_export::SCRIPT,
+            protected_restore_browser::PAGE,
+            "/restore/protected.js",
+        ] {
             assert_eq!(
                 shell
                     .dispatch(&Method::GET, path, None, &headers, &[], 5)

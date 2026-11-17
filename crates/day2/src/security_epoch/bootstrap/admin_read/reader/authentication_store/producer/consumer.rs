@@ -25,6 +25,10 @@ pub(in crate::security_epoch) use stop::{
     WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use stop::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
+pub(in crate::security_epoch) use stop::{
+    PendingControllerCurrentInstallation, RestoreInstalledOutputLoan,
+    RetiredControllerCurrentInstallation,
+};
 
 const EXECUTION_CHALLENGE_SECONDS: i64 = 300;
 
@@ -173,8 +177,10 @@ impl RestoreAuthenticationAction<'_, '_, '_> {
 }
 
 impl PendingRestoreExecution {
-    pub(in crate::security_epoch) fn challenge_data(&self) -> Result<String> {
-        self.ceremony.encoded_challenge()
+    pub(in crate::security_epoch) fn request_options_data(
+        &self,
+    ) -> Result<crate::security_epoch::restore_webauthn::RestorePasskeyPrompt> {
+        self.ceremony.request_options_data()
     }
 
     pub(in crate::security_epoch) fn authenticate<'metadata, 'storage, 'role>(

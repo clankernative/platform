@@ -20,6 +20,7 @@ Workflow :: [].{
 		Backup(Str, Str, Str),
 		Restore(Str, Str),
 		RestoreInspect(Str),
+		RestoreProtected(Str, Str),
 		Infra(Str, Str),
 		AuthorityInspect(Str, Str),
 		AuthorityApply(Str, Str, Str, Str, Str),
@@ -60,6 +61,8 @@ Workflow :: [].{
 		["maintain", "mark-activated", request_file] => Ok(Maintain("mark-activated", request_file))
 		["backup", instance, app_name, output] => Ok(Backup(instance, app_name, output))
 		["restore", "inspect", backup] => Ok(RestoreInspect(backup))
+		["restore", "protected", instance, app_name] => Ok(RestoreProtected(instance, app_name))
+		["restore", "protected"] | ["restore", "protected", _] => Err("usage: restore protected INSTANCE APP")
 		["restore", backup, output] => Ok(Restore(backup, output))
 		["infra", "plan", configuration, output] => Ok(Infra(configuration, output))
 		["authority", "inspect", instance, app_name] => Ok(AuthorityInspect(instance, app_name))
@@ -110,7 +113,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
+			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | restore protected INSTANCE APP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
 		)
 	}
 
@@ -127,6 +130,7 @@ Workflow :: [].{
 					"backup INSTANCE APP NEW_DIRECTORY",
 					"restore BACKUP NEW_DIRECTORY",
 					"restore inspect BACKUP",
+					"restore protected INSTANCE APP (browser navigation only)",
 					"infra plan CONFIG NEW_DIRECTORY",
 					"authority inspect INSTANCE APP",
 					"authority admin INSTANCE LOCAL_OPERATOR",
@@ -150,6 +154,7 @@ Workflow :: [].{
 		Backup(instance, app_name, output) => Backup.take!(instance, app_name, output, host!)
 		Restore(backup, output) => Backup.restore!(backup, output, host!)
 		RestoreInspect(backup) => Backup.inspect!(backup, host!)
+		RestoreProtected(instance, app_name) => Backup.protected!(instance, app_name, host!)
 		Infra(configuration, output) => Infra.run!(configuration, output, host!)
 		AuthorityInspect(instance, app_name) => Authority.inspect!(instance, app_name, host!)
 		AuthorityAdmin(instance, operator) => Authority.admin!(instance, operator, host!)

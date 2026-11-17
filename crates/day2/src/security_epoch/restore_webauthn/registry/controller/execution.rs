@@ -346,6 +346,21 @@ impl ControllerExecutionCeremony {
         self.ceremony.encoded_challenge()
     }
 
+    /// Execution has its own server-held challenge bound to the COMPLETE
+    /// signed approval and operation; an approval assertion cannot substitute.
+    pub(in crate::security_epoch) fn request_options_data(
+        &self,
+    ) -> Result<super::super::super::RestorePasskeyPrompt> {
+        let encoded = self.ceremony.encoded_challenge()?;
+        super::super::super::prompt::execution(
+            &self.ceremony.record,
+            &self.ceremony.challenge()?,
+            encoded,
+            &self.signed,
+            &self.operation,
+        )
+    }
+
     pub(in crate::security_epoch) fn issue_durable(
         &self,
         reader: &mut ControllerAdminReader<'_, '_, '_>,

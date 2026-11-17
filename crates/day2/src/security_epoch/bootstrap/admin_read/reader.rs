@@ -12,15 +12,19 @@ use day2_capabilities::Digest;
 mod authentication_store;
 pub(in crate::security_epoch) use authentication_store::{
     AuthenticatedRestoreExecution, CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan,
-    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
-    RestoreAuthenticationAction, RestoreFinalInstallationLoan, RestoreTargetCheck,
-    RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
+    FencedRestoreContinuation, PendingApproval, PendingRestoreExecution, ReservationRegistryLoan,
+    ReservationSourceLoan, RestoreAuthenticationAction, RestoreFinalInstallationLoan,
+    RestoreTargetCheck, RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
     RestoreWriterExchangeContext, RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan,
     TargetSettlementSourceLoan, WriterConfirmationSourceLoan, WriterMayRegistryLoan,
     WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use authentication_store::{
     FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit,
+};
+pub(in crate::security_epoch) use authentication_store::{
+    PendingControllerCurrentInstallation, RestoreInstalledOutputLoan,
+    RetiredControllerCurrentInstallation,
 };
 
 /// Fields drop in declaration order: SQLite closes before the actual native

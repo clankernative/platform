@@ -21,10 +21,14 @@ const SUPPORTED_FLAGS: u8 = USER_PRESENT | USER_VERIFIED | BACKUP_ELIGIBLE | BAC
 
 mod store;
 pub(super) use store::require_existing_schema;
+mod prompt;
+pub(in crate::security_epoch) use prompt::RestorePasskeyPrompt;
+#[cfg(test)]
+pub(super) use prompt::RestorePromptFixtureData;
 
 /// Shared execution-challenge DATA. This commits to the complete signed grant,
 /// operation and target intent; it supplies no authentication or send authority.
-fn execution_request(
+pub(crate) fn execution_request(
     record: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
     operation: &Digest,
 ) -> Result<Digest> {
@@ -35,6 +39,18 @@ fn execution_request(
         operation,
         record.statement.request.intent(),
     ))
+}
+
+/// Actual producer encoding for portable consumer tests. Only inert public
+/// fixture DATA crosses this seam; no key, challenge or native owner escapes.
+#[cfg(test)]
+pub(crate) fn restore_prompt_fixture_data(
+    intent: &crate::security_epoch::restore_approval::ApprovalIntent,
+    approver: &crate::security_epoch::restore_approval::AdminIdentity,
+    record: &crate::security_epoch::restore_approval::signed::SignedApprovalRecord,
+    operation: &Digest,
+) -> Result<RestorePromptFixtureData> {
+    prompt::fixture_data(intent, approver, record, operation)
 }
 
 /// Exact admitted registry selection, not a browser-supplied key. A future
@@ -54,6 +70,7 @@ enum KeySource<'owner> {
 #[derive(Clone, PartialEq, Eq)]
 struct KeyRecord {
     admin: Digest,
+    principal: crate::security_epoch::restore_approval::AdminIdentity,
     registry: Digest,
     revision: u64,
     credential_id: Vec<u8>,
@@ -120,6 +137,7 @@ impl KeyRecord {
         Digest::of(&(
             "day2-restore-passkey-enrollment-v1",
             &row.admin,
+            &row.principal,
             &row.registry,
             row.revision,
             &row.credential_id,

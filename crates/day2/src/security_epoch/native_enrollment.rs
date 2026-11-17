@@ -32,7 +32,18 @@ mod peer_idle;
 mod policy;
 #[cfg(target_os = "linux")]
 mod process;
+mod protected_restore;
+pub(crate) use protected_restore::RestoreInstalledOutputData;
+pub(in crate::security_epoch) use protected_restore::{
+    ProtectedRestoreInstalledIo, ProtectedRestoreRefusal,
+};
 mod protocol;
+pub(in crate::security_epoch) use protected_restore::{
+    ProtectedRestoreListener, ProtectedRestorePeer, ProtectedRestoreTurn,
+};
+pub(crate) use protected_restore::{
+    ProtectedRestoreReply, ProtectedRestoreRequest, ProtectedRestoreShell,
+};
 #[cfg(target_os = "linux")]
 mod qualification;
 mod restore_peer_wire;

@@ -20,6 +20,10 @@ pub(super) fn fixture() -> Fixture {
     let key = TrustedKey {
         record: KeyRecord {
             admin: Digest::new(b"exact admin email and subject"),
+            principal: crate::security_epoch::restore_approval::AdminIdentity {
+                email: "ceremony-approver@example.test".into(),
+                subject: "ceremony-approver-subject".into(),
+            },
             registry: Digest::new(b"reviewed registry"),
             revision: 1,
             credential_id: b"owned credential id".to_vec(),

@@ -7,6 +7,86 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[test]
+fn protected_restore_recipe_only_returns_browser_navigation_and_refuses_authority_flags()
+-> Result<()> {
+    let runner = automation::runner()?;
+    let expected =
+        json!({"kind":"protected_restore_browser_navigation_v1", "execution":"unavailable"});
+    let mut calls = Vec::new();
+    let actual = automation::run(
+        &runner,
+        &[
+            "platform",
+            "restore",
+            "protected",
+            "current-instance.json",
+            "calendar",
+        ],
+        |request| {
+            calls.push(request.action.clone());
+            assert_eq!(request.action, "restore-browser-entry");
+            assert_eq!(
+                request.decode::<Value>()?,
+                json!({"instance":"current-instance.json","app_name":"calendar"})
+            );
+            Ok(expected.clone())
+        },
+    )?;
+    assert_eq!(calls, ["restore-browser-entry"]);
+    assert_eq!(actual, expected);
+    for malformed in [
+        vec!["platform", "restore", "protected"],
+        vec!["platform", "restore", "protected", "current-instance.json"],
+    ] {
+        let mut calls = 0;
+        let result = automation::run(&runner, &malformed, |_| {
+            calls += 1;
+            bail!("malformed protected navigation reached write-capable restore fallback")
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 0);
+    }
+    for extra in [
+        "--approved",
+        "--execute",
+        "--actor=admin@example.com",
+        "--url=https://foreign.example.com",
+    ] {
+        let mut calls = 0;
+        let result = automation::run(
+            &runner,
+            &[
+                "platform",
+                "restore",
+                "protected",
+                "current-instance.json",
+                "calendar",
+                extra,
+            ],
+            |_| {
+                calls += 1;
+                bail!("invalid restore navigation reached native capability")
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 0);
+    }
+    let result = automation::run(
+        &runner,
+        &[
+            "platform",
+            "restore",
+            "protected",
+            "current-instance.json",
+            "calendar",
+        ],
+        |_| bail!("injected current-instance refusal"),
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
 fn restore_inspection_only_verifies_the_exact_archive_without_entering_restore() -> Result<()> {
     let expected = json!({
         "kind":"restore_archive_inspection_v1",

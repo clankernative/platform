@@ -25,10 +25,15 @@ use std::{cell::RefCell, rc::Rc};
 
 mod admin_read;
 pub(in crate::security_epoch) use admin_read::{
+    PendingControllerCurrentInstallation, RestoreInstalledOutputLoan,
+    RetiredControllerCurrentInstallation,
+};
+mod protected_operator;
+pub(in crate::security_epoch) use admin_read::{
     AuthenticatedRestoreExecution, CompletedCeremony, ExecutionSourceLoan, FencedRegistryLoan,
-    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
-    RestoreAuthenticationAction, RestoreFinalInstallationLoan, RestoreTargetCheck,
-    RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
+    FencedRestoreContinuation, PendingApproval, PendingRestoreExecution, ReservationRegistryLoan,
+    ReservationSourceLoan, RestoreAuthenticationAction, RestoreFinalInstallationLoan,
+    RestoreTargetCheck, RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
     RestoreWriterExchangeContext, RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan,
     TargetSettlementSourceLoan, WriterConfirmationSourceLoan, WriterMayRegistryLoan,
     WriterRegistryLoan, WriterSendSourceLoan,
@@ -36,6 +41,10 @@ pub(in crate::security_epoch) use admin_read::{
 pub(crate) use admin_read::{
     FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit,
 };
+pub(in crate::security_epoch) use protected_operator::{
+    ProtectedRestoreAttempt, ProtectedRestoreSession,
+};
+pub(crate) use protected_operator::{ProtectedRestoreCommandData, protected_restore_command_data};
 mod app_serving;
 #[cfg(test)]
 mod lineage;

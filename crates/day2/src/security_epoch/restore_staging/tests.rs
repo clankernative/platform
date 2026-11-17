@@ -2516,7 +2516,30 @@ fn native_archive_entry_consumes_genuine_executor_and_exposes_no_frame_or_parts(
         {
             return false;
         }
-        if methods.len() != 1 {
+        if methods.len() != 2 {
+            return false;
+        }
+        let Some(run_index) = methods.iter().position(|m| m.sig.ident == "run_protected") else {
+            return false;
+        };
+        let mut run = methods.remove(run_index);
+        let mut expected_run: syn::ImplItemFn = syn::parse_quote! {
+            pub(in crate::security_epoch) fn run_protected(
+                mut self,
+                turn:crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'_>,
+                attempt:crate::security_epoch::bootstrap::ProtectedRestoreAttempt,
+            )->Result<()> {
+                let mut native=self.prepared.start_native()?;
+                native.run_protected(turn,attempt)
+            }
+        };
+        if run.attrs.iter().any(|a| !a.path().is_ident("doc")) {
+            return false;
+        }
+        run.attrs.clear();
+        run.sig.inputs = run.sig.inputs.into_iter().collect();
+        expected_run.sig.inputs = expected_run.sig.inputs.into_iter().collect();
+        if run.to_token_stream().to_string() != expected_run.to_token_stream().to_string() {
             return false;
         }
         let mut method = methods.remove(0);
@@ -2580,6 +2603,28 @@ fn native_archive_entry_consumes_genuine_executor_and_exposes_no_frame_or_parts(
     ] {
         assert_eq!(source.matches(before).count(), 1, "{before}");
         assert!(!valid(&source.replacen(before, after, 1)), "{after}");
+    }
+    for (before, after) in [
+        (
+            "let mut native = self.prepared.start_native()?;",
+            "let mut native = other.start_native()?;",
+        ),
+        (
+            "native.run_protected(turn, attempt)",
+            "native.run_protected(other_turn, attempt)",
+        ),
+        (
+            "native.run_protected(turn, attempt)",
+            "native.run_protected(turn, other_attempt)",
+        ),
+        ("native.run_protected(turn, attempt)", "Ok(())"),
+    ] {
+        assert_eq!(
+            source.matches(before).count(),
+            1,
+            "actual archive driver target"
+        );
+        assert!(!valid(&source.replacen(before, after, 1)));
     }
     let getter = format!(
         "{source}\nimpl PreparedNativeRestoreArchive<'_, '_, '_> {{fn raw(&self)->&archive::ArchivePrepared<'_, '_, '_>{{&self.prepared}}}}"

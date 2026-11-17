@@ -48,7 +48,7 @@ platform_rust_test(
     crate_name = "xtask",
     crate_root = "src/main.rs",
     srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
-    compile_data = COMPILE_INPUTS,
+    compile_data = COMPILE_INPUTS + ["//:architecture-proofs.json"],
     internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
 )
 

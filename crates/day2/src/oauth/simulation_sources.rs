@@ -52,6 +52,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         include_str!("native_management/consumer_context.rs"),
     ),
     (
+        "native_management/protected_restore.rs",
+        include_str!("native_management/protected_restore.rs"),
+    ),
+    (
         "native_management/request.rs",
         include_str!("native_management/request.rs"),
     ),
@@ -94,6 +98,18 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     (
         "security_shell/passkey_export.rs",
         include_str!("security_shell/passkey_export.rs"),
+    ),
+    (
+        "security_shell/protected_restore_browser.rs",
+        include_str!("security_shell/protected_restore_browser.rs"),
+    ),
+    (
+        "security_shell/protected_restore_browser/state.rs",
+        include_str!("security_shell/protected_restore_browser/state.rs"),
+    ),
+    (
+        "security_shell/protected_restore_prompt.rs",
+        include_str!("security_shell/protected_restore_prompt.rs"),
     ),
     ("shell_oidc.rs", include_str!("shell_oidc.rs")),
     ("shell_transport.rs", include_str!("shell_transport.rs")),
@@ -460,6 +476,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
             "native_management",
             &[
                 "consumer_context.rs",
+                "protected_restore.rs",
                 "request.rs",
                 "response.rs",
                 "response_tickets",
@@ -470,7 +487,19 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
             "native_management/response_tickets",
             &["sql_debt_tests.rs"][..],
         ),
-        ("security_shell", &["passkey_export.rs"][..]),
+        (
+            "security_shell",
+            &[
+                "passkey_export.rs",
+                "protected_restore_browser",
+                "protected_restore_browser.rs",
+                "protected_restore_prompt.rs",
+            ][..],
+        ),
+        (
+            "security_shell/protected_restore_browser",
+            &["state.rs"][..],
+        ),
     ] {
         let mut children = std::fs::read_dir(directory.join(name))?
             .map(|entry| {

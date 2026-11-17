@@ -74,6 +74,19 @@ impl Operations {
                 .effect(day2::json::decode(&raw)?);
         }
         match request.action.as_str() {
+            "restore-browser-entry" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    instance: PathBuf,
+                    app_name: String,
+                }
+                let parameters: Input = input(&request)?;
+                day2_ops::protected_restore::browser_entry(
+                    &parameters.instance,
+                    &parameters.app_name,
+                )
+            }
             "credential-provision-inputs" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

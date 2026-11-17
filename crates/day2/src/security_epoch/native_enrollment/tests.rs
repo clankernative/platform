@@ -329,6 +329,13 @@ fn owned_request_borrow_shape(source: &str) -> bool {
         matches!(expression, syn::Expr::Path(path) if path.path.is_ident(name))
     }
 
+    fn actual_original(expression: &syn::Expr) -> bool {
+        matches!(expression, syn::Expr::Try(attempt)
+            if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+                if call.method == "original_mut" && call.args.is_empty()
+                && path(&call.receiver, "request")))
+    }
+
     let source = syn::parse_file(source).unwrap();
     let functions = source.items.iter().filter_map(|item| {
         let syn::Item::Impl(owner) = item else { return None; };
@@ -413,7 +420,7 @@ fn owned_request_borrow_shape(source: &str) -> bool {
         let Some(initializer) = &local.init else { return false; };
         let syn::Expr::Try(attempt) = &*initializer.expr else { return false; };
         let syn::Expr::MethodCall(call) = &*attempt.expr else { return false; };
-        call.method == "interval_data" && field(&call.receiver, "acquisition") && call.args.is_empty()
+        call.method == "interval_data" && actual_original(&call.receiver) && call.args.is_empty()
     }).count();
     let actual_owner = result_body.stmts.iter().any(|statement| {
         let syn::Stmt::Local(local) = statement else {
@@ -456,8 +463,7 @@ fn owned_request_borrow_shape(source: &str) -> bool {
             matches!(&*call.func, syn::Expr::Path(path)
                 if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["StageAcquisition", "borrowed"])
                 && call.args.len() == 1
-                && matches!(&call.args[0], syn::Expr::Reference(reference)
-                    if reference.mutability.is_some() && field(&reference.expr, "acquisition"))
+                && actual_original(&call.args[0])
         })
     });
     #[derive(Default)]
@@ -515,20 +521,20 @@ fn http_request_guard_rejects_new_clocks_weaker_lifetimes_and_skipped_postchecks
             "&mut EnrolledCurrentRequest",
         ),
         (
-            "request.acquisition.interval_data()?",
+            "request.original_mut()?.interval_data()?",
             "NativeAcquisition::begin(5)?.interval_data()?",
         ),
         (
-            "StageAcquisition::borrowed(&mut request.acquisition)",
-            "StageAcquisition::owned(request.acquisition.narrow(5, deadline)?)",
+            "StageAcquisition::borrowed(request.original_mut()?)",
+            "StageAcquisition::owned(request.original_mut()?.narrow(5, deadline)?)",
         ),
         (
-            "StageAcquisition::borrowed(&mut request.acquisition)",
+            "StageAcquisition::borrowed(request.original_mut()?)",
             "StageAcquisition::borrowed(&mut unrelated)",
         ),
         (
-            "request.acquisition.interval_data()?",
-            "request.unrelated.interval_data()?",
+            "request.original_mut()?.interval_data()?",
+            "request.unrelated()?.interval_data()?",
         ),
         ("Rc::ptr_eq(&original, &self.identity)", "true"),
         ("request.incarnation == self.incarnation", "true"),
@@ -4001,7 +4007,7 @@ fn actual_restored_controller_check_requires_same_parent_retired_predecessor_and
                 .retired
                 .acquisition
                 .as_mut()
-                .require_retired_predecessor(&mut request.acquisition)?;
+                .require_retired_predecessor(request.original_mut()?)?;
             let mut stage = attempt
                 .parent
                 .retired
@@ -4035,7 +4041,7 @@ fn actual_restored_controller_check_requires_same_parent_retired_predecessor_and
             "",
         ),
         (
-            "attempt.parent.retired.acquisition.as_mut().require_retired_predecessor(&mut request.acquisition)?;",
+            "attempt.parent.retired.acquisition.as_mut().require_retired_predecessor(request.original_mut()?)?;",
             "attempt.parent.retired.check()?;",
         ),
         (
@@ -4504,7 +4510,7 @@ fn restored_request_capture_holds_the_real_parent_before_native_work_and_keeps_n
                 .ok_or_else(|| anyhow::anyhow!("restore_current_capture_missing"))?;
             pending
                 .original
-                .require_retired_predecessor(&mut fresh.acquisition)?;
+                .require_retired_predecessor(fresh.original_mut()?)?;
             pending.owner.borrow_current_request(fresh)?.check()?;
             Ok(captured)
         }

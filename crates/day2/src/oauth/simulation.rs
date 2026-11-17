@@ -597,6 +597,11 @@ fn failure_category(error: &anyhow::Error) -> String {
 
 /// Keep the actual last failing observation. Re-running a reduced history and
 /// assuming it fails again would discard evidence of intermittent nondeterminism.
+/// Delete coarse blocks before individual steps: long padding histories must
+/// not require a full pair of model replays for every single removable event.
+/// Every candidate still consumes the SAME probe budget and must actually fail
+/// in the same category. The complete original remains the caller's evidence.
+/// Reserve the original single-step pass before spending probes on blocks.
 pub(super) fn reduce_steps<T: Clone>(
     steps: &[T],
     budget: usize,
@@ -606,22 +611,122 @@ pub(super) fn reduce_steps<T: Clone>(
 ) -> (Vec<T>, Option<anyhow::Error>) {
     let mut reduced = steps.to_vec();
     let mut observed = None;
-    let mut index = 0;
     let mut attempts = 0;
-    while index < reduced.len() && attempts < budget {
-        let mut candidate = reduced.clone();
-        candidate.remove(index);
-        attempts += 1;
-        if let Err(error) = check(&candidate)
-            && classify(&error) == category
+    let coarse_limit = budget.saturating_sub(reduced.len());
+    let mut width = if coarse_limit == 0 {
+        1
+    } else {
+        (reduced.len() / 2).max(1)
+    };
+    loop {
+        let mut index = 0;
+        while index < reduced.len() && attempts < budget && (width == 1 || attempts < coarse_limit)
         {
-            reduced = candidate;
-            observed = Some(error);
-            continue;
+            let end = index.saturating_add(width).min(reduced.len());
+            let mut candidate = reduced.clone();
+            drop(candidate.drain(index..end));
+            attempts += 1;
+            if let Err(error) = check(&candidate)
+                && classify(&error) == category
+            {
+                reduced = candidate;
+                observed = Some(error);
+                continue;
+            }
+            index = end;
         }
-        index += 1;
+        if width == 1 || attempts >= budget {
+            break;
+        }
+        width = if attempts >= coarse_limit {
+            1
+        } else {
+            (width / 2).max(1)
+        };
     }
     (reduced, observed)
+}
+
+#[test]
+fn reduction_reserves_a_complete_single_step_pass_for_late_only_failures() {
+    let steps = (0_u8..64).collect::<Vec<_>>();
+    let mut calls = 0;
+    let (reduced, observed) = reduce_steps(
+        &steps,
+        96,
+        "late",
+        |error| error.to_string(),
+        |candidate| {
+            calls += 1;
+            if candidate.len() == 63 && !candidate.contains(&63) {
+                anyhow::bail!("late");
+            }
+            Ok(())
+        },
+    );
+    assert_eq!(reduced, (0_u8..63).collect::<Vec<_>>());
+    assert!(calls <= 96);
+    assert_eq!(observed.unwrap().to_string(), "late");
+}
+
+#[test]
+fn reduction_removes_padding_in_bounded_coarse_probes_without_losing_required_events() {
+    let required = [0_u8, 1, 2, 3, 4, 6];
+    let steps = (0_u8..5)
+        .chain(std::iter::repeat_n(5, 58))
+        .chain([6])
+        .collect::<Vec<_>>();
+    assert_eq!(steps.len(), 64);
+    let mut calls = 0;
+    let (reduced, observed) = reduce_steps(
+        &steps,
+        96,
+        "required",
+        |error| error.to_string(),
+        |candidate| {
+            calls += 1;
+            if required.iter().all(|event| candidate.contains(event)) {
+                anyhow::bail!("required");
+            }
+            Ok(())
+        },
+    );
+    assert_eq!(reduced, required);
+    assert!(calls <= 32, "single-event replay work returned: {calls}");
+    assert_eq!(observed.unwrap().to_string(), "required");
+
+    let (unchanged, observed) = reduce_steps(
+        &steps,
+        0,
+        "required",
+        |_| panic!("no classification budget"),
+        |_| panic!("no probe budget"),
+    );
+    assert_eq!(unchanged, steps);
+    assert!(observed.is_none());
+    let (empty, observed) = reduce_steps::<u8>(
+        &[],
+        96,
+        "required",
+        |_| panic!("empty classification"),
+        |_| panic!("empty probe"),
+    );
+    assert!(empty.is_empty());
+    assert!(observed.is_none());
+    let mut calls = 0;
+    let (unchanged, observed) = reduce_steps(
+        &steps,
+        1,
+        "required",
+        |error| error.to_string(),
+        |_| {
+            calls += 1;
+            anyhow::bail!("other category");
+        },
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(unchanged, steps);
+    assert!(observed.is_none());
 }
 
 #[test]
@@ -649,6 +754,38 @@ fn reduction_keeps_observed_evidence_when_a_failure_does_not_repeat() {
         observed.is_none(),
         "retain the original failure when no reduction repeats it"
     );
+}
+
+#[test]
+fn reduction_keeps_the_actual_coarse_winner_when_later_probes_pass() {
+    let original = (0_u8..16).collect::<Vec<_>>();
+    for budget in [1, 32] {
+        for later_wrong_category in [false, true] {
+            let mut calls = 0;
+            let mut winner = None;
+            let (reduced, observed) = reduce_steps(
+                &original,
+                budget,
+                "replay",
+                |error| error.to_string(),
+                |candidate| {
+                    calls += 1;
+                    if calls == 1 {
+                        winner = Some(candidate.to_vec());
+                        anyhow::bail!("replay");
+                    }
+                    if later_wrong_category {
+                        anyhow::bail!("other category");
+                    }
+                    Ok(())
+                },
+            );
+            assert!(calls <= budget);
+            assert!(budget == 1 || calls > 1);
+            assert_eq!(reduced, winner.unwrap());
+            assert_eq!(observed.unwrap().to_string(), "replay");
+        }
+    }
 }
 
 fn verify(program: &Program) -> Result<Trace> {

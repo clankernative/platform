@@ -150,6 +150,10 @@ fn record(
             &key.subject,
             &active.stamp,
         ))?,
+        principal: crate::security_epoch::restore_approval::AdminIdentity {
+            email: key.email.clone(),
+            subject: key.subject.clone(),
+        },
         registry: Digest::of(&(
             "day2-restore-registry-selection-v1",
             file_binding,

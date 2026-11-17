@@ -38,6 +38,7 @@ use std::{
     time::Duration,
 };
 
+mod protected_restore;
 mod restore;
 mod restore_receiver;
 mod serving;
@@ -61,6 +62,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
     initial_holder_attempted: bool,
     initial_handshake_attempted: bool,
     serving_attempted: bool,
+    protected_restore_attempted: bool,
     #[cfg(target_os = "linux")]
     issuer: Rc<RefCell<IssuerReceipt>>,
     #[cfg(target_os = "linux")]
@@ -1906,7 +1908,7 @@ impl RetiredRestoredAppNative {
                 .ok_or_else(|| anyhow::anyhow!("restore_current_capture_missing"))?;
             pending
                 .original
-                .require_retired_predecessor(&mut fresh.acquisition)?;
+                .require_retired_predecessor(fresh.original_mut()?)?;
             pending.owner.borrow_current_request(fresh)?.check()?;
             Ok(captured)
         }
@@ -2374,6 +2376,7 @@ impl PendingRestoredEnrollment {
                     initial_holder_attempted: true,
                     initial_handshake_attempted: true,
                     serving_attempted: true,
+                    protected_restore_attempted: true,
                     issuer: port.issuer,
                     binding: stage.runtime.clone(),
                     self_data: stage.process.clone(),
@@ -2617,7 +2620,7 @@ impl CapturedRestoredControllerRequest {
                 .retired
                 .acquisition
                 .as_mut()
-                .require_retired_predecessor(&mut request.acquisition)?;
+                .require_retired_predecessor(request.original_mut()?)?;
             let mut stage = attempt
                 .parent
                 .retired
@@ -3581,7 +3584,9 @@ pub(crate) struct EnrolledCurrentRequest {
     role: NativeRole,
     process: u32,
     thread: ThreadId,
-    acquisition: NativeAcquisition,
+    // Some throughout borrowed use. Only the fixed consuming protected-turn
+    // transfer can take this actual value; it never substitutes another clock.
+    acquisition: Option<NativeAcquisition>,
     finished: bool,
     local: PhantomData<Rc<()>>,
 }
@@ -3883,7 +3888,7 @@ const _: () = {
 impl Drop for EnrolledCurrentRequest {
     fn drop(&mut self) {
         if !self.finished {
-            self.acquisition.refuse();
+            self.refuse();
         }
     }
 }
@@ -3891,9 +3896,15 @@ impl Drop for EnrolledCurrentRequest {
 impl EnrolledCurrentRequest {
     /// Retain negative identity of this actual request, never a clock getter.
     pub(crate) fn consumer_origin(&self) -> NativeConsumerOrigin {
+        // A consumed request is never returned from the fixed transfer. Every
+        // externally reachable request still owns its actual original here.
+        let original = self
+            .acquisition
+            .as_ref()
+            .expect("live enrolled request original");
         NativeConsumerOrigin {
-            refusal: self.acquisition.retained_refusal(),
-            domain: self.acquisition.historical_interval_observation().0,
+            refusal: original.retained_refusal(),
+            domain: original.historical_interval_observation().0,
         }
     }
 
@@ -3910,7 +3921,15 @@ impl EnrolledCurrentRequest {
     }
 
     pub(crate) fn refuse(&mut self) {
-        self.acquisition.refuse();
+        if let Some(original) = &mut self.acquisition {
+            original.refuse();
+        }
+    }
+
+    fn original_mut(&mut self) -> Result<&mut NativeAcquisition> {
+        self.acquisition
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_original_transferred"))
     }
 }
 
@@ -3993,6 +4012,7 @@ impl EnrolledProcessRoleOwner {
                 initial_holder_attempted: false,
                 initial_handshake_attempted: false,
                 serving_attempted: false,
+                protected_restore_attempted: false,
                 issuer: Rc::new(RefCell::new(issuer)),
                 binding: grant.data.runtime.clone(),
                 self_data: grant.data.process.clone(),
@@ -4029,7 +4049,7 @@ impl EnrolledProcessRoleOwner {
             role: stage.owner.role,
             process: stage.owner.process,
             thread: stage.owner.thread,
-            acquisition: stage.acquisition.into_owned()?,
+            acquisition: Some(stage.acquisition.into_owned()?),
             finished: false,
             local: PhantomData,
         })
@@ -4079,7 +4099,7 @@ impl EnrolledProcessRoleOwner {
                     role: self.role,
                     process: self.process,
                     thread: self.thread,
-                    acquisition,
+                    acquisition: Some(acquisition),
                     finished: false,
                     local: PhantomData,
                 };
@@ -4117,21 +4137,21 @@ impl EnrolledProcessRoleOwner {
                     && request.thread == std::thread::current().id(),
                 "native_enrollment_request_owner_changed"
             );
-            let (_, deadline) = request.acquisition.interval_data()?;
+            let (_, deadline) = request.original_mut()?.interval_data()?;
             Ok(deadline)
         })();
         let deadline = match result {
             Ok(deadline) => deadline,
             Err(error) => {
                 self.refused = true;
-                request.acquisition.refuse();
+                request.refuse();
                 return Err(error);
             }
         };
         let mut stage = EnrolledRoleStage {
             owner: self,
             purpose: StagePurpose::CurrentRole,
-            acquisition: StageAcquisition::borrowed(&mut request.acquisition),
+            acquisition: StageAcquisition::borrowed(request.original_mut()?),
             deadline,
         };
         stage.check()?;
@@ -5368,9 +5388,10 @@ mod restored_app_current_source_tests {
             .filter(|c| !c.is_whitespace())
             .collect::<String>();
         let required = [
+            "letoriginal=self.acquisition.as_ref().expect(\"liveenrolledrequestoriginal\");",
             "NativeConsumerOrigin{",
-            "refusal:self.acquisition.retained_refusal()",
-            "domain:self.acquisition.historical_interval_observation().0",
+            "refusal:original.retained_refusal()",
+            "domain:original.historical_interval_observation().0",
         ];
         assert!(ordered(&native, &required));
         for part in required {

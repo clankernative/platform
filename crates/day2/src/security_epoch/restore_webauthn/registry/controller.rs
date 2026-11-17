@@ -450,6 +450,21 @@ impl ControllerCeremony {
         self.ceremony.encoded_challenge()
     }
 
+    /// Protected prompt DATA from this SAME server-held pending ceremony.
+    /// Current registry/authority, UV, durable use and signing are still checked
+    /// by complete_durable and the existing genuine approval producer.
+    pub(in crate::security_epoch) fn request_options_data(
+        &self,
+    ) -> Result<super::super::RestorePasskeyPrompt> {
+        let encoded = self.ceremony.encoded_challenge()?;
+        super::super::prompt::approval(
+            &self.ceremony.record,
+            &self.ceremony.challenge()?,
+            encoded,
+            &self.intent,
+        )
+    }
+
     pub(in crate::security_epoch) fn verify_current(
         &self,
         reader: &mut ControllerAdminReader<'_, '_, '_>,
