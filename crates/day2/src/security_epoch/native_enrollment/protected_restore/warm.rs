@@ -345,7 +345,7 @@ mod tests {
                         && block.label.is_none()
                         && let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice()
                     {
-                        closure.body = Box::new(inner.clone());
+                        *closure.body = inner.clone();
                     }
                 }
                 syn::Expr::Block(block) => {

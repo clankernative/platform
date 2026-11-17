@@ -1060,7 +1060,7 @@ mod source_controls {
                         && block.label.is_none()
                         && let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice()
                     {
-                        closure.body = Box::new(inner.clone());
+                        *closure.body = inner.clone();
                     }
                 }
                 syn::Expr::Block(block) => {
@@ -1136,15 +1136,14 @@ mod source_controls {
         let file = syn::parse_file(source).unwrap();
         let mut found = Vec::new();
         for item in file.items {
-            if let syn::Item::Impl(item) = item {
-                if matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|part|part.ident==owner))
-                {
-                    for method in item.items {
-                        if let syn::ImplItem::Fn(method) = method {
-                            if method.sig.ident == name {
-                                found.push(method.block);
-                            }
-                        }
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|part|part.ident==owner))
+            {
+                for method in item.items {
+                    if let syn::ImplItem::Fn(method) = method
+                        && method.sig.ident == name
+                    {
+                        found.push(method.block);
                     }
                 }
             }
