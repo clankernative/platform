@@ -3099,7 +3099,7 @@ fn app_rollout_cannot_resume_or_deploy_a_runtime_pair_record() -> Result<()> {
             .rollout_resume()
             .unwrap_err()
             .to_string()
-            .contains("runtime_pair_activation_not_implemented")
+            .contains("runtime_pair_requires_runtime_rollout")
     );
     session.state.resumed = true;
     for step in ["prepare", "admit", "deploy"] {
@@ -3108,7 +3108,7 @@ fn app_rollout_cannot_resume_or_deploy_a_runtime_pair_record() -> Result<()> {
                 .rollout(step)
                 .unwrap_err()
                 .to_string()
-                .contains("runtime_pair_activation_not_implemented")
+                .contains("runtime_pair_requires_runtime_rollout")
         );
     }
     assert!(

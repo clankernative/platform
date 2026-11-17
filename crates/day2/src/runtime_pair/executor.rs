@@ -26,21 +26,59 @@ pub struct Selection {
 
 impl Selection {
     pub fn load(path: &Path) -> Result<Self> {
-        use std::{fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt};
-        let mut input: File = OpenOptions::new()
-            .read(true)
-            .custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-            )
-            .open(path)?;
+        crate::json::decode(&input_bytes(path)?)
+            .map_err(|_| anyhow::anyhow!("runtime_pair_selection_invalid"))
+    }
+}
+
+pub(super) fn input_bytes(path: &Path) -> Result<Vec<u8>> {
+    use std::{fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt};
+    let mut input: File = OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(path)?;
+    ensure!(
+        input.metadata()?.is_file(),
+        "runtime_pair_selection_regular_file_required"
+    );
+    let mut bytes = Vec::new();
+    input.by_ref().take(1_048_577).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 1_048_576, "runtime_pair_selection_budget");
+    Ok(bytes)
+}
+
+/// Fixed init-container supervision for a disposable checkpoint. The operator
+/// copies and verifies the checkpoint before publishing the one-byte marker;
+/// no live claim is mounted by this supervisor or the candidate that follows.
+pub fn rehearsal_wait(root: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    ensure!(
+        std::fs::symlink_metadata(root)?.is_dir(),
+        "runtime_pair_rehearsal_directory_required"
+    );
+    for name in ["state", "evidence"] {
+        let directory = root.join(name);
+        std::fs::create_dir(&directory)?;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let started = std::time::Instant::now();
+    loop {
+        match input_bytes(&root.join("ready")) {
+            Ok(bytes) => {
+                ensure!(bytes == b"1", "runtime_pair_rehearsal_marker_invalid");
+                return Ok(());
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
+        }
         ensure!(
-            input.metadata()?.is_file(),
-            "runtime_pair_selection_regular_file_required"
+            started.elapsed() < std::time::Duration::from_secs(600),
+            "runtime_pair_rehearsal_staging_deadline"
         );
-        let mut bytes = Vec::new();
-        input.by_ref().take(1_048_577).read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= 1_048_576, "runtime_pair_selection_budget");
-        crate::json::decode(&bytes).map_err(|_| anyhow::anyhow!("runtime_pair_selection_invalid"))
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -63,16 +101,24 @@ pub enum Execution {
         candidate: String,
         attempt: u64,
         check: Option<CandidateCheck>,
+        handoff: Option<Box<super::Handoff>>,
     },
 }
 
 impl Execution {
     pub(crate) fn validate(&self, release: &Release) -> Result<()> {
+        if matches!(self, Self::Unadmitted) {
+            ensure!(
+                matches!(release.phase, Phase::Prepared | Phase::Aborted),
+                "runtime_pair_executor_not_admitted"
+            );
+        }
         if let Self::Admitted {
             source,
             candidate,
             attempt,
             check,
+            handoff,
         } = self
         {
             ensure!(
@@ -105,12 +151,20 @@ impl Execution {
                 day2_assets::hash_part(&check.snapshot)?;
                 day2_assets::hash_part(&check.checks)?;
             }
+            if let Some(handoff) = handoff {
+                handoff.validate(release)?;
+            } else {
+                ensure!(
+                    matches!(release.phase, Phase::Prepared | Phase::Aborted),
+                    "runtime_pair_handoff_required"
+                );
+            }
         }
         Ok(())
     }
 }
 
-fn bound(runtime: &Runtime, db: &Connection, source: bool) -> Result<Release> {
+pub(super) fn bound(runtime: &Runtime, db: &Connection, source: bool) -> Result<Release> {
     ensure!(
         runtime.rolling() && !runtime.uses_native_storage(),
         "ordinary_rolling_profile_required"
@@ -119,7 +173,11 @@ fn bound(runtime: &Runtime, db: &Connection, source: bool) -> Result<Release> {
     let release = rollout::state(db)?.context("runtime_pair_not_prepared")?;
     ensure!(
         matches!(release.kind, ReleaseKind::RuntimePair { .. })
-            && (release.phase == Phase::Prepared || (source && release.phase == Phase::Aborted))
+            && (matches!(
+                release.phase,
+                Phase::Prepared | Phase::Serving | Phase::Draining
+            ) || (source && release.phase == Phase::Aborted)
+                || (!source && release.phase == Phase::Complete))
             && release.scope == runtime.scope()
             && release.source.artifact == runtime.artifact().id()
             && release.source.instance_digest == runtime.instance_digest()
@@ -135,7 +193,12 @@ fn bound(runtime: &Runtime, db: &Connection, source: bool) -> Result<Release> {
 }
 
 fn prepared(runtime: &Runtime, db: &Connection) -> Result<Release> {
-    bound(runtime, db, false)
+    let release = bound(runtime, db, false)?;
+    ensure!(
+        release.phase == Phase::Prepared,
+        "runtime_pair_not_prepared"
+    );
+    Ok(release)
 }
 
 fn admit_in(runtime: &Runtime, db: &Connection, id: &str) -> Result<Release> {
@@ -168,6 +231,7 @@ fn admit_in(runtime: &Runtime, db: &Connection, id: &str) -> Result<Release> {
                 candidate,
                 attempt: 0,
                 check: None,
+                handoff: None,
             }
         }
         Execution::Admitted {
@@ -242,7 +306,14 @@ fn require_executor(
     else {
         anyhow::bail!("runtime_pair_executor_not_admitted")
     };
-    runtime_generation::require_active(db, source)?;
+    runtime_generation::require_active(
+        db,
+        if matches!(release.phase, Phase::Prepared | Phase::Aborted) {
+            source
+        } else {
+            candidate
+        },
+    )?;
     let (generation, software) = match selection.role {
         ExecutorRole::Source => (source, &release.source),
         ExecutorRole::Candidate => (candidate, &release.target),
@@ -358,6 +429,55 @@ pub struct Candidate {
     health_capacity: Arc<tokio::sync::Semaphore>,
 }
 
+/// The canonical installed admission, rather than an obsolete selection file,
+/// determines a previously installed process's role on later app releases.
+/// A selection for the current pair always follows that pair's strict path.
+pub async fn supervise(
+    instance: &Path,
+    app: &str,
+    selection: Selection,
+    evidence: &Path,
+) -> Result<()> {
+    let _lease = crate::deployment::pair_executor_lease(instance, app)?;
+    let runtime = Runtime::load(instance, app)?;
+    let current_pair = runtime.sql_read(|db| {
+        Ok(rollout::state(db)?.is_some_and(|release| {
+            matches!(release.kind, ReleaseKind::RuntimePair { .. })
+                && release.id == selection.release
+        }))
+    })?;
+    if !current_pair
+        && runtime.sql_read(|db| runtime_generation::installed_process(&runtime, db))?
+    {
+        return crate::deployment::serve(instance, app, crate::deployment::Access::Edge).await;
+    }
+    let candidate = Candidate::open(instance, app, selection)?;
+    candidate.serve(evidence).await
+}
+
+pub(crate) fn bind_serving_process(runtime: &Runtime, selection: &Selection) -> Result<()> {
+    ensure!(
+        selection.role == ExecutorRole::Candidate,
+        "runtime_pair_candidate_role_required"
+    );
+    runtime.sql_read(|db| {
+        let (release, generation) = require_executor(
+            runtime,
+            db,
+            selection,
+            &crate::security_admission::host_code()?,
+        )?;
+        ensure!(
+            matches!(
+                release.phase,
+                Phase::Serving | Phase::Draining | Phase::Complete
+            ),
+            "runtime_pair_public_admission_required"
+        );
+        runtime_generation::bind_admitted(runtime, db, &generation)
+    })
+}
+
 impl Candidate {
     pub fn open(instance: &Path, app: &str, selection: Selection) -> Result<Self> {
         ensure!(
@@ -446,19 +566,71 @@ impl Candidate {
     pub async fn serve(self, evidence_directory: &Path) -> Result<()> {
         let directory = evidence_directory.to_path_buf();
         let candidate = tokio::task::spawn_blocking(move || -> Result<Self> {
-            self.check(&directory)?;
+            let prepared = self
+                .runtime
+                .sql_read(|db| Ok(bound(&self.runtime, db, false)?.phase == Phase::Prepared))?;
+            if prepared {
+                self.check(&directory)?;
+            }
             Ok(self)
         })
         .await??;
-        let router = candidate_router(Arc::new(candidate));
+        let candidate = Arc::new(candidate);
+        let already_public = candidate.public_admitted()?;
+        if already_public {
+            return crate::deployment::serve_runtime_pair(
+                candidate.runtime.instance_path(),
+                candidate.runtime.app(),
+                candidate.selection.clone(),
+            )
+            .await;
+        }
+        let router = candidate_router(candidate.clone());
         let listener =
             tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 8080)).await?;
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                let _ = crate::deployment::termination().await;
-            })
-            .await?;
-        Ok(())
+        let (shutdown, mut stopped) = tokio::sync::watch::channel(false);
+        let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+            let _ = stopped.changed().await;
+        });
+        use std::future::IntoFuture;
+        let mut server = Box::pin(server.into_future());
+        let mut ticks = tokio::time::interval(std::time::Duration::from_secs(1));
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                signal=crate::deployment::termination()=> { let _=shutdown.send(true); server.await?; return signal; },
+                result=&mut server=> { result?; anyhow::bail!("runtime_pair_standby_listener_stopped"); },
+                _=ticks.tick()=> {
+                    let current=candidate.clone();
+                    if tokio::task::spawn_blocking(move || current.public_admitted()).await?? {
+                        let _=shutdown.send(true);
+                        server.await?;
+                        break;
+                    }
+                }
+            }
+        }
+        crate::deployment::serve_runtime_pair(
+            candidate.runtime.instance_path(),
+            candidate.runtime.app(),
+            candidate.selection.clone(),
+        )
+        .await
+    }
+
+    fn public_admitted(&self) -> Result<bool> {
+        self.runtime.sql_read(|db| {
+            let (release, _) = require_executor(
+                &self.runtime,
+                db,
+                &self.selection,
+                &crate::security_admission::host_code()?,
+            )?;
+            Ok(matches!(
+                release.phase,
+                Phase::Serving | Phase::Draining | Phase::Complete
+            ))
+        })
     }
 }
 
@@ -513,10 +685,7 @@ pub fn source_drain(
             selection,
             &crate::security_admission::host_code()?,
         )?;
-        ensure!(
-            runtime_generation::selected(&runtime, db)? == generation,
-            "runtime_pair_executor_code_changed"
-        );
+        runtime_generation::bind_admitted(&runtime, db, &generation)?;
         rollout::verify_storage_shape(&runtime, db)
     })?;
     crate::invocations::drain(&runtime, budget)

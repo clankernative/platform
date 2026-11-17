@@ -87,13 +87,24 @@ impl OperationLease {
             selection.apps.contains_key(app),
             "operation_app_not_installed"
         );
-        Self::acquire(
+        let lease = Self::acquire(
             &instance
                 .parent()
                 .context("instance directory")?
                 .join(".state"),
             app,
-        )
+        )?;
+        // This inspection is only for ordinary RWO stores. Native bootstrap
+        // must retain its protected constructor before any SQLite access.
+        if selection.apps[app]
+            .runtime
+            .as_ref()
+            .is_some_and(|profile| profile.rolling())
+            && selection.native_bootstrap_for(app)?.is_none()
+        {
+            require_no_runtime_handoff(&instance, app)?;
+        }
+        Ok(lease)
     }
 
     pub fn check(&self, state: &Path, app: &str) -> Result<()> {
@@ -110,6 +121,21 @@ impl OperationLease {
         );
         Ok(())
     }
+}
+
+pub(crate) fn require_no_runtime_handoff(instance: &Path, app: &str) -> Result<()> {
+    let release = crate::rollout::inspect_file(instance, app)?;
+    ensure!(
+        release.is_none_or(|release| !matches!(
+            release.kind,
+            crate::rollout::ReleaseKind::RuntimePair { .. }
+        ) || matches!(
+            release.phase,
+            crate::rollout::Phase::Complete | crate::rollout::Phase::Aborted
+        )),
+        "runtime_pair_recovery_required"
+    );
+    Ok(())
 }
 
 fn loan(stream: &UnixStream) -> Result<File> {

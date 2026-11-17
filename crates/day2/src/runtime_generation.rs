@@ -1,7 +1,7 @@
 //! Ordinary RWO executor ownership in the existing release journal. These rows
 //! describe installed code and accepted work; they never replace live authority.
-//! Isolated candidates have no invocation admission. Public runtime-pair
-//! promotion remains blocked until the online recipe exists.
+//! Isolated candidates have no invocation admission. A promoted pair may retain
+//! its exact source executor without transferring that executor's accepted work.
 use crate::{
     authority_state,
     runtime_pair::RuntimeIdentity,
@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS day2_rollout_runtime(
 CREATE TABLE IF NOT EXISTS day2_invocation_runtime(
     invocation TEXT PRIMARY KEY REFERENCES day2_invocations(id),
     generation TEXT NOT NULL REFERENCES day2_rollout_generations(id)
-) STRICT;";
+) STRICT;
+CREATE INDEX IF NOT EXISTS day2_invocation_runtime_generation ON day2_invocation_runtime(generation,invocation);";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,16 +82,95 @@ fn pin_process(runtime: &Runtime, id: &str) -> Result<()> {
 /// A restart reads the durable selection, while a running process keeps the
 /// identity it already selected. Neither path can silently adopt another host.
 pub(crate) fn selected(runtime: &Runtime, db: &Connection) -> Result<String> {
+    let measured = security_admission::host_code()?;
+    let id = choice(runtime, db, &measured)?;
+    bind_admitted(runtime, db, &id)?;
+    Ok(id)
+}
+
+fn choice(runtime: &Runtime, db: &Connection, measured: &HostCode) -> Result<String> {
     let admitted = active(db)?.context("runtime_generation_not_installed")?;
-    let id = runtime.executor_generation().get().unwrap_or(&admitted);
-    ensure!(*id == admitted, "runtime_generation_not_admitted");
-    let installed = load(db, runtime.scope(), id)?;
+    let id = if let Some(pinned) = runtime.executor_generation().get() {
+        pinned.clone()
+    } else if let Some(source) = crate::runtime_pair::retained_source(runtime, db)?
+        && load(db, runtime.scope(), &source)?.code == *measured
+    {
+        // Ordinary source restarts retain their owner even for an image-only
+        // pair with identical supervisor/launcher bytes. A candidate binds its
+        // exact admitted target explicitly before public host construction.
+        source
+    } else {
+        admitted.clone()
+    };
     ensure!(
-        installed.code == security_admission::host_code()?,
+        id == admitted || crate::runtime_pair::retained_source(runtime, db)?.as_ref() == Some(&id),
+        "runtime_generation_not_admitted"
+    );
+    let installed = load(db, runtime.scope(), &id)?;
+    ensure!(
+        installed.code == *measured,
         "runtime_generation_code_changed"
     );
-    pin_process(runtime, id)?;
-    Ok(id.clone())
+    Ok(id)
+}
+
+pub(crate) fn bind_admitted(runtime: &Runtime, db: &Connection, id: &str) -> Result<()> {
+    ensure!(
+        active(db)?.as_deref() == Some(id)
+            || crate::runtime_pair::retained_source(runtime, db)?.as_deref() == Some(id),
+        "runtime_generation_not_admitted"
+    );
+    ensure!(
+        load(db, runtime.scope(), id)?.code == security_admission::host_code()?,
+        "runtime_generation_code_changed"
+    );
+    pin_process(runtime, id)
+}
+
+#[cfg(test)]
+pub(crate) fn choice_for_test(
+    runtime: &Runtime,
+    db: &Connection,
+    measured: &HostCode,
+) -> Result<String> {
+    choice(runtime, db, measured)
+}
+
+/// Build prerequisites still validate the original compiled artifact. The
+/// installed runtime is a separately approved execution choice: only startup
+/// under those prerequisites or an operator-admitted pair can publish it.
+pub(crate) fn require_execution(
+    runtime: &Runtime,
+    db: &Connection,
+    requirements: &security_admission::Requirements,
+) -> Result<()> {
+    if runtime.rolling() && active(db)?.is_some() {
+        let id = selected(runtime, db)?;
+        let installed = load(db, runtime.scope(), &id)?;
+        if matches!(
+            installed.runtime.containment,
+            Some(security_admission::Containment::LinuxQualifiedV1 { .. })
+        ) {
+            ensure!(
+                installed.runtime.code()? == installed.code,
+                "runtime_generation_qualification_changed"
+            );
+            return Ok(());
+        }
+    }
+    requirements.require_runtime()
+}
+
+pub(crate) fn select_pair_target(db: &Connection, source: &str, target: &str) -> Result<()> {
+    require_active(db, source)?;
+    ensure!(
+        db.execute(
+            "UPDATE day2_rollout_runtime SET generation=?1 WHERE singleton=1 AND generation=?2",
+            params![target, source]
+        )? == 1,
+        "runtime_generation_not_admitted"
+    );
+    Ok(())
 }
 
 fn initial(runtime: &Runtime, tx: &Transaction<'_>) -> Result<String> {
@@ -215,6 +295,9 @@ pub(crate) fn capture(
     } else {
         initial(runtime, tx)?
     };
+    if parent.is_none() {
+        crate::runtime_pair::require_root_admission(runtime, tx, &generation)?;
+    }
     if let Some(parent) = parent {
         ensure!(
             owner(tx, parent)? == generation,
@@ -294,6 +377,23 @@ pub(crate) fn identity(runtime: &Runtime, db: &Connection) -> Result<Option<Runt
     active(db)?
         .map(|id| load(db, runtime.scope(), &id).map(|value| value.runtime))
         .transpose()
+}
+
+pub(crate) fn process_identity(runtime: &Runtime, db: &Connection) -> Result<RuntimeIdentity> {
+    load(db, runtime.scope(), &selected(runtime, db)?).map(|installed| installed.runtime)
+}
+
+pub(crate) fn installed_process(runtime: &Runtime, db: &Connection) -> Result<bool> {
+    let actual = security_admission::host_code()?;
+    if let Some(id) = active(db)?
+        && load(db, runtime.scope(), &id)?.code == actual
+    {
+        return Ok(true);
+    }
+    if let Some(source) = crate::runtime_pair::retained_source(runtime, db)? {
+        return Ok(load(db, runtime.scope(), &source)?.code == actual);
+    }
+    Ok(false)
 }
 
 pub(crate) fn authority_changed(

@@ -181,6 +181,109 @@ here changes an installed app, controller, PVC safeguard or data. Compiled runti
 and app artifacts remain reusable; no app deployment rebuilds Platform for this
 protocol.
 
+## R2c online runtime handoff
+
+`day2 platform maintain runtime-rollout REQUEST_JSON_FILE` is the runtime-only
+lane in the existing `ops/Maintain.roc` recipe. App-code-only delivery continues
+through `maintain rollout`; it refuses runtime-pair records. This code supplies
+controller/kernel guards. R3 native qualification and R4–R5 delivery/adoption
+remain prerequisites for live use; local SQLite, metadata and scripted adapter
+tests do not establish two-binary or real-ingress qualification.
+
+The request keeps the existing source/target immutable images, same compiled
+artifact, effective instance, exact controller/PVC UID and incumbent node. It adds
+one closed `runtime_pair` record with `receipt`, `receipt_digest`, `project`,
+`backend_service` and Kubernetes `service`. The receipt pins the exact directed
+qualified pair and local-only profile. No app deployment compiles Platform or its
+SDK/operator tooling. The local-only profile rejects provider/OAuth/native-store,
+sidecar and credential initialization combinations; unsupported shapes refuse
+while Source serves. Existing protocol-3 installations require the explicit
+bootstrap decision; no journal migration or stopped fallback is supplied.
+
+The native protocol now versions the release journal at 4 and serving, operation
+and execution leases at 2. The same journal records bound, promoted, withdrawing,
+quiesced and complete handoff states. Actual measured Source and Target code
+remain separate execution approvals; the artifact's original SDK/security
+prerequisites are still validated independently. No authority document, invocation
+owner or effect owner is rewritten to make the target impersonate Source.
+
+The recipe first obtains a verified offsite checkpoint and a private local copy
+under the shared operation lease. It prepares a disposable SQLite copy, then
+starts the target's actual candidate-check binary with **no live PVC mounted**.
+After that rehearsal and operator confirmation, it claims the original Deployment
+and prepares live admission. Preparation leaves Source ready. A per-release
+immutable ConfigMap binds the instance, role selections and original/target
+pod templates. An independently managed ReplicaSet starts Target on the same
+node using scheduler affinity in every existing placement term. Target is owned
+by that ConfigMap until adoption, so the Source Deployment cannot scale it away.
+
+Target first exposes standby health only. Native promotion atomically selects
+its execution generation and retains Source; the same process then opens the
+ordinary Edge server. Its own pump executes the app-owned business probe.
+Public readiness stays false until the probe succeeds. Current policy, captured
+execution ownership and measured code are enforced on business requests, separate
+from the health cache.
+
+Withdrawal requires Google's real backend endpoint health, matched to the exact
+Service/NEG, project, backend ID/configuration, attached HTTP `/health/ready`
+check, target Pod/ReplicaSet UID, actual image ID, node and PVC UID. The initial
+adapter supports one global HTTP backend and one zonal IPv4 NEG; other topologies
+refuse. Pod Ready, `LoadBalancerNegReady`, an aggregate healthy backend or the
+absence of a health check is insufficient. Backend health and NEG membership
+come from separate bounded, read-only provider observations. Each transition
+uses a fresh native observation round and current authority stamp.
+
+After withdrawal Source stays able to finish requests while the controller waits
+for its original endpoint to leave the NEG and for a full configured connection
+drain interval. The interval is monotonic and starts again after controller loss.
+A fresh allowlisted `/health/drain` observation must report zero in-flight
+requests and streams under Source's original generation. Native quiescence then
+blocks new Source roots; accepted work and children retain Source ownership.
+The ordinary server observes that state, drains HTTP and exits successfully.
+The controller records the actual original Pod's graceful stop in the canonical
+journal **before** it may retire that Pod. A historical successful termination
+beside a currently running container is insufficient.
+
+Adoption pauses the original Deployment, installs the exact Target template,
+compare-and-swaps the running ReplicaSet's owner from ConfigMap to Deployment,
+and unpauses. It retains the running Target instead of asking Kubernetes to make
+another target surge. Every mutation tests current UID, resourceVersion and
+template, and rechecks Target backend health. Source's stopped public Pod may
+then release its CPU slot. Bounded headless executors using the exact original
+Source image recover its remaining accepted work on the same PVC/node. No work
+is transferred to Target. Completion requires Source backlog zero, no Source
+public Pods and a healthy adopted Target. The reviewed backup CronJob then selects
+Target's image/instance under the same exclusion protocol.
+
+A controller restart uses the same exact request, immutable blueprint and
+canonical journal. It reaps only its own previous helper/checkpoint Pods under
+UID preconditions, waits for its prior bounded backup Jobs to settle, and keeps
+a headless Source recovery Pod available for reconciliation. Reaping a keeper
+does not release a borrowing child's actual locked descriptor. A policy-aborted,
+never-public candidate is removed only after native inspection proves original
+Source is still active; its Deployment claim is then cleared without stopping
+Source. Lost responses reconcile rather than repeat app writes or
+invent completion. Pending runtime admission blocks fresh backups and offline
+maintenance even after the keeper dies; the Deployment claim also prevents an
+offline recipe from stopping the app before that refusal. Shared-claim backups
+must use a qualified member of this pair and the operation-lock contract.
+Interrupted source recovery remains bounded and retains original owners.
+No step deletes a PVC or restores a checkpoint over live writes.
+
+Ordinary-RWO readiness uses a dedicated metadata-only SQLite observer, outside
+the business SQL admission queue. HTTP probes use its bounded fresh cache rather
+than enqueue SQL. Busy/locked observations retain at most five seconds of prior
+health; invalid binding/metadata clears it. A single owned sampler is joined at
+shutdown. Source quiescence is irreversible for that process. Native-store health
+keeps its existing protected path.
+
+This is a planned-deploy bridge, not node-failure HA. Before Target is healthy,
+Source remains the only available backend. After Source is quiesced, a Target or
+node failure can still interrupt service. R3/R5 must exercise those failure
+windows, authenticated ingress, long responses/streams, backup exclusion,
+source/target deaths and exact retained receipts. Richer artifact/runtime pairs
+and restore under fresh runtime authority remain explicitly unqualified.
+
 ## Current mechanisms
 
 - [Maintain.roc](../ops/Maintain.roc) prepares artifacts and a sized helper while

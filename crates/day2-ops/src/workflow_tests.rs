@@ -1248,9 +1248,21 @@ fn rolling_release_proves_candidate_before_promotion_without_an_offline_fence() 
             |request| {
                 let input: Value = request.decode()?;
                 steps.push(match request.action.as_str() {
-                    "maintenance-rollout" => format!("rollout:{}", input["step"].as_str().unwrap()),
+                    "maintenance-rollout" => format!(
+                        "rollout:{}",
+                        input["step"].as_str().ok_or_else(|| anyhow::anyhow!(
+                            "runtime step missing in {}",
+                            request.input
+                        ))?
+                    ),
                     "maintenance-migration" => {
-                        format!("migration:{}", input["step"].as_str().unwrap())
+                        format!(
+                            "migration:{}",
+                            input["step"].as_str().ok_or_else(|| anyhow::anyhow!(
+                                "runtime step missing in {}",
+                                request.input
+                            ))?
+                        )
                     }
                     "maintenance-workflow" => {
                         format!("workflow:{}", input["workflow"].as_str().unwrap())
@@ -1320,5 +1332,135 @@ fn rolling_release_proves_candidate_before_promotion_without_an_offline_fence() 
     );
     assert!(result.is_err());
     assert_ne!(steps.last().map(String::as_str), Some("maintenance-finish"));
+    Ok(())
+}
+
+#[test]
+fn runtime_handoff_recipe_preserves_order_on_every_failure_and_bounds_source_recovery() -> Result<()>
+{
+    let runner = automation::runner()?;
+    let execute = |resuming: bool,
+                   refuse: Option<&str>,
+                   recover_forever: bool|
+     -> (Result<Value>, Vec<String>) {
+        let mut steps = Vec::new();
+        let result = automation::run(
+            &runner,
+            &["platform", "maintain", "runtime-rollout", "request.json"],
+            |request| {
+                let input: Value = request.decode()?;
+                let step = if request.action == "maintenance-runtime-rollout" {
+                    format!(
+                        "runtime:{}",
+                        input["step"].as_str().ok_or_else(|| anyhow::anyhow!(
+                            "runtime step missing in {}",
+                            request.input
+                        ))?
+                    )
+                } else if request.action == "maintenance-workflow" {
+                    format!("workflow:{}", input["workflow"].as_str().unwrap())
+                } else {
+                    request.action.trim_start_matches("maintenance-").into()
+                };
+                steps.push(step.clone());
+                if refuse == Some(step.as_str()) {
+                    bail!("injected capability refusal");
+                }
+                Ok(if step == "runtime:resume" {
+                    json!({"resuming":resuming,"aborted":false})
+                } else if step == "runtime:recover" {
+                    json!({"remaining":recover_forever})
+                } else {
+                    json!({})
+                })
+            },
+        );
+        (result, steps)
+    };
+    let (result, fresh) = execute(false, None, false);
+    result?;
+    let index = |step: &str| fresh.iter().position(|s| s == step).unwrap();
+    assert!(index("offsite-backup") < index("workflow:backup"));
+    assert!(index("runtime:rehearsal-check") < index("runtime:claim"));
+    assert!(index("runtime:confirm") < index("runtime:claim"));
+    assert!(index("runtime:claim") < index("runtime:prepare"));
+    assert!(index("runtime:probe") < index("runtime:withdraw"));
+    assert!(index("runtime:drain") < index("runtime:quiesce"));
+    assert!(index("runtime:transport-stop") < index("runtime:pause"));
+    assert!(
+        index("runtime:retarget") < index("runtime:adopt")
+            && index("runtime:adopt") < index("runtime:unpause")
+    );
+    assert!(index("runtime:source-gone") < index("runtime:recover"));
+    assert!(
+        index("runtime:complete") < index("runtime:backup-select")
+            && index("runtime:backup-select") < index("runtime:release")
+    );
+    assert!(
+        !fresh
+            .iter()
+            .any(|s| matches!(s.as_str(), "fence" | "migration:apply" | "mark-activated"))
+    );
+    for (position, step) in fresh.iter().enumerate() {
+        let (result, observed) = execute(false, Some(step), false);
+        assert!(result.is_err(), "failure at {step} was ignored");
+        assert_eq!(
+            observed,
+            fresh[..=position],
+            "actions continued after {step}"
+        );
+    }
+    let (result, resumed) = execute(true, None, false);
+    result?;
+    assert!(!resumed.iter().any(|s| matches!(
+        s.as_str(),
+        "offsite-backup" | "workflow:backup" | "copy-backup"
+    )));
+    let (result, exhausted) = execute(true, None, true);
+    assert!(result.is_err());
+    assert_eq!(
+        exhausted
+            .iter()
+            .filter(|s| s.as_str() == "runtime:recover")
+            .count(),
+        32
+    );
+    assert!(!exhausted.iter().any(|s| s == "runtime:complete"));
+    Ok(())
+}
+
+#[test]
+fn policy_aborted_runtime_retry_only_cleans_its_never_public_candidate() -> Result<()> {
+    let mut steps = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "runtime-rollout", "request.json"],
+        |request| {
+            let input: Value = request.decode()?;
+            let step = if request.action == "maintenance-runtime-rollout" {
+                format!(
+                    "runtime:{}",
+                    input["step"].as_str().ok_or_else(|| anyhow::anyhow!(
+                        "runtime step missing in {}",
+                        request.input
+                    ))?
+                )
+            } else {
+                request.action.clone()
+            };
+            steps.push(step.clone());
+            Ok(if step == "runtime:resume" {
+                json!({"resuming":true,"aborted":true})
+            } else {
+                json!({})
+            })
+        },
+    )?;
+    assert!(steps.iter().any(|step| step == "runtime:abort-cleanup"));
+    assert!(!steps.iter().any(|step| matches!(
+        step.as_str(),
+        "runtime:promote" | "runtime:pause" | "maintenance-offsite-backup" | "maintenance-fence"
+    )));
+    assert_eq!(steps.last().map(String::as_str), Some("maintenance-finish"));
     Ok(())
 }

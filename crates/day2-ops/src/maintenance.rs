@@ -32,8 +32,10 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 mod activation;
+mod runtime_rollout;
 pub use activation::Recovery;
 use activation::{Intent as ActivationIntent, Phase as ActivationPhase};
+pub use runtime_rollout::{BackendRead, RuntimePairRequest};
 use std::{
     collections::BTreeMap,
     fs,
@@ -94,6 +96,7 @@ pub enum Operation {
     /// Recovery for `activate` of a new artifact when its own stamp step failed.
     MarkActivated,
     Rollout,
+    RuntimeRollout,
 }
 
 impl Operation {
@@ -104,9 +107,10 @@ impl Operation {
             "authority-apply" => Self::AuthorityApply,
             "activate" => Self::Activate,
             "rollout" => Self::Rollout,
+            "runtime-rollout" => Self::RuntimeRollout,
             "mark-activated" => Self::MarkActivated,
             _ => bail!(
-                "maintain operation must be inspect, backup, authority-apply, activate or mark-activated"
+                "maintain operation must be inspect, backup, authority-apply, activate, mark-activated, rollout or runtime-rollout"
             ),
         })
     }
@@ -118,13 +122,21 @@ impl Operation {
             Self::AuthorityApply => "authority-apply",
             Self::Activate => "activate",
             Self::Rollout => "rollout",
+            Self::RuntimeRollout => "runtime-rollout",
             Self::MarkActivated => "mark-activated",
         }
     }
 
     /// `activate` and its `mark-activated` recovery take the same request.
     fn targeted(self) -> bool {
-        matches!(self, Self::Activate | Self::MarkActivated | Self::Rollout)
+        matches!(
+            self,
+            Self::Activate | Self::MarkActivated | Self::Rollout | Self::RuntimeRollout
+        )
+    }
+
+    fn online(self) -> bool {
+        matches!(self, Self::Rollout | Self::RuntimeRollout)
     }
 
     /// How many times the app's stores fit on the pod's scratch volume at the
@@ -138,7 +150,7 @@ impl Operation {
             // the WAL and SQLite temporary files that migration grows. The
             // real migration's WAL is on the app's volume; its temporary files
             // reuse the space the removed rehearsal freed.
-            Self::Activate | Self::Rollout => 2,
+            Self::Activate | Self::Rollout | Self::RuntimeRollout => 2,
         }
     }
 }
@@ -352,6 +364,9 @@ pub struct Request {
     pub request_id: Option<String>,
     #[serde(default)]
     pub target: Option<Target>,
+    /// Runtime-only online delivery has its own directed qualification and
+    /// provider observations. The app-artifact lane never falls back to it.
+    pub runtime_pair: Option<RuntimePairRequest>,
     /// Reviewed namespace backup identity and destination. Required for rolling
     /// releases; the source image takes an online snapshot before preparation.
     #[serde(default)]
@@ -367,7 +382,7 @@ pub struct Request {
 
 impl Request {
     fn kind(&self, operation: Operation) -> WorkloadKind {
-        if operation == Operation::Rollout {
+        if operation.online() {
             WorkloadKind::Deployment
         } else {
             self.workload_kind
@@ -375,8 +390,23 @@ impl Request {
     }
 
     pub fn validate(&self, operation: Operation) -> Result<()> {
+        match (&self.runtime_pair, operation) {
+            (Some(pair), Operation::RuntimeRollout) => {
+                pair.validate()?;
+                ensure!(
+                    self.target
+                        .as_ref()
+                        .is_some_and(|target| target.artifact_id == self.artifact_id
+                            && target.probe.is_some()),
+                    "runtime_pair_requires_same_artifact_and_probe"
+                );
+            }
+            (None, Operation::RuntimeRollout) => bail!("runtime_pair_request_required"),
+            (Some(_), _) => bail!("runtime_pair_requires_runtime_rollout"),
+            (None, _) => {}
+        }
         match (&self.placement, operation) {
-            (Some(placement), Operation::Rollout) => {
+            (Some(placement), Operation::Rollout | Operation::RuntimeRollout) => {
                 for uid in [&placement.controller_uid, &placement.pvc_uid] {
                     ensure!(
                         !uid.is_empty()
@@ -389,19 +419,23 @@ impl Request {
                 }
                 ensure!(dns_label(&placement.node), "invalid rolling placement node");
             }
-            (None, Operation::Rollout) => bail!("rolling_release_requires_captured_placement"),
+            (None, Operation::Rollout | Operation::RuntimeRollout) => {
+                bail!("rolling_release_requires_captured_placement")
+            }
             (None, _) => {}
             (Some(_), _) => bail!("placement requires rollout"),
         }
         match (&self.offsite_backup, operation) {
-            (Some(backup), Operation::Rollout) => {
+            (Some(backup), Operation::Rollout | Operation::RuntimeRollout) => {
                 ensure!(
                     dns_label(&backup.cronjob) && dns_label(&backup.service_account),
                     "invalid rolling backup identity"
                 );
                 crate::offsite::validate_bucket(&backup.bucket)?;
             }
-            (None, Operation::Rollout) => bail!("rolling_release_requires_offsite_backup"),
+            (None, Operation::Rollout | Operation::RuntimeRollout) => {
+                bail!("rolling_release_requires_offsite_backup")
+            }
             (None, _) => {}
             (Some(_), _) => bail!("offsite_backup requires rollout"),
         }
@@ -451,12 +485,7 @@ impl Request {
             Some(id) => ensure!(
                 needs_id
                     && !id.is_empty()
-                    && id.len()
-                        <= if operation == Operation::Rollout {
-                            96
-                        } else {
-                            128
-                        }
+                    && id.len() <= if operation.online() { 96 } else { 128 }
                     && id
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
@@ -561,6 +590,16 @@ pub trait Cluster {
         stdin: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<String>;
+    /// Fixed read-only GCP observations. An adapter that lacks this port refuses
+    /// runtime handoff before the source is withdrawn.
+    fn backend_read(
+        &mut self,
+        _project: &str,
+        _read: &BackendRead,
+        _timeout: Duration,
+    ) -> Result<String> {
+        bail!("runtime_pair_backend_observation_unavailable")
+    }
     /// From now on ignore interrupts and keep tools out of the terminal's
     /// process group: cleanup must finish even under a second Ctrl-C.
     fn unstoppable(&mut self) {}
@@ -587,6 +626,7 @@ impl Tools {
         Ok(Self {
             cluster: Box::new(Kubectl {
                 executable: on_path("kubectl")?,
+                gcloud: on_path("gcloud")?,
                 interrupted: interrupted.clone(),
                 unstoppable: false,
             }),
@@ -701,11 +741,74 @@ fn bounded(
 
 struct Kubectl {
     executable: PathBuf,
+    gcloud: PathBuf,
     interrupted: Arc<AtomicBool>,
     unstoppable: bool,
 }
 
 impl Cluster for Kubectl {
+    fn backend_read(
+        &mut self,
+        project: &str,
+        read: &BackendRead,
+        timeout: Duration,
+    ) -> Result<String> {
+        ensure!(dns_label(project), "runtime_pair_backend_selection_invalid");
+        let mut command = Command::new(&self.gcloud);
+        command.arg("compute");
+        match read {
+            BackendRead::HealthCheck { name } => {
+                ensure!(dns_label(name), "runtime_pair_backend_selection_invalid");
+                command.args(["health-checks", "describe", name, "--global"]);
+            }
+            BackendRead::Neg { name, zone } => {
+                ensure!(
+                    dns_label(name) && dns_label(zone),
+                    "runtime_pair_backend_selection_invalid"
+                );
+                command.args(["network-endpoint-groups", "describe", name, "--zone", zone]);
+            }
+            BackendRead::Service { name } | BackendRead::Health { name } => {
+                ensure!(dns_label(name), "runtime_pair_backend_selection_invalid");
+                command.args([
+                    "backend-services",
+                    if matches!(read, BackendRead::Service { .. }) {
+                        "describe"
+                    } else {
+                        "get-health"
+                    },
+                    name,
+                    "--global",
+                ]);
+            }
+            BackendRead::Endpoints { name, zone } => {
+                ensure!(
+                    dns_label(name) && dns_label(zone),
+                    "runtime_pair_backend_selection_invalid"
+                );
+                command.args([
+                    "network-endpoint-groups",
+                    "list-network-endpoints",
+                    name,
+                    "--zone",
+                    zone,
+                ]);
+            }
+        }
+        command.args(["--project", project, "--format=json", "--quiet"]);
+        let result = bounded(
+            &mut command,
+            None,
+            timeout,
+            (!self.unstoppable).then_some(self.interrupted.as_ref()),
+        )
+        .map_err(|_| anyhow::anyhow!("runtime_pair_backend_observation_failed"))?;
+        ensure!(
+            result.len() <= 1_048_576,
+            "runtime_pair_backend_observation_budget"
+        );
+        Ok(result)
+    }
     fn kubectl(
         &mut self,
         args: &[String],
@@ -1088,6 +1191,7 @@ fn private(path: &Path) -> Result<()> {
 
 #[derive(Default)]
 struct State {
+    runtime: runtime_rollout::Progress,
     operation_claimed: bool,
     preflight_done: bool,
     rehearsal_prepared: bool,
@@ -1169,7 +1273,7 @@ impl Session {
         let request: Request = day2::json::decode(&request_bytes)?;
         request.validate(operation)?;
         ensure!(
-            operation != Operation::Rollout
+            !operation.online()
                 || request
                     .target
                     .as_ref()
@@ -1184,6 +1288,9 @@ impl Session {
                     "target instance size"
                 );
                 let text = fs::read_to_string(&target.instance)?;
+                if operation == Operation::RuntimeRollout {
+                    day2::runtime_pair::validate_instance(text.as_bytes(), &request.app)?;
+                }
                 let value: Value =
                     serde_json::from_str(&text).context("target instance is not JSON")?;
                 ensure!(
@@ -1209,13 +1316,36 @@ impl Session {
             "-o",
             "json",
         ])?)?;
+        if let Some(owner) =
+            statefulset["metadata"]["annotations"]["day2.dev/runtime-pair"].as_str()
+        {
+            ensure!(
+                operation == Operation::RuntimeRollout && owner == request_digest,
+                "runtime_pair_recovery_required"
+            );
+        }
         let replicas = statefulset["spec"]["replicas"]
             .as_u64()
             .context("StatefulSet replicas")?;
+        if operation == Operation::RuntimeRollout {
+            let source_map = statefulset["spec"]["template"]["spec"]["volumes"]
+                .as_array()
+                .context("runtime_pair_source_volumes_required")?
+                .iter()
+                .find(|volume| volume["name"] == "instance")
+                .and_then(|volume| volume["configMap"]["name"].as_str())
+                .context("runtime_pair_source_instance_required")?;
+            let map: Value =
+                serde_json::from_str(&kubectl(&["get", "configmap", source_map, "-o", "json"])?)?;
+            let source = map["data"]["instance.json"]
+                .as_str()
+                .context("runtime_pair_source_instance_required")?;
+            day2::runtime_pair::validate_instance(source.as_bytes(), &request.app)?;
+        }
         let running = statefulset["spec"]["template"]["spec"]["containers"][0]["image"]
             .as_str()
             .context("StatefulSet image")?;
-        let resuming = operation == Operation::Rollout
+        let resuming = operation.online()
             && statefulset["metadata"]["annotations"]["day2.dev/rollout"].as_str()
                 == request.request_id.as_deref()
             && request
@@ -1234,7 +1364,7 @@ impl Session {
             unmarked(&request, replicas, marked.as_deref())?;
         }
         let mut incumbent = None;
-        let online_node = if operation == Operation::Rollout {
+        let online_node = if operation.online() {
             ensure!(
                 replicas == 1
                     && statefulset["spec"]["strategy"]["type"] == "RollingUpdate"
@@ -1271,6 +1401,8 @@ impl Session {
                                     && owner["uid"] == statefulset["metadata"]["uid"]
                             })
                         })
+                        || (operation == Operation::RuntimeRollout
+                            && runtime_rollout::owned_candidate(replica, &request, &request_digest))
                 })
                 .filter_map(|replica| replica["metadata"]["uid"].as_str())
                 .collect();
@@ -1331,7 +1463,11 @@ impl Session {
                                 containers.iter().any(|container| {
                                     container["name"] == "day2"
                                         && (container["image"] == request.app_image
-                                            || (resuming && container["image"] == running))
+                                            || (resuming && container["image"] == running)
+                                            || (operation == Operation::RuntimeRollout
+                                                && request.target.as_ref().is_some_and(|target| {
+                                                    container["image"] == target.app_image
+                                                })))
                                 })
                             })
                 })
@@ -1436,7 +1572,10 @@ impl Session {
         };
         let pvc_uid = if matches!(
             operation,
-            Operation::Rollout | Operation::Activate | Operation::MarkActivated
+            Operation::Rollout
+                | Operation::RuntimeRollout
+                | Operation::Activate
+                | Operation::MarkActivated
         ) {
             let pvc: Value =
                 serde_json::from_str(&kubectl(&["get", "pvc", &request.pvc, "-o", "json"])?)?;
@@ -1504,7 +1643,8 @@ impl Session {
                 "maintenance_pod_must_not_match_a_service"
             );
         }
-        if operation == Operation::Rollout {
+        let mut runtime_helpers = Vec::new();
+        if operation.online() {
             let expected = request
                 .placement
                 .as_ref()
@@ -1534,6 +1674,12 @@ impl Session {
                     ),
                 "another_maintenance_session_is_running"
             );
+            if operation == Operation::RuntimeRollout {
+                runtime_helpers = others["items"]
+                    .as_array()
+                    .context("maintenance pods")?
+                    .clone();
+            }
         } else {
             let others = kubectl(&["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"])?;
             ensure!(
@@ -1583,6 +1729,7 @@ impl Session {
             activation,
             state: State {
                 fenced: recovering_fence,
+                runtime: runtime_rollout::Progress::with_stale(runtime_helpers),
                 ..State::default()
             },
             request,
@@ -1687,7 +1834,7 @@ impl Session {
         // Reconciliation may have updated the mutable bootstrap ConfigMap
         // after completion but before CI recorded ready. The owned target's
         // selected instance remains exact; never reconstruct or replan it.
-        let released = self.operation == Operation::Rollout
+        let released = self.operation.online()
             && self.controller["metadata"]["annotations"]["day2.dev/rollout"].as_str()
                 == self.request.request_id.as_deref()
             && self.request.target.as_ref().is_some_and(|target| {
@@ -1750,7 +1897,7 @@ impl Session {
             self.state.artifacts && !self.state.stopped,
             "stop follows the artifact fetch, once"
         );
-        if self.operation == Operation::Rollout {
+        if self.operation.online() {
             self.state.stopped = true; // Ordering marker; no workload is scaled.
             self.record("incumbent-kept-serving", json!({"node":self.online_node}))?;
             return Ok(json!({"incumbent_running":true}));
@@ -2222,6 +2369,12 @@ impl Session {
                                 && owner["uid"] == self.controller["metadata"]["uid"]
                         })
                     })
+                    || (self.operation == Operation::RuntimeRollout
+                        && runtime_rollout::owned_candidate(
+                            replica,
+                            &self.request,
+                            &self.request_digest,
+                        ))
                 {
                     ensure!(
                         replica["metadata"]["uid"]
@@ -2267,6 +2420,15 @@ impl Session {
                         {
                             continue;
                         }
+                        if self.operation == Operation::RuntimeRollout
+                            && runtime_rollout::owned_recovery(
+                                item,
+                                &self.request,
+                                &self.request_digest,
+                            )
+                        {
+                            continue;
+                        }
                         if item["metadata"]["ownerReferences"]
                             .as_array()
                             .is_some_and(|owners| {
@@ -2309,6 +2471,21 @@ impl Session {
                     backup_participant(template, &self.request.app, &self.request.pvc),
                     "uncoordinated_backup_or_job_uses_app_claim"
                 );
+                if self.operation == Operation::RuntimeRollout {
+                    ensure!(
+                        template["spec"]["containers"]
+                            .as_array()
+                            .is_some_and(|containers| containers.iter().all(|container| container
+                                ["image"]
+                                == self.request.app_image
+                                || self
+                                    .request
+                                    .target
+                                    .as_ref()
+                                    .is_some_and(|target| container["image"] == target.app_image))),
+                        "runtime_pair_backup_execution_protocol_required"
+                    );
+                }
             }
         }
         Ok(())
@@ -2798,6 +2975,7 @@ impl Session {
                             | Operation::AuthorityApply
                             | Operation::Activate
                             | Operation::Rollout
+                            | Operation::RuntimeRollout
                     ) && !self.state.pod_backup,
                     "one backup per session, not for inspect or mark-activated"
                 );
@@ -3105,8 +3283,10 @@ impl Session {
 
     pub fn prepare_rehearsal(&mut self) -> Result<Value> {
         ensure!(
-            matches!(self.operation, Operation::Activate | Operation::Rollout)
-                && self.state.operation_claimed
+            matches!(
+                self.operation,
+                Operation::Activate | Operation::Rollout | Operation::RuntimeRollout
+            ) && self.state.operation_claimed
                 && self.state.backup.is_some()
                 && !self.state.confirmed
                 && !self.state.rehearsal_prepared,
@@ -3334,7 +3514,7 @@ impl Session {
         }
         ensure!(
             state["kind"]["kind"] == "app_artifact",
-            "runtime_pair_activation_not_implemented"
+            "runtime_pair_requires_runtime_rollout"
         );
         let target = self.request.target.as_ref().context("target")?;
         self.require_target_instance(&state)?;
@@ -3363,7 +3543,7 @@ impl Session {
     /// incumbent image, instance and PVC. No serving replica is stopped.
     pub fn offsite_backup(&mut self) -> Result<Value> {
         ensure!(
-            self.operation == Operation::Rollout
+            self.operation.online()
                 && self.state.pod
                 && !self.state.operation_claimed
                 && !self.state.resumed
@@ -3582,6 +3762,8 @@ impl Session {
             "offsite_backup_completion_required"
         );
         let receipt = json!({"job":name,"source_image":self.request.app_image,
+            "cronjob_uid":cronjob["metadata"]["uid"],
+            "template_digest":day2::digest(&serde_json::to_vec(&cronjob["spec"]["jobTemplate"]["spec"]["template"])?),
             "source_artifact":summary["artifact"],"upload":uploaded});
         self.record("offsite-backup-complete", receipt.clone())?;
         self.state.offsite_backup = Some(receipt.clone());
@@ -3658,7 +3840,7 @@ impl Session {
         if state["id"] == id {
             ensure!(
                 state["kind"]["kind"] == "app_artifact",
-                "runtime_pair_activation_not_implemented"
+                "runtime_pair_requires_runtime_rollout"
             );
             self.require_target_instance(&state)?;
         }
@@ -4389,7 +4571,9 @@ impl Session {
             "finish closes an open session, once"
         );
         match self.operation {
-            Operation::Rollout => ensure!(self.state.result.is_some(), "rollout has not finished"),
+            Operation::Rollout | Operation::RuntimeRollout => {
+                ensure!(self.state.result.is_some(), "rollout has not finished")
+            }
             Operation::Inspect => ensure!(self.state.result.is_some(), "inspect has not run"),
             Operation::Backup => ensure!(
                 self.state.backup.is_some(),
@@ -4420,7 +4604,7 @@ impl Session {
             "journal": self.journal,
         });
         self.record("finish", receipt.clone())?;
-        if self.operation.targeted() && self.operation != Operation::Rollout {
+        if self.operation.targeted() && !self.operation.online() {
             eprintln!(
                 "\nActivated. {} stays at 0 replicas. Release the activated image\nnext: day2-gke-release restores the replica for a release-managed app.\nOtherwise apply day2-app with image and artifact_id set to the activated build.",
                 self.request.statefulset
@@ -4493,6 +4677,7 @@ impl Session {
             failures.push(format!("deleting backup {job}: {error:#}"));
         }
         let mut pods = Vec::new();
+        pods.extend(self.state.runtime.temporary_pods.clone());
         if self.state.probe {
             pods.push(self.probe());
         }
@@ -4503,7 +4688,12 @@ impl Session {
             let uid = (pod == self.pod)
                 .then_some(self.state.helper_uid.as_deref())
                 .flatten();
-            let removed = activation::remove_helper(
+            let remove = if self.state.runtime.temporary_pods.contains(&pod) {
+                runtime_rollout::remove_pod
+            } else {
+                activation::remove_helper
+            };
+            let removed = remove(
                 self.tools.cluster.as_mut(),
                 &self.request,
                 &pod,
@@ -4514,7 +4704,7 @@ impl Session {
                 failures.push(format!("deleting {pod}: {error:#}"));
             }
         }
-        let restore = self.operation != Operation::Rollout
+        let restore = !self.operation.online()
             && self.state.stopped
             && !self.state.fenced
             && self.replicas > 0

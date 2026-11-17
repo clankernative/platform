@@ -21,6 +21,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+pub(crate) mod health;
+
 const MAX_FILES: usize = 8192;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STORED_BYTES: i64 = 512 * 1024 * 1024;
@@ -171,24 +173,33 @@ pub(crate) fn authority_for(
     let mut active = authority_state::current(db)?;
     if let Some(release) = if runtime.rolling() { state(db)? } else { None }
         && let ReleaseKind::RuntimePair { admission, .. } = &release.kind
-        && release.phase == Phase::Prepared
     {
+        ensure!(
+            release.scope == runtime.scope()
+                && release.source.artifact == runtime.artifact().id()
+                && (release.phase == Phase::Complete
+                    || (release.source.instance_digest == runtime.instance_digest()
+                        && release.target.instance_digest == runtime.instance_digest())),
+            "runtime_pair_binding_changed"
+        );
         let requirements = active
             .document
             .security
             .as_ref()
             .context("runtime_pair_source_security_required")?;
-        let identity = match crate::runtime_generation::identity(runtime, db)? {
-            Some(installed) => installed,
-            None => crate::runtime_pair::RuntimeIdentity::from_artifact(
+        if crate::runtime_generation::identity(runtime, db)?.is_some() {
+            if matches!(release.phase, Phase::Prepared | Phase::Aborted) {
+                admission
+                    .require_source(&crate::runtime_generation::process_identity(runtime, db)?)?;
+            }
+            crate::runtime_generation::require_execution(runtime, db, requirements)?;
+        } else {
+            admission.require_source(&crate::runtime_pair::RuntimeIdentity::from_artifact(
                 runtime.artifact(),
                 Some(requirements),
-            )?,
-        };
-        admission.require_source(&identity)?;
-        // Metadata equality is insufficient: the business executor must
-        // still be the actual measured source supervisor/launcher.
-        requirements.require_runtime()?;
+            )?)?;
+            requirements.require_runtime()?;
+        }
     }
     if active.artifact_id != runtime.artifact().id() {
         ensure!(
@@ -214,7 +225,7 @@ pub(crate) fn state(connection: &Connection) -> Result<Option<Release>> {
     }
     let release: Option<Release> = connection
         .query_row(
-            "SELECT release FROM day2_rollout WHERE singleton=1",
+            "SELECT CASE WHEN length(release)<=2097152 THEN release ELSE NULL END FROM day2_rollout WHERE singleton=1",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -226,8 +237,7 @@ pub(crate) fn state(connection: &Connection) -> Result<Option<Release>> {
     {
         admission.validate_record()?;
         ensure!(
-            matches!(release.phase, Phase::Prepared | Phase::Aborted)
-                && release.source.artifact == release.target.artifact
+            release.source.artifact == release.target.artifact
                 && release.source.instance_digest == release.target.instance_digest
                 && release.source.runtime == admission.receipt.source.runtime
                 && release.target.runtime == admission.receipt.target.runtime,
@@ -247,6 +257,10 @@ pub fn inspect(runtime: &Runtime) -> Result<Option<Release>> {
 pub fn inspect_file(instance_path: &Path, app: &str) -> Result<Option<Release>> {
     day2_contracts::names::identifier(app)?;
     let instance = Instance::load(instance_path)?;
+    ensure!(
+        instance.native_bootstrap_for(app)?.is_none(),
+        "ordinary_rollout_inspection_required"
+    );
     let path = instance_path
         .parent()
         .context("installation root")?
@@ -285,7 +299,27 @@ pub(crate) fn authority_changed(
         return Ok(());
     };
     if matches!(release.kind, ReleaseKind::RuntimePair { .. }) {
-        return invalidate(connection);
+        let preserves = previous.is_some_and(|before| {
+            before.artifact_id == next.artifact_id
+                && before.artifact_path == next.artifact_path
+                && before.stamp.epoch == next.stamp.epoch
+                && before.document.security == next.document.security
+        });
+        if !preserves {
+            ensure!(
+                matches!(release.phase, Phase::Complete | Phase::Aborted),
+                "runtime_pair_unsettled"
+            );
+            return invalidate(connection);
+        }
+        if release.phase == Phase::Complete {
+            return invalidate(connection);
+        }
+        if release.phase == Phase::Prepared {
+            release.phase = Phase::Aborted;
+        }
+        release.authority = next.stamp.clone();
+        return write(connection, &release);
     }
     let preserves_binding = previous.is_some_and(|previous| {
         previous.stamp == release.authority
@@ -357,6 +391,14 @@ pub(crate) fn run_probe(runtime: &Runtime) -> Result<()> {
     if release.target.artifact != runtime.artifact().id()
         || release.phase != Phase::Serving
         || probe.status != ProbeStatus::Pending
+    {
+        return Ok(());
+    }
+    if let ReleaseKind::RuntimePair {
+        execution: crate::runtime_pair::Execution::Admitted { candidate, .. },
+        ..
+    } = &release.kind
+        && runtime.sql_read(|db| crate::runtime_generation::selected(runtime, db))? != *candidate
     {
         return Ok(());
     }
@@ -439,9 +481,31 @@ pub(crate) fn require_expected_release(runtime: &Runtime, id: &str) -> Result<()
         if let Some(release) = state(db)?
             && matches!(release.kind, ReleaseKind::RuntimePair { .. })
         {
-            // Keep the incumbent's previous release pin restartable. The
-            // new pair pin can never start the candidate in R1.
-            ensure!(id != release.id, "runtime_pair_activation_not_implemented");
+            if id == release.id {
+                ensure!(
+                    matches!(
+                        release.phase,
+                        Phase::Serving | Phase::Draining | Phase::Complete
+                    ),
+                    "runtime_pair_public_admission_required"
+                );
+                authority_for(runtime, db)?;
+                let ReleaseKind::RuntimePair {
+                    execution: crate::runtime_pair::Execution::Admitted { candidate, .. },
+                    ..
+                } = &release.kind
+                else {
+                    anyhow::bail!("runtime_pair_executor_not_admitted")
+                };
+                ensure!(
+                    matches!(
+                        release.phase,
+                        Phase::Serving | Phase::Draining | Phase::Complete
+                    ) && crate::runtime_generation::selected(runtime, db)? == *candidate,
+                    "runtime_pair_public_admission_required"
+                );
+                return Ok(());
+            }
             authority_for(runtime, db)?;
         }
         ensure!(
@@ -589,40 +653,42 @@ pub(crate) fn verify_storage_shape(runtime: &Runtime, actual: &Connection) -> Re
     Ok(())
 }
 
-pub(crate) fn ready(runtime: &Runtime, candidate_probe: bool) -> Result<bool> {
-    let (ready, warm) = runtime.sql_read(|db| {
-        runtime.check_binding(db)?;
-        let active = authority_for(runtime, db)?;
-        active.document.validate(runtime.artifact())?;
-        if !active.document.enabled {
-            return Ok((false, Vec::new()));
-        }
-        let Some(release) = state(db)? else {
-            return Ok((true, Vec::new()));
-        };
-        let ready = matches!(release.kind, ReleaseKind::RuntimePair { .. })
-            || candidate_probe
-            || runtime.artifact().id() != release.target.artifact
-            || matches!(release.phase, Phase::Draining | Phase::Complete);
-        let mut warm = Vec::new();
-        if candidate_probe
-            && release.scope == runtime.scope()
-            && release.authority == active.stamp
-            && matches!(release.phase, Phase::Serving | Phase::Draining)
-        {
-            for id in [release.source.artifact, release.target.artifact] {
-                if id != runtime.artifact().id() {
-                    warm.push(id);
-                }
+pub(crate) fn ready_snapshot(
+    runtime: &Runtime,
+    db: &Connection,
+    candidate_probe: bool,
+) -> Result<(bool, Vec<String>)> {
+    runtime.check_binding(db)?;
+    let active = authority_for(runtime, db)?;
+    active.document.validate(runtime.artifact())?;
+    if !active.document.enabled {
+        return Ok((false, Vec::new()));
+    }
+    let Some(release) = state(db)? else {
+        return Ok((true, Vec::new()));
+    };
+    if matches!(release.kind, ReleaseKind::RuntimePair { .. }) {
+        return Ok((
+            crate::runtime_pair::serving_ready(runtime, db, &release, candidate_probe)?,
+            Vec::new(),
+        ));
+    }
+    let ready = candidate_probe
+        || runtime.artifact().id() != release.target.artifact
+        || matches!(release.phase, Phase::Draining | Phase::Complete);
+    let mut warm = Vec::new();
+    if candidate_probe
+        && release.scope == runtime.scope()
+        && release.authority == active.stamp
+        && matches!(release.phase, Phase::Serving | Phase::Draining)
+    {
+        for id in [release.source.artifact, release.target.artifact] {
+            if id != runtime.artifact().id() {
+                warm.push(id);
             }
         }
-        Ok((ready, warm))
-    })?;
-    // Never hold a business snapshot while admitting retained code/resources.
-    for id in warm {
-        retained(runtime, &id)?;
     }
-    Ok(ready)
+    Ok((ready, warm))
 }
 
 pub(crate) fn pending_artifacts(runtime: &Runtime) -> Result<Vec<String>> {
@@ -694,6 +760,25 @@ fn operational_contract(artifact: &LoadedArtifact) -> Result<serde_json::Value> 
             .remove(key);
     }
     Ok(value)
+}
+
+pub(crate) fn record_runtime_release(
+    runtime: &Runtime,
+    db: &Connection,
+    release: &Release,
+) -> Result<()> {
+    ensure!(
+        release.phase == Phase::Complete && release.target.artifact == runtime.artifact().id(),
+        "runtime_pair_completion_required"
+    );
+    let contract = crate::digest(&serde_json::to_vec(&operational_contract(
+        runtime.artifact(),
+    )?)?);
+    db.execute("INSERT INTO day2_rollout_artifacts VALUES(?1,?2,?3,?4,?5,NULL)
+        ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,epoch=excluded.epoch,contract=excluded.contract,
+        admission_id=excluded.admission_id,retired_ms=NULL",
+        params![release.target.artifact,release.scope,release.authority.epoch,contract,release.id])?;
+    Ok(())
 }
 
 pub(crate) fn compatible_ticket(
@@ -898,7 +983,10 @@ pub fn prepare(
         let mut normalized = desired.clone();
         if let (Some(next), Some(previous)) = (&mut normalized.security, &active.document.security) { next.artifact = previous.artifact.clone(); }
         ensure!(active.artifact_id == runtime.artifact().id() && normalized == active.document, "rollout_authority_changed");
-        let identity = crate::runtime_pair::RuntimeIdentity::from_artifact(runtime.artifact(), active.document.security.as_ref())?;
+        let identity = match crate::runtime_generation::identity(runtime, tx)? {
+            Some(installed) => installed,
+            None => crate::runtime_pair::RuntimeIdentity::from_artifact(runtime.artifact(), active.document.security.as_ref())?,
+        };
         let release = Release { id: id.into(), scope: runtime.scope().into(),
             source: Generation { artifact: active.artifact_id, runtime: identity.clone(), instance_digest: runtime.instance_digest().into(), image: source_image.into() },
             target: Generation { artifact: target.id().into(), runtime: identity, instance_digest: crate::digest(&serde_json::to_vec(&instance)?), image: target_image.into() },
@@ -942,8 +1030,10 @@ pub fn transition(
         ensure!(release.id == id && release.scope == runtime.scope(), "rollout_identity_changed");
         ensure!(next == Phase::Aborted || release.authority == authority_state::current(tx)?.stamp, "rollout_authority_changed");
         if release.phase == next { return Ok(release); }
-        ensure!(matches!(release.kind, ReleaseKind::AppArtifact) || next == Phase::Aborted,
-            "runtime_pair_activation_not_implemented");
+        if matches!(release.kind, ReleaseKind::RuntimePair { .. }) {
+            ensure!(next == Phase::Aborted, "runtime_pair_transition_requires_handoff");
+            ensure!(release.phase == Phase::Prepared, "runtime_pair_post_promotion_abort_refused");
+        }
         if next == Phase::Serving && Instance::load(runtime.instance_path())?.identity.is_some() {
             ensure!(release.placement.is_some(), "rollout_placement_required");
         }

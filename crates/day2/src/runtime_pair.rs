@@ -1,7 +1,7 @@
-//! Directed, operator-reviewed runtime compatibility DATA. A separately admitted
-//! candidate can run isolated checks; public promotion stays blocked. This is
-//! neither signed provenance nor permission to execute business work on a target.
-//! R3 owns the native pair campaign and published compiled outputs.
+//! Directed runtime compatibility DATA and guarded ordinary-RWO handoff.
+//! Operator-observed placement and endpoint facts grant no business authority;
+//! actual measured code, current policy and original execution owners remain
+//! independently enforced. R3 owns native/live qualification and compiled output publication.
 use crate::{
     artifact::{Instance, LoadedArtifact},
     authority_state::{self, LocalOperator},
@@ -14,9 +14,36 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 mod executor;
+mod handoff;
+pub(crate) use executor::bind_serving_process;
 pub use executor::{
-    Candidate, CandidateCheck, Execution, ExecutorRole, Selection, admit, source_drain,
+    Candidate, CandidateCheck, Execution, ExecutorRole, Selection, admit, rehearsal_wait,
+    source_drain, supervise,
 };
+pub use handoff::{
+    AdoptionObservation, Backend, Binding as HandoffBinding, DrainObservation, Endpoint, Handoff,
+    HealthObservation, ObservationAction, PodObservation, ResourceIdentity, Stage as HandoffStage,
+    apply_observation, bind_handoff, complete_handoff, inspect_aborted, inspect_source_pending,
+    next_observation, promote_handoff, quiesce_source, withdraw_source,
+};
+pub(crate) use handoff::{require_root_admission, retained_source, serving_ready, source_quiesced};
+
+/// Metadata preflight only: native storage must never enter the ordinary helper
+/// or raw SQLite inspection path. This constructs no store/epoch authority.
+pub fn validate_instance(bytes: &[u8], app: &str) -> Result<()> {
+    ensure!(bytes.len() <= 1_048_576, "runtime_pair_instance_budget");
+    let instance = Instance::from_bytes(bytes)?;
+    ensure!(
+        instance
+            .apps
+            .get(app)
+            .and_then(|binding| binding.runtime.as_ref())
+            .is_some_and(|profile| profile.rolling())
+            && instance.native_bootstrap_for(app)?.is_none(),
+        "ordinary_rolling_profile_required"
+    );
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,10 +139,10 @@ impl Protocols {
         Self {
             private_schema,
             artifact_catalog_schema,
-            serving_lease: 1,
-            operation_lease: 1,
-            execution_lease: 1,
-            release_journal: 3,
+            serving_lease: 2,
+            operation_lease: 2,
+            execution_lease: 2,
+            release_journal: 4,
             authority: 1,
             invocation_effect: 2,
             web_ticket: 1,
@@ -379,6 +406,10 @@ pub fn prepare(
     operator: &LocalOperator,
 ) -> Result<Release> {
     rollout::operator(runtime, operator)?;
+    let _operation = crate::deployment::OperationLease::acquire(
+        runtime.db().parent().context("state root")?,
+        runtime.app(),
+    )?;
     let _lease = rollout::release_lock(runtime)?;
     ensure!(
         !request.id.is_empty()
@@ -763,13 +794,13 @@ mod tests {
             rollout::require_expected_release(&runtime, "pair")
                 .unwrap_err()
                 .to_string()
-                .contains("runtime_pair_activation_not_implemented")
+                .contains("runtime_pair_public_admission_required")
         );
         assert!(
             rollout::transition(&runtime, "pair", Phase::Prepared, Phase::Serving, &operator)
                 .unwrap_err()
                 .to_string()
-                .contains("runtime_pair_activation_not_implemented")
+                .contains("runtime_pair_transition_requires_handoff")
         );
         let aborted =
             rollout::transition(&runtime, "pair", Phase::Prepared, Phase::Aborted, &operator)?;
@@ -789,7 +820,10 @@ mod tests {
         let next = authority_state::current(&tx)?;
         rollout::authority_changed(&tx, Some(&previous), &next)?;
         tx.commit()?;
-        assert!(rollout::state(&target)?.is_none());
+        assert_eq!(
+            rollout::state(&target)?.context("fenced pair")?.phase,
+            Phase::Aborted
+        );
         assert_eq!(authority_state::current(&target)?.stamp.revision, 2);
         assert_eq!(authority_state::current(&target)?.artifact_id, artifact);
         Ok(())

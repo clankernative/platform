@@ -3,6 +3,9 @@ use crate::artifact::LoadedArtifact;
 use rusqlite::params;
 use serde_json::json;
 
+#[path = "handoff_tests.rs"]
+mod handoff_tests;
+
 // Synthetic qualification metadata exercises the real SQLite/role guards. The
 // positive supplied-code cases are not native image or two-runtime qualification.
 struct World {

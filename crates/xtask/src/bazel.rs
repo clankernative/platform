@@ -1268,6 +1268,9 @@ mod tests {
                         Err(error) => return Err(error.into()),
                     }
                 };
+                // Accepted sockets can inherit the listener's nonblocking mode.
+                // Request I/O uses the fixture's existing finite deadlines.
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                 ensure!(stream.read(&mut [0; 4096])? > 0, "fixture request required");

@@ -47,6 +47,9 @@ Maintain :: [].{
 		if operation == "rollout" {
 			return rolling!(host!)
 		}
+		if operation == "runtime-rollout" {
+			return runtime_rolling!(host!)
+		}
 		if operation != "activate" {
 			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
 		}
@@ -82,7 +85,9 @@ Maintain :: [].{
 				_ = workflow!("authority-inspect", host!)?
 				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}
-			_ => return Err("maintain operation must be inspect, backup, authority-apply, activate or mark-activated")
+			_ => return Err(
+				"maintain operation must be inspect, backup, authority-apply, activate, mark-activated, rollout or runtime-rollout",
+			)
 		}
 		Capability.call!("maintenance-finish", "{}", host!)
 	}
@@ -114,6 +119,77 @@ Maintain :: [].{
 		_ = Capability.call!("maintenance-rollout", Json.to_str({ step: "complete" }), host!)?
 		Capability.call!("maintenance-finish", "{}", host!)
 	}
+
+	# Runtime-only changes keep Source serving through isolated checks, public
+	# Target admission and actual backend health. Adoption reuses the running
+	# Target ReplicaSet; recovery always executes accepted work with Source code.
+	runtime_rolling! : (Str => Try(Str, Str)) => Try(Str, Str)
+	runtime_rolling! = |host!| {
+		_ = runtime_step!("reap-helpers", host!)?
+		_ = runtime_step!("settle-backups", host!)?
+		raw = runtime_step!("resume", host!)?
+		previous : { resuming : Bool, aborted : Bool }
+		previous = Json.parse(raw).map_err(|_| "invalid runtime resume observation")?
+		if previous.aborted {
+			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
+			_ = runtime_step!("abort-cleanup", host!)?
+			return Capability.call!("maintenance-finish", "{}", host!)
+		}
+		if !previous.resuming {
+			_ = Capability.call!("maintenance-offsite-backup", "{}", host!)?
+			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
+			_ = backup!(host!)?
+		} else {
+			_ = Capability.call!("maintenance-operation-claim", "{}", host!)?
+		}
+		for step in [
+			"blueprint",
+			"rehearsal-copy",
+			"rehearsal-check",
+			"rehearsal-remove",
+			"confirm",
+			"claim",
+			"prepare",
+			"placement",
+			"executors",
+			"candidate",
+			"bind",
+			"check",
+			"promote",
+			"probe",
+			"withdraw",
+			"drain",
+			"quiesce",
+			"transport-stop",
+			"pause",
+			"retarget",
+			"adopt",
+			"unpause",
+			"source-gone",
+		] {
+			_ = runtime_step!(step, host!)?
+		}
+		var $remaining = Bool.True
+		var $attempts = 0.U64
+		while $remaining {
+			if $attempts >= 32 {
+				return Err("runtime source recovery budget exhausted; resume the same request")
+			}
+			recovery_raw = runtime_step!("recover", host!)?
+			status : { remaining : Bool }
+			status = Json.parse(recovery_raw).map_err(|_| "invalid runtime recovery observation")?
+			$remaining = status.remaining
+			$attempts = $attempts + 1
+		}
+		_ = runtime_step!("complete", host!)?
+		_ = runtime_step!("backup-select", host!)?
+		_ = runtime_step!("release", host!)?
+		Capability.call!("maintenance-finish", "{}", host!)
+	}
+
+	runtime_step! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	runtime_step! =
+		|step_name, host!| Capability.call!("maintenance-runtime-rollout", Json.to_str({ step: step_name }), host!)
 
 	# A verified backup in the pod, then a verified private copy beside the operator.
 	backup! : (Str => Try(Str, Str)) => Try(Str, Str)
