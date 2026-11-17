@@ -172,18 +172,12 @@ fn demonstration(action: Action) -> Demonstration {
         Action::NotificationsResolve | Action::NotificationsLatest | Action::NotificationsSend => {
             Demonstration::NotificationsAdapter
         }
-        Action::WorkspaceDirectoryCapture
-        | Action::WorkspaceDirectoryUserPath
-        | Action::WorkspaceDirectoryHierarchy
-        | Action::WorkspaceDirectoryPage
+        Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchyDelivery
         | Action::WorkspaceDirectoryDeliveryPage => Demonstration::NativeAdapterRead,
         // The live capture pipeline against Carta's own wire world, then a
-        // local read of the published capture.
-        Action::CartaSnapshot
-        | Action::CartaRecord
-        | Action::CartaSnapshotDelivery
-        | Action::CartaRecords => Demonstration::AdmittedAdapterRead,
+        // local read of the capture the application holds.
+        Action::CartaSnapshotDelivery | Action::CartaRecords => Demonstration::AdmittedAdapterRead,
         Action::CartaRelease => Demonstration::HeldCaptureRelease,
         Action::FreetoolFingerprint
         | Action::FreetoolStatus
@@ -820,34 +814,23 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
 /// saboteur below can feed it a rigged observation and assert it is rejected.
 /// A gate that cannot be shown to fail is indistinguishable from one that has
 /// silently stopped checking — which is the failure Phase 4 exists to prevent.
-fn directory_capture(
-    database: &std::path::Path,
-    now: i64,
-    mode: crate::workspace_directory::CaptureMode,
-) -> Result<Value> {
+fn directory_input(now: i64) -> crate::workspace_directory::CaptureInput {
+    crate::workspace_directory::CaptureInput {
+        customer_id: "Ccoverage".into(),
+        connection_id: "coverage-connection@1".into(),
+        actor: "directory-reader@coverage.test".into(),
+        captured_at: now,
+    }
+}
+
+/// One v2 delivery through the simulated port: always a provider read, with no
+/// host cache to fall back on.
+fn directory_delivery(database: &std::path::Path, now: i64) -> Result<Value> {
     use crate::workspace_directory::*;
-    let cache = database.with_file_name("workspace_directory.sqlite");
-    let plan = CapturePlan::prepare(
-        &cache,
-        CaptureInput {
-            customer_id: "Ccoverage".into(),
-            connection_id: "coverage-connection@1".into(),
-            actor: "directory-reader@coverage.test".into(),
-            captured_at: now,
-        },
-        mode,
-    )?;
-    let complete = plan.collect(|input, _| {
-        Ok(Box::new(SimulatedDirectoryPort::new(
-            database,
-            SCOPE,
-            &input.customer_id,
-            &input.actor,
-            input.captured_at,
-        )?))
-    })?;
-    publish(&mut open_store(&cache)?, &complete)?;
-    Ok(serde_json::to_value(complete.metadata())?)
+    let input = directory_input(now);
+    let mut port = SimulatedDirectoryPort::new(database, SCOPE, &input.customer_id, &input.actor)?;
+    let (delivery, staged) = deliver_hierarchy(input, &mut port)?;
+    Ok(json!({"delivery": delivery, "pages": staged.pages, "starts": staged.starts}))
 }
 
 fn directory_replay(start: i64, fault: super::simulated::SimulatedFault) -> Result<Value> {
@@ -855,75 +838,66 @@ fn directory_replay(start: i64, fault: super::simulated::SimulatedFault) -> Resu
         DIRECTORY_HIERARCHY_ENDPOINT, DIRECTORY_USER_ENDPOINT, ScheduledFault, schedule_faults,
         update_workspace_directory,
     };
-    use crate::workspace_directory::CaptureMode::{Hierarchy, Membership};
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
     seed(&database, SCOPE, &fixture(Variant::A))?;
-    let cold = directory_capture(&database, start, Hierarchy)?;
-    assert_eq!(cold["source_captured_at"], start);
-    schedule_faults(
-        &database,
-        SCOPE,
-        Provider::WorkspaceDirectory.world().unwrap(),
-        vec![ScheduledFault {
-            endpoint: DIRECTORY_HIERARCHY_ENDPOINT.into(),
-            remaining: 1,
-            fault,
-        }],
-    )?;
-    let cached = directory_capture(&database, start + 899, Hierarchy)?;
-    assert_eq!(cached["source_captured_at"], start);
-    assert_eq!(cached["expires_at"], start + 900);
-    update_workspace_directory(&database, SCOPE, |world| {
-        assert_eq!(world.calls.len(), 1);
-        assert_eq!(
-            world.faults.len(),
-            1,
-            "cache must not consume a provider fault"
-        );
-        world.world.hierarchy["organizationUnits"][1]["name"] = json!("Renamed Engineering");
-        Ok(())
-    })?;
-    let failure = directory_capture(&database, start + 900, Hierarchy)
+    let cold = directory_delivery(&database, start)?;
+    assert_eq!(cold["delivery"]["captured_at"], start);
+    let schedule = || {
+        schedule_faults(
+            &database,
+            SCOPE,
+            Provider::WorkspaceDirectory.world().unwrap(),
+            vec![ScheduledFault {
+                endpoint: DIRECTORY_HIERARCHY_ENDPOINT.into(),
+                remaining: 1,
+                fault,
+            }],
+        )
+    };
+    // A provider fault fails the delivery; nothing earlier substitutes for it.
+    schedule()?;
+    let failure = directory_delivery(&database, start + 1)
         .unwrap_err()
         .to_string();
     assert_eq!(failure, "workspace_directory_hierarchy_lookup_failed");
-    let refreshed = directory_capture(&database, start + 901, Hierarchy)?;
-    assert_eq!(refreshed["source_captured_at"], start + 901);
-    assert_eq!(refreshed["expires_at"], start + 1801);
-    // Membership must read the user, while using exactly the same hierarchy
-    // cache policy as production. A hierarchy fault stays pending during it.
-    schedule_faults(
+    let recovered = directory_delivery(&database, start + 2)?;
+    assert_eq!(recovered["delivery"]["id"], cold["delivery"]["id"]);
+    update_workspace_directory(&database, SCOPE, |world| {
+        assert_eq!(world.calls.len(), 3, "every delivery reads the provider");
+        assert!(world.faults.is_empty(), "the fault was consumed");
+        world.world.hierarchy["organizationUnits"][1]["name"] = json!("Renamed Engineering");
+        Ok(())
+    })?;
+    let renamed = directory_delivery(&database, start + 3)?;
+    assert_ne!(renamed["delivery"]["id"], cold["delivery"]["id"]);
+    // A user-path read never reads the hierarchy, so a pending hierarchy fault
+    // stays pending.
+    schedule()?;
+    let input = directory_input(start + 4);
+    let mut port = crate::workspace_directory::SimulatedDirectoryPort::new(
         &database,
         SCOPE,
-        Provider::WorkspaceDirectory.world().unwrap(),
-        vec![ScheduledFault {
-            endpoint: DIRECTORY_HIERARCHY_ENDPOINT.into(),
-            remaining: 1,
-            fault,
-        }],
+        &input.customer_id,
+        &input.actor,
     )?;
-    let membership = directory_capture(&database, start + 902, Membership)?;
-    assert_eq!(membership["source_captured_at"], start + 901);
-    assert_eq!(membership["user_path"], "/Engineering");
+    let user = serde_json::to_value(crate::workspace_directory::collect_user_path(
+        input, &mut port,
+    )?)?;
+    assert_eq!(user["user_path"], "/Engineering");
     let world = update_workspace_directory(&database, SCOPE, |world| {
-        assert_eq!(world.calls.len(), 4);
-        assert!(world.calls[3].starts_with(DIRECTORY_USER_ENDPOINT));
+        assert_eq!(world.calls.len(), 5);
+        assert!(world.calls[4].starts_with(DIRECTORY_USER_ENDPOINT));
         assert_eq!(world.faults.len(), 1);
         Ok(serde_json::to_value(world)?)
     })?;
-    // Reopening the on-disk adapter on every read preserves its evidence. A
-    // cache plan remains local even if the provider world disappears afterward.
-    std::fs::remove_file(database.with_file_name(Provider::WorkspaceDirectory.world().unwrap()))?;
-    let offline = directory_capture(&database, start + 903, Hierarchy)?;
-    assert_eq!(offline["source_captured_at"], start + 901);
     Ok(
-        json!({"cold":cold,"cached":cached,"failure":failure,"refreshed":refreshed,"membership":membership,"offline":offline,"world":world}),
+        json!({"cold":cold,"failure":failure,"recovered":recovered,"renamed":renamed,"user":user,"world":world}),
     )
 }
 
 #[test]
-fn directory_all_transport_faults_replay_through_cache_and_recovery() -> Result<()> {
+fn directory_all_transport_faults_fail_closed_recover_and_replay() -> Result<()> {
     use super::simulated::SimulatedFault::*;
     for fault in [
         Denied,
@@ -944,7 +918,7 @@ fn directory_all_transport_faults_replay_through_cache_and_recovery() -> Result<
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(24))]
     #[test]
-    fn directory_fault_expiry_recovery_and_replay(start in 0_i64..2_000_000_000, fault_index in 0_usize..6) {
+    fn directory_fault_recovery_and_replay(start in 0_i64..2_000_000_000, fault_index in 0_usize..6) {
         use super::simulated::SimulatedFault::*;
         let fault = [Denied, RateLimited, ServerError, ConnectionLost, Oversized, NotJson][fault_index];
         let first = directory_replay(start, fault).unwrap();
@@ -957,10 +931,7 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
     ensure!(
         matches!(
             action,
-            Action::WorkspaceDirectoryCapture
-                | Action::WorkspaceDirectoryUserPath
-                | Action::WorkspaceDirectoryHierarchy
-                | Action::WorkspaceDirectoryPage
+            Action::WorkspaceDirectoryUserPath
                 | Action::WorkspaceDirectoryHierarchyDelivery
                 | Action::WorkspaceDirectoryDeliveryPage
         ),
@@ -976,7 +947,6 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         SCOPE,
         "Ccoverage",
         "directory-reader@coverage.test",
-        captured_at,
     )?;
     let input = crate::workspace_directory::CaptureInput {
         customer_id: "Ccoverage".into(),
@@ -995,47 +965,11 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
             after,
         });
     }
-    if matches!(
-        action,
-        Action::WorkspaceDirectoryHierarchyDelivery | Action::WorkspaceDirectoryDeliveryPage
-    ) {
-        let (delivery, staged) = crate::workspace_directory::deliver_hierarchy(input, &mut port)?;
-        let result = if action == Action::WorkspaceDirectoryHierarchyDelivery {
-            serde_json::to_string(&delivery)?
-        } else {
-            staged.pages[0].clone()
-        };
-        let after = worlds(&database)?;
-        return Ok(Observed {
-            result,
-            before,
-            after,
-        });
-    }
-    let complete = if action == Action::WorkspaceDirectoryHierarchy {
-        crate::workspace_directory::collect_hierarchy(input, &mut port)?
+    let (delivery, staged) = crate::workspace_directory::deliver_hierarchy(input, &mut port)?;
+    let result = if action == Action::WorkspaceDirectoryHierarchyDelivery {
+        serde_json::to_string(&delivery)?
     } else {
-        crate::workspace_directory::collect_complete(input, &mut port)?
-    };
-    let capture_id = complete.metadata().id.clone();
-    let store_path = database.with_file_name("workspace_directory.sqlite");
-    let mut store = crate::workspace_directory::open_store(&store_path)?;
-    crate::workspace_directory::publish(&mut store, &complete)?;
-    let result = if matches!(
-        action,
-        Action::WorkspaceDirectoryCapture | Action::WorkspaceDirectoryHierarchy
-    ) {
-        serde_json::to_string(complete.metadata())?
-    } else {
-        serde_json::to_string(&crate::workspace_directory::page_for_grant(
-            &store,
-            &capture_id,
-            "Ccoverage",
-            "coverage-connection@1",
-            "directory-reader@coverage.test",
-            captured_at,
-            0,
-        )?)?
+        staged.pages[0].clone()
     };
     let after = worlds(&database)?;
     Ok(Observed {
@@ -1302,7 +1236,6 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
             "another-app",
             "Ccoverage",
             "directory-reader@coverage.test",
-            1_700_000_001,
         )
         .is_err()
     );
@@ -1312,7 +1245,6 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
             SCOPE,
             "Ccoverage",
             "unseeded@coverage.test",
-            1_700_000_001,
         )
         .and_then(
             |mut port| crate::workspace_directory::DirectoryReadPort::user_org_unit_path(
@@ -1325,16 +1257,10 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
     {
         let constructor = crate::workspace_directory::SimulatedDirectoryPort::new;
         assert_eq!(
-            constructor(
-                &database,
-                SCOPE,
-                "Cother",
-                "directory-reader@coverage.test",
-                1_700_000_001
-            )
-            .err()
-            .context("wrong-customer fixture must reject")?
-            .to_string(),
+            constructor(&database, SCOPE, "Cother", "directory-reader@coverage.test",)
+                .err()
+                .context("wrong-customer fixture must reject")?
+                .to_string(),
             "workspace_directory_customer_mismatch"
         );
         assert!(
@@ -1343,7 +1269,6 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
                 "another-app",
                 "Ccoverage",
                 "directory-reader@coverage.test",
-                1_700_000_001
             )
             .is_err()
         );
@@ -1359,7 +1284,6 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
             SCOPE,
             "Ccoverage",
             "directory-reader@coverage.test",
-            1_700_000_001,
         )
         .is_err()
     );
@@ -1422,10 +1346,6 @@ fn live_carta_read_rejects_wrong_scope_issuer_and_world() -> Result<()> {
     assert!(
         !provider_path.exists(),
         "wrong world seeded the declared world"
-    );
-    assert!(
-        !database.with_file_name(crate::carta_live::STORE).exists(),
-        "no failed capture publishes"
     );
     Ok(())
 }

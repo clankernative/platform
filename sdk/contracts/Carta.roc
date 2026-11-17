@@ -2,24 +2,14 @@ import Observe
 import Resource
 import Context
 
-# Typed reads from an immutable Carta capture: an explicitly seeded synthetic
-# snapshot, or a live capture the host collects completely when the bound resource
-# has a live connection. Record reads never reach the provider.
+# A complete Carta capture handed to this application: an explicitly seeded
+# synthetic snapshot, or a live capture the host collects completely when the
+# bound resource has a live connection. The application holds it in its own
+# database, reads its records without reaching the provider, and releases it.
 # Provider arrays are transported as individual records, preserving their parent
 # external IDs. Applications own validation, import decisions and calculations.
 Carta :: [].{
 	OptionalText : [Some(Str), None]
-
-	Snapshot : {
-		id : Str,
-		issuer_id : Str,
-		record_count : U64,
-		stakeholder_count : U64,
-		grant_count : U64,
-		vesting_event_count : U64,
-		exercise_count : U64,
-		source_profile : Str,
-	}
 
 	Stakeholder : {
 		id : Str,
@@ -85,8 +75,6 @@ Carta :: [].{
 		exercise_type : Str,
 		qualified : Bool,
 	}
-
-	ReadResult : [Stakeholder(Stakeholder), Grant(Grant), VestingEvent(VestingEvent), Exercise(Exercise), Done]
 
 	Record : [Stakeholder(Stakeholder), Grant(Grant), VestingEvent(VestingEvent), Exercise(Exercise)]
 
@@ -156,67 +144,4 @@ Carta :: [].{
 		},
 	)
 
-	begin : Context -> Observe(Snapshot)
-	begin = |context| Resource.bind(context, "carta").and_then(begin_with)
-
-	begin_with : Resource -> Observe(Snapshot)
-	begin_with = |resource| Observe.capability("carta.snapshot.v1", Json.to_str({ handle: Resource.token(resource) }))
-		.and_then(
-			|raw| {
-				parsed : Try(Snapshot, _)
-				parsed = Json.parse(raw)
-				Observe.from_host(parsed.map_err(|_| "invalid_carta_snapshot"))
-			},
-		)
-
-	next : Context, Str, U64 -> Observe(ReadResult)
-	next =
-		|
-			context,
-			snapshot_id,
-			cursor,
-		| Resource.bind(context, "carta").and_then(|resource| next_with(resource, snapshot_id, cursor))
-
-	next_with : Resource, Str, U64 -> Observe(ReadResult)
-	next_with =
-		|
-			resource,
-			snapshot_id,
-			cursor,
-		| Observe.capability("carta.record.v1", Json.to_str({ handle: Resource.token(resource), snapshot_id, cursor }))
-			.and_then(
-				|raw| {
-					parsed : Try({ kind : Str, data : Str }, _)
-					parsed = Json.parse(raw)
-					Observe.from_host(parsed.map_err(|_| "invalid_carta_record"))
-				},
-			)
-			.and_then(
-				|envelope| match envelope.kind {
-					"stakeholder" => {
-						parsed : Try(Stakeholder, _)
-						parsed = Json.parse(envelope.data)
-						Observe.from_host(parsed.map_err(|_| "invalid_carta_stakeholder"))
-							.map(|value| Stakeholder(value))
-					}
-					"grant" => {
-						parsed : Try(Grant, _)
-						parsed = Json.parse(envelope.data)
-						Observe.from_host(parsed.map_err(|_| "invalid_carta_grant")).map(|value| Grant(value))
-					}
-					"vesting_event" => {
-						parsed : Try(VestingEvent, _)
-						parsed = Json.parse(envelope.data)
-						Observe.from_host(parsed.map_err(|_| "invalid_carta_vesting_event"))
-							.map(|value| VestingEvent(value))
-					}
-					"exercise" => {
-						parsed : Try(Exercise, _)
-						parsed = Json.parse(envelope.data)
-						Observe.from_host(parsed.map_err(|_| "invalid_carta_exercise")).map(|value| Exercise(value))
-					}
-					"done" => Observe.value(Done)
-					_ => Observe.from_host(Err("invalid_carta_record_kind"))
-				},
-			)
 }

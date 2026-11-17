@@ -5,15 +5,17 @@ is handed to the reading application, which persists what it keeps in its own
 models and owns that retention. The host does not keep provider data for an
 application in a sibling store with a platform-chosen expiry.
 
-Status: both paths are implemented beside the unchanged v1 capabilities.
-Workspace Directory (`workspace_directory.hierarchy.v2`, `page.v2`) uses an
+Status: implemented, and the v1 capture capabilities are retired. Workspace
+Directory (`workspace_directory.hierarchy.v2`, `page.v2`) uses an
 invocation-held delivery. Carta (`carta.snapshot.v2`, `records.v2`,
 `release.v2`) uses an application-held delivery, the option chosen in
-[Carta](#carta-application-held-delivery).
+[Carta](#carta-application-held-delivery). `workspace_directory.sqlite`,
+`carta.sqlite`, the 15-minute Directory cache and the v1 SDK functions are gone.
+Home and Equity read through v2; see [Retirement](#retirement).
 
 ## What this replaces
 
-| Store | Contents | Retention today | Problem |
+| Store (before v2) | Contents | Retention | Problem |
 | --- | --- | --- | --- |
 | `workspace_directory.sqlite` | Org-unit hierarchy and membership captures | `SOURCE_TTL_SECONDS = 900`; expired rows are deleted on the next publish | Not in backups. An app keeps only a capture id, so a pointer older than 15 minutes, or any pointer after a restore, dangles. |
 | `carta.sqlite` | Full live issuer captures | The two newest selections per connection and issuer | Excluded from backups. Equity holds `capture_id + cursor` across about one invocation per record, so two newer captures published mid-import delete its snapshot. |
@@ -164,22 +166,21 @@ ordinary initialization does, so `restore_staging` charges it from now on.
 
 ## Home migration
 
-Home's `HierarchyRead.read` already captures and pages within one invocation.
-The daily sync that another thread is adding should switch from
-`capture_hierarchy_with` + `page_with` to the following:
+Home already saved the hierarchy in its own rows (its daily sync, home#27) and
+owns its age limit. Its sync now reads through v2:
 
-1. In `prepare`, call `deliver_hierarchy_with(resource)`. If `delivery.id`
-   equals the id Home last persisted, return `Unchanged`. Otherwise read pages
-   `0 .. page_count` with `delivery_page_with` and keep Home's 256-unit bound.
-2. In `decide`, upsert units into Home's own org-unit table and soft-delete
-   removed units. Record `delivery.id` and `captured_at`. Home decides how old
-   a hierarchy may be.
-3. Remove `read_saved`, which pages a host capture by a saved pointer. Read
-   Home's own table instead. Restores then stay consistent because there are no
-   host pointers.
-4. Declare the two v2 observations. Operators add the two v2 actions to Home's
-   Directory policy slot; v2 needs the same response limit and call allowance as
-   the v1 hierarchy.
+- `HierarchyRead.read` calls `deliver_hierarchy_with` and pages
+  `0 .. page_count` with `delivery_page_with`, keeping Home's 256-unit bound.
+  The delivery's `captured_at` is the source time Home publishes; there is no
+  host expiry to respect.
+- The directory sync, scheduled sync and refresh commands declare
+  `workspace_directory.hierarchy.v2` and `page.v2`.
+- No Home model changes. Reads already used only Home's own rows.
+
+Operators replace the v1 hierarchy and page actions on Home's Directory slot
+with `workspace_directory_hierarchy_delivery` and
+`workspace_directory_delivery_page`; v2 needs the same response limit and call
+allowance as the v1 hierarchy.
 
 ## Carta: application-held delivery
 
@@ -205,13 +206,13 @@ cannot both hold for Carta under the current budgets. The options were:
 - **Holder**: `day2_capture_deliveries.holder` is the invocation id for
   Directory and empty for an application-held capture. The sweep only ever
   touches invocation-held rows.
-- **`carta.snapshot.v2`** (observation): collects exactly as v1 does. A live
-  connection uses the same plan, token, pagination, bounds, failure codes and
-  metered settlement; a connection without `live` uses the seeded synthetic
-  capture. It stages the typed records in pages of at most 256 records and
-  56 KiB journaled, and returns `Delivery` (v1's snapshot facts plus
-  `page_count`). Nothing is published to `carta.sqlite`.
-- **Identity**: `id` is the v1 capture identity (`carta_<sha256>`): scope,
+- **`carta.snapshot.v2`** (observation): a live connection uses the reviewed
+  collection plan, token, pagination, bounds, failure codes and metered
+  settlement; a connection without `live` uses the seeded synthetic capture. It
+  stages the typed records in pages of at most 256 records and 56 KiB
+  journaled, each row recording its first record's index, and returns
+  `Delivery`: the capture's facts and counts.
+- **Identity**: `id` is `carta_<sha256>` over the: scope,
   connection authority, environment, issuer, child mode, records, counts and
   source, with no time. An unchanged recapture of a held capture returns the
   same `id` and stores nothing new.
@@ -273,17 +274,24 @@ one unbounded JSON row and a hard 4 MiB failure. The fix is per-message rows
 with operator-owned, per-scope bounded retention, the same model as any external
 provider's history. This is not implemented.
 
-## Deprecation path (proposed, not executed)
+## Retirement
 
-1. Ship v2 beside v1. This change does that.
-2. Migrate Home (Directory v2) and Equity (Carta v2) as described above.
-3. Remove `workspace_directory.capture.v1` / `hierarchy.v1` / `page.v1` and
-   `carta.snapshot.v1` / `record.v1`, with `workspace_directory.sqlite`,
-   `carta.sqlite` and their sweep/prune code. `user_path.v1` stores nothing and
-   stays. Keep the synthetic seed store; it is the synthetic provider, not an app
-   capture. No data migration: under AGENTS.md the stores are disposable caches,
-   and app tables now hold what matters.
-4. Drop `SOURCE_TTL_SECONDS` and the Directory cache plan.
+The v1 capture capabilities are removed: `workspace_directory.capture.v1`,
+`hierarchy.v1` and `page.v1`, and `carta.snapshot.v1` and `record.v1`. Their
+SDK functions, `workspace_directory.sqlite`, `carta.sqlite`, the 15-minute
+Directory cache and source TTL, and the combined membership capture are gone.
+`workspace_directory.user_path.v1` stores nothing and stays. The synthetic Carta
+seed store stays: it is the synthetic provider, not an application capture.
+There is no data migration. Under AGENTS.md the stores were disposable caches,
+and application tables now hold what matters.
+
+Order of rollout: deploy Home and Equity on a qualified release that includes
+v2, and grant the v2 actions, before a release without v1 reaches them. An app
+artifact that still declares a v1 capability fails admission on the retired
+platform. Maintenance now treats `workspace_directory.sqlite` and `carta.sqlite`
+as undeclared stores and stops, so an operator deletes an installation's leftover
+files (with their `-wal` and `-shm`) from its state volume before that
+installation's first activation on the retired platform.
 
 ## Implementation map
 

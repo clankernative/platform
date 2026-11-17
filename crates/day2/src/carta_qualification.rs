@@ -3,8 +3,9 @@
 //! run by `xtask carta-qualify`, calls [`qualify`] as its collection capability
 //! with a reviewed profile and secret.
 //!
-//! It drives the native port through the production pipeline into a scratch
-//! store and returns a receipt describing what Carta actually sent: page and
+//! It drives the native port through the production pipeline, holding the
+//! capture in a scratch application database as `carta.snapshot.v2` would, and
+//! returns a receipt describing what Carta actually sent: page and
 //! byte counts, end-of-pagination forms, and per-field presence counts. Every
 //! receipt entry is a count, a closed classification, a reviewed name or an
 //! operator-supplied profile field. No provider-owned value or JSON subtree is
@@ -490,9 +491,29 @@ pub fn qualify(profile: &QualificationProfile, secret: String, scratch: &Path) -
     qualify_through(profile, &plan, native, scratch, started)
 }
 
+/// Hold a complete capture in a fresh scratch application database exactly as
+/// an application holds one. The caller discards the scratch database.
+fn hold_in_scratch(
+    scratch: &Path,
+    plan: &CapturePlan,
+    capture: &crate::carta_live::CompleteCapture,
+) -> Result<()> {
+    let (_, staged) = crate::carta::delivery(
+        capture.snapshot(),
+        capture.records(),
+        plan.delivery_authority()?,
+    )?;
+    let mut db = crate::store::open(scratch)?;
+    let tx = db.transaction()?;
+    crate::capture_delivery::upgrade(&tx)?;
+    crate::capture_delivery::stage(&tx, crate::capture_delivery::Holder::Application, &staged)?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// The capture and receipt for any port. The outcome is a closed code: a
-/// capture failure's stable code, or `carta_publication_failed` for the
-/// scratch store, never an error's text.
+/// capture failure's stable code, or `carta_publication_failed` when the
+/// scratch database refuses the delivery, never an error's text.
 fn qualify_through<P: CartaPort>(
     profile: &QualificationProfile,
     plan: &CapturePlan,
@@ -505,7 +526,7 @@ fn qualify_through<P: CartaPort>(
         crate::carta_live::collect_complete(plan, &mut recording, MAX_PAGE_RESPONSE_BYTES);
     let finished = crate::oauth::effects::wall_time()?;
     let (outcome, snapshot) = match capture.and_then(|capture| {
-        crate::carta_live::publish(scratch, &capture, started, finished.max(started))?;
+        hold_in_scratch(scratch, plan, &capture)?;
         Ok(capture.snapshot().clone())
     }) {
         Ok(snapshot) => ("captured", Some(snapshot)),
@@ -623,7 +644,7 @@ mod tests {
             &profile,
             &plan(&profile)?,
             Replay(replies.into()),
-            &directory.path().join("carta.sqlite"),
+            &directory.path().join("scratch.sqlite"),
             1,
         )
     }
@@ -798,7 +819,7 @@ mod tests {
             expires_at,
         };
         let directory = tempfile::tempdir().unwrap();
-        let scratch = directory.path().join("carta.sqlite");
+        let scratch = directory.path().join("scratch.sqlite");
         for (profile, expected) in [
             (
                 profile(CartaEnvironment::Production, i64::MAX),

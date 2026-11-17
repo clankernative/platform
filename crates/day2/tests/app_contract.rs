@@ -373,8 +373,6 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
     let units = day2::workspace_directory::parse_org_unit_response(br#"{"organizationUnits":[{"orgUnitId":"root","name":"Root","orgUnitPath":"/"},{"orgUnitId":"eng","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}"#)?;
-    let page = serde_json::to_string(&day2::workspace_directory::page(&units, 0)?)?;
-    let empty = serde_json::to_string(&day2::workspace_directory::page(&units, 2)?)?;
     struct NativeFixturePort(Vec<day2::workspace_directory::OrgUnit>);
     impl day2::workspace_directory::DirectoryReadPort for NativeFixturePort {
         fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
@@ -384,7 +382,6 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
             Ok(day2::workspace_directory::ProviderPage {
                 units: self.0.clone(),
                 response_bytes: 256,
-                hierarchy_captured_at: 100,
             })
         }
     }
@@ -394,20 +391,16 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
         actor: "alice@example.test".into(),
         captured_at: 200,
     };
-    let membership = day2::workspace_directory::collect_complete(
-        input.clone(),
-        &mut NativeFixturePort(units.clone()),
-    )?;
     let (delivery, staged) = day2::workspace_directory::deliver_hierarchy(
         input.clone(),
         &mut NativeFixturePort(units.clone()),
     )?;
     let delivery_json = serde_json::to_string(&delivery)?;
     let delivery_page = staged.pages[0].clone();
-    let hierarchy =
-        day2::workspace_directory::collect_hierarchy(input, &mut NativeFixturePort(units))?;
-    let membership_json = serde_json::to_string(membership.metadata())?;
-    let hierarchy_json = serde_json::to_string(hierarchy.metadata())?;
+    let user_path = serde_json::to_string(&day2::workspace_directory::collect_user_path(
+        input,
+        &mut NativeFixturePort(units),
+    )?)?;
     let source = r#"app [step] { pf: platform "../sdk/main.roc" }
 import pf.WorkspaceDirectory
 import pf.Resource
@@ -415,60 +408,26 @@ import pf.Observe
 import pf.Tx
 step : Str -> Str
 step = |raw| raw
-read_page = |raw, offset| {
-    program = Resource.decode("{\"token\":\"fixture-handle\"}")
-        .and_then(|resource| WorkspaceDirectory.page_with(resource, "fixture-capture", offset))
-        .program()
+answer = |program, raw| {
     match Tx.evaluate(program, []) {
         Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
         other => other
     }
 }
-read_membership = |raw, resource_json| {
-    program = Resource.decode(resource_json)
-        .and_then(WorkspaceDirectory.capture_with)
-        .program()
-    match Tx.evaluate(program, []) {
-        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
-        other => other
-    }
-}
-read_hierarchy = |raw, resource_json| {
-    program = Resource.decode(resource_json)
-        .and_then(WorkspaceDirectory.capture_hierarchy_with)
-        .program()
-    match Tx.evaluate(program, []) {
-        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
-        other => other
-    }
-}
-requested_hierarchy_action = |resource_json| {
-    program = Resource.decode(resource_json)
-        .and_then(WorkspaceDirectory.capture_hierarchy_with)
-        .program()
-    match Tx.evaluate(program, []) {
-        Pending(request) => request.instruction.model == HIERARCHY_CAPABILITY
-        _ => Bool.False
-    }
-}
-read_delivery = |raw, resource_json| {
-    program = Resource.decode(resource_json)
-        .and_then(WorkspaceDirectory.deliver_hierarchy_with)
-        .program()
-    match Tx.evaluate(program, []) {
-        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
-        other => other
-    }
-}
-read_delivery_page = |raw, page| {
-    program = Resource.decode("{\"token\":\"fixture-handle\"}")
+read_delivery = |raw| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}").and_then(WorkspaceDirectory.deliver_hierarchy_with).program(),
+    raw,
+)
+read_delivery_page = |raw, page| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}")
         .and_then(|resource| WorkspaceDirectory.delivery_page_with(resource, "fixture-capture", page))
-        .program()
-    match Tx.evaluate(program, []) {
-        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
-        other => other
-    }
-}
+        .program(),
+    raw,
+)
+read_user_path = |raw| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}").and_then(WorkspaceDirectory.user_path_with).program(),
+    raw,
+)
 requested_delivery_action = |resource_json| {
     program = Resource.decode(resource_json)
         .and_then(WorkspaceDirectory.deliver_hierarchy_with)
@@ -478,9 +437,8 @@ requested_delivery_action = |resource_json| {
         _ => Bool.False
     }
 }
-expect requested_hierarchy_action("{\"token\":\"fixture-handle\"}")
 expect requested_delivery_action("{\"token\":\"fixture-handle\"}")
-expect match read_delivery(DELIVERY_JSON, "{\"token\":\"fixture-handle\"}") {
+expect match read_delivery(DELIVERY_JSON) {
     Done(result) => result.consumed == 1 and result.value.customer_id == "customer-1"
         and result.value.org_unit_count == 2 and result.value.page_count == 1 and result.value.captured_at == 200
     _ => Bool.False
@@ -488,47 +446,24 @@ expect match read_delivery(DELIVERY_JSON, "{\"token\":\"fixture-handle\"}") {
 expect match read_delivery_page(STAGED_DELIVERY_ROWS, 0) {
     Done(result) => result.consumed == 1 and result.value.done and result.value.page == 0
         and result.value.items.len() == 2
-        and result.value.items.any(|unit| unit.id == "eng" and unit.parent_id == Some("root") and unit.parent_path == Some("/"))
-    _ => Bool.False
-}
-expect match read_page(PAGE_JSON, 0) {
-    Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2
-        and result.value.items.len() == 2
         and result.value.items.any(|unit| unit.id == "root" and unit.parent_id == None and unit.parent_path == None)
         and result.value.items.any(|unit| unit.id == "eng" and unit.parent_id == Some("root") and unit.parent_path == Some("/"))
     _ => Bool.False
 }
-expect match read_page(EMPTY_JSON, 2) {
-    Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2 and result.value.items.is_empty()
-    _ => Bool.False
-}
-expect match read_membership(MEMBERSHIP_JSON, "{\"token\":\"fixture-handle\"}") {
+expect match read_user_path(USER_PATH_JSON) {
     Done(result) => result.consumed == 1 and result.value.user_path == "/Engineering"
-        and result.value.source_captured_at == 100 and result.value.expires_at == 1000
-    _ => Bool.False
-}
-expect match read_hierarchy(HIERARCHY_JSON, "{\"token\":\"fixture-handle\"}") {
-    Done(result) => result.consumed == 1 and result.value.customer_id == "customer-1"
-        and result.value.actor == "alice@example.test" and result.value.source_captured_at == 100
-        and result.value.expires_at == 1000
+        and result.value.actor == "alice@example.test" and result.value.captured_at == 200
     _ => Bool.False
 }
 "#
-        .replace("PAGE_JSON", &serde_json::to_string(&page)?)
-        .replace("EMPTY_JSON", &serde_json::to_string(&empty)?)
-        .replace("MEMBERSHIP_JSON", &serde_json::to_string(&membership_json)?)
-        .replace("HIERARCHY_JSON", &serde_json::to_string(&hierarchy_json)?)
         .replace("DELIVERY_JSON", &serde_json::to_string(&delivery_json)?)
         .replace("STAGED_DELIVERY_ROWS", &serde_json::to_string(&delivery_page)?)
+        .replace("USER_PATH_JSON", &serde_json::to_string(&user_path)?)
         .replace(
             "DELIVERY_CAPABILITY",
             &serde_json::to_string(
                 &day2_capabilities::registry::Action::WorkspaceDirectoryHierarchyDelivery.capability(),
             )?,
-        )
-        .replace(
-            "HIERARCHY_CAPABILITY",
-            &serde_json::to_string(&day2_capabilities::registry::Action::WorkspaceDirectoryHierarchy.capability())?,
         );
     fs::write(stage.join("app/main.roc"), source)?;
     let output = crate::support::compiler::output(
@@ -547,7 +482,7 @@ expect match read_hierarchy(HIERARCHY_JSON, "{\"token\":\"fixture-handle\"}") {
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (8) tests passed"),
+        output.status.success() && diagnostics.contains("All (4) tests passed"),
         "native Directory contracts ({}): {diagnostics}",
         output.status
     );
@@ -995,8 +930,8 @@ query_program : Context, { path : Str } -> Tx({ count : U64 })
 query_program = query.query_program()
 expect command_base.required_all_rows().is_empty() and query_base.required_all_rows().is_empty()
 expect command_base.observations().is_empty() and query_base.observations().is_empty()
-expect command_base.observes("workspace_directory.capture.v1").observations() == ["workspace_directory.capture.v1"]
-expect query_base.observes("workspace_directory.hierarchy.v1").observes("workspace_directory.page.v1").observations() == ["workspace_directory.hierarchy.v1", "workspace_directory.page.v1"]
+expect command_base.observes("workspace_directory.user_path.v1").observations() == ["workspace_directory.user_path.v1"]
+expect query_base.observes("workspace_directory.hierarchy.v2").observes("workspace_directory.page.v2").observations() == ["workspace_directory.hierarchy.v2", "workspace_directory.page.v2"]
 expect command.required_all_rows() == ["rows", "logs"] and query.required_all_rows() == ["logs", "rows"]
 expect (command.contract().example)({}) == Ok({input: {reason: "example"}, output: {accepted: Bool.True}}) and (command.verification().input)("{}", 1) == Ok({reason: "generated"})
 expect (query.contract().example)({}) == Ok({input: {path: "/root"}, output: {count: 5}}) and (query.verification().input)("{}", 1) == Ok({path: "/generated"})

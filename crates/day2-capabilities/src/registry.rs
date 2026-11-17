@@ -138,8 +138,6 @@ providers! {
         kind: CartaIssuer,
         world: "carta.synthetic.sqlite",
         actions: {
-            CartaSnapshot => "carta.snapshot.v1" (read, data),
-            CartaRecord => "carta.record.v1" (read, data),
             // A complete capture held in the reading application's own database
             // until that application releases it; no host store or pruning.
             CartaSnapshotDelivery => "carta.snapshot.v2" (read, data),
@@ -165,10 +163,7 @@ providers! {
         kind: WorkspaceDirectory,
         world: "workspace_directory.simulated.sqlite",
         actions: {
-            WorkspaceDirectoryCapture => "workspace_directory.capture.v1" (read, data),
             WorkspaceDirectoryUserPath => "workspace_directory.user_path.v1" (read, data),
-            WorkspaceDirectoryHierarchy => "workspace_directory.hierarchy.v1" (read, data),
-            WorkspaceDirectoryPage => "workspace_directory.page.v1" (read, data),
             // A complete hierarchy handed to the reading invocation, with no
             // host cache or expiry; its pages exist only for that invocation.
             WorkspaceDirectoryHierarchyDelivery => "workspace_directory.hierarchy.v2" (read, data),

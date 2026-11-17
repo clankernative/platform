@@ -345,14 +345,6 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         // the fixed two-second busy timeout on a connection they just opened.
         // These pins do not establish native SQL ownership or admit a callback.
         (
-            "crates/day2/src/carta.rs",
-            "sha256:bf05f4c05e391c7efd0f0176e4e7b47bc09fa4e78f4b8081bf46ee57e2761584",
-        ),
-        (
-            "crates/day2/src/carta_live.rs",
-            "sha256:d0c13c2ba2a523b1a316256b49697b08e3562e879b5d41b4884f42690a560258",
-        ),
-        (
             "crates/day2/src/people_providers.rs",
             "sha256:f1b6a0eac6d467e0cb30e81e655aa57d8f1d13d1515419dc2df67a664095be34",
         ),

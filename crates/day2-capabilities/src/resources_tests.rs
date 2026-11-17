@@ -77,7 +77,7 @@ fn stale_aliases_actors_actions_duration_and_ambiguous_bindings_fail_closed() ->
         .get_mut("notifications")
         .unwrap()
         .actions
-        .insert(Action::CartaRecord);
+        .insert(Action::CartaRecords);
     assert!(changed.validate().is_err());
     Ok(())
 }
@@ -176,8 +176,9 @@ mod registry_golden {
         Action::NotificationsResolve,
         Action::NotificationsLatest,
         Action::NotificationsSend,
-        Action::CartaSnapshot,
-        Action::CartaRecord,
+        Action::CartaSnapshotDelivery,
+        Action::CartaRecords,
+        Action::CartaRelease,
         Action::GoogleDirectorySnapshot,
         Action::GoogleDirectoryRecord,
         Action::GoogleDirectoryCreateUser,
@@ -220,8 +221,9 @@ mod registry_golden {
             ResourceKind::NotificationMailbox,
             true,
         ),
-        ("carta.snapshot.v1", ResourceKind::CartaIssuer, false),
-        ("carta.record.v1", ResourceKind::CartaIssuer, false),
+        ("carta.snapshot.v2", ResourceKind::CartaIssuer, false),
+        ("carta.records.v2", ResourceKind::CartaIssuer, false),
+        ("carta.release.v2", ResourceKind::CartaIssuer, false),
         (
             "google_directory.snapshot.v1",
             ResourceKind::GoogleDirectory,
@@ -628,7 +630,7 @@ mod carta_modes {
             "connections":{"carta":{"revision":1,"provider":"carta","live":live}},
             "resources":{"issuer":{"revision":1,"connection":{"id":"carta","revision":1},"target":target}},
             "policies":{"capture":{"revision":1,"owner":"owner","actors":["refresh"],"allowed_apps":["equity"],"max_duration_seconds":null,
-                "slots":{"carta":{"kind":"carta_issuer","allowed_resources":[{"id":"issuer","revision":1}],"actions":["carta_snapshot"],
+                "slots":{"carta":{"kind":"carta_issuer","allowed_resources":[{"id":"issuer","revision":1}],"actions":["carta_snapshot_delivery"],
                     "limits":{"max_request_bytes":65536,"max_response_bytes":4194304,"max_calls_per_invocation":101}}}}}
         }))?)
     }

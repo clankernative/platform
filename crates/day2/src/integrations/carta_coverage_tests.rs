@@ -19,11 +19,10 @@ const ACTOR: &str = "alice";
 const INVOCATION: &str = "carta-coverage";
 const ISSUER: &str = "4242";
 const SYNTHETIC_ISSUER: &str = "synthetic-issuer-1";
-const ACTIONS: [Action; 2] = [Action::CartaSnapshot, Action::CartaRecord];
-/// Every action the admitted slot grants, including the v2 held delivery.
-const GRANTED: [Action; 5] = [
-    Action::CartaSnapshot,
-    Action::CartaRecord,
+/// The reads the coverage gate observes; release has its own demonstration.
+const ACTIONS: [Action; 2] = [Action::CartaSnapshotDelivery, Action::CartaRecords];
+/// Every action the admitted slot grants.
+const GRANTED: [Action; 3] = [
     Action::CartaSnapshotDelivery,
     Action::CartaRecords,
     Action::CartaRelease,
@@ -299,12 +298,6 @@ impl Harness {
         })
     }
 
-    fn snapshot(&self) -> Result<crate::carta::Snapshot> {
-        Ok(serde_json::from_str(
-            &self.dispatch(Action::CartaSnapshot, json!({}))?.result,
-        )?)
-    }
-
     fn deliver(&self) -> Result<crate::carta::Delivery> {
         Ok(serde_json::from_str(
             &self
@@ -343,25 +336,11 @@ impl Harness {
             |row| row.get(0),
         )?)
     }
-
-    fn record(&self, id: &str, cursor: u64) -> Result<String> {
-        Ok(self
-            .dispatch(
-                Action::CartaRecord,
-                json!({"snapshot_id":id,"cursor":cursor}),
-            )?
-            .result)
-    }
 }
 
 pub(super) fn observe(action: Action, variant: Variant) -> Result<Observed> {
     let harness = Harness::new(variant)?;
     match action {
-        Action::CartaSnapshot => harness.dispatch(action, json!({})),
-        Action::CartaRecord => {
-            let snapshot = harness.snapshot()?;
-            harness.dispatch(action, json!({"snapshot_id":snapshot.id,"cursor":0}))
-        }
         Action::CartaSnapshotDelivery => harness.dispatch(action, json!({})),
         Action::CartaRecords => {
             let delivery = harness.deliver()?;
@@ -382,20 +361,7 @@ fn carta_actions_use_admitted_handles_and_independent_complete_records() -> Resu
     for variant in [Variant::A, Variant::B] {
         let harness = Harness::new(variant)?;
         let before = harness.provider()?.world;
-        let snapshot = harness.snapshot()?;
-        assert_eq!(snapshot.issuer_id, ISSUER);
-        assert_eq!(snapshot.source_profile, "carta_simulated");
-        assert_eq!(
-            (
-                snapshot.record_count,
-                snapshot.stakeholder_count,
-                snapshot.grant_count,
-                snapshot.vesting_event_count,
-                snapshot.exercise_count
-            ),
-            (3, 2, 1, 0, 0)
-        );
-        assert!(snapshot.id.starts_with("carta_"));
+        let delivery = harness.deliver()?;
         let collected = harness.provider()?;
         assert_eq!(
             collected.world, before,
@@ -406,23 +372,18 @@ fn carta_actions_use_admitted_handles_and_independent_complete_records() -> Resu
             4,
             "token, both stakeholder pages, then grant page"
         );
-        for (cursor, record) in expected_records(variant).iter().enumerate() {
-            let actual: Value =
-                serde_json::from_str(&harness.record(&snapshot.id, cursor as u64)?)?;
-            let expected = serde_json::to_value(record)?;
-            assert_eq!(actual["kind"], expected["kind"]);
-            let body: Value =
-                serde_json::from_str(actual["data"].as_str().context("record data")?)?;
-            assert_eq!(body, expected["data"]);
-        }
+        let expected = expected_records(variant)
+            .iter()
+            .map(tagged)
+            .collect::<Result<Vec<_>>>()?;
         assert_eq!(
-            serde_json::from_str::<Value>(&harness.record(&snapshot.id, 3)?)?,
-            json!({"kind":"done","data":"{}"})
+            harness.page(&delivery.id, 0)?,
+            json!({"records":expected,"next":3,"done":true})
         );
         assert_eq!(
             harness.provider()?,
             collected,
-            "local records make zero provider calls"
+            "held record reads make zero provider calls"
         );
     }
     Ok(())
@@ -488,13 +449,13 @@ fn carta_variants_change_only_carta_and_reject_mutating_readers() -> Result<()> 
 
 #[test]
 fn carta_authorization_refuses_foreign_actor_handle_and_binding_before_provider_io() -> Result<()> {
-    for action in ACTIONS {
+    for action in GRANTED {
         let harness = Harness::new(Variant::A)?;
-        let snapshot = harness.snapshot()?;
-        let input = if action == Action::CartaRecord {
-            json!({"snapshot_id":snapshot.id,"cursor":0})
-        } else {
-            json!({})
+        let delivery = harness.deliver()?;
+        let input = match action {
+            Action::CartaRecords => json!({"capture_id":delivery.id,"from":0,"limit":1}),
+            Action::CartaRelease => json!({"capture_id":delivery.id}),
+            _ => json!({}),
         };
         let before = harness.provider()?;
         assert!(
@@ -507,34 +468,43 @@ fn carta_authorization_refuses_foreign_actor_handle_and_binding_before_provider_
         assert!(harness.authorize(action, forged, "carta", ACTOR).is_err());
         assert!(harness.authorize(action, input, "unbound", ACTOR).is_err());
         assert_eq!(harness.provider()?, before);
+        assert_eq!(harness.held()?, 1, "{action:?}: nothing released");
     }
     Ok(())
 }
 
 #[test]
-fn carta_record_refuses_other_connections_issuers_cursors_and_unknown_captures() -> Result<()> {
+fn carta_records_refuse_other_connections_issuers_cursors_and_unknown_captures() -> Result<()> {
     let harness = Harness::new(Variant::A)?;
-    let snapshot = harness.snapshot()?;
+    let delivery = harness.deliver()?;
     let before = harness.provider()?;
     for binding in ["other_connection", "other_issuer"] {
         let authorized = harness.authorize(
-            Action::CartaRecord,
-            json!({"snapshot_id":snapshot.id,"cursor":0}),
+            Action::CartaRecords,
+            json!({"capture_id":delivery.id,"from":0,"limit":1}),
             binding,
             ACTOR,
         )?;
-        assert!(
+        assert_eq!(
             capabilities::observe(harness.runtime(), authorized, "foreign-read")
                 .result
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "capture_delivery_authority_changed",
+            "{binding}"
         );
     }
-    assert!(harness.record(&snapshot.id, 4).is_err());
-    assert!(harness.record(&snapshot.id, u64::MAX).is_err());
-    assert!(harness.record("carta_unavailable", 0).is_err());
+    assert!(harness.page(&delivery.id, 4).is_err());
+    assert!(harness.page(&delivery.id, u64::MAX).is_err());
+    assert!(harness.page("carta_unavailable", 0).is_err());
+    assert!(
+        harness
+            .page(&format!("carta_{}", "0".repeat(64)), 0)
+            .is_err()
+    );
     assert_eq!(harness.provider()?, before);
-    // A refused lookup must not replace the selected capture.
-    assert!(harness.record(&snapshot.id, 0).is_ok());
+    // A refused lookup does not disturb the held capture.
+    assert!(harness.page(&delivery.id, 0).is_ok());
     Ok(())
 }
 
@@ -542,21 +512,19 @@ fn carta_record_refuses_other_connections_issuers_cursors_and_unknown_captures()
 fn carta_capture_refuses_a_different_admitted_issuer() -> Result<()> {
     let harness = Harness::new(Variant::A)?;
     let before = harness.provider()?.world;
-    let authorized = harness.authorize(Action::CartaSnapshot, json!({}), "other_issuer", ACTOR)?;
+    let authorized = harness.authorize(
+        Action::CartaSnapshotDelivery,
+        json!({}),
+        "other_issuer",
+        ACTOR,
+    )?;
     assert!(
         capabilities::observe(harness.runtime(), authorized, "wrong-issuer")
             .result
             .is_err()
     );
     assert_eq!(harness.provider()?.world, before);
-    assert!(
-        !harness
-            .runtime()
-            .db()
-            .with_file_name(crate::carta_live::STORE)
-            .exists(),
-        "failed capture must publish nothing"
-    );
+    assert_eq!(harness.held()?, 0, "a failed capture holds nothing");
     Ok(())
 }
 
@@ -627,14 +595,7 @@ fn carta_delivery_holds_the_complete_capture_in_the_app_database_until_released(
         );
         assert!(delivery.id.starts_with("carta_"));
         assert_eq!(harness.provider()?.calls.len(), 4);
-        assert!(
-            !harness
-                .runtime()
-                .db()
-                .with_file_name(crate::carta_live::STORE)
-                .exists(),
-            "v2 publishes nothing beside the app database"
-        );
+        assert_eq!(harness.held()?, 1, "held in the app database");
         let page = harness.page(&delivery.id, 0)?;
         let expected = expected_records(variant)
             .iter()

@@ -1,11 +1,12 @@
 //! Live Carta capture: one bounded, complete collection of an issuer's
-//! stakeholders and option grants, mapped to the typed SDK records and published
-//! as an immutable, content-addressed capture in the live provider store.
+//! stakeholders and option grants, mapped to the typed SDK records and given a
+//! content-addressed identity.
 //!
-//! `carta.snapshot.v1` performs the collection when its resource has a live
-//! connection; `carta.record.v1` then reads the published capture locally. This
-//! pipeline owns request order, pagination, every byte and record bound, status
-//! classification and all-or-none publication. A port owns only the wire: the
+//! `carta.snapshot.v2` performs the collection when its resource has a live
+//! connection and hands the complete capture to the application, which holds it
+//! in its own database (see `crate::capture_delivery`). This pipeline owns
+//! request order, pagination, every byte and record bound, status
+//! classification and all-or-none completion. A port owns only the wire: the
 //! native port speaks HTTPS to Carta's fixed origins and the simulated port
 //! serves verbatim wire bodies from a committed world, so both lanes run the same
 //! DTO parser and the same failure classification.
@@ -13,18 +14,14 @@
 //! Stakeholders and option grants are separate endpoints read in sequence. The
 //! capture is immutable locally; it is not an upstream point-in-time snapshot.
 use crate::carta::{Exercise, Grant, OptionalText, Record, Snapshot, Stakeholder, VestingEvent};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use day2_capabilities::{
     integrations::{CartaEnvironment, LiveConnection},
     resources::{CartaChildren, VersionRef},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Deserialize;
 use std::{collections::BTreeSet, fmt, path::Path};
 
-/// The live provider store, beside the app database. Not a registry world:
-/// backups exclude it, and a restored instance recaptures.
-pub const STORE: &str = "carta.sqlite";
 pub const MAX_PAGE_RESPONSE_BYTES: usize = 4 * 1_048_576;
 pub const MAX_TOKEN_RESPONSE_BYTES: usize = 16 * 1024;
 /// Every page response of one capture together.
@@ -35,9 +32,6 @@ pub const MAX_CAPTURE_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_CAPTURE_RESPONSE_BYTES: u64 =
     (MAX_TOKEN_RESPONSE_BYTES + 1 + MAX_AGGREGATE_PAGE_BYTES + 1) as u64;
 pub const MAX_PAGE_TOKEN_BYTES: usize = 1024;
-/// Two retained 32 MiB captures, a third being published before the oldest is
-/// pruned, and SQLite page overhead.
-pub const MAX_STORE_BYTES: u64 = 128 * 1_048_576;
 /// Pinned per adapter version. Qualification corrects this list explicitly.
 pub const REQUIRED_SCOPES: [&str; 2] = ["read_issuer_stakeholders", "read_issuer_securities"];
 const MIN_TOKEN_LIFETIME_SECONDS: i64 = 60;
@@ -61,7 +55,6 @@ pub enum Failure {
     RecordCountBudget,
     RecordByteBudget,
     CaptureByteBudget,
-    StoreFull,
 }
 
 impl Failure {
@@ -81,7 +74,6 @@ impl Failure {
             Self::RecordCountBudget => "carta_record_count_budget",
             Self::RecordByteBudget => "carta_record_byte_budget",
             Self::CaptureByteBudget => "carta_capture_byte_budget",
-            Self::StoreFull => "carta_store_full",
         }
     }
 }
@@ -698,12 +690,11 @@ impl ExerciseDto {
     }
 }
 
-/// Records in provider order with their encoded envelopes, bounded as they
+/// Records in provider order, each encoded once to bound it, bounded as they
 /// arrive so an oversized capture fails before it is fully held in memory.
 #[derive(Default)]
 struct Collected {
     records: Vec<Record>,
-    envelopes: Vec<String>,
     bytes: usize,
 }
 
@@ -726,7 +717,6 @@ impl Collected {
             .checked_add(envelope.len())
             .filter(|bytes| *bytes <= crate::carta::MAX_CAPTURE_BYTES)
             .ok_or(Failure::CaptureByteBudget)?;
-        self.envelopes.push(envelope);
         self.records.push(record);
         Ok(())
     }
@@ -855,14 +845,9 @@ fn collect(
     Ok(collected)
 }
 
-/// A validated capture ready for atomic publication.
+/// A validated complete capture, ready to be delivered to the application.
 pub struct CompleteCapture {
     snapshot: Snapshot,
-    scope: String,
-    connection: String,
-    environment: CartaEnvironment,
-    children: CartaChildren,
-    envelopes: Vec<String>,
     records: Vec<Record>,
 }
 
@@ -912,11 +897,6 @@ fn complete(plan: &CapturePlan, collected: Collected) -> Result<CompleteCapture>
             exercise_count: u64::try_from(exercise_count)?,
             source_profile: source_profile.into(),
         },
-        scope: plan.scope.clone(),
-        connection: plan.connection.clone(),
-        environment: plan.environment,
-        children: plan.children,
-        envelopes: collected.envelopes,
         records: collected.records,
     })
 }
@@ -934,302 +914,6 @@ pub fn collect_complete(
         .map_err(anyhow::Error::from)
         .and_then(|collected| complete(plan, collected));
     (result, meter)
-}
-
-fn upgrade(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS carta_snapshots (
-            scope TEXT NOT NULL, id TEXT NOT NULL, issuer_id TEXT NOT NULL,
-            record_count INTEGER NOT NULL CHECK(record_count BETWEEN 0 AND 10000),
-            stakeholder_count INTEGER NOT NULL CHECK(stakeholder_count >= 0),
-            grant_count INTEGER NOT NULL CHECK(grant_count >= 0),
-            vesting_event_count INTEGER NOT NULL CHECK(vesting_event_count >= 0),
-            exercise_count INTEGER NOT NULL CHECK(exercise_count >= 0),
-            source_profile TEXT NOT NULL
-                CHECK(source_profile IN ('carta_production','carta_playground','carta_simulated')),
-            connection TEXT NOT NULL CHECK(length(connection) = 71 AND connection GLOB 'sha256:*'),
-            environment TEXT NOT NULL CHECK(environment IN ('production','playground')),
-            children TEXT NOT NULL CHECK(children IN ('include','omit')),
-            CHECK(record_count = stakeholder_count + grant_count + vesting_event_count + exercise_count),
-            PRIMARY KEY(scope,id)
-        ) STRICT;
-        CREATE TABLE IF NOT EXISTS carta_records (
-            scope TEXT NOT NULL, snapshot TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-            envelope TEXT NOT NULL, PRIMARY KEY(scope,snapshot,ordinal),
-            FOREIGN KEY(scope,snapshot) REFERENCES carta_snapshots(scope,id)
-        ) STRICT;
-        -- Selections and their retention are per connection authority: a
-        -- capture through one connection never prunes or replaces another's.
-        CREATE TABLE IF NOT EXISTS carta_selection (
-            scope TEXT NOT NULL, connection TEXT NOT NULL, issuer_id TEXT NOT NULL,
-            seq INTEGER NOT NULL CHECK(seq > 0), snapshot TEXT NOT NULL,
-            collected_from INTEGER NOT NULL, collected_to INTEGER NOT NULL,
-            CHECK(collected_to >= collected_from),
-            PRIMARY KEY(scope,connection,issuer_id,seq),
-            FOREIGN KEY(scope,snapshot) REFERENCES carta_snapshots(scope,id)
-        ) STRICT;
-        CREATE INDEX IF NOT EXISTS carta_selection_snapshot ON carta_selection(scope,snapshot);
-        CREATE TRIGGER IF NOT EXISTS carta_snapshots_no_update BEFORE UPDATE ON carta_snapshots
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
-        CREATE TRIGGER IF NOT EXISTS carta_records_no_update BEFORE UPDATE ON carta_records
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
-        CREATE TRIGGER IF NOT EXISTS carta_selection_no_update BEFORE UPDATE ON carta_selection
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
-        CREATE TRIGGER IF NOT EXISTS carta_snapshots_no_replace BEFORE INSERT ON carta_snapshots
-            WHEN EXISTS(SELECT 1 FROM carta_snapshots WHERE scope=NEW.scope AND id=NEW.id)
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
-        CREATE TRIGGER IF NOT EXISTS carta_records_no_replace BEFORE INSERT ON carta_records
-            WHEN EXISTS(SELECT 1 FROM carta_records
-                WHERE scope=NEW.scope AND snapshot=NEW.snapshot AND ordinal=NEW.ordinal)
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
-        -- Retention: a snapshot or its records are removable only once no
-        -- selection refers to it, and the newest selection of each of the two
-        -- most recently selected snapshots per connection and issuer cannot be
-        -- removed.
-        CREATE TRIGGER IF NOT EXISTS carta_snapshots_retained BEFORE DELETE ON carta_snapshots
-            WHEN EXISTS(SELECT 1 FROM carta_selection WHERE scope=OLD.scope AND snapshot=OLD.id)
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
-        CREATE TRIGGER IF NOT EXISTS carta_records_retained BEFORE DELETE ON carta_records
-            WHEN EXISTS(SELECT 1 FROM carta_selection WHERE scope=OLD.scope AND snapshot=OLD.snapshot)
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
-        CREATE TRIGGER IF NOT EXISTS carta_selection_retained BEFORE DELETE ON carta_selection
-            WHEN OLD.seq = (SELECT max(seq) FROM carta_selection
-                    WHERE scope=OLD.scope AND connection=OLD.connection AND issuer_id=OLD.issuer_id
-                        AND snapshot=OLD.snapshot)
-                AND OLD.snapshot IN (SELECT snapshot FROM carta_selection
-                    WHERE scope=OLD.scope AND connection=OLD.connection AND issuer_id=OLD.issuer_id
-                    GROUP BY snapshot ORDER BY max(seq) DESC LIMIT 2)
-            BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;",
-    )?;
-    Ok(())
-}
-
-/// Publish a complete capture and select it, atomically. An identical capture
-/// is reused; the previous selection stays readable so an in-progress import
-/// can finish, and anything older for this issuer is pruned in the same
-/// transaction.
-pub fn publish(
-    path: &Path,
-    capture: &CompleteCapture,
-    collected_from: i64,
-    collected_to: i64,
-) -> Result<()> {
-    publish_with_limit(path, capture, collected_from, collected_to, MAX_STORE_BYTES)
-}
-
-fn publish_with_limit(
-    path: &Path,
-    capture: &CompleteCapture,
-    collected_from: i64,
-    collected_to: i64,
-    max_bytes: u64,
-) -> Result<()> {
-    let snapshot = &capture.snapshot;
-    ensure!(
-        capture.envelopes.len() == usize::try_from(snapshot.record_count)?
-            && collected_to >= collected_from,
-        "carta_capture_metadata_invalid"
-    );
-    let mut connection = crate::store::open(path)?;
-    let tx = crate::write_queue::immediate(&mut connection)?;
-    upgrade(&tx)?;
-    let existing: Option<(String, i64, String, String, String, String)> = tx
-        .query_row(
-            "SELECT issuer_id,record_count,source_profile,connection,environment,children
-             FROM carta_snapshots WHERE scope=?1 AND id=?2",
-            params![capture.scope, snapshot.id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let metadata = (
-        snapshot.issuer_id.clone(),
-        i64::try_from(snapshot.record_count)?,
-        snapshot.source_profile.clone(),
-        capture.connection.clone(),
-        capture.environment.name().to_owned(),
-        capture.children.name().to_owned(),
-    );
-    match existing {
-        Some(existing) => ensure!(existing == metadata, "carta_capture_id_conflict"),
-        None => {
-            tx.execute(
-                "INSERT INTO carta_snapshots VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![
-                    capture.scope,
-                    snapshot.id,
-                    snapshot.issuer_id,
-                    i64::try_from(snapshot.record_count)?,
-                    i64::try_from(snapshot.stakeholder_count)?,
-                    i64::try_from(snapshot.grant_count)?,
-                    i64::try_from(snapshot.vesting_event_count)?,
-                    i64::try_from(snapshot.exercise_count)?,
-                    snapshot.source_profile,
-                    capture.connection,
-                    capture.environment.name(),
-                    capture.children.name(),
-                ],
-            )?;
-            let mut insert = tx.prepare("INSERT INTO carta_records VALUES(?1,?2,?3,?4)")?;
-            for (ordinal, envelope) in capture.envelopes.iter().enumerate() {
-                insert.execute(params![
-                    capture.scope,
-                    snapshot.id,
-                    i64::try_from(ordinal)?,
-                    envelope
-                ])?;
-            }
-        }
-    }
-    tx.execute(
-        "INSERT INTO carta_selection
-         SELECT ?1,?2,?3,coalesce(max(seq),0)+1,?4,?5,?6 FROM carta_selection
-         WHERE scope=?1 AND connection=?2 AND issuer_id=?3",
-        params![
-            capture.scope,
-            capture.connection,
-            snapshot.issuer_id,
-            snapshot.id,
-            collected_from,
-            collected_to
-        ],
-    )?;
-    // Older selections of retained snapshots are compacted; every selection of
-    // anything else goes, and then its records and the snapshot itself. Only
-    // this connection's selections for this issuer are considered.
-    let retained =
-        "SELECT snapshot FROM carta_selection WHERE scope=?1 AND connection=?2 AND issuer_id=?3
-        GROUP BY snapshot ORDER BY max(seq) DESC LIMIT 2";
-    let pruned: Vec<String> = tx
-        .prepare(&format!(
-            "SELECT DISTINCT snapshot FROM carta_selection
-             WHERE scope=?1 AND connection=?2 AND issuer_id=?3 AND snapshot NOT IN ({retained})"
-        ))?
-        .query_map(
-            params![capture.scope, capture.connection, snapshot.issuer_id],
-            |row| row.get(0),
-        )?
-        .collect::<rusqlite::Result<_>>()?;
-    tx.execute(
-        &format!(
-            "DELETE FROM carta_selection WHERE scope=?1 AND connection=?2 AND issuer_id=?3
-             AND (snapshot NOT IN ({retained})
-             OR seq < (SELECT max(seq) FROM carta_selection newest WHERE newest.scope=carta_selection.scope
-                AND newest.connection=carta_selection.connection AND newest.issuer_id=carta_selection.issuer_id
-                AND newest.snapshot=carta_selection.snapshot))"
-        ),
-        params![capture.scope, capture.connection, snapshot.issuer_id],
-    )?;
-    for old in pruned {
-        tx.execute(
-            "DELETE FROM carta_records WHERE scope=?1 AND snapshot=?2",
-            params![capture.scope, old],
-        )?;
-        tx.execute(
-            "DELETE FROM carta_snapshots WHERE scope=?1 AND id=?2",
-            params![capture.scope, old],
-        )?;
-    }
-    let pages: i64 = tx.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-    let page_size: i64 = tx.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    let bytes = u64::try_from(pages)?
-        .checked_mul(u64::try_from(page_size)?)
-        .context("carta_store_size_overflow")?;
-    ensure!(bytes <= max_bytes, Failure::StoreFull);
-    tx.commit()?;
-    Ok(())
-}
-
-/// A `carta.record.v1` read of a live capture, bound to the grant's connection
-/// authority, environment, issuer, source and child-record mode as well as the
-/// runtime scope.
-pub struct RecordRead {
-    scope: String,
-    snapshot_id: String,
-    cursor: u64,
-    issuer_id: String,
-    connection: String,
-    environment: CartaEnvironment,
-    source_profile: SourceProfile,
-    children: CartaChildren,
-}
-
-impl RecordRead {
-    pub(crate) fn authorize(
-        plan: &CapturePlan,
-        instruction: &crate::protocol::Instruction,
-    ) -> Result<Self> {
-        let (snapshot_id, cursor) = crate::carta::decode_next(instruction)?;
-        Ok(Self {
-            scope: plan.scope.clone(),
-            snapshot_id,
-            cursor,
-            issuer_id: plan.issuer_id.clone(),
-            connection: plan.connection.clone(),
-            environment: plan.environment,
-            source_profile: plan.source_profile,
-            children: plan.children,
-        })
-    }
-}
-
-/// Read one record from the live store. Purely local: no provider is reached,
-/// and a pruned or foreign snapshot is unavailable rather than substituted. A
-/// capture collected under any other connection authority or environment is
-/// foreign, even when its issuer, source and mode match.
-pub fn read_record(path: &Path, read: &RecordRead) -> Result<String> {
-    // OPEN_CREATE is intentionally absent: a missing store is no capture.
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| anyhow::anyhow!("carta_snapshot_unavailable"))?;
-    connection.busy_timeout(std::time::Duration::from_secs(2))?;
-    let count: Option<i64> = connection
-        .query_row(
-            "SELECT s.record_count FROM carta_snapshots s WHERE s.scope=?1 AND s.id=?2 AND s.issuer_id=?3
-                AND s.source_profile=?4 AND s.children=?5 AND s.connection=?6 AND s.environment=?7
-                AND EXISTS(SELECT 1 FROM carta_selection l WHERE l.scope=s.scope AND l.connection=s.connection
-                    AND l.issuer_id=s.issuer_id AND l.snapshot=s.id)",
-            params![
-                read.scope,
-                read.snapshot_id,
-                read.issuer_id,
-                read.source_profile.name(),
-                read.children.name(),
-                read.connection,
-                read.environment.name()
-            ],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| anyhow::anyhow!("carta_snapshot_unavailable"))?;
-    let count = count.context("carta_snapshot_unavailable")?;
-    ensure!(
-        (0..=crate::carta::MAX_RECORDS as i64).contains(&count),
-        "carta_record_count_budget"
-    );
-    let cursor = i64::try_from(read.cursor)?;
-    ensure!(cursor <= count, "invalid_carta_cursor");
-    let result = if cursor == count {
-        serde_json::json!({"kind":"done","data":"{}"}).to_string()
-    } else {
-        connection.query_row(
-            "SELECT envelope FROM carta_records WHERE scope=?1 AND snapshot=?2 AND ordinal=?3",
-            params![read.scope, read.snapshot_id, cursor],
-            |row| row.get::<_, String>(0),
-        )?
-    };
-    ensure!(
-        result.len() <= crate::carta::MAX_RECORD_BYTES * 2 + 128,
-        "carta_record_byte_budget"
-    );
-    Ok(result)
 }
 
 /// Offline Carta wire bodies parsed by the same DTOs and pipeline as the live

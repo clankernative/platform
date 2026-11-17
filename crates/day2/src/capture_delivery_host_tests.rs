@@ -46,8 +46,6 @@ fn fixture(world: Value) -> Result<(tempfile::TempDir, Runtime)> {
     let actions = [
         Action::WorkspaceDirectoryHierarchyDelivery,
         Action::WorkspaceDirectoryDeliveryPage,
-        Action::WorkspaceDirectoryHierarchy,
-        Action::WorkspaceDirectoryPage,
     ];
     let observations: Vec<_> = actions.iter().map(|action| action.capability()).collect();
     let policy = json!({"version":1,"admins":[],"operations":{"run":{"actors":[ACTOR],
@@ -257,6 +255,22 @@ impl<'a> Invocation<'a> {
     }
 }
 
+/// A provider port that answers a fixed hierarchy and never looks up a user.
+struct Units(Vec<crate::workspace_directory::OrgUnit>);
+
+impl crate::workspace_directory::DirectoryReadPort for Units {
+    fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+        anyhow::bail!("a hierarchy read never looks up a user")
+    }
+
+    fn list_org_units(&mut self) -> Result<crate::workspace_directory::ProviderPage> {
+        Ok(crate::workspace_directory::ProviderPage {
+            units: self.0.clone(),
+            response_bytes: 0,
+        })
+    }
+}
+
 fn staged_rows(runtime: &Runtime) -> Result<i64> {
     Ok(open(runtime.db())?.query_row(
         "SELECT count(*) FROM day2_capture_deliveries",
@@ -401,7 +415,7 @@ fn delivery_fails_closed_without_staging_and_still_settles_provider_usage() -> R
     let readable = crate::capture_delivery::MAX_PAGES * crate::capture_delivery::MAX_PAGE_ITEMS;
     let (delivery, staged) = crate::workspace_directory::deliver_hierarchy(
         input.clone(),
-        &mut crate::workspace_directory::CachedHierarchyPort::new(units(readable - 1), NOW),
+        &mut Units(units(readable - 1)),
     )?;
     assert_eq!(
         delivery.page_count,
@@ -409,12 +423,9 @@ fn delivery_fails_closed_without_staging_and_still_settles_provider_usage() -> R
     );
     assert_eq!(staged.pages.len(), crate::capture_delivery::MAX_PAGES);
     assert_eq!(
-        crate::workspace_directory::deliver_hierarchy(
-            input,
-            &mut crate::workspace_directory::CachedHierarchyPort::new(units(readable), NOW),
-        )
-        .unwrap_err()
-        .to_string(),
+        crate::workspace_directory::deliver_hierarchy(input, &mut Units(units(readable)),)
+            .unwrap_err()
+            .to_string(),
         "workspace_directory_delivery_exceeds_invocation"
     );
 
@@ -462,54 +473,5 @@ fn delivery_fails_closed_without_staging_and_still_settles_provider_usage() -> R
     ] {
         assert!(denied.observe(PAGE, data).is_err());
     }
-    Ok(())
-}
-
-#[test]
-fn v1_capture_and_cache_are_unchanged_beside_v2() -> Result<()> {
-    let (_directory, runtime) = fixture(hierarchy(2, "Team"))?;
-    let mut legacy = Invocation::accept(&runtime, "legacy")?;
-    let captured: Value = serde_json::from_str(
-        &legacy
-            .observe("workspace_directory.hierarchy.v1", json!({}))?
-            .result?,
-    )?;
-    assert_eq!(
-        captured["expires_at"],
-        NOW + crate::workspace_directory::SOURCE_TTL_SECONDS
-    );
-    let page: Value = serde_json::from_str(
-        &legacy
-            .observe(
-                "workspace_directory.page.v1",
-                json!({"capture_id":captured["id"],"offset":0}),
-            )?
-            .result?,
-    )?;
-    assert_eq!(page["items"].as_array().map(Vec::len), Some(3));
-    assert!(
-        runtime
-            .db()
-            .with_file_name("workspace_directory.sqlite")
-            .exists()
-    );
-    // v2 neither reads nor writes the v1 store: it calls the provider even with
-    // a live v1 cache entry, and v1 pages cannot address a v2 delivery.
-    let mut current = Invocation::accept(&runtime, "current")?;
-    let before = provider_calls(&runtime)?;
-    let (delivery, _) = current.deliver()?;
-    assert_eq!(provider_calls(&runtime)?, before + 1);
-    assert_ne!(Value::from(delivery.id.clone()), captured["id"]);
-    assert_eq!(
-        current
-            .observe(
-                "workspace_directory.page.v1",
-                json!({"capture_id":delivery.id,"offset":0}),
-            )?
-            .result
-            .unwrap_err()
-            .to_string(),
-        "workspace_directory_capture_missing"
-    );
     Ok(())
 }

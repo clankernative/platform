@@ -165,7 +165,7 @@ impl Session {
         let profile = self.profile.as_ref().context("profile not opened")?;
         let secret = self.secret.clone().context("secret not opened")?;
         let scratch = self.scratch.as_ref().context("scratch not created")?;
-        let receipt = (self.collect)(profile, secret, &scratch.path().join("carta.sqlite"))?;
+        let receipt = (self.collect)(profile, secret, &scratch.path().join("scratch.sqlite"))?;
         let outcome = receipt["outcome"]
             .as_str()
             .context("qualification outcome missing")?
