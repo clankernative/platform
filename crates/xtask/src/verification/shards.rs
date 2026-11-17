@@ -783,6 +783,7 @@ fn remaining_fixture(step: &str) -> bool {
     [
         "build-credential-metadata",
         "build-credential-selectable",
+        "build-restore-native",
         "build-connection-declaration",
         "build-oauth-calendar",
         "build-oauth-gitlab",
@@ -1587,7 +1588,7 @@ mod tests {
     fn preparation_join_rejects_foreign_identity_and_incomplete_or_swapped_parts() -> Result<()> {
         let complete = combine_parts(sample_parts()?, &sample_identity())?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 26);
+        assert_eq!(complete.fixtures.len(), 27);
         for fixture in complete.fixtures.keys() {
             let mut parts = sample_parts()?;
             let removed: usize = parts
@@ -1673,12 +1674,79 @@ mod tests {
                     .all(|step| part_steps("inputs").unwrap().contains(step))
             );
         }
-        assert_eq!(part_steps("fixtures")?.len(), 18);
+        assert_eq!(part_steps("fixtures")?.len(), 19);
         assert!(!part_steps("inputs")?.contains("lint"));
         assert_eq!(
             part_steps("tests")?,
             BTreeSet::from(["lint".into(), "test-binaries".into(), "test-docs".into()])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_fixture_partitions_match_the_actual_recipe_and_reject_moved_or_missing_builds()
+    -> Result<()> {
+        let validate = |source: &str| -> Result<()> {
+            for (part, function) in [
+                ("inputs", "input_fixtures"),
+                ("fixtures", "remaining_fixtures"),
+            ] {
+                let prefix = format!("{function}! = |host!| {{\n\t\tfor fixture in [");
+                let list = source
+                    .split_once(&prefix)
+                    .context("fixture recipe function")?
+                    .1
+                    .split_once("] {")
+                    .context("complete fixture recipe list")?
+                    .0;
+                let mut actual = BTreeSet::new();
+                for value in list
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    let fixture: String = serde_json::from_str(value)?;
+                    ensure!(
+                        actual.insert(format!("build-{fixture}")),
+                        "duplicate fixture recipe"
+                    );
+                }
+                let expected = part_steps(part)?
+                    .into_iter()
+                    .filter(|step| step.starts_with("build-"))
+                    .collect();
+                ensure!(
+                    actual == expected,
+                    "fixture recipe and hosted admission differ"
+                );
+            }
+            Ok(())
+        };
+        let source = day2::automation::SOURCES
+            .iter()
+            .find(|(name, _)| *name == "ops/Verify.roc")
+            .context("verification recipe")?
+            .1;
+        let source = std::str::from_utf8(source)?;
+        validate(source)?;
+        assert_eq!(source.matches("\"restore-native\"").count(), 1);
+        let without_restore = source.replacen("\t\t\t\"restore-native\",\n", "", 1);
+        assert_ne!(without_restore, source);
+        assert!(validate(&without_restore).is_err());
+        let moved = without_restore.replacen(
+            "\t\t\t\"http\",\n",
+            "\t\t\t\"http\",\n\t\t\t\"restore-native\",\n",
+            1,
+        );
+        assert_ne!(moved, without_restore);
+        assert!(validate(&moved).is_err());
+        let duplicated = source.replacen(
+            "\t\t\t\"restore-native\",\n",
+            "\t\t\t\"restore-native\",\n\t\t\t\"restore-native\",\n",
+            1,
+        );
+        assert_ne!(duplicated, source);
+        assert!(validate(&duplicated).is_err());
         Ok(())
     }
 
