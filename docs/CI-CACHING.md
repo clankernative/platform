@@ -85,7 +85,9 @@ fixtures. It therefore does not initialize the optional fixture-output cache or
 rebuild a configured verifier just to calculate that cache's identity. The current
 source bootstrap, architecture/compiler/proof checks, all prepared executable and
 native fixture admission, live producer authentication and complete receipt join
-still run. Every other recipe retains its existing fixture-cache behavior, and
+still run. The fixture-free `verify-fast` recipe also leaves this cache empty;
+its source checks, checked Roc runner, formatting, complete lint, library tests
+and receipt remain mandatory. Other recipes retain their existing fixture-cache behavior, and
 the final job still has a separate orchestration deadline. A warm initial bootstrap
 does not guarantee an otherwise redundant configured build would stay warm.
 

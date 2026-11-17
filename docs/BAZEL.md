@@ -64,6 +64,23 @@ from your own working directory to preserve relative instance/artifact paths.
 The xtask Bazel entry point restores the original invocation directory itself;
 ordinary `bazel run` changes a program's directory to its runfiles tree.
 
+`verify-fast` keeps formatting, complete workspace Clippy and the same ten
+library harnesses. Its library build requests those harnesses and the three
+Linux sandbox launchers, rather than linking all 21 operator and integration
+programs. Linux still installs and admits the launchers beside the harnesses.
+The checked Roc runner is prepared independently before the recipe. FAST has no
+fixture builds, so it also avoids initializing the optional fixture-output cache.
+The 900-second library budget still includes target selection, compilation,
+output admission and all library execution; test filters and concurrency are
+unchanged. Full and focused integration campaigns retain their existing program
+selection and fresh checks.
+
+Rust builds, Clippy dependency builds and producer queries use the same JSON
+compiler-diagnostic setting. Switching from lint to native compilation must not
+change a shared dependency's diagnostic action key. Clippy retains its strict
+aspect and independently admitted diagnostic outputs; native build capture also
+keeps its explicit JSON requirement for isolated workspaces.
+
 ## Inputs and profiles
 
 `build/bazel/targets.json` records the normal programs, libraries and harnesses.
