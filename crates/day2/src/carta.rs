@@ -1,13 +1,13 @@
-//! A typed, read-only Carta transport. Its records and envelopes are shared by
-//! both sources: explicitly seeded synthetic captures, read here, and live
-//! captures collected by [`crate::carta_live`]. Operators and verification hosts
-//! may install synthetic captures; applications can only read their runtime's
-//! scoped capture. The adapter preserves provider records and duplicates. Import
+//! Typed Carta records and their delivery to the application. Two sources share
+//! them: explicitly seeded synthetic captures, read here, and live captures
+//! collected by [`crate::carta_live`]. Operators and verification hosts may
+//! install synthetic captures; an application receives its runtime's scoped
+//! capture through `carta.snapshot.v2` and holds it in its own database. The adapter preserves provider records and duplicates. Import
 //! decisions, employee mapping, publication and financial calculations remain
 //! application code.
-use crate::{protocol::Instruction, store::Runtime};
+use crate::store::Runtime;
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
@@ -139,90 +139,6 @@ pub struct SyntheticSnapshot {
     pub records: Vec<Record>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyntheticFailure {
-    Unavailable,
-}
-
-impl std::fmt::Display for SyntheticFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("carta_unavailable")
-    }
-}
-
-impl std::error::Error for SyntheticFailure {}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Empty {
-    #[serde(rename = "handle")]
-    _handle: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Next {
-    snapshot_id: String,
-    cursor: u64,
-    #[serde(rename = "handle")]
-    _handle: String,
-}
-
-pub(crate) enum Read {
-    Begin {
-        scope: String,
-        issuer_id: String,
-    },
-    Next {
-        scope: String,
-        snapshot_id: String,
-        cursor: u64,
-        issuer_id: String,
-    },
-}
-
-pub(crate) fn authorized(
-    runtime: &Runtime,
-    instruction: &Instruction,
-    issuer_id: &str,
-) -> Result<Read> {
-    match instruction.model.as_str() {
-        "carta.snapshot.v1" => {
-            let _: Empty = crate::json::decode(instruction.data.as_bytes())?;
-            Ok(Read::Begin {
-                scope: runtime.scope().into(),
-                issuer_id: issuer_id.into(),
-            })
-        }
-        "carta.record.v1" => {
-            let (snapshot_id, cursor) = decode_next(instruction)?;
-            Ok(Read::Next {
-                scope: runtime.scope().into(),
-                snapshot_id,
-                cursor,
-                issuer_id: issuer_id.into(),
-            })
-        }
-        _ => anyhow::bail!("unknown_carta_capability"),
-    }
-}
-
-/// A `carta.record.v1` request's snapshot identity and cursor, shared by the
-/// synthetic and live stores. Both issue `carta_<sha256 hex>` identities.
-pub(crate) fn decode_next(instruction: &Instruction) -> Result<(String, u64)> {
-    let next: Next = crate::json::decode(instruction.data.as_bytes())?;
-    ensure!(
-        next.snapshot_id.len() == 70
-            && next.snapshot_id.starts_with("carta_")
-            && next.snapshot_id[6..]
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            && next.cursor <= MAX_RECORDS as u64,
-        "invalid_carta_cursor"
-    );
-    Ok((next.snapshot_id, next.cursor))
-}
-
 /// A `carta_<sha256 hex>` capture identity, as both stores issue it.
 pub(crate) fn validate_snapshot_id(id: &str) -> Result<()> {
     ensure!(
@@ -274,12 +190,7 @@ fn upgrade(connection: &Connection) -> Result<()> {
             scope TEXT PRIMARY KEY, snapshot TEXT NOT NULL,
             FOREIGN KEY(scope,snapshot) REFERENCES carta_snapshots(scope,id)
         ) STRICT;
-        CREATE TABLE IF NOT EXISTS carta_failures (
-            scope TEXT NOT NULL, snapshot TEXT NOT NULL, ordinal INTEGER NOT NULL,
-            remaining INTEGER NOT NULL CHECK(remaining >= 0),
-            PRIMARY KEY(scope,snapshot,ordinal),
-            FOREIGN KEY(scope,snapshot) REFERENCES carta_snapshots(scope,id)
-        ) STRICT;"
+"
     )?;
     for table in ["carta_snapshots", "carta_records"] {
         for (action, suffix) in [("UPDATE", "update"), ("DELETE", "delete")] {
@@ -532,18 +443,6 @@ pub(crate) fn seed_verification_if_unconfigured(runtime: &Runtime) -> Result<()>
     Ok(())
 }
 
-/// A host-only deterministic failure schedule. The current runtime records an
-/// observation error as terminal; a new business attempt can resume at this cursor.
-pub fn fail_reads(runtime: &Runtime, snapshot_id: &str, cursor: u64, count: u32) -> Result<()> {
-    ensure!(
-        count <= 100 && cursor <= MAX_RECORDS as u64,
-        "invalid_carta_failure_schedule"
-    );
-    let connection = crate::store::open(&runtime.db().with_file_name("carta.synthetic.sqlite"))?;
-    connection.execute("INSERT INTO carta_failures VALUES(?1,?2,?3,?4) ON CONFLICT(scope,snapshot,ordinal) DO UPDATE SET remaining=excluded.remaining", params![runtime.scope(), snapshot_id, i64::try_from(cursor)?, i64::from(count)])?;
-    Ok(())
-}
-
 /// The delivery kind for application-held Carta captures.
 pub const DELIVERY_KIND: &str = "carta.issuer";
 
@@ -745,10 +644,21 @@ pub(crate) fn synthetic_capture(
     runtime: &Runtime,
     issuer_id: &str,
 ) -> Result<(Snapshot, Vec<Record>)> {
-    let path = runtime.db().with_file_name("carta.synthetic.sqlite");
+    synthetic_capture_at(
+        &runtime.db().with_file_name("carta.synthetic.sqlite"),
+        runtime.scope(),
+        issuer_id,
+    )
+}
+
+fn synthetic_capture_at(
+    path: &Path,
+    scope: &str,
+    issuer_id: &str,
+) -> Result<(Snapshot, Vec<Record>)> {
     // A missing store is an unconfigured provider, never an empty capture.
     ensure!(path.is_file(), "carta_unconfigured");
-    let mut connection = crate::store::open(&path)?;
+    let mut connection = crate::store::open(path)?;
     let tx = connection.transaction()?;
     let seeded: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='carta_active')",
@@ -759,7 +669,7 @@ pub(crate) fn synthetic_capture(
     let snapshot: Snapshot = tx
         .query_row(
             "SELECT s.id,s.issuer_id,s.record_count,s.stakeholder_count,s.grant_count,s.vesting_event_count,s.exercise_count,s.source_profile FROM carta_active a JOIN carta_snapshots s ON s.scope=a.scope AND s.id=a.snapshot WHERE a.scope=?1 AND s.issuer_id=?2",
-            params![runtime.scope(), issuer_id],
+            params![scope, issuer_id],
             snapshot_from_row,
         )
         .optional()?
@@ -772,9 +682,7 @@ pub(crate) fn synthetic_capture(
         "SELECT envelope FROM carta_records WHERE scope=?1 AND snapshot=?2 ORDER BY ordinal",
     )?;
     let envelopes = statement
-        .query_map(params![runtime.scope(), snapshot.id], |row| {
-            row.get::<_, String>(0)
-        })?
+        .query_map(params![scope, snapshot.id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let records = envelopes
         .iter()
@@ -789,70 +697,9 @@ pub(crate) fn synthetic_capture(
         .collect::<Result<Vec<_>>>()?;
     ensure!(
         u64::try_from(records.len())? == snapshot.record_count,
-        "carta_snapshot_unavailable"
+        "carta_unconfigured"
     );
     Ok((snapshot, records))
-}
-
-pub(crate) fn observe(runtime: &Runtime, read: Read) -> Result<String> {
-    read_at(&runtime.db().with_file_name("carta.synthetic.sqlite"), read)
-}
-
-fn read_at(path: &Path, read: Read) -> Result<String> {
-    ensure!(path.is_file(), "carta_unconfigured");
-    // OPEN_CREATE is intentionally absent: an unconfigured provider never creates
-    // a plausible empty capture or silently supplies demonstration data.
-    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    connection.busy_timeout(std::time::Duration::from_secs(2))?;
-    match read {
-        Read::Begin { scope, issuer_id } => {
-            let snapshot: Option<Snapshot> = connection.query_row(
-                "SELECT s.id,s.issuer_id,s.record_count,s.stakeholder_count,s.grant_count,s.vesting_event_count,s.exercise_count,s.source_profile FROM carta_active a JOIN carta_snapshots s ON s.scope=a.scope AND s.id=a.snapshot WHERE a.scope=?1 AND s.issuer_id=?2",
-                params![scope,issuer_id], snapshot_from_row,
-            ).optional()?;
-            Ok(serde_json::to_string(
-                &snapshot.context("carta_unconfigured")?,
-            )?)
-        }
-        Read::Next {
-            scope,
-            snapshot_id,
-            cursor,
-            issuer_id,
-        } => {
-            let cursor = i64::try_from(cursor)?;
-            let tx = crate::write_queue::immediate(&mut connection)?;
-            let count: Option<i64> = tx
-                .query_row(
-                    "SELECT record_count FROM carta_snapshots WHERE scope=?1 AND id=?2 AND issuer_id=?3",
-                    params![scope, snapshot_id,issuer_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let count = count.context("carta_snapshot_unavailable")?;
-            ensure!(
-                (0..=MAX_RECORDS as i64).contains(&count),
-                "carta_record_count_budget"
-            );
-            ensure!(cursor <= count, "invalid_carta_cursor");
-            let failed = tx.execute("UPDATE carta_failures SET remaining=remaining-1 WHERE scope=?1 AND snapshot=?2 AND ordinal=?3 AND remaining>0", params![scope, snapshot_id, cursor])?;
-            if failed != 0 {
-                tx.commit()?;
-                return Err(SyntheticFailure::Unavailable.into());
-            }
-            let result = if cursor == count {
-                json!({"kind":"done","data":"{}"}).to_string()
-            } else {
-                tx.query_row("SELECT envelope FROM carta_records WHERE scope=?1 AND snapshot=?2 AND ordinal=?3", params![scope, snapshot_id, cursor], |row| row.get::<_, String>(0))?
-            };
-            ensure!(
-                result.len() <= MAX_RECORD_BYTES * 2 + 128,
-                "carta_record_byte_budget"
-            );
-            tx.commit()?;
-            Ok(result)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -872,79 +719,30 @@ mod tests {
         }
     }
 
-    fn next(scope: &str, id: &str, cursor: u64) -> Read {
-        next_for(scope, id, cursor, "synthetic-issuer")
-    }
-
-    fn next_for(scope: &str, id: &str, cursor: u64, issuer_id: &str) -> Read {
-        Read::Next {
-            scope: scope.into(),
-            snapshot_id: id.into(),
-            cursor,
-            issuer_id: issuer_id.into(),
-        }
-    }
-
     #[test]
-    fn unconfigured_scope_and_substituted_snapshot_are_refused() -> Result<()> {
+    fn unconfigured_scope_and_issuer_are_refused() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("provider.sqlite");
-        assert!(
-            read_at(
-                &path,
-                Read::Begin {
-                    scope: "first".into(),
-                    issuer_id: "synthetic-issuer".into(),
-                }
-            )
-            .is_err()
-        );
-        assert!(!path.exists());
-        let snapshot = seed(&path, "first", &capture())?;
-        assert!(
-            read_at(
-                &path,
-                Read::Begin {
-                    scope: "second".into(),
-                    issuer_id: "synthetic-issuer".into(),
-                }
-            )
-            .is_err()
-        );
-        assert!(read_at(&path, next("second", &snapshot.id, 0)).is_err());
-        assert!(
-            read_at(
-                &path,
-                Read::Begin {
-                    scope: "first".into(),
-                    issuer_id: "another-issuer".into()
-                }
-            )
-            .is_err(),
-            "a configured scope does not authorize every issuer"
-        );
-        assert!(
-            read_at(
-                &path,
-                Read::Next {
-                    scope: "first".into(),
-                    snapshot_id: snapshot.id.clone(),
-                    cursor: 0,
-                    issuer_id: "another-issuer".into()
-                }
-            )
-            .is_err(),
-            "a snapshot ID cannot substitute for issuer authority"
-        );
-        assert!(read_at(&path, next("first", "unknown", 0)).is_err());
-        assert!(read_at(&path, next("first", &snapshot.id, 2)).is_err());
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&read_at(
-                &path,
-                next("first", &snapshot.id, 1)
-            )?)?["kind"],
-            "done"
+            synthetic_capture_at(&path, "first", "synthetic-issuer")
+                .unwrap_err()
+                .to_string(),
+            "carta_unconfigured"
         );
+        assert!(!path.exists(), "a read never creates the provider store");
+        let snapshot = seed(&path, "first", &capture())?;
+        for (scope, issuer) in [("second", "synthetic-issuer"), ("first", "another-issuer")] {
+            assert_eq!(
+                synthetic_capture_at(&path, scope, issuer)
+                    .unwrap_err()
+                    .to_string(),
+                "carta_unconfigured",
+                "{scope} {issuer}: a configured scope does not authorize every scope or issuer"
+            );
+        }
+        let (read, records) = synthetic_capture_at(&path, "first", "synthetic-issuer")?;
+        assert_eq!(read, snapshot);
+        assert_eq!(records, capture().records);
         Ok(())
     }
 
@@ -982,33 +780,16 @@ mod tests {
             seed_with_mode(&path, "first", &synthetic_example(), true)?,
             snapshot
         );
-
-        let reopened: Snapshot = serde_json::from_str(&read_at(
-            &path,
-            Read::Begin {
-                scope: "first".into(),
-                issuer_id: capture.issuer_id.clone(),
-            },
-        )?)?;
+        let (reopened, records) = synthetic_capture_at(&path, "first", &capture.issuer_id)?;
         assert_eq!(reopened, snapshot);
-        let records = (0..snapshot.record_count)
-            .map(|cursor| {
-                read_at(
-                    &path,
-                    next_for("first", &snapshot.id, cursor, &capture.issuer_id),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        assert_eq!(records.len(), capture.records.len());
-        let final_record: serde_json::Value = serde_json::from_str(&records[records.len() - 1])?;
-        assert_eq!(final_record["kind"], "stakeholder");
-        assert_eq!(records[0], records[records.len() - 1]);
+        // Every record in provider order, duplicates included.
+        assert_eq!(records, capture.records);
         assert_ne!(seed(&path, "other", &capture)?.id, snapshot.id);
         Ok(())
     }
 
     #[test]
-    fn empty_capture_reopens_zero_counts_and_finishes_at_the_first_cursor() -> Result<()> {
+    fn empty_capture_reopens_zero_counts_and_no_records() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("provider.sqlite");
         let capture = SyntheticSnapshot {
@@ -1028,42 +809,32 @@ mod tests {
             snapshot,
             "an explicitly empty capture is configured"
         );
-        let reopened: Snapshot = serde_json::from_str(&read_at(
-            &path,
-            Read::Begin {
-                scope: "first".into(),
-                issuer_id: capture.issuer_id,
-            },
-        )?)?;
+        let (reopened, records) = synthetic_capture_at(&path, "first", &capture.issuer_id)?;
         assert_eq!(reopened, snapshot);
-        let first: serde_json::Value =
-            serde_json::from_str(&read_at(&path, next("first", &snapshot.id, 0))?)?;
-        assert_eq!(first, json!({"kind":"done","data":"{}"}));
-        assert!(read_at(&path, next("first", &snapshot.id, 1)).is_err());
+        assert!(records.is_empty());
         Ok(())
     }
 
     #[test]
-    fn immutable_captures_preserve_duplicates_options_and_old_reads() -> Result<()> {
+    fn immutable_captures_preserve_duplicates_and_options() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("provider.sqlite");
         let first = capture();
         let snapshot = seed(&path, "first", &first)?;
         assert_eq!(seed(&path, "first", &first)?, snapshot);
-        let original = read_at(&path, next("first", &snapshot.id, 0))?;
         let mut replacement = first.clone();
         replacement.records.push(first.records[0].clone());
         let newer = seed(&path, "first", &replacement)?;
         assert_ne!(newer.id, snapshot.id);
-        assert_eq!(original, read_at(&path, next("first", &snapshot.id, 0))?);
-        assert_eq!(
-            read_at(&path, next("first", &newer.id, 0))?,
-            read_at(&path, next("first", &newer.id, 1))?
-        );
-        let envelope: serde_json::Value = serde_json::from_str(&original)?;
-        let data: serde_json::Value = serde_json::from_str(envelope["data"].as_str().unwrap())?;
-        assert_eq!(data["employee_id"], json!({"Some":""}));
-        assert_eq!(data["group"], "None");
+        // The newer capture is selected, with its duplicate preserved.
+        let (selected, records) = synthetic_capture_at(&path, "first", "synthetic-issuer")?;
+        assert_eq!(selected, newer);
+        assert_eq!(records, replacement.records);
+        let Record::Stakeholder(holder) = &records[0] else {
+            unreachable!()
+        };
+        assert_eq!(holder.employee_id, OptionalText::Some(String::new()));
+        assert_eq!(holder.group, OptionalText::None);
         let connection = Connection::open(&path)?;
         assert!(
             connection
@@ -1105,25 +876,6 @@ mod tests {
         many.records = vec![many.records[0].clone(); MAX_RECORDS + 1];
         assert!(seed(&path, "first", &many).is_err());
         assert!(!path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn scheduled_read_failure_is_typed_and_never_changes_snapshot_data() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("provider.sqlite");
-        let snapshot = seed(&path, "first", &capture())?;
-        let original = read_at(&path, next("first", &snapshot.id, 0))?;
-        Connection::open(&path)?.execute(
-            "INSERT INTO carta_failures VALUES('first',?1,0,1)",
-            [&snapshot.id],
-        )?;
-        let error = read_at(&path, next("first", &snapshot.id, 0)).unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<SyntheticFailure>(),
-            Some(&SyntheticFailure::Unavailable)
-        );
-        assert_eq!(original, read_at(&path, next("first", &snapshot.id, 0))?);
         Ok(())
     }
 

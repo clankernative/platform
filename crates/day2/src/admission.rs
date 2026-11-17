@@ -121,7 +121,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "WorkspaceDirectory.roc",
         "",
-        "ae93dba199829f30484f4c9e3c88de0e2bcc506b39934671f361733e9326ebc2",
+        "96b618ebeabaacab43bb9c41c631ed3a1ea60492e81bf3ee8014df3b2591e819",
     ),
     (
         "Linear.roc",
@@ -141,7 +141,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Carta.roc",
         "",
-        "1a739fd79fdbf13c83a2bb0e5e8f46af68734f9c086d6d4288190b4b8c3ae9a5",
+        "ba0354ce03ffa7e9310f74b0599835538a943c51714b246b7af5ca442e557f6b",
     ),
     (
         "Audit.roc",

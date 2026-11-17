@@ -1330,8 +1330,6 @@ pub fn local_resource_fixture(
                     children: CartaChildren::Include,
                 }),
                 vec![
-                    Action::CartaSnapshot,
-                    Action::CartaRecord,
                     Action::CartaSnapshotDelivery,
                     Action::CartaRecords,
                     Action::CartaRelease,
@@ -1891,10 +1889,7 @@ fn provider_resource_fixture(
                 customer_id: "synthetic-customer-1".into(),
             },
             vec![
-                Action::WorkspaceDirectoryCapture,
                 Action::WorkspaceDirectoryUserPath,
-                Action::WorkspaceDirectoryHierarchy,
-                Action::WorkspaceDirectoryPage,
                 Action::WorkspaceDirectoryHierarchyDelivery,
                 Action::WorkspaceDirectoryDeliveryPage,
             ],
@@ -2665,7 +2660,7 @@ mod people_resource_tests {
                     "home.directory".into(),
                     operation(
                         &["home-reader@synthetic.example"],
-                        &["workspace_directory.hierarchy.v1"],
+                        &["workspace_directory.hierarchy.v2"],
                     ),
                 ),
                 (
@@ -2685,7 +2680,7 @@ mod people_resource_tests {
         let grant = &resolved.operations["home.directory"]["workspace_directory"];
         assert_eq!(
             grant.actions,
-            BTreeSet::from([Action::WorkspaceDirectoryHierarchy])
+            BTreeSet::from([Action::WorkspaceDirectoryHierarchyDelivery])
         );
         assert!(grant.actors.contains("home-reader@synthetic.example"));
         assert!(!grant.actors.contains("other-reader@synthetic.example"));
@@ -2702,7 +2697,7 @@ mod people_resource_tests {
                 "other.directory".into(),
                 operation(
                     &["other-reader@synthetic.example"],
-                    &["workspace_directory.hierarchy.v1"],
+                    &["workspace_directory.hierarchy.v2"],
                 ),
             )]),
             ..selected
@@ -2721,7 +2716,7 @@ mod people_resource_tests {
         let unrelated_resolved = unrelated_catalog.resolve("other", &unrelated_attachments, 1)?;
         assert_eq!(
             unrelated_resolved.operations["other.directory"]["workspace_directory"].actions,
-            BTreeSet::from([Action::WorkspaceDirectoryHierarchy])
+            BTreeSet::from([Action::WorkspaceDirectoryHierarchyDelivery])
         );
         let default_policy = local_policy_for(&artifact, "developer")?;
         assert!(!reads_provider(
@@ -2746,7 +2741,7 @@ mod people_resource_tests {
                         "inputs":[], "outputs":[], "input_sources":[], "follow_ups":[]},
                     "request_example":"{}", "response_example":"{}", "deprecated":false,
                     "execution":{"model":"","id_field":"","version_field":"","effects":[]},
-                    "errors":[], "observations":["workspace_directory.hierarchy.v1", "workspace_directory.page.v1"],
+                    "errors":[], "observations":["workspace_directory.hierarchy.v2", "workspace_directory.page.v2"],
                     "verification_setup":[], "verification_delegation":[]
                 }},
                 "presentation":{"stylesheet":"","script":""}, "identities":"",
@@ -2770,8 +2765,8 @@ mod people_resource_tests {
                     assert_eq!(
                         binding.context("declared Directory binding")?.actions,
                         BTreeSet::from([
-                            Action::WorkspaceDirectoryHierarchy,
-                            Action::WorkspaceDirectoryPage
+                            Action::WorkspaceDirectoryHierarchyDelivery,
+                            Action::WorkspaceDirectoryDeliveryPage
                         ])
                     );
                 } else {
@@ -2863,8 +2858,8 @@ mod people_resource_tests {
                     models: BTreeMap::new(),
                     commands: BTreeSet::new(),
                     observations: BTreeSet::from([
-                        "workspace_directory.capture.v1".into(),
-                        "workspace_directory.page.v1".into(),
+                        "workspace_directory.hierarchy.v2".into(),
+                        "workspace_directory.page.v2".into(),
                     ]),
                     effects: BTreeSet::new(),
                 },
@@ -2889,8 +2884,9 @@ mod people_resource_tests {
         let units = crate::workspace_directory::parse_org_unit_response(&serde_json::to_vec(
             &fixture.workspace_directory.hierarchy,
         )?)?;
-        let units = crate::workspace_directory::validate_complete(units, "/Engineering")?;
+        let units = crate::workspace_directory::validate_hierarchy(units)?;
         assert_eq!(units.len(), 2);
+        assert!(units.iter().any(|unit| unit.path == "/Engineering"));
         Ok(())
     }
 }

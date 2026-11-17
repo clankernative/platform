@@ -2261,18 +2261,14 @@ fn a_small_store_keeps_the_floor_and_inspect_measures_nothing() -> Result<()> {
 }
 
 #[test]
-fn derived_platform_stores_are_allowed_but_never_sized() -> Result<()> {
-    // Equity's credential registration and Carta captures and Home's Directory
-    // captures leave these beside the app database; maintenance must still run.
+fn the_credential_registry_is_allowed_but_never_sized() -> Result<()> {
+    // Credential registration leaves it beside the app database on every start;
+    // maintenance must still run.
     let listing = [
         format!("10 {STATE}/example_app.sqlite"),
         format!("4 {STATE}/example_app.sqlite-wal"),
         format!("7 {STATE}/provider-credentials.sqlite"),
         format!("3 {STATE}/provider-credentials.sqlite-wal"),
-        format!("9 {STATE}/workspace_directory.sqlite"),
-        format!("2 {STATE}/workspace_directory.sqlite-shm"),
-        format!("11 {STATE}/carta.sqlite"),
-        format!("6 {STATE}/carta.sqlite-wal"),
     ]
     .join("\n");
     let sizes = store_sizes(&listing, "example_app")?;
@@ -2283,11 +2279,13 @@ fn derived_platform_stores_are_allowed_but_never_sized() -> Result<()> {
             ("example_app.sqlite-wal".to_owned(), 4)
         ]
     );
-    // Only those exact names: anything else is still an undeclared store.
+    // Only that exact name: anything else, including the retired v1 capture
+    // stores, is an undeclared store.
     for other in [
         "provider-credentials.sqlite.bak.sqlite",
         "other_app.sqlite",
-        "carta.sqlite.bak.sqlite",
+        "workspace_directory.sqlite",
+        "carta.sqlite",
     ] {
         let error = format!(
             "{:#}",

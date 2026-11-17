@@ -156,12 +156,9 @@ fn failure(result: Result<CompleteCapture>) -> Failure {
 
 fn envelopes(capture: &CompleteCapture) -> Vec<Value> {
     capture
-        .envelopes
+        .records()
         .iter()
-        .map(|envelope| {
-            let envelope: Value = serde_json::from_str(envelope).unwrap();
-            json!({"kind":envelope["kind"],"data":serde_json::from_str::<Value>(envelope["data"].as_str().unwrap()).unwrap()})
-        })
+        .map(|record| serde_json::to_value(record).unwrap())
         .collect()
 }
 
@@ -734,111 +731,49 @@ fn complete_capture(plan: &CapturePlan, stakeholders: &[&str]) -> Result<Complet
     run(plan, &mut port).0
 }
 
-fn record_read(plan: &CapturePlan, snapshot: &str, cursor: u64) -> RecordRead {
-    RecordRead::authorize(
-        plan,
-        &crate::protocol::Instruction {
-            kind: "observe".into(),
-            model: "carta.record.v1".into(),
-            data: json!({"handle":"h","snapshot_id":snapshot,"cursor":cursor}).to_string(),
-            ..Default::default()
-        },
-    )
-    .expect("a well-formed record read")
-}
-
-#[test]
-fn published_captures_are_immutable_and_retain_current_and_previous() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join(STORE);
-    let plan = plan(CartaChildren::Include);
-    assert_eq!(
-        read_record(
-            &path,
-            &record_read(&plan, &format!("carta_{}", "0".repeat(64)), 0)
-        )
-        .unwrap_err()
-        .to_string(),
-        "carta_snapshot_unavailable"
-    );
-    assert!(!path.exists(), "a read never creates the live store");
-    let first = complete_capture(&plan, &["s1"])?;
-    let second = complete_capture(&plan, &["s1", "s2"])?;
-    let third = complete_capture(&plan, &["s3"])?;
-    publish(&path, &first, 100, 110)?;
-    let original = read_record(&path, &record_read(&plan, &first.snapshot().id, 0))?;
-    publish(&path, &second, 200, 210)?;
-    assert_eq!(
-        original,
-        read_record(&path, &record_read(&plan, &first.snapshot().id, 0))?,
-        "an import reading the previous capture continues while a newer one lands"
-    );
-    // An unchanged recapture is the same capture and does not evict the previous.
-    for at in [300, 400] {
-        publish(&path, &complete_capture(&plan, &["s1", "s2"])?, at, at)?;
-        assert!(read_record(&path, &record_read(&plan, &first.snapshot().id, 0)).is_ok());
-    }
-    publish(&path, &third, 500, 510)?;
-    assert_eq!(
-        read_record(&path, &record_read(&plan, &first.snapshot().id, 0))
-            .unwrap_err()
-            .to_string(),
-        "carta_snapshot_unavailable"
-    );
-    assert_eq!(
-        serde_json::from_str::<Value>(&read_record(
-            &path,
-            &record_read(&plan, &second.snapshot().id, 2)
-        )?)?,
-        json!({"kind":"done","data":"{}"})
-    );
-    assert!(read_record(&path, &record_read(&plan, &second.snapshot().id, 3)).is_err());
-    assert!(read_record(&path, &record_read(&plan, &third.snapshot().id, 0)).is_ok());
-    let connection = Connection::open(&path)?;
-    let (snapshots, records, selections): (i64, i64, i64) = connection.query_row(
-        "SELECT (SELECT count(*) FROM carta_snapshots),(SELECT count(*) FROM carta_records),(SELECT count(*) FROM carta_selection)",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+/// Hold a capture as the application would, in a fresh application database.
+fn held(plan: &CapturePlan, capture: &CompleteCapture) -> Result<rusqlite::Connection> {
+    let db = rusqlite::Connection::open_in_memory()?;
+    crate::capture_delivery::upgrade(&db)?;
+    let (_, staged) = crate::carta::delivery(
+        capture.snapshot(),
+        capture.records(),
+        plan.delivery_authority()?,
     )?;
-    assert_eq!((snapshots, records, selections), (2, 3, 2));
-    connection.pragma_update(None, "foreign_keys", true)?;
-    for statement in [
-        "UPDATE carta_records SET envelope='{}'",
-        "UPDATE carta_snapshots SET record_count=0",
-        "UPDATE carta_selection SET collected_to=collected_to+1",
-        "DELETE FROM carta_records",
-        "DELETE FROM carta_snapshots",
-        "DELETE FROM carta_selection",
-        "INSERT OR REPLACE INTO carta_records SELECT * FROM carta_records LIMIT 1",
-        "INSERT OR REPLACE INTO carta_snapshots SELECT * FROM carta_snapshots LIMIT 1",
-    ] {
-        assert!(connection.execute(statement, []).is_err(), "{statement}");
-    }
-    assert!(read_record(&path, &record_read(&plan, &second.snapshot().id, 1)).is_ok());
-    Ok(())
+    crate::capture_delivery::stage(&db, crate::capture_delivery::Holder::Application, &staged)?;
+    Ok(db)
+}
+
+/// Read one record of a held capture under `plan`'s grant.
+fn read(db: &rusqlite::Connection, plan: &CapturePlan, id: &str) -> Result<String> {
+    crate::carta::records(db, &plan.delivery_authority()?, id, 0, 1)
 }
 
 #[test]
-fn record_reads_are_bound_to_scope_issuer_source_and_mode() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join(STORE);
+fn held_reads_are_bound_to_scope_issuer_source_and_mode() -> Result<()> {
     let plan = plan(CartaChildren::Include);
     let capture = complete_capture(&plan, &["s1"])?;
-    publish(&path, &capture, 100, 100)?;
+    let db = held(&plan, &capture)?;
     let id = &capture.snapshot().id;
-    assert!(read_record(&path, &record_read(&plan, id, 0)).is_ok());
-    let mut foreign = record_read(&plan, id, 0);
-    foreign.scope = "cartaco/test/other".into();
-    let mut issuer = record_read(&plan, id, 0);
+    assert!(read(&db, &plan, id).is_ok());
+    let mut scope = plan.clone();
+    scope.scope = "cartaco/test/other".into();
+    let mut issuer = plan.clone();
     issuer.issuer_id = "7654321".into();
-    let mut source = record_read(&plan, id, 0);
+    let mut source = plan.clone();
     source.source_profile = SourceProfile::Simulated;
-    let mut mode = record_read(&plan, id, 0);
+    let mut mode = plan.clone();
     mode.children = CartaChildren::Omit;
-    for read in [foreign, issuer, source, mode] {
+    for (name, other) in [
+        ("scope", scope),
+        ("issuer", issuer),
+        ("source", source),
+        ("mode", mode),
+    ] {
         assert_eq!(
-            read_record(&path, &read).unwrap_err().to_string(),
-            "carta_snapshot_unavailable"
+            read(&db, &other, id).unwrap_err().to_string(),
+            "capture_delivery_authority_changed",
+            "{name}"
         );
     }
     Ok(())
@@ -878,14 +813,12 @@ fn plan_through(
 }
 
 #[test]
-fn record_reads_are_bound_to_the_authorizing_connection_client_and_credential() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join(STORE);
+fn held_reads_are_bound_to_the_authorizing_connection_client_and_credential() -> Result<()> {
     let plan = plan(CartaChildren::Include);
     let capture = complete_capture(&plan, &["s1"])?;
-    publish(&path, &capture, 100, 100)?;
+    let db = held(&plan, &capture)?;
     let id = &capture.snapshot().id;
-    assert!(read_record(&path, &record_read(&plan, id, 0)).is_ok());
+    assert!(read(&db, &plan, id).is_ok());
     let other_client = plan_through(
         connection_ref(),
         |client, _, _| *client = "other-client".into(),
@@ -924,14 +857,12 @@ fn record_reads_are_bound_to_the_authorizing_connection_client_and_credential() 
             "{name}: only the connection authority differs"
         );
         assert_eq!(
-            read_record(&path, &record_read(other, id, 0))
-                .unwrap_err()
-                .to_string(),
-            "carta_snapshot_unavailable",
+            read(&db, other, id).unwrap_err().to_string(),
+            "capture_delivery_authority_changed",
             "{name}"
         );
         // The same provider content collected through it is a distinct
-        // capture with its own selection, never the original's identity.
+        // capture, never the original's identity.
         let theirs = complete_capture(other, &["s1"])?;
         assert_ne!(&theirs.snapshot().id, id, "{name}");
     }
@@ -940,8 +871,6 @@ fn record_reads_are_bound_to_the_authorizing_connection_client_and_credential() 
 
 #[test]
 fn a_simulated_production_connection_cannot_read_a_simulated_playground_capture() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join(STORE);
     let playground = plan_through(connection_ref(), |_, _, _| {}, true);
     let production = plan_through(
         connection_ref(),
@@ -951,70 +880,12 @@ fn a_simulated_production_connection_cannot_read_a_simulated_playground_capture(
     // Both source profiles are carta_simulated; the environment still binds.
     assert_eq!(playground.source_profile, production.source_profile);
     let capture = complete_capture(&playground, &["s1"])?;
-    publish(&path, &capture, 100, 100)?;
+    let db = held(&playground, &capture)?;
     let id = &capture.snapshot().id;
-    assert!(read_record(&path, &record_read(&playground, id, 0)).is_ok());
+    assert!(read(&db, &playground, id).is_ok());
     assert_eq!(
-        read_record(&path, &record_read(&production, id, 0))
-            .unwrap_err()
-            .to_string(),
-        "carta_snapshot_unavailable"
-    );
-    // Same authority but a different environment column is also refused.
-    let mut forged = record_read(&playground, id, 0);
-    forged.environment = CartaEnvironment::Production;
-    assert_eq!(
-        read_record(&path, &forged).unwrap_err().to_string(),
-        "carta_snapshot_unavailable"
-    );
-    Ok(())
-}
-
-#[test]
-fn retention_is_per_connection_so_another_connection_never_prunes_a_capture() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join(STORE);
-    let ours = plan(CartaChildren::Include);
-    let theirs = plan_through(
-        connection_ref(),
-        |client, _, _| *client = "other-client".into(),
-        false,
-    );
-    let kept = complete_capture(&ours, &["s1"])?;
-    publish(&path, &kept, 100, 100)?;
-    for (at, holders) in [(200, &["s2"][..]), (300, &["s3"]), (400, &["s4"])] {
-        publish(&path, &complete_capture(&theirs, holders)?, at, at)?;
-    }
-    assert!(
-        read_record(&path, &record_read(&ours, &kept.snapshot().id, 0)).is_ok(),
-        "three captures through another connection leave ours selected"
-    );
-    let selections: i64 =
-        Connection::open(&path)?
-            .query_row("SELECT count(*) FROM carta_selection", [], |row| row.get(0))?;
-    assert_eq!(selections, 3, "ours plus their current and previous");
-    Ok(())
-}
-
-#[test]
-fn the_live_store_has_an_explicit_fail_closed_capacity() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join(STORE);
-    let plan = plan(CartaChildren::Include);
-    let capture = complete_capture(&plan, &["s1"])?;
-    let error = publish_with_limit(&path, &capture, 1, 1, 1).unwrap_err();
-    assert_eq!(error.downcast_ref::<Failure>(), Some(&Failure::StoreFull));
-    assert_eq!(
-        read_record(&path, &record_read(&plan, &capture.snapshot().id, 0))
-            .unwrap_err()
-            .to_string(),
-        "carta_snapshot_unavailable",
-        "a refused publication leaves nothing selected"
-    );
-    publish(&path, &capture, 1, 1)?;
-    assert!(
-        publish(&path, &capture, 2, 1).is_err(),
-        "time cannot run backwards"
+        read(&db, &production, id).unwrap_err().to_string(),
+        "capture_delivery_authority_changed"
     );
     Ok(())
 }

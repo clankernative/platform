@@ -175,11 +175,11 @@ semantic model and a durable local mailbox adapter in a separate SQLite file.
 Any admitted app can use the same pack and model with explicit instance grants.
 No Reports-specific behavior lives in this adapter.
 
-[`pf.Carta`](CARTA.md) is a typed read pack backed by immutable captures: explicitly
-seeded synthetic captures, or live captures that `Carta.begin` collects completely
-and publishes when its resource has a live connection. It reads individual
-stakeholder, grant, vesting and exercise records so nested arrays do not exceed one
-observation; record reads of a live capture are local. Disposable verification
+[`pf.Carta`](CARTA.md) hands the application a complete immutable capture: an
+explicitly seeded synthetic capture, or a live capture that `Carta.deliver`
+collects completely when its resource has a live connection. The application
+holds it in its own database, reads bounded ranges of individual stakeholder,
+grant, vesting and exercise records locally, and releases it with an effect. Disposable verification
 campaigns explicitly supply its shared synthetic model; ordinary runtimes without a
 live connection remain unconfigured until a native operator seeds a capture.
 

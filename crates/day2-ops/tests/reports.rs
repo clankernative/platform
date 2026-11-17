@@ -143,8 +143,7 @@ fn reports_examples_and_generated_commands_replay_with_independent_statistics() 
 #[test]
 fn directory_fixtures_keep_verification_repeatable_and_local_serving_fresh() -> Result<()> {
     use day2::workspace_directory::{
-        CaptureInput, DirectoryReadPort, SOURCE_TTL_SECONDS, SimulatedDirectoryPort,
-        collect_complete,
+        CaptureInput, SimulatedDirectoryPort, collect_user_path, deliver_hierarchy,
     };
     let artifact_path = artifact()?;
     let scratch = tempfile::tempdir()?;
@@ -154,13 +153,12 @@ fn directory_fixtures_keep_verification_repeatable_and_local_serving_fresh() -> 
         None,
         development::ACTOR,
     )?;
-    let port = |runtime: &Runtime, now: i64| {
+    let port = |runtime: &Runtime| {
         SimulatedDirectoryPort::new(
             runtime.db(),
             runtime.scope(),
             "synthetic-customer-1",
             development::ACTOR,
-            now,
         )
     };
     let input = |captured_at| CaptureInput {
@@ -170,23 +168,21 @@ fn directory_fixtures_keep_verification_repeatable_and_local_serving_fresh() -> 
         captured_at,
     };
     let epoch = 1_700_000_000;
-    let capture = collect_complete(input(epoch), &mut port(&verified, epoch)?)?;
-    assert_eq!(capture.metadata().captured_at, epoch);
-    assert_eq!(capture.metadata().expires_at, epoch + SOURCE_TTL_SECONDS);
-    let expired = epoch + SOURCE_TTL_SECONDS;
-    let refreshed = collect_complete(input(expired), &mut port(&verified, expired)?)?;
-    assert_eq!(refreshed.metadata().source_captured_at, expired);
-    assert_eq!(
-        refreshed.metadata().expires_at,
-        expired + SOURCE_TTL_SECONDS
-    );
+    let (first, _) = deliver_hierarchy(input(epoch), &mut port(&verified)?)?;
+    assert_eq!(first.captured_at, epoch);
+    // Every delivery reads the fixture afresh; the same hierarchy is the same
+    // content identity at any later time.
+    let later = epoch + 86_400;
+    let (again, _) = deliver_hierarchy(input(later), &mut port(&verified)?)?;
+    assert_eq!(again.id, first.id);
+    assert_eq!(again.captured_at, later);
 
     let local = development::create(&artifact_path, &scratch.path().join("local"), None)?;
-    let after = epoch + 86_400;
-    let hierarchy = port(&local, after)?.list_org_units()?;
-    assert_eq!(hierarchy.hierarchy_captured_at, after);
-    let capture = collect_complete(input(after), &mut port(&local, after)?)?;
-    assert_eq!(capture.metadata().captured_at, after);
+    let (served, _) = deliver_hierarchy(input(later), &mut port(&local)?)?;
+    assert_eq!(served.captured_at, later);
+    assert_eq!(served.org_unit_count, first.org_unit_count);
+    let user = collect_user_path(input(later), &mut port(&local)?)?;
+    assert_eq!(user.user_path, "/Engineering");
     Ok(())
 }
 

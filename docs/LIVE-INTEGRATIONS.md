@@ -66,21 +66,20 @@ and [data controls](https://platform.openai.com/docs/models/default-usage-polici
 
 ## Workspace Directory hierarchy reads
 
-`workspace_directory.hierarchy.v1` reads and validates the complete organizational-unit hierarchy without looking up the current user or claiming a membership path. Its capture reports both publication time and original source capture/expiry; reusing cached hierarchy facts never renews their source TTL. Reuse selects the newest capture published no later than the request; a capture published after it is a cache miss, never a hierarchy from the future. Cold hierarchy reads request only the organizational-unit OAuth scope. The separate membership capture remains fail-closed on user lookup and requests both user and hierarchy scopes.
+`WorkspaceDirectory.deliver_hierarchy_with(resource)` (`workspace_directory.hierarchy.v2`) reads and validates the complete organizational-unit hierarchy without looking up the current user or claiming a membership path. Every delivery is a provider read that requests only the organizational-unit OAuth scope; the host keeps no cache and no expiry. The validated hierarchy is staged as bounded pages in the application's own database for the reading invocation only, and `delivery_page_with` (`workspace_directory.page.v2`) reads them back locally. The application persists what it keeps in its own models and owns its age limit and retention. Its `id` is the content identity, so an unchanged hierarchy delivers the same `id`. See [provider capture delivery](PROVIDER-CAPTURE-DELIVERY.md).
 
 `WorkspaceDirectory.user_path(context)` / `user_path_with(resource)` independently observe the current actor's checked Google user path through `workspace_directory.user_path.v1`. Only the host-issued resource handle crosses the capability boundary; actor, customer, connection revision and invocation time come from current native authority. It requests only the user-read OAuth scope, never fetches or publishes a hierarchy, and supplies no primary-email/profile claim or default path on failure. The full authentication/user-read envelope reserves 32 KiB of requests and at most 64 KiB + 1 byte of responses; direct and delegated flows reserve three and four calls respectively. The application owns any user-path cache and its expiry. A cache-first workflow can commit that user fact before a separate hierarchy command, preserving it if the latter fails.
 
-`workspace_directory.hierarchy.v2` delivers the complete hierarchy to the reading invocation instead: it always reads the provider, stages bounded pages in the application's own database for that invocation only, and `workspace_directory.page.v2` reads them back locally. The host keeps no cache or expiry; the application persists the hierarchy in its own models and owns its retention. See [provider capture delivery](PROVIDER-CAPTURE-DELIVERY.md). The v1 capabilities are unchanged.
+Applications own membership-cache validity, ancestry decisions, persistence and reconciliation. The platform supplies bounded, customer/connection/actor-bound hierarchy facts; operators own real identity and provider grants. Declare read dependencies on the operation definition, for example `Api.query({...}).observes("workspace_directory.hierarchy.v2").observes("workspace_directory.page.v2")`. Admission rejects unknown capabilities, writes and duplicate declarations. The generated artifact carries those declarations into the disposable build-verification and local-development policy. That policy selects synthetic Directory bindings for any application namespace; an operation without a Directory declaration receives no default Directory authority. Explicit disposable policies may narrow or supply the observations used by a scenario. Production loading never infers authority from these declarations. Read-dependency declarations are not identity or membership claims.
 
-Applications own membership-cache validity, ancestry decisions and reconciliation. The platform supplies bounded, customer/connection/actor-bound hierarchy facts; operators own real identity and provider grants. Declare read dependencies on the operation definition, for example `Api.query({...}).observes("workspace_directory.hierarchy.v1").observes("workspace_directory.page.v1")`. Admission rejects unknown capabilities, writes and duplicate declarations. The generated artifact carries those declarations into the disposable build-verification and local-development policy. That policy selects synthetic Directory bindings for any application namespace; an operation without a Directory declaration receives no default Directory authority. Explicit disposable policies may narrow or supply the observations used by a scenario. Production loading never infers authority from these declarations. Read-dependency declarations are not identity or membership claims.
-
-Authorization freezes a validated cache or provider-fetch plan before reserving provider traffic. A cached hierarchy needs no provider call/byte budget and cannot fall through to the network; membership still requires a user lookup. Both live and simulated adapters share this cache policy. The simulator records requests and consumes scheduled endpoint faults in its SQLite world, while fresh reads use the injected capture time. Provider world data carries no adapter-cache timestamp. The Directory regression campaign checks expiry, failed refresh, recovery, membership, cache reuse during provider outage, and identical replay; real HTTP fixtures separately check the native authentication and request paths.
+Authorization freezes the provider source before reserving provider traffic: a simulated host never falls through to the network. Live and simulated adapters run the same parser and validation. The simulator records requests and consumes scheduled endpoint faults in its SQLite world. The Directory regression campaign checks provider faults, recovery, content-identity changes, a user-path read that never touches the hierarchy, and identical replay; real HTTP fixtures separately check the native authentication and request paths.
 
 ## Carta issuer captures
 
-A resource on a live `carta` connection makes `carta.snapshot.v1` collect one
-issuer's stakeholders and option grants completely and publish an immutable
-capture; `carta.record.v1` then reads it locally. [Carta](CARTA.md) describes
+A resource on a live `carta` connection makes `carta.snapshot.v2` collect one
+issuer's stakeholders and option grants completely and hand the capture to the
+application, which holds it in its own database, reads it with
+`carta.records.v2` and releases it with `carta.release.v2`. [Carta](CARTA.md) describes
 the profile, bounds, mapping, retention and failure codes. The native adapter
 (`crates/day2/src/carta_http.rs`) builds its own blocking client because the
 token exchange needs HTTP Basic and a form body, which the shared bearer
@@ -124,7 +123,8 @@ fails. The profile is JSON with `format: 1`, `environment: "playground"`
 `issuer_id`, optional `children`, `max_pages_per_collection` and `expires_at`
 (Unix seconds). The secret file must be an owner-private regular file, and the
 evidence directory must be new. Collection drives the native adapter through
-the production pipeline into the scratch store. The `receipt.json` it publishes
+the production pipeline and holds the capture in the scratch store exactly as
+an application database holds a `carta.snapshot.v2` delivery. The `receipt.json` it publishes
 has an outcome code, counts, usage, the last exchange, each page's status, bytes,
 item count, `nextPageToken` form and any transport failure code, and
 per-field present/null/absent/empty counts. The token exchange is recorded only

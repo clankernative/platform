@@ -1779,14 +1779,14 @@ mod selector_tests {
         let (_, _, contracts) = shared_failure_fixture()?;
         let mut operation = contracts["create"].clone();
         operation.observations = vec![
-            "workspace_directory.hierarchy.v1".into(),
-            "workspace_directory.page.v1".into(),
+            "workspace_directory.hierarchy.v2".into(),
+            "workspace_directory.page.v2".into(),
         ];
         operation.validate_observations()?;
         for requirements in [
             vec!["unknown.read.v1".into()],
             vec![crate::capabilities::WRITES[0].into()],
-            vec!["workspace_directory.hierarchy.v1".into(); 2],
+            vec!["workspace_directory.hierarchy.v2".into(); 2],
         ] {
             operation.observations = requirements;
             assert!(operation.validate_observations().is_err());

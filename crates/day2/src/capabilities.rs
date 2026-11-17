@@ -16,11 +16,6 @@ use std::collections::BTreeMap;
 // Generated from the one provider table; see `day2_capabilities::registry`.
 pub use day2_capabilities::registry::{LOCAL_PROVIDER_DATABASES, READS, WRITES};
 
-/// The live Workspace Directory capture store beside the app database: a cache of
-/// provider data that the next capture fetches again. Backups never take it and
-/// maintenance does not size for it.
-pub const WORKSPACE_DIRECTORY_STORE: &str = "workspace_directory.sqlite";
-
 /// Whether `name` is an observation an operation policy may grant.
 ///
 /// Every provider read, plus the host's own [`crate::audit::HISTORY`]: an
@@ -57,14 +52,6 @@ struct WorkspaceDirectoryCaptureRequest {
 #[serde(deny_unknown_fields)]
 struct CartaCaptureRequest {
     handle: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceDirectoryPageRequest {
-    handle: String,
-    capture_id: String,
-    offset: u64,
 }
 
 #[derive(Deserialize)]
@@ -166,11 +153,6 @@ pub(crate) struct Authorized {
 
 enum Action {
     Live(crate::integrations::PreparedCall),
-    Carta(crate::carta::Read),
-    /// A complete live collection, published before the snapshot is returned.
-    CartaCapture(crate::carta_live::CapturePlan),
-    /// A record of a published live capture. Local; reaches no provider.
-    CartaRecord(crate::carta_live::RecordRead),
     /// A complete capture (live when `plan` is present, else the seeded
     /// synthetic one) held in the application's database until released.
     CartaDelivery {
@@ -191,13 +173,7 @@ enum Action {
         capture_id: String,
     },
     People(crate::people_providers::Action),
-    WorkspaceDirectoryCapture(crate::workspace_directory::CapturePlan),
     WorkspaceDirectoryUserPath(crate::workspace_directory::CaptureInput),
-    WorkspaceDirectoryPage {
-        capture_id: String,
-        offset: u64,
-        now: i64,
-    },
     /// A fresh complete hierarchy staged for this invocation only.
     WorkspaceDirectoryDelivery {
         input: crate::workspace_directory::CaptureInput,
@@ -398,10 +374,7 @@ pub(crate) fn authorized(
             resource.planned_calls = call.max_calls();
             Action::Live(call)
         }
-        "workspace_directory.capture.v1"
-        | "workspace_directory.hierarchy.v1"
-        | "workspace_directory.user_path.v1"
-        | "workspace_directory.page.v1"
+        "workspace_directory.user_path.v1"
         | "workspace_directory.hierarchy.v2"
         | "workspace_directory.page.v2" => {
             ensure!(
@@ -465,75 +438,6 @@ pub(crate) fn authorized(
                         crate::workspace_directory::MAX_USER_LOOKUP_RESPONSE_BYTES;
                     Action::WorkspaceDirectoryUserPath(input)
                 }
-                "workspace_directory.capture.v1" | "workspace_directory.hierarchy.v1" => {
-                    let mode = match instruction.model.as_str() {
-                        "workspace_directory.hierarchy.v1" => CaptureMode::Hierarchy,
-                        _ => CaptureMode::Membership,
-                    };
-                    let input: WorkspaceDirectoryCaptureRequest =
-                        serde_json::from_str(&instruction.data)?;
-                    ensure!(
-                        input.handle == resource.handle,
-                        crate::error::Failure::ResourceForbidden
-                    );
-                    ensure!(
-                        resource.grant.limits.max_response_bytes
-                            >= crate::workspace_directory::MAX_RESPONSE_BYTES as u64
-                            && resource.grant.limits.max_request_bytes
-                                >= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
-                            && instruction.data.len() as u64
-                                <= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES,
-                        crate::error::Failure::ResourceForbidden
-                    );
-                    let ResourceTarget::WorkspaceDirectory { customer_id } = &resource.grant.target
-                    else {
-                        anyhow::bail!(crate::error::Failure::ResourceForbidden)
-                    };
-                    let plan = crate::workspace_directory::CapturePlan::prepare(
-                        &runtime.db().with_file_name(WORKSPACE_DIRECTORY_STORE),
-                        crate::workspace_directory::CaptureInput {
-                            customer_id: customer_id.clone(),
-                            connection_id: format!(
-                                "{}@{}",
-                                resource.grant.connection.id, resource.grant.connection.revision
-                            ),
-                            actor: resource.actor.clone(),
-                            captured_at: request.context.now,
-                        },
-                        mode,
-                    )?;
-                    quote.request_bytes = if plan.is_cached() {
-                        0
-                    } else {
-                        crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
-                    };
-                    quote.response_bytes = if plan.is_cached() {
-                        0
-                    } else {
-                        crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
-                    };
-                    let connection = resource
-                        .grant
-                        .live
-                        .as_ref()
-                        .ok_or(crate::error::Failure::ResourceForbidden)?;
-                    resource.planned_calls = if plan.is_cached() {
-                        0
-                    } else {
-                        match connection {
-                        LiveConnection::WorkspaceDirectory {
-                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
-                            ..
-                        } => 4,
-                        _ => 5,
-                    }
-                    };
-                    ensure!(
-                        resource.planned_calls <= crate::workspace_directory::MAX_PROVIDER_CALLS,
-                        crate::error::Failure::ResourceForbidden
-                    );
-                    Action::WorkspaceDirectoryCapture(plan)
-                }
                 "workspace_directory.hierarchy.v2" => {
                     let input: WorkspaceDirectoryCaptureRequest =
                         serde_json::from_str(&instruction.data)?;
@@ -572,7 +476,7 @@ pub(crate) fn authorized(
                         invocation: request.context.invocation_id.clone(),
                     }
                 }
-                "workspace_directory.page.v2" => {
+                _ => {
                     let input: WorkspaceDirectoryDeliveryPageRequest =
                         serde_json::from_str(&instruction.data)?;
                     let ResourceTarget::WorkspaceDirectory { customer_id } = &resource.grant.target
@@ -596,21 +500,6 @@ pub(crate) fn authorized(
                         )?,
                         capture_id: input.capture_id,
                         page: input.page,
-                    }
-                }
-                _ => {
-                    let input: WorkspaceDirectoryPageRequest =
-                        serde_json::from_str(&instruction.data)?;
-                    ensure!(
-                        input.handle == resource.handle && input.capture_id.len() == 71,
-                        crate::error::Failure::ResourceForbidden
-                    );
-                    quote.request_bytes = instruction.data.len() as u64;
-                    resource.planned_calls = 1;
-                    Action::WorkspaceDirectoryPage {
-                        capture_id: input.capture_id,
-                        offset: input.offset,
-                        now: request.context.now,
                     }
                 }
             }
@@ -640,7 +529,8 @@ pub(crate) fn authorized(
                 anyhow::bail!(crate::error::Failure::ResourceForbidden)
             };
             // The source and every fact a held capture is bound to are frozen
-            // here, before any reservation, exactly as for v1.
+            // here, before any reservation: a simulated host never falls through
+            // to the network, and only the same grant reads or releases it.
             let plan = match resource.grant.live.as_ref() {
                 None => None,
                 Some(connection @ LiveConnection::Carta { .. }) => {
@@ -728,63 +618,6 @@ pub(crate) fn authorized(
                         capture_id: input.capture_id,
                     }
                 }
-            }
-        }
-        "carta.snapshot.v1" | "carta.record.v1" => {
-            ensure!(
-                resource.grant.provider == Provider::Carta,
-                crate::error::Failure::ResourceForbidden
-            );
-            let ResourceTarget::CartaIssuer {
-                issuer_id,
-                children,
-            } = &resource.grant.target
-            else {
-                anyhow::bail!(crate::error::Failure::ResourceForbidden)
-            };
-            match resource.grant.live.as_ref() {
-                None => Action::Carta(crate::carta::authorized(runtime, instruction, issuer_id)?),
-                Some(connection @ LiveConnection::Carta { .. }) => {
-                    // The source and the reviewed connection authority are
-                    // frozen here, before any reservation: a simulated host
-                    // never falls through to the network, and a record read
-                    // only answers from a capture this same connection made.
-                    let plan = crate::carta_live::CapturePlan::authorize(
-                        runtime.scope(),
-                        &resource.grant.connection,
-                        connection,
-                        issuer_id,
-                        *children,
-                        runtime.integrations().uses_simulated_providers(),
-                    )?;
-                    if instruction.model == "carta.snapshot.v1" {
-                        let input: CartaCaptureRequest =
-                            crate::json::decode(instruction.data.as_bytes())?;
-                        ensure!(
-                            input.handle == resource.handle
-                                && resource.grant.limits.max_request_bytes
-                                    >= crate::carta_live::MAX_CAPTURE_REQUEST_BYTES
-                                && resource.grant.limits.max_response_bytes
-                                    >= crate::carta_live::MAX_TOKEN_RESPONSE_BYTES as u64
-                                && instruction.data.len() as u64
-                                    <= crate::carta_live::MAX_CAPTURE_REQUEST_BYTES,
-                            crate::error::Failure::ResourceForbidden
-                        );
-                        // The aggregate envelope of the whole collection. Each
-                        // response remains bounded by the grant's own limit.
-                        quote.request_bytes = crate::carta_live::MAX_CAPTURE_REQUEST_BYTES;
-                        quote.response_bytes = crate::carta_live::MAX_CAPTURE_RESPONSE_BYTES;
-                        resource.planned_calls = plan.planned_calls();
-                        Action::CartaCapture(plan)
-                    } else {
-                        let read = crate::carta_live::RecordRead::authorize(&plan, instruction)?;
-                        quote.request_bytes = 0;
-                        quote.response_bytes = 0;
-                        resource.planned_calls = 0;
-                        Action::CartaRecord(read)
-                    }
-                }
-                Some(_) => anyhow::bail!(crate::error::Failure::ResourceForbidden),
             }
         }
         "notifications.recipient.v1" => {
@@ -1050,68 +883,30 @@ impl ProviderResult {
         }
     }
 
-    fn workspace_directory(
+    /// A user-path read reserves and settles the whole authentication envelope.
+    fn workspace_directory_user_path(
         runtime: &Runtime,
         resource: &crate::resources::ResourceUse,
-        action: &Action,
+        input: &crate::workspace_directory::CaptureInput,
         request_bytes: u64,
     ) -> Self {
-        let planned_calls = resource.planned_calls;
-        let cached_hierarchy =
-            matches!(action, Action::WorkspaceDirectoryCapture(plan) if plan.is_cached());
-        let result = match action {
-            Action::WorkspaceDirectoryCapture(plan) => {
-                workspace_directory_capture(runtime, resource, plan)
-            }
-            Action::WorkspaceDirectoryUserPath(input) => {
-                workspace_directory_user_path(runtime, resource, input)
-            }
-            Action::WorkspaceDirectoryPage {
-                capture_id,
-                offset,
-                now,
-            } => workspace_directory_page(runtime, resource, capture_id, *offset, *now),
-            _ => Err(anyhow::anyhow!("workspace_directory_action_invalid")),
-        };
-        // Capture reserves the aggregate provider envelope; cache reuse is
-        // provably local and settles with no consumed traffic.
-        let response_bytes =
-            if matches!(action, Action::WorkspaceDirectoryCapture(_)) && !cached_hierarchy {
-                crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
-            } else if matches!(action, Action::WorkspaceDirectoryUserPath(_)) {
-                crate::workspace_directory::MAX_USER_LOOKUP_RESPONSE_BYTES
-            } else {
-                result.as_ref().map_or(0, |value| value.len() as u64)
-            };
         Self {
-            result,
+            result: workspace_directory_user_path(runtime, resource, input),
             correlation: Vec::new(),
             pending: false,
             usage: crate::resources::ProviderUsage {
-                calls: if cached_hierarchy { 0 } else { planned_calls },
-                request_bytes: if cached_hierarchy { 0 } else { request_bytes },
-                response_bytes: if cached_hierarchy { 0 } else { response_bytes },
+                calls: resource.planned_calls,
+                request_bytes,
+                response_bytes: crate::workspace_directory::MAX_USER_LOOKUP_RESPONSE_BYTES,
                 cost_microunits: 0,
                 known: true,
-                dispatched: matches!(
-                    action,
-                    Action::WorkspaceDirectoryCapture(_) | Action::WorkspaceDirectoryUserPath(_)
-                ) && !cached_hierarchy,
+                dispatched: true,
             },
         }
     }
 
     /// A live capture settles what it actually sent and read, including a
     /// failed collection; a read-only exchange leaves no unknown outcome.
-    fn carta_capture(
-        runtime: &Runtime,
-        resource: &crate::resources::ResourceUse,
-        plan: &crate::carta_live::CapturePlan,
-    ) -> Self {
-        let (result, meter) = carta_capture(runtime, resource, plan);
-        Self::carta_metered(result, meter)
-    }
-
     fn carta_metered(result: Result<String>, meter: crate::carta_live::Meter) -> Self {
         use crate::integrations::{ExchangeCorrelation, ExchangePhase};
         // Only a failure's final exchange is kept: it names the phase, page and
@@ -1176,7 +971,6 @@ fn workspace_directory_user_path(
                 runtime.scope(),
                 &input.customer_id,
                 &input.actor,
-                input.captured_at,
             )?)
         } else {
             let connection = resource
@@ -1189,7 +983,6 @@ fn workspace_directory_user_path(
             Box::new(crate::workspace_directory::NativeDirectoryPort::new(
                 authentication,
                 &input.customer_id,
-                input.captured_at,
                 CaptureMode::UserPath,
             )?)
         };
@@ -1212,7 +1005,6 @@ fn workspace_directory_delivery(
                 runtime.scope(),
                 &input.customer_id,
                 &input.actor,
-                input.captured_at,
             )?)
         } else {
             let connection = resource
@@ -1225,7 +1017,6 @@ fn workspace_directory_delivery(
             Box::new(crate::workspace_directory::NativeDirectoryPort::new(
                 authentication,
                 &input.customer_id,
-                input.captured_at,
                 CaptureMode::Hierarchy,
             )?)
         };
@@ -1239,47 +1030,6 @@ fn workspace_directory_delivery(
         )
     })?;
     Ok(serde_json::to_string(&delivery)?)
-}
-
-fn workspace_directory_capture(
-    runtime: &Runtime,
-    resource: &crate::resources::ResourceUse,
-    plan: &crate::workspace_directory::CapturePlan,
-) -> Result<String> {
-    let complete = plan.collect(|input, mode| {
-        if runtime.integrations().uses_simulated_providers() {
-            Ok(Box::new(
-                crate::workspace_directory::SimulatedDirectoryPort::new(
-                    runtime.db(),
-                    runtime.scope(),
-                    &input.customer_id,
-                    &input.actor,
-                    input.captured_at,
-                )?,
-            ))
-        } else {
-            let connection = resource
-                .grant
-                .live
-                .as_ref()
-                .ok_or(crate::error::Failure::ResourceForbidden)?;
-            let authentication =
-                crate::workspace_directory::AuthenticationPlan::from_connection(connection)?;
-            Ok(Box::new(
-                crate::workspace_directory::NativeDirectoryPort::new(
-                    authentication,
-                    &input.customer_id,
-                    input.captured_at,
-                    mode,
-                )?,
-            ))
-        }
-    })?;
-    let mut db = crate::workspace_directory::open_store(
-        &runtime.db().with_file_name(WORKSPACE_DIRECTORY_STORE),
-    )?;
-    crate::workspace_directory::publish(&mut db, &complete)?;
-    Ok(serde_json::to_string(complete.metadata())?)
 }
 
 /// One complete live collection through the simulated or native port, with the
@@ -1316,25 +1066,6 @@ fn carta_collect(
         usize::try_from(resource.grant.limits.max_response_bytes).unwrap_or(usize::MAX);
     let (complete, meter) = crate::carta_live::collect_complete(plan, port.as_mut(), page_limit);
     (complete.map(|complete| (complete, started)), meter)
-}
-
-fn carta_capture(
-    runtime: &Runtime,
-    resource: &crate::resources::ResourceUse,
-    plan: &crate::carta_live::CapturePlan,
-) -> (Result<String>, crate::carta_live::Meter) {
-    let (complete, meter) = carta_collect(runtime, resource, plan);
-    let result = complete.and_then(|(complete, started)| {
-        let finished = runtime.host().now_ms()? / 1000;
-        crate::carta_live::publish(
-            &runtime.db().with_file_name(crate::carta_live::STORE),
-            &complete,
-            started,
-            finished.max(started),
-        )?;
-        Ok(serde_json::to_string(complete.snapshot())?)
-    });
-    (result, meter)
 }
 
 /// Collect live, then stage the complete capture for the application. Nothing
@@ -1385,35 +1116,6 @@ fn native_carta_port(
         .map_err(|_| Failure::CredentialUnavailable)?
         .carta_client_secret(connection)?;
     crate::carta_http::NativeCartaPort::new(plan, client_id, secret)
-}
-
-fn workspace_directory_page(
-    runtime: &Runtime,
-    resource: &crate::resources::ResourceUse,
-    capture_id: &str,
-    offset: u64,
-    now: i64,
-) -> Result<String> {
-    let day2_capabilities::resources::ResourceTarget::WorkspaceDirectory { customer_id } =
-        &resource.grant.target
-    else {
-        anyhow::bail!("workspace_directory_resource_invalid")
-    };
-    let path = runtime.db().with_file_name(WORKSPACE_DIRECTORY_STORE);
-    let db = crate::workspace_directory::open_store(&path)?;
-    let page = crate::workspace_directory::page_for_grant(
-        &db,
-        capture_id,
-        customer_id,
-        &format!(
-            "{}@{}",
-            resource.grant.connection.id, resource.grant.connection.revision
-        ),
-        &resource.actor,
-        now,
-        offset,
-    )?;
-    Ok(serde_json::to_string(&page)?)
 }
 
 pub(crate) fn with_world(
@@ -1503,13 +1205,11 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
         Action::Freetool(request) => {
             return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
         }
-        Action::WorkspaceDirectoryCapture(_)
-        | Action::WorkspaceDirectoryUserPath(_)
-        | Action::WorkspaceDirectoryPage { .. } => {
-            return ProviderResult::workspace_directory(
+        Action::WorkspaceDirectoryUserPath(input) => {
+            return ProviderResult::workspace_directory_user_path(
                 runtime,
                 &capability.resource,
-                &capability.action,
+                &input,
                 request_bytes,
             );
         }
@@ -1560,9 +1260,6 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
             };
         }
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
-        Action::CartaCapture(plan) => {
-            return ProviderResult::carta_capture(runtime, &capability.resource, &plan);
-        }
         Action::CartaDelivery {
             plan: Some(plan),
             authority,
@@ -1627,23 +1324,6 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
                 },
             };
         }
-        Action::CartaRecord(read) => {
-            let result = crate::carta_live::read_record(
-                &runtime.db().with_file_name(crate::carta_live::STORE),
-                &read,
-            );
-            // Read from the published capture: no provider call, no traffic.
-            return ProviderResult {
-                result,
-                correlation: Vec::new(),
-                pending: false,
-                usage: crate::resources::ProviderUsage {
-                    known: true,
-                    ..Default::default()
-                },
-            };
-        }
-        Action::Carta(read) => crate::carta::observe(runtime, read),
         Action::People(action) => crate::people_providers::observe(runtime, action),
         Action::Recipient(actor) => Ok(json!({"actor":actor}).to_string()),
         Action::Latest { actor, topic } => with_world(runtime, |world| {

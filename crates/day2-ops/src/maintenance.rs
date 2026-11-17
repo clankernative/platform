@@ -172,10 +172,9 @@ fn scratch_bytes(copies: u64, stores: u64, artifacts: u64) -> u64 {
 
 /// The store files the session copies, from `stat -c '%s %n'` of the regular
 /// files at the top of the state volume: the app's database and every local
-/// provider store the backup takes, each with its WAL. The credential registry,
-/// the Directory capture cache and the live Carta capture store are platform
-/// stores the backup does not take (registration and the next capture recreate
-/// them), so they may be present but are never copied or sized. Any other
+/// provider store the backup takes, each with its WAL. The credential registry
+/// is a platform store the backup does not take (registration recreates it on
+/// every start), so it may be present but is never copied or sized. Any other
 /// SQLite file is an undeclared store and stops maintenance.
 fn store_sizes(listing: &str, app: &str) -> Result<BTreeMap<String, u64>> {
     let database = format!("{app}.sqlite");
@@ -185,11 +184,6 @@ fn store_sizes(listing: &str, app: &str) -> Result<BTreeMap<String, u64>> {
             .iter()
             .map(|name| (*name).to_owned()),
     );
-    let derived = [
-        day2::integration_host::CREDENTIAL_REGISTRY,
-        day2::capabilities::WORKSPACE_DIRECTORY_STORE,
-        day2::carta_live::STORE,
-    ];
     let mut sizes = BTreeMap::new();
     for line in listing.lines().filter(|line| !line.is_empty()) {
         let (size, path) = line.split_once(' ').context("unexpected stat output")?;
@@ -204,7 +198,7 @@ fn store_sizes(listing: &str, app: &str) -> Result<BTreeMap<String, u64>> {
         ensure!(
             !store.ends_with(".sqlite")
                 || wanted.iter().any(|wanted| wanted == store)
-                || derived.contains(&store),
+                || store == day2::integration_host::CREDENTIAL_REGISTRY,
             "undeclared_auxiliary_sqlite_store: {name}"
         );
         if !name.ends_with("-shm") && wanted.iter().any(|wanted| wanted == store) {

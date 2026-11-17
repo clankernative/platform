@@ -57,15 +57,14 @@ activation remains valid, and ordinary filtered operations remain available.
 The requirements also appear in generated docs and OpenAPI. See the
 [application contract guide](../docs/APP-CONTRACT.md) for inheritance and paging.
 
-Chain `.observes("workspace_directory.hierarchy.v1")` onto a command or query
+Chain `.observes("workspace_directory.hierarchy.v2")` onto a command or query
 definition to declare a read dependency for disposable verification. Declare
-`workspace_directory.page.v1` when paging the capture,
-`workspace_directory.user_path.v1` for an independent current-actor user lookup,
-or `workspace_directory.capture.v1` for the combined user/hierarchy capture. Prefer
-`workspace_directory.hierarchy.v2` with `workspace_directory.page.v2`
-(`WorkspaceDirectory.deliver_hierarchy_with` / `delivery_page_with`): the
+`workspace_directory.page.v2` when paging the delivered hierarchy
+(`WorkspaceDirectory.deliver_hierarchy_with` / `delivery_page_with`: the
 complete hierarchy is handed to the reading invocation and persisted in the
-app's own models; see [capture delivery](../docs/PROVIDER-CAPTURE-DELIVERY.md). Build verification
+app's own models; see [capture delivery](../docs/PROVIDER-CAPTURE-DELIVERY.md)),
+or `workspace_directory.user_path.v1` for an independent current-actor user
+lookup. Build verification
 and local development derive synthetic Directory bindings from these declarations,
 independent of operation names. Admission checks capability names and rejects
 writes and duplicates. Production grants remain operator-owned. See
