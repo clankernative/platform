@@ -76,6 +76,7 @@ pub struct Generation {
     pub runtime: crate::runtime_pair::RuntimeIdentity,
     pub instance_digest: String,
     pub image: String,
+    pub composition: Option<crate::runtime_pair::Composition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +237,8 @@ pub(crate) fn state(connection: &Connection) -> Result<Option<Release>> {
         && let ReleaseKind::RuntimePair { admission, .. } = &release.kind
     {
         admission.validate_record()?;
+        release.source.require_runtime_image()?;
+        release.target.require_runtime_image()?;
         ensure!(
             release.source.artifact == release.target.artifact
                 && release.source.instance_digest == release.target.instance_digest
@@ -988,8 +991,8 @@ pub fn prepare(
             None => crate::runtime_pair::RuntimeIdentity::from_artifact(runtime.artifact(), active.document.security.as_ref())?,
         };
         let release = Release { id: id.into(), scope: runtime.scope().into(),
-            source: Generation { artifact: active.artifact_id, runtime: identity.clone(), instance_digest: runtime.instance_digest().into(), image: source_image.into() },
-            target: Generation { artifact: target.id().into(), runtime: identity, instance_digest: crate::digest(&serde_json::to_vec(&instance)?), image: target_image.into() },
+            source: Generation { composition: None, artifact: active.artifact_id, runtime: identity.clone(), instance_digest: runtime.instance_digest().into(), image: source_image.into() },
+            target: Generation { composition: None, artifact: target.id().into(), runtime: identity, instance_digest: crate::digest(&serde_json::to_vec(&instance)?), image: target_image.into() },
             kind: ReleaseKind::AppArtifact,
             target_instance_digest, probe: None, authority: active.stamp, target_security: desired.security.clone(), placement: None, phase: Phase::Prepared };
         if let Some(previous) = state(tx)? {

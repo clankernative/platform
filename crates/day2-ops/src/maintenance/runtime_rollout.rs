@@ -132,6 +132,8 @@ pub(super) fn remove_pod(
 pub struct RuntimePairRequest {
     pub receipt: PathBuf,
     pub receipt_digest: String,
+    pub source_composition: day2::runtime_pair::Composition,
+    pub target_composition: day2::runtime_pair::Composition,
     pub project: String,
     pub backend_service: String,
     pub service: String,
@@ -139,6 +141,8 @@ pub struct RuntimePairRequest {
 
 impl RuntimePairRequest {
     pub(super) fn validate(&self) -> Result<()> {
+        self.source_composition.validate()?;
+        self.target_composition.validate()?;
         ensure!(
             dns_label(&self.project)
                 && dns_label(&self.backend_service)
@@ -242,4 +246,24 @@ pub(super) fn owned_candidate(replica: &Value, request: &Request, digest: &str) 
                     container["name"] == "day2" && container["image"] == target.app_image
                 })
             })
+}
+
+// Synthetic adapter DATA only; shared by port fixtures, never qualification.
+#[cfg(test)]
+pub(super) fn fixture_composition(image: &str, artifact: &str) -> day2::runtime_pair::Composition {
+    day2::runtime_pair::Composition {
+        version: 1,
+        base_image: format!("registry/runtime@{}", day2::digest(b"base native")),
+        base_native: day2::digest(b"base native"),
+        base_config: day2::digest(b"base config"),
+        base_manifest: day2::digest(b"base manifest"),
+        image: image.into(),
+        manifest: day2::digest(format!("manifest:{image}").as_bytes()),
+        config: day2::digest(b"app config"),
+        artifact: format!("sha256:{artifact}"),
+        artifact_tree: day2::digest(b"tree"),
+        layer: day2::digest(b"layer"),
+        verifier: day2::digest(b"verifier"),
+        recipe: day2::digest(b"recipe"),
+    }
 }

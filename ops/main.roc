@@ -8,6 +8,7 @@ package
 		Ci,
 		Verify,
 		Linux,
+		RuntimeImage,
 		Provision,
 		Simulation,
 		ProviderConformance,

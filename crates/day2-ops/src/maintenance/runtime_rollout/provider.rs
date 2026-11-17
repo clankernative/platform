@@ -294,10 +294,15 @@ pub(super) fn pod(
     } else {
         &request.app_image
     };
-    let image_digest = image
-        .split_once('@')
-        .context("runtime_pair_image_invalid")?
-        .1;
+    let pair = request
+        .runtime_pair
+        .as_ref()
+        .context("runtime_pair_request_required")?;
+    let composition = if replica["metadata"]["name"] == target_name(request)? {
+        &pair.target_composition
+    } else {
+        &pair.source_composition
+    };
     ensure!(
         containers.len() == 1
             && containers[0]["name"] == "day2"
@@ -309,7 +314,7 @@ pub(super) fn pod(
             && statuses[0]["name"] == "day2"
             && statuses[0]["imageID"]
                 .as_str()
-                .is_some_and(|id| id.ends_with(&format!("@{image_digest}")))
+                .is_some_and(|id| composition.require_image_id(id).is_ok())
             && value["spec"]["nodeName"] == placement.node
             && owner(value, "ReplicaSet")? == text(&replica["metadata"], "uid")?
             && value["spec"]["volumes"]
@@ -392,6 +397,14 @@ mod tests {
         let request = RuntimePairRequest {
             receipt: "receipt.json".into(),
             receipt_digest: day2::digest(b"receipt"),
+            source_composition: super::super::fixture_composition(
+                &format!("registry/source@{}", day2::digest(b"source")),
+                &"a".repeat(64),
+            ),
+            target_composition: super::super::fixture_composition(
+                &format!("registry/target@{}", day2::digest(b"target")),
+                &"a".repeat(64),
+            ),
             project: "project-one".into(),
             backend_service: "backend-one".into(),
             service: "app-service".into(),

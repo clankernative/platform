@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 mod executor;
 mod handoff;
+mod image;
 pub(crate) use executor::bind_serving_process;
 pub use executor::{
     Candidate, CandidateCheck, Execution, ExecutorRole, Selection, admit, rehearsal_wait,
@@ -27,6 +28,7 @@ pub use handoff::{
     next_observation, promote_handoff, quiesce_source, withdraw_source,
 };
 pub(crate) use handoff::{require_root_admission, retained_source, serving_ready, source_quiesced};
+pub use image::Composition;
 
 /// Metadata preflight only: native storage must never enter the ordinary helper
 /// or raw SQLite inspection path. This constructs no store/epoch authority.
@@ -78,21 +80,6 @@ impl RuntimeIdentity {
         })
     }
 
-    fn require_image(&self, image: &str) -> Result<()> {
-        self.require_qualified()?;
-        rollout::image(image)?;
-        let Some(Containment::LinuxQualifiedV1 { evidence }) = &self.containment else {
-            anyhow::bail!("runtime_pair_requires_linux_qualification")
-        };
-        ensure!(
-            image
-                .rsplit_once('@')
-                .is_some_and(|(_, digest)| digest == evidence.runtime_image),
-            "runtime_pair_image_changed"
-        );
-        Ok(())
-    }
-
     fn require_qualified(&self) -> Result<()> {
         day2_assets::hash_part(&self.platform_inventory)?;
         let Some(Containment::LinuxQualifiedV1 { evidence }) = &self.containment else {
@@ -142,7 +129,7 @@ impl Protocols {
             serving_lease: 2,
             operation_lease: 2,
             execution_lease: 2,
-            release_journal: 4,
+            release_journal: 5,
             authority: 1,
             invocation_effect: 2,
             web_ticket: 1,
@@ -357,6 +344,8 @@ pub struct Request {
     pub source_image: String,
     pub target_image: String,
     pub receipt_digest: String,
+    pub source_composition: Composition,
+    pub target_composition: Composition,
 }
 
 fn local_stores(runtime: &Runtime) -> Result<()> {
@@ -506,22 +495,26 @@ pub fn prepare(
             protocols: expected.protocols,
         };
         let admission = Admission::review(receipt_bytes, &request.receipt_digest, &source)?;
-        let generation = |identity: RuntimeIdentity, image: &str| Generation {
-            artifact: active.artifact_id.clone(),
-            runtime: identity,
-            instance_digest: instance_digest.clone(),
-            image: image.into(),
-        };
+        let generation =
+            |identity: RuntimeIdentity, image: &str, composition: Composition| Generation {
+                composition: Some(composition),
+                artifact: active.artifact_id.clone(),
+                runtime: identity,
+                instance_digest: instance_digest.clone(),
+                image: image.into(),
+            };
         let release = Release {
             id: request.id.clone(),
             scope: runtime.scope().into(),
             source: generation(
                 admission.receipt.source.runtime.clone(),
                 &request.source_image,
+                request.source_composition.clone(),
             ),
             target: generation(
                 admission.receipt.target.runtime.clone(),
                 &request.target_image,
+                request.target_composition.clone(),
             ),
             kind: ReleaseKind::RuntimePair {
                 admission: Box::new(admission),
@@ -534,6 +527,8 @@ pub fn prepare(
             target_security: active.document.security,
             phase: Phase::Prepared,
         };
+        release.source.require_runtime_image()?;
+        release.target.require_runtime_image()?;
         persist(tx, release)
     })
 }
@@ -707,6 +702,11 @@ mod tests {
         )?;
         let receipt = receipt();
         let generation = |runtime: RuntimeIdentity, image: &str| Generation {
+            composition: Some(image::tests::composition(
+                &runtime,
+                &format!("registry/app@{}", crate::digest(image.as_bytes())),
+                &artifact,
+            )),
             artifact: artifact.clone(),
             runtime,
             instance_digest: crate::digest(b"instance"),

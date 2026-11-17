@@ -185,9 +185,22 @@ impl Prompt for PromptPort {
 
 fn fixture() -> Result<(Request, Rc<RefCell<World>>)> {
     let mut request = request();
+    request.target.as_mut().unwrap().probe = Some(day2::rollout::ProbeDefinition {
+        actor: "alice".into(),
+        command: "run".into(),
+        input: json!({}),
+        query: "read".into(),
+        query_input: json!({}),
+        expected: json!({}),
+    });
     request.runtime_pair = Some(RuntimePairRequest {
         receipt: "receipt.json".into(),
         receipt_digest: day2::digest(b"receipt"),
+        source_composition: fixture_composition(&request.app_image, &request.artifact_id),
+        target_composition: fixture_composition(
+            &request.target.as_ref().unwrap().app_image,
+            &request.artifact_id,
+        ),
         project: "project-one".into(),
         backend_service: "backend-one".into(),
         service: "app-service".into(),
@@ -272,7 +285,7 @@ fn fixture() -> Result<(Request, Rc<RefCell<World>>)> {
         serving_lease: 2,
         operation_lease: 2,
         execution_lease: 2,
-        release_journal: 4,
+        release_journal: 5,
         authority: 1,
         invocation_effect: 2,
         web_ticket: 1,
@@ -293,7 +306,8 @@ fn fixture() -> Result<(Request, Rc<RefCell<World>>)> {
         },
         protocols,
     };
-    let generation = |runtime, image| day2::rollout::Generation {
+    let generation = |runtime, image: String| day2::rollout::Generation {
+        composition: Some(fixture_composition(&image, &request.artifact_id)),
         artifact: format!("sha256:{}", request.artifact_id),
         runtime,
         instance_digest: day2::digest(b"instance"),
@@ -457,6 +471,36 @@ fn session(request: &Request, world: &Rc<RefCell<World>>) -> Result<Session> {
         },
         work,
     })
+}
+
+#[test]
+fn adoption_accepts_the_measured_native_manifest_and_refuses_configuration_ids() -> Result<()> {
+    for valid in [false, true] {
+        let (request, world) = fixture()?;
+        let composition = &request.runtime_pair.as_ref().unwrap().target_composition;
+        let id = if valid {
+            &composition.manifest
+        } else {
+            &composition.config
+        };
+        world
+            .borrow_mut()
+            .objects
+            .get_mut(&("pod".into(), "target-pod".into()))
+            .unwrap()["status"]["containerStatuses"][0]["imageID"] =
+            json!(format!("registry/app@{id}"));
+        let mut attempt = session(&request, &world)?;
+        if valid {
+            for step in ["pause", "retarget", "adopt", "unpause"] {
+                attempt.runtime_adoption(step)?;
+            }
+        } else {
+            assert!(attempt.runtime_adoption("pause").is_err());
+            assert_eq!(world.borrow().mutations, 0);
+        }
+        attempt.state.finished = true;
+    }
+    Ok(())
 }
 
 #[test]
@@ -646,5 +690,43 @@ fn an_aborted_never_public_candidate_is_removed_without_stopping_source_and_retr
     );
     assert!(observed.objects[&("deployment".into(),request.statefulset.clone())]["metadata"]["annotations"]["day2.dev/runtime-pair"].is_null());
     attempt.state.finished = true;
+    Ok(())
+}
+
+// Synthetic adapter DATA only; these model tests do not qualify image bytes.
+
+#[test]
+fn image_composition_must_match_both_selected_images_and_the_unchanged_artifact() -> Result<()> {
+    let (mut request, _) = fixture()?;
+    request.offsite_backup = Some(OffsiteBackup {
+        cronjob: "backup".into(),
+        bucket: "day2-backup-fixture".into(),
+        service_account: "app".into(),
+    });
+    request.validate(Operation::RuntimeRollout)?;
+    for source in [false, true] {
+        for artifact in [false, true] {
+            let mut changed = request.clone();
+            let pair = changed.runtime_pair.as_mut().unwrap();
+            let composition = if source {
+                &mut pair.source_composition
+            } else {
+                &mut pair.target_composition
+            };
+            if artifact {
+                composition.artifact = day2::digest(b"another artifact");
+            } else {
+                composition.image =
+                    format!("registry/another@{}", day2::digest(b"another manifest"));
+            }
+            assert!(
+                changed
+                    .validate(Operation::RuntimeRollout)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("runtime_pair_image_composition_changed")
+            );
+        }
+    }
     Ok(())
 }

@@ -185,7 +185,8 @@ impl Session {
         fs::write(&receipt_path, receipt)?;
         self.copy_in(&receipt_path, "/srv/day2/runtime-receipt.json")?;
         let request = json!({"id":self.request.request_id,"source_image":self.request.app_image,
-            "target_image":self.request.target.as_ref().context("target")?.app_image,"receipt_digest":pair.receipt_digest});
+            "target_image":self.request.target.as_ref().context("target")?.app_image,"receipt_digest":pair.receipt_digest,
+            "source_composition":pair.source_composition,"target_composition":pair.target_composition});
         for (name, value) in [
             ("runtime-request.json", request),
             ("runtime-placement.json", self.pair_placement()?),
@@ -652,9 +653,11 @@ impl Session {
                 && pod["spec"]["containers"][0]["image"] == *image
                 && pod["status"]["containerStatuses"][0]["imageID"]
                     .as_str()
-                    .is_some_and(
-                        |id| id.ends_with(&format!("@{}", image.split_once('@').unwrap().1))
-                    ),
+                    .is_some_and(|id| self
+                        .request
+                        .runtime_pair
+                        .as_ref()
+                        .is_some_and(|pair| pair.target_composition.require_image_id(id).is_ok())),
             "runtime_pair_target_rehearsal_failed"
         );
         self.state.runtime.rehearsal_checked = true;
