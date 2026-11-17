@@ -1364,11 +1364,14 @@ fn campaign_fixture_cache(
     snapshot: &str,
     load: impl FnOnce() -> Result<VerificationCache>,
 ) -> Result<VerificationCache> {
-    if matches!(recipe, "verify-prepare-join" | "verify-compose") {
-        // These recipes only admit and join existing evidence. They never build
-        // a fixture, so optional fixture reuse adds a redundant configured
-        // compiler build. Complete prepared-output and fixture admission still
-        // runs through the ordinary authenticated join paths.
+    if matches!(
+        recipe,
+        "verify-fast" | "verify-prepare-join" | "verify-compose"
+    ) {
+        // FAST has no fixture builds; the other two recipes only join evidence.
+        // Optional fixture reuse would add an unused configured compiler build.
+        // Mandatory source, runner and prepared-output admission stays outside
+        // this optional cache selection.
         Ok(VerificationCache::empty(scope, snapshot, None))
     } else {
         load()
@@ -1653,8 +1656,15 @@ fn suite_targets(
     root: &Path,
     suite: &str,
 ) -> Result<(Vec<crate::bazel::Target>, Vec<crate::bazel::Target>)> {
-    let selection = test_selection(suite)?;
     let catalog = crate::bazel::targets(root)?;
+    select_suite_targets(&catalog, suite)
+}
+
+fn select_suite_targets(
+    catalog: &[crate::bazel::Target],
+    suite: &str,
+) -> Result<(Vec<crate::bazel::Target>, Vec<crate::bazel::Target>)> {
+    let selection = test_selection(suite)?;
     let selected = catalog
         .iter()
         .filter(|target| {
@@ -1678,6 +1688,10 @@ fn suite_targets(
             .filter(|target| {
                 !target.test
                     && target.kind == ["bin"]
+                    // Library cases use their own harness or the checked Roc
+                    // runner. Keep Linux's three fixed-sibling sandbox helpers,
+                    // without linking unrelated operator/integration programs.
+                    && (suite != "fast-libraries" || target.package == "day2-sandbox")
                     && (selection.packages.is_empty()
                         || selection.packages.contains(&target.package.as_str())
                         || target.package == "day2-sandbox")
@@ -2191,8 +2205,110 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evidence_joins_never_initialize_an_unused_fixture_compiler() -> Result<()> {
-        for (recipe, scope) in [("verify-prepare-join", "all"), ("verify-compose", "linux")] {
+    fn fast_libraries_keep_every_harness_and_linux_launcher_without_operator_links() -> Result<()> {
+        let catalog = crate::bazel::targets(&day2::automation::source_root()?)?;
+        let labels = |targets: &[crate::bazel::Target]| {
+            targets
+                .iter()
+                .map(|target| target.label.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        let (selected, compile) = select_suite_targets(&catalog, "fast-libraries")?;
+        let expected = [
+            "//crates/worker:unit_lib",
+            "//crates/day2:unit_lib",
+            "//crates/day2-assets:unit_lib",
+            "//crates/day2-contracts:unit_lib",
+            "//crates/day2-control:unit_lib",
+            "//crates/day2-kernel:unit_lib",
+            "//crates/day2-capabilities:unit_lib",
+            "//crates/durable-temporal:unit_lib",
+            "//crates/day2-ops:unit_lib",
+            "//crates/day2-sandbox:unit_lib",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(labels(&selected), expected);
+        assert_eq!(selected.len(), 10);
+        let helpers = [
+            "//crates/day2-sandbox:day2-compiler-sandbox",
+            "//crates/day2-sandbox:day2-sandbox",
+            "//crates/day2-sandbox:day2-sandbox-probe",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            labels(&compile),
+            expected.union(&helpers).cloned().collect()
+        );
+        assert_eq!(compile.len(), 13);
+        let (ordinary, ordinary_compile) = select_suite_targets(&catalog, "libraries")?;
+        let mut ordinary_expected = expected.clone();
+        ordinary_expected.insert("//cli/checks:unit_lib".into());
+        assert_eq!(labels(&ordinary), ordinary_expected);
+        assert_eq!(ordinary_compile.len(), 32);
+        let (_, full) = select_suite_targets(&catalog, "workspace-runtime")?;
+        let mut programs = catalog
+            .iter()
+            .filter(|target| !target.test && target.kind == ["bin"]);
+        assert!(
+            programs
+                .clone()
+                .all(|target| labels(&full).contains(&target.label))
+        );
+
+        let mut program = programs.next().cloned().context("declared program")?;
+        let mut extended = catalog;
+        let mut extra = selected[0].clone();
+        extra.label = "//crates/worker:unit_new_library".into();
+        extended.push(extra.clone());
+        program.package = "new-operator".into();
+        program.label = "//crates/new-operator:operator".into();
+        extended.push(program.clone());
+        let (new_selected, new_compile) = select_suite_targets(&extended, "fast-libraries")?;
+        assert!(labels(&new_selected).contains(&extra.label));
+        assert!(labels(&new_compile).contains(&extra.label));
+        assert!(!labels(&new_compile).contains(&program.label));
+        Ok(())
+    }
+
+    #[test]
+    fn fast_recipe_has_no_fixture_cache_consumer_and_keeps_its_original_bounds() -> Result<()> {
+        let (_, source) = day2::automation::SOURCES
+            .iter()
+            .find(|(name, _)| *name == "ops/Verify.roc")
+            .context("verification recipe")?;
+        let fast = std::str::from_utf8(source)?
+            .split_once("fast! = |host!| {")
+            .context("FAST recipe")?
+            .1
+            .split_once("\n\t}")
+            .context("FAST recipe end")?
+            .0;
+        assert_eq!(fast.matches("Capability.call!").count(), 4);
+        for effect in [
+            "verify-format",
+            "verify-lint",
+            "verify-tests",
+            "verify-receipt",
+        ] {
+            assert!(fast.contains(&format!("\"{effect}\"")));
+        }
+        assert!(fast.contains("suite: \"fast-libraries\", budget_seconds: 900.U64"));
+        assert!(!fast.contains("verify-build"));
+        assert!(test_selection("fast-libraries")?.arguments.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn fixture_free_campaigns_never_initialize_an_unused_fixture_compiler() -> Result<()> {
+        for (recipe, scope) in [
+            ("verify-fast", "fast"),
+            ("verify-prepare-join", "all"),
+            ("verify-compose", "linux"),
+        ] {
             let cache = campaign_fixture_cache(recipe, scope, "current", || {
                 panic!("{recipe} must not invoke the optional fixture compiler")
             })?;
@@ -2286,7 +2402,6 @@ mod tests {
     #[test]
     fn other_campaigns_preserve_fixture_cache_loading_and_errors() -> Result<()> {
         for recipe in [
-            "verify-fast",
             "verify-reports",
             "verify",
             "verify-prepare",

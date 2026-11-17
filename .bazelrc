@@ -13,6 +13,9 @@ build --define=DAY2_PLATFORM_FEATURE_SCOPE=verification
 build --local_resources=cpu=2
 build --local_resources=memory=4096
 build --compilation_mode=fastbuild
+# Keep diagnostic configuration stable across lint, builds and producer queries.
+# Native build capture already requires structured compiler diagnostics.
+build --@rules_rust//rust/settings:error_format=json
 build --verbose_failures
 build --show_timestamps
 build --announce_rc
