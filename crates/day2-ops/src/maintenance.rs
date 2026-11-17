@@ -3175,6 +3175,10 @@ impl Session {
                     self.state.rehearsal_prepared,
                     "isolated_rehearsal_required_before_plan"
                 );
+                // `day2 migration-plan` refuses an existing output. Any plan in
+                // the pod belongs to an earlier checkpoint (the online
+                // rehearsal), so derive this one from the current backup.
+                self.exec(&["rm", "-f", PLAN], Duration::from_secs(60))?;
                 self.exec(
                     &[
                         DAY2,
