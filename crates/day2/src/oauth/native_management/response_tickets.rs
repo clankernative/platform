@@ -1022,11 +1022,12 @@ mod tests {
                 .response_tickets
                 .prepare_native(&self.identity, &owners.response_rights)?;
             request_owner.finish(role.owner())?;
-            transport.complete(sequence)?;
+            transport.complete(sequence.sequence)?;
             role.known = true;
             lease.known = true;
             self.state.set(SinkState::Complete);
             terminal.complete();
+            sequence.published = true;
             Ok(())
         });
         let actual = &function.block.stmts;
@@ -1052,24 +1053,70 @@ mod tests {
         assert!(native_terminal_tail(source));
         for (old, new) in [
             (
-                "transport.complete(sequence)?;",
-                "terminal.complete(); transport.complete(sequence)?;",
+                "transport.complete(sequence.sequence)?;",
+                "terminal.complete(); transport.complete(sequence.sequence)?;",
             ),
             (
                 "request_owner.finish(role.owner())?;",
                 "terminal.complete(); request_owner.finish(role.owner())?;",
             ),
             (
-                "transport.complete(sequence)?;",
-                "let _unknown = transport.complete(sequence);",
+                "transport.complete(sequence.sequence)?;",
+                "let _unknown = transport.complete(sequence.sequence);",
             ),
             ("lease.known = true;", ""),
             ("terminal.complete();", ""),
             ("terminal.complete();", "terminal.complete()?;"),
+            ("sequence.published = true;", ""),
+            (
+                "transport.complete(sequence.sequence)?;",
+                "sequence.published = true; transport.complete(sequence.sequence)?;",
+            ),
+            (
+                "terminal.complete();",
+                "sequence.published = true; terminal.complete();",
+            ),
         ] {
-            let mutant = source.replacen(old, new, 1);
-            assert_ne!(source, mutant, "actual final response boundary");
-            assert!(!native_terminal_tail(&mutant));
+            // Mutate the selected initial driver, not the first matching
+            // text in the whole file (the restored driver has its own tail).
+            use quote::ToTokens;
+            let mut file = syn::parse_file(source).unwrap();
+            let mut selected = 0;
+            for item in &mut file.items {
+                let syn::Item::Impl(item) = item else {
+                    continue;
+                };
+                if item.self_ty.to_token_stream().to_string() != "Sink" {
+                    continue;
+                }
+                for member in &mut item.items {
+                    let syn::ImplItem::Fn(function) = member else {
+                        continue;
+                    };
+                    if function.sig.ident != "drive_response" {
+                        continue;
+                    }
+                    selected += 1;
+                    let before: syn::Block = syn::parse_str(&format!("{{{old}}}")).unwrap();
+                    let after: syn::Block = syn::parse_str(&format!("{{{new}}}")).unwrap();
+                    assert_eq!(before.stmts.len(), 1);
+                    let expected = before.stmts[0].to_token_stream().to_string();
+                    let positions = function
+                        .block
+                        .stmts
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, stmt)| {
+                            (stmt.to_token_stream().to_string() == expected).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(positions.len(), 1, "actual final response statement: {old}");
+                    let index = positions[0];
+                    function.block.stmts.splice(index..index + 1, after.stmts);
+                }
+            }
+            assert_eq!(selected, 1, "one actual initial response driver");
+            assert!(!native_terminal_tail(&file.to_token_stream().to_string()));
         }
     }
 
