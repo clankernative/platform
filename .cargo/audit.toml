@@ -2,4 +2,13 @@
 # Informational: scraper 0.24 -> selectors 0.31 -> fxhash 0.2.1.
 # No known vulnerability is exempted. Replace when the selectors dependency
 # permits rustc-hash; review this exception no later than 2026-12-23.
-ignore = ["RUSTSEC-2025-0057"]
+ignore = [
+    "RUSTSEC-2025-0057",
+    # Informational: prost-wkt 0.7.2, prost-wkt-types 0.7.2 and
+    # temporalio-common-wasm 1.0.0 -> chrono 0.4.45 (unmaintained).
+    # No known vulnerability is exempted; no released parent drops chrono.
+    # Track upstream replacement with jiff or time, then remove this exception;
+    # review no later than 2026-12-01. RustSec lists no patched chrono release.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0543.html
+    "RUSTSEC-2026-0543",
+]
