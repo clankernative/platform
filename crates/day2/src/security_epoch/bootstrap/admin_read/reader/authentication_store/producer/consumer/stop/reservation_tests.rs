@@ -473,15 +473,113 @@ fn same_owner_handoff_retains_complete_actual_known_records_ack_and_authorizatio
 
 #[test]
 fn native_target_factory_borrows_only_the_actual_reset_frame_and_never_report_data() {
+    #[derive(Default)]
+    struct Targets(Vec<syn::ExprStruct>, Vec<syn::ExprStruct>);
+    impl<'ast> Visit<'ast> for Targets {
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if let Some(target) = local_target(local)
+                && target.path.is_ident("NativeStagedTarget")
+            {
+                self.1.push(target.clone());
+            }
+            syn::visit::visit_local(self, local);
+        }
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            if node
+                .path
+                .segments
+                .last()
+                .is_some_and(|part| part.ident == "NativeStagedTarget")
+            {
+                self.0.push(node.clone());
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+    }
+    fn local_target(local: &syn::Local) -> Option<&syn::ExprStruct> {
+        if !local.attrs.is_empty()
+            || !matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "target" && name.mutability.is_some() && name.by_ref.is_none() && name.subpat.is_none())
+        {
+            return None;
+        }
+        let init = local.init.as_ref()?;
+        if init.diverge.is_some() {
+            return None;
+        }
+        let syn::Expr::Struct(target) = &*init.expr else {
+            return None;
+        };
+        Some(target)
+    }
+    fn fields(target: &syn::ExprStruct, expected: &[(&str, &str)]) -> bool {
+        target.attrs.is_empty()
+            && target.qself.is_none()
+            && target.path.is_ident("NativeStagedTarget")
+            && target.rest.is_none()
+            && target.fields.len() == expected.len()
+            && target
+                .fields
+                .iter()
+                .zip(expected)
+                .all(|(field, &(name, expression))| {
+                    let expected: syn::Expr = syn::parse_str(expression).unwrap();
+                    field.attrs.is_empty()
+                        && matches!(&field.member, syn::Member::Named(actual) if actual == name)
+                        && field.expr.to_token_stream().to_string()
+                            == expected.to_token_stream().to_string()
+                })
+    }
     fn guarded(source: &str) -> bool {
         let factory = method(source, "NativeParent", "stage_and_settle");
+        let resumed = method(source, "NativeRestore", "run_protected");
+        let mut all = Targets::default();
+        all.visit_file(&syn::parse_file(source).unwrap());
+        let mut staged = Targets::default();
+        staged.visit_block(&factory.block);
+        let mut retained = Targets::default();
+        retained.visit_block(&resumed.block);
+        if all.0.len() != 2
+            || staged.0.len() != 1
+            || retained.0.len() != 1
+            || staged.1.len() != 1
+            || retained.1.len() != 1
+        {
+            return false;
+        }
+        let prefix = [
+            "let intent = self.intent.clone();",
+            "let mut parent = self.begin()?;",
+            "let (projection, _receipt) = parent.stage_and_settle(&intent)?;",
+        ];
+        if resumed.block.stmts.len() < 5
+            || !resumed
+                .block
+                .stmts
+                .iter()
+                .zip(prefix)
+                .all(|(actual, expected)| {
+                    let expected: syn::Stmt = syn::parse_str(expected).unwrap();
+                    actual.to_token_stream().to_string() == expected.to_token_stream().to_string()
+                })
+        {
+            return false;
+        }
+        let syn::Stmt::Local(target) = &resumed.block.stmts[3] else {
+            return false;
+        };
+        let Some(retained_target) = local_target(target) else {
+            return false;
+        };
+        let received: syn::Stmt =
+            syn::parse_quote!(let mut candidate = parent.loan.receive_writer(&mut target)?;);
+        if resumed.block.stmts[4].to_token_stream().to_string()
+            != received.to_token_stream().to_string()
+        {
+            return false;
+        }
         let tokens = factory.block.to_token_stream().to_string();
         let expected = [
             "let projection = self . execute_staging () ?",
-            "state : & mut self . state",
-            "root : & mut self . root",
-            "selection : self . selection . reborrow ()",
-            "intent , projection",
             "self . loan . settle_target (& mut target)",
         ];
         expected.iter().all(|needle| tokens.contains(needle))
@@ -489,10 +587,36 @@ fn native_target_factory_borrows_only_the_actual_reset_frame_and_never_report_da
                 &factory,
                 &["execute_staging", "reborrow", "settle_target", "current"],
             )
-            && source
-                .matches("let mut target = NativeStagedTarget {")
-                .count()
-                == 1
+            && fields(
+                &staged.1[0],
+                &[
+                    ("state", "&mut self.state"),
+                    ("root", "&mut self.root"),
+                    ("selection", "self.selection.reborrow()"),
+                    ("intent", "intent"),
+                    ("projection", "projection.clone()"),
+                    ("cohort_attempted", "false"),
+                    (
+                        "artifact",
+                        "self.installed.as_mut().context(\"restore_artifact_not_installed\")?",
+                    ),
+                ],
+            )
+            && fields(
+                retained_target,
+                &[
+                    ("state", "&mut parent.state"),
+                    ("root", "&mut parent.root"),
+                    ("selection", "parent.selection.reborrow()"),
+                    ("intent", "&intent"),
+                    ("projection", "projection"),
+                    ("cohort_attempted", "false"),
+                    (
+                        "artifact",
+                        "parent.installed.as_mut().context(\"restore_artifact_not_installed\")?",
+                    ),
+                ],
+            )
     }
     let source = include_str!("../../../../../../../restore_staging/writer.rs");
     assert!(guarded(source));
@@ -507,6 +631,23 @@ fn native_target_factory_borrows_only_the_actual_reset_frame_and_never_report_da
             "self.loan.settle_target(&mut target)",
             "self.loan.settle_other(&mut target)",
         ),
+        (
+            "projection: projection.clone(),",
+            "projection: cached_projection,",
+        ),
+        ("root: &mut parent.root,", "root: &mut other_parent.root,"),
+        (
+            "let mut parent = self.begin()?;",
+            "let mut parent = other_parent;",
+        ),
+        (
+            "let (projection, _receipt) = parent.stage_and_settle(&intent)?;",
+            "let (projection, _receipt) = cached_report;",
+        ),
+        (
+            "let mut candidate = parent.loan.receive_writer(&mut target)?;",
+            "let mut candidate = other_parent.loan.receive_writer(&mut target)?;",
+        ),
     ] {
         assert_eq!(
             source.matches(from).count(),
@@ -515,6 +656,140 @@ fn native_target_factory_borrows_only_the_actual_reset_frame_and_never_report_da
         );
         assert!(!guarded(&source.replacen(from, to, 1)));
     }
+    for (name, replacement) in [
+        ("selection", "other_parent.selection.reborrow()"),
+        (
+            "artifact",
+            "other_parent.installed.as_mut().context(\"restore_artifact_not_installed\")?",
+        ),
+        ("projection", "cached_projection"),
+    ] {
+        let mut file = syn::parse_file(source).unwrap();
+        let mut changed = 0;
+        for item in &mut file.items {
+            let syn::Item::Impl(owner) = item else {
+                continue;
+            };
+            if !matches!(&*owner.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == "NativeRestore"))
+            {
+                continue;
+            }
+            for item in &mut owner.items {
+                let syn::ImplItem::Fn(method) = item else {
+                    continue;
+                };
+                if method.sig.ident != "run_protected" {
+                    continue;
+                }
+                let syn::Stmt::Local(local) = &mut method.block.stmts[3] else {
+                    panic!("actual target local");
+                };
+                let syn::Expr::Struct(target) = &mut *local.init.as_mut().unwrap().expr else {
+                    panic!("actual target constructor");
+                };
+                let field = target.fields.iter_mut().find(|field| matches!(&field.member, syn::Member::Named(actual) if actual == name)).unwrap();
+                field.colon_token = Some(Default::default());
+                field.expr = syn::parse_str(replacement).unwrap();
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 1, "one actual retained target field");
+        assert!(!guarded(&file.to_token_stream().to_string()));
+    }
+    // A correct nested constructor cannot stand in for the actual local that
+    // is borrowed by settlement or the retained-parent receive operation.
+    for (owner_name, method_name) in [
+        ("NativeParent", "stage_and_settle"),
+        ("NativeRestore", "run_protected"),
+    ] {
+        let mut file = syn::parse_file(source).unwrap();
+        let mut wrapped = 0;
+        for item in &mut file.items {
+            let syn::Item::Impl(owner) = item else {
+                continue;
+            };
+            if !matches!(&*owner.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == owner_name))
+            {
+                continue;
+            }
+            for item in &mut owner.items {
+                let syn::ImplItem::Fn(method) = item else {
+                    continue;
+                };
+                if method.sig.ident == method_name {
+                    let mut actual = Targets::default();
+                    actual.visit_block(&method.block);
+                    assert_eq!(actual.1.len(), 1, "one direct actual target local");
+                    let original = &actual.1[0];
+                    let from: syn::Stmt = syn::parse_quote!(let mut target = #original;);
+                    let to: syn::Stmt =
+                        syn::parse_quote!(let mut target = Wrapper { inner: #original };);
+                    let from = from.to_token_stream().to_string();
+                    let to = to.to_token_stream().to_string();
+                    let body = method.block.to_token_stream().to_string();
+                    assert_eq!(body.matches(&from).count(), 1, "one actual wrapper cut");
+                    method.block = syn::parse_str(&body.replacen(&from, &to, 1)).unwrap();
+                    wrapped += 1;
+                }
+            }
+        }
+        assert_eq!(wrapped, 1, "one actual target initializer");
+        let mut all = Targets::default();
+        all.visit_file(&file);
+        assert_eq!(
+            all.0.len(),
+            2,
+            "wrapper cut retains global constructor count"
+        );
+        assert!(!guarded(&file.to_token_stream().to_string()));
+    }
+    let mut relocated = syn::parse_file(source).unwrap();
+    let mut changed = 0;
+    for item in &mut relocated.items {
+        let syn::Item::Impl(owner) = item else {
+            continue;
+        };
+        if !matches!(&*owner.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == "NativeRestore"))
+        {
+            continue;
+        }
+        for item in &mut owner.items {
+            let syn::ImplItem::Fn(method) = item else {
+                continue;
+            };
+            if method.sig.ident != "run_protected" {
+                continue;
+            }
+            let actual_target = method.block.stmts[3].clone();
+            let syn::Stmt::Local(local) = &mut method.block.stmts[3] else {
+                panic!("actual target local");
+            };
+            *local.init.as_mut().unwrap().expr = syn::parse_quote!(OtherTarget {});
+            method.block.stmts.insert(5, actual_target);
+            changed += 1;
+        }
+    }
+    assert_eq!(changed, 1);
+    let mut all = Targets::default();
+    all.visit_file(&relocated);
+    assert_eq!(
+        all.0.len(),
+        2,
+        "relocation cut retains global constructor count"
+    );
+    let relocated = relocated.to_token_stream().to_string();
+    let mut retained = Targets::default();
+    retained.visit_block(&method(&relocated, "NativeRestore", "run_protected").block);
+    assert_eq!(retained.0.len(), 1);
+    assert_eq!(retained.1.len(), 1);
+    assert!(!guarded(&relocated));
+    // An extra constructor elsewhere cannot hide behind the two permitted
+    // methods retaining their correct field bindings.
+    let resumed = method(source, "NativeRestore", "run_protected");
+    let extra = resumed.block.stmts[3].to_token_stream();
+    assert!(!guarded(&format!(
+        "{source}\nfn extra_target() {{ {extra} }}"
+    )));
 }
 
 #[test]

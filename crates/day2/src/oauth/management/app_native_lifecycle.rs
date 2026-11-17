@@ -3371,15 +3371,17 @@ fn intermittent_consumer_failure_keeps_actual_winning_evidence_without_rerunning
     );
     for first_wins in [false, true] {
         let mut calls = 0;
+        let mut winning_steps = None;
         let root = tempfile::tempdir()?;
         let path = retain_with(
             root.path(),
             &program,
             original.clone(),
             OracleControl::OvercountFirstRead,
-            |_, _| {
+            |candidate, _| {
                 calls += 1;
                 if first_wins && calls == 1 {
+                    winning_steps = Some(candidate.steps.clone());
                     original.clone()
                 } else {
                     ReplayPair {
@@ -3407,7 +3409,7 @@ fn intermittent_consumer_failure_keeps_actual_winning_evidence_without_rerunning
             "last winning pair was lost"
         );
         ensure!(
-            bundle.reduced.steps.len() == program.steps.len() - usize::from(first_wins),
+            bundle.reduced.steps == winning_steps.unwrap_or_else(|| program.steps.clone()),
             "unwitnessed reduction was retained"
         );
     }

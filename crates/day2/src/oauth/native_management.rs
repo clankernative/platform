@@ -28,6 +28,7 @@ use std::{
 };
 
 mod consumer_context;
+mod protected_restore;
 mod request;
 mod response;
 mod response_tickets;
@@ -37,7 +38,53 @@ pub(crate) use consumer_context::{
 use response::RuntimeRequest;
 pub(crate) use response_tickets::AppAuthorityStop;
 
+/// Presentation/correlation DATA from the same installed Shell selection.
+/// This cannot lend a stage, admit an administrator or reconstruct a command.
+pub(in crate::oauth) fn protected_restore_command_data(
+    scope: &AuthorityScope,
+    bytes: &[u8],
+) -> Result<crate::security_epoch::ProtectedRestoreCommandData> {
+    protected_restore::command_data(scope, bytes)
+}
+
+/// Fixed protected-restore DATA exchange under the actual saved Shell HTTP
+/// original. No CLI assertion, prompt or response creates native authority.
+pub(crate) fn protected_restore_request(
+    scope: &AuthorityScope,
+    data: crate::security_epoch::native_enrollment::ProtectedRestoreRequest,
+) -> Result<crate::security_epoch::native_enrollment::ProtectedRestoreReply> {
+    protected_restore::request(scope, data)
+}
+
+/// Dedicated terminal exchange on the SAME admitted Shell connection. The
+/// returned allowlisted DATA does not construct an owner or promise delivery.
+pub(crate) fn protected_restore_authenticate(
+    scope: &AuthorityScope,
+    id: &day2_capabilities::Digest,
+    assertion: &[u8],
+) -> Result<crate::security_epoch::native_enrollment::RestoreInstalledOutputData> {
+    protected_restore::authenticate(scope, id, assertion)
+}
+
 type Role = response::Role<EnrolledProcessRoleOwner>;
+
+/// Fixed check on the actual already-bound Shell request after protected DATA
+/// returns. No courier, stage, original or renewed grant is exposed.
+pub(in crate::oauth) fn check_protected_restore_reply(scope: &AuthorityScope) -> Result<()> {
+    let sink = current_sink()?;
+    let checked = sink.request.check_shell_reply(scope);
+    if checked.is_err() {
+        sink.abort();
+    }
+    checked
+}
+
+/// Terminal negative duty only, including while unwinding a browser phase.
+pub(in crate::oauth) fn refuse_protected_restore_reply() {
+    if let Ok(sink) = current_sink() {
+        sink.abort();
+    }
+}
 
 /// Checked desired selection DATA. This cannot enroll, open storage, create a
 /// serving participant or replace any missing native supplier.
@@ -102,6 +149,13 @@ struct Owners {
 struct InitialOwner {
     role: Role,
     storage: AppStorage,
+    // Across a human wait only the admitted DATA courier and native peer
+    // handles remain, never a stage, Current, SQL loan or executor grant.
+    protected_restore: std::cell::OnceCell<
+        std::cell::RefCell<
+            Option<Box<crate::security_epoch::native_enrollment::ProtectedRestoreShell>>,
+        >,
+    >,
 }
 
 enum OwnerSource {
@@ -359,6 +413,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                         source: OwnerSource::Initial(InitialOwner {
                             role: Role::new(role),
                             storage,
+                            protected_restore: std::cell::OnceCell::new(),
                         }),
                         kind,
                         selection: selection.clone(),
@@ -4446,42 +4501,65 @@ impl Sink {
             self.state.get() == SinkState::Open,
             "native response outcome unknown or excluded"
         );
-        let intents: Vec<_> = self
-            .bindings
-            .try_borrow()?
-            .iter()
-            .map(|((role, _), binding)| (*role, binding.clone()))
-            .collect();
-        match intents.as_slice() {
-            [] => match self.runtime.try_borrow()?.clone() {
-                Some(binding) => binding.effects.run(|| {
-                    with_runtime_response(
-                        &binding.scope,
-                        &self.identity,
-                        phase == Phase::ResponseComplete,
-                        operation,
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.request.check_bound_shell()?;
+            let intents: Vec<_> = self
+                .bindings
+                .try_borrow()?
+                .iter()
+                .map(|((role, _), binding)| (*role, binding.clone()))
+                .collect();
+            match intents.as_slice() {
+                [] => match self.runtime.try_borrow()?.clone() {
+                    Some(binding) => binding.effects.run(|| {
+                        with_runtime_response(
+                            &binding.scope,
+                            &self.identity,
+                            phase == Phase::ResponseComplete,
+                            operation,
+                        )
+                    }),
+                    None => operation(),
+                },
+                [(role, binding)] => binding.effects.clone().run(|| {
+                    ensure!(
+                        self.runtime.try_borrow()?.is_none(),
+                        "native response ownership conflict"
+                    );
+                    with_consumer_for_role(
+                        &binding.intent,
+                        phase,
+                        super::effects::wall_time()?,
+                        *role,
+                        Some(&self.identity),
+                        |consumer| {
+                            consumer.arm()?;
+                            operation()
+                        },
                     )
                 }),
-                None => operation(),
+                _ => anyhow::bail!("native response must have exactly one original"),
+            }
+        }));
+        // A real poll may return Pending, an IO error or unwind after partial
+        // progress. Observe the SAME saved request independently before choosing
+        // its original result; no role borrow survives a Pending return.
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.request.check_bound_shell()
+        }));
+        if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) {
+            self.abort();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(value)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(value)
+                }
             },
-            [(role, binding)] => binding.effects.clone().run(|| {
-                ensure!(
-                    self.runtime.try_borrow()?.is_none(),
-                    "native response ownership conflict"
-                );
-                with_consumer_for_role(
-                    &binding.intent,
-                    phase,
-                    super::effects::wall_time()?,
-                    *role,
-                    Some(&self.identity),
-                    |consumer| {
-                        consumer.arm()?;
-                        operation()
-                    },
-                )
-            }),
-            _ => anyhow::bail!("native response must have exactly one original"),
         }
     }
 

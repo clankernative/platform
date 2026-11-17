@@ -20,4 +20,14 @@ Backup :: [].{
 	# fence a holder, copy files, select current epochs or admit a new writer.
 	inspect! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	inspect! = |backup, host!| Capability.call!("backup-verify", Json.to_str({ directory: backup }), host!)
+
+	# A navigation leaf, not approval or restore execution. Browser IAP/passkey
+	# ceremonies retain their actual native channel and accepting owner.
+	protected! : Str, Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	protected! =
+		|
+			instance,
+			app_name,
+			host!,
+		| Capability.call!("restore-browser-entry", Json.to_str({ instance, app_name }), host!)
 }

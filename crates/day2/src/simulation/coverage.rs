@@ -14,6 +14,7 @@ pub enum Campaign {
     StorageCurrentHandshake,
     StorageBootstrapHandshake,
     ServingHandshake,
+    ProtectedRestoreHandshake,
     StorageLifecycle,
     NativeOauthConsumer,
     AppConnectionRequest,
@@ -27,7 +28,7 @@ pub enum Campaign {
 }
 
 impl Campaign {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Oauth,
         Self::InboundOauth,
         Self::CredentialLifecycle,
@@ -35,6 +36,7 @@ impl Campaign {
         Self::StorageCurrentHandshake,
         Self::StorageBootstrapHandshake,
         Self::ServingHandshake,
+        Self::ProtectedRestoreHandshake,
         Self::StorageLifecycle,
         Self::NativeOauthConsumer,
         Self::AppConnectionRequest,
@@ -53,7 +55,8 @@ impl Campaign {
             Self::EnrollmentHandshake
             | Self::StorageCurrentHandshake
             | Self::StorageBootstrapHandshake
-            | Self::ServingHandshake => (1..=32).chain(100..132).collect(),
+            | Self::ServingHandshake
+            | Self::ProtectedRestoreHandshake => (1..=32).chain(100..132).collect(),
             Self::GoogleMappedRegistration
             | Self::GoogleExternalRegistration
             | Self::GitlabRegistration => (0..8).collect(),

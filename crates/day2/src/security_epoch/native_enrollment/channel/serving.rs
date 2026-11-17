@@ -356,9 +356,10 @@ pub(in crate::security_epoch::native_enrollment) struct ControllerReceipt {
 }
 
 impl ControllerReceipt {
-    // Only the closed receiver above can construct this with its ORIGINAL
-    // SCM_PIDFD. No caller PID, certificate or reopened FD constructor exists.
-    fn receive(
+    // Only fixed receivers in this channel module can construct this from
+    // their ORIGINAL SCM_PIDFD. This is kernel sender provenance, not a
+    // serving connection or permission. No PID/reopened-FD factory exists.
+    pub(super) fn receive(
         packet: net::ReceivedPidfdPacket,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
@@ -409,7 +410,13 @@ impl ControllerReceipt {
         result
     }
 
-    fn check_received(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
+    // A negative observation of this ORIGINAL received handle only. Initial
+    // protected admission uses it on independent error/panic posts, including
+    // when no valid signed statement was received. It grants no admission.
+    pub(in crate::security_epoch::native_enrollment) fn check_received(
+        &mut self,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
         ensure!(
             self.valid
                 && self.local_process == std::process::id()
@@ -417,6 +424,40 @@ impl ControllerReceipt {
             "serving_peer_controller_receipt_refused"
         );
         crate::security_epoch::native_enrollment::process::live(&self.pidfd, acquisition)
+    }
+
+    /// Only retained, already-bound receipt identity/liveness. It never checks
+    /// a stage, re-enters a frame guard or renews the Controller's old grant.
+    /// The fixed Shell frame guard separately joins its actual enrolled owner.
+    pub(in crate::security_epoch::native_enrollment) fn check_protected_restore_bound(
+        &mut self,
+        statement: &Statement,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            ensure!(
+                self.statement.as_ref() == Some(&statement.digest()?)
+                    && statement.stage.data.role == NativeRole::EpochController
+                    && statement.stage.data.process.process == self.kernel_process,
+                "protected_restore_controller_receipt_binding_changed"
+            );
+            Ok(())
+        }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check_received(acquisition)
+        }));
+        if !matches!(&requested, Ok(Ok(()))) || !matches!(&checked, Ok(Ok(()))) {
+            self.valid = false;
+            acquisition.refuse();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => result,
+            },
+        }
     }
 
     /// Require an actual bound admission receipt in addition to this packet's

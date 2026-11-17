@@ -39,6 +39,32 @@ pub(crate) use restore_staging::MemoryAdmission;
 pub(crate) use restore_staging::MemoryHook;
 pub(crate) use restore_staging::RestoreArtifactAdmission;
 mod restore_webauthn;
+
+/// Canonical comparison DATA for the protected browser consumer. This is the
+/// same producer commitment, not approval, authentication or execution authority.
+pub(crate) fn restore_execution_request_data(
+    record: &restore_approval::signed::SignedApprovalRecord,
+    operation: &day2_capabilities::Digest,
+) -> anyhow::Result<day2_capabilities::Digest> {
+    restore_webauthn::execution_request(record, operation)
+}
+
+#[cfg(test)]
+pub(crate) fn restore_public_record_fixture_data()
+-> anyhow::Result<restore_approval::signed::SignedApprovalRecord> {
+    restore_approval::fixture_publication_data().map(|(_, record)| record)
+}
+
+#[cfg(test)]
+pub(crate) fn restore_prompt_fixture_data(
+    intent: &restore_approval::ApprovalIntent,
+    approver: &restore_approval::AdminIdentity,
+    record: &restore_approval::signed::SignedApprovalRecord,
+    operation: &day2_capabilities::Digest,
+) -> anyhow::Result<restore_webauthn::RestorePromptFixtureData> {
+    restore_webauthn::restore_prompt_fixture_data(intent, approver, record, operation)
+}
+
 mod runtime_profile;
 mod seed_core;
 mod self_check_profile;
@@ -60,7 +86,8 @@ pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort, Retaine
 pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
     ControllerAdminReadLoan, ControllerAdminReader, ControllerRegistryData, CurrentAppServingPhase,
-    FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit,
+    FencedReadUnit, ProtectedRestoreCommandData, ReservationReadUnit, WriterMayReadUnit,
+    WriterReadUnit, protected_restore_command_data,
 };
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;

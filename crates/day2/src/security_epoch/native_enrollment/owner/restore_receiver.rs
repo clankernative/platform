@@ -7569,7 +7569,7 @@ mod installed_confirmation_source_tests {
         assert!(!actual.replacen(&kernel, "", 1).contains(&kernel));
         for forbidden in [
             "NativeAcquisition::begin",
-            "StageAcquisition::begin",
+            "EnrolledStageFrame::fresh",
             "retire_owned",
             "retire_checked",
             "Runtime::",

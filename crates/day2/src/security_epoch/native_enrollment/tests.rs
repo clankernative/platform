@@ -45,6 +45,44 @@ fn native_source_tokens(source: &str) -> String {
     normalize(source.parse::<proc_macro2::TokenStream>().unwrap()).to_string()
 }
 
+// Only the direct synchronous catch used by the actual stage. A closure
+// hidden under a branch, stored without invocation, or using another catcher
+// cannot satisfy the retained-check controls.
+fn native_requested_block(expression: &syn::Expr) -> Option<&syn::Block> {
+    fn call<'a>(expression: &'a syn::Expr, expected: &[&str]) -> Option<&'a syn::Expr> {
+        let syn::Expr::Call(call) = expression else {
+            return None;
+        };
+        let syn::Expr::Path(path) = &*call.func else {
+            return None;
+        };
+        if call.args.len() != 1
+            || path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                != expected
+        {
+            return None;
+        }
+        call.args.first()
+    }
+    let inner = call(expression, &["std", "panic", "catch_unwind"])?;
+    let closure = call(inner, &["std", "panic", "AssertUnwindSafe"])?;
+    let syn::Expr::Closure(closure) = closure else {
+        return None;
+    };
+    if !closure.inputs.is_empty() || closure.asyncness.is_some() {
+        return None;
+    }
+    let syn::Expr::Block(block) = &*closure.body else {
+        return None;
+    };
+    Some(&block.block)
+}
+
 #[test]
 fn native_source_tokens_match_actual_fallible_statements_and_preserve_tuple_commas() {
     use quote::ToTokens;
@@ -95,6 +133,13 @@ fn enrolled_self_reborrow_shape(source: &str) -> bool {
     // production check, and dropping its error is not a successful check.
     fn result_body(body: &syn::Block) -> Option<&syn::Block> {
         for statement in &body.stmts {
+            if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "requested")
+                && let Some(initializer) = &local.init
+                && let Some(body) = native_requested_block(&initializer.expr)
+            {
+                return Some(body);
+            }
             if let Some(body) = linux_body(statement) {
                 if let Some(result) = result_body(body) {
                     return Some(result);
@@ -329,6 +374,20 @@ fn owned_request_borrow_shape(source: &str) -> bool {
         matches!(expression, syn::Expr::Path(path) if path.path.is_ident(name))
     }
 
+    fn actual_original(expression: &syn::Expr) -> bool {
+        matches!(expression, syn::Expr::Try(attempt)
+            if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+                if call.method == "original_mut" && call.args.is_empty()
+                && path(&call.receiver, "request")))
+    }
+
+    fn actual_frame(expression: &syn::Expr) -> bool {
+        matches!(expression, syn::Expr::Try(attempt)
+            if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+                if call.method == "frame_mut" && call.args.is_empty()
+                && path(&call.receiver, "request")))
+    }
+
     let source = syn::parse_file(source).unwrap();
     let functions = source.items.iter().filter_map(|item| {
         let syn::Item::Impl(owner) = item else { return None; };
@@ -413,7 +472,7 @@ fn owned_request_borrow_shape(source: &str) -> bool {
         let Some(initializer) = &local.init else { return false; };
         let syn::Expr::Try(attempt) = &*initializer.expr else { return false; };
         let syn::Expr::MethodCall(call) = &*attempt.expr else { return false; };
-        call.method == "interval_data" && field(&call.receiver, "acquisition") && call.args.is_empty()
+        call.method == "interval_data" && actual_original(&call.receiver) && call.args.is_empty()
     }).count();
     let actual_owner = result_body.stmts.iter().any(|statement| {
         let syn::Stmt::Local(local) = statement else {
@@ -454,10 +513,9 @@ fn owned_request_borrow_shape(source: &str) -> bool {
             if !matches!(&value.member, syn::Member::Named(name) if name == "acquisition") { return false; }
             let syn::Expr::Call(call) = &value.expr else { return false; };
             matches!(&*call.func, syn::Expr::Path(path)
-                if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["StageAcquisition", "borrowed"])
+                if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["EnrolledStageFrame", "borrowed"])
                 && call.args.len() == 1
-                && matches!(&call.args[0], syn::Expr::Reference(reference)
-                    if reference.mutability.is_some() && field(&reference.expr, "acquisition"))
+                && actual_frame(&call.args[0])
         })
     });
     #[derive(Default)]
@@ -515,20 +573,20 @@ fn http_request_guard_rejects_new_clocks_weaker_lifetimes_and_skipped_postchecks
             "&mut EnrolledCurrentRequest",
         ),
         (
-            "request.acquisition.interval_data()?",
+            "request.original_mut()?.interval_data()?",
             "NativeAcquisition::begin(5)?.interval_data()?",
         ),
         (
-            "StageAcquisition::borrowed(&mut request.acquisition)",
-            "StageAcquisition::owned(request.acquisition.narrow(5, deadline)?)",
+            "EnrolledStageFrame::borrowed(request.frame_mut()?)",
+            "EnrolledStageFrame::fresh(request.original_mut()?.narrow(5, deadline)?)",
         ),
         (
-            "StageAcquisition::borrowed(&mut request.acquisition)",
-            "StageAcquisition::borrowed(&mut unrelated)",
+            "EnrolledStageFrame::borrowed(request.frame_mut()?)",
+            "EnrolledStageFrame::borrowed(&mut unrelated)",
         ),
         (
-            "request.acquisition.interval_data()?",
-            "request.unrelated.interval_data()?",
+            "request.original_mut()?.interval_data()?",
+            "request.unrelated()?.interval_data()?",
         ),
         ("Rc::ptr_eq(&original, &self.identity)", "true"),
         ("request.incarnation == self.incarnation", "true"),
@@ -579,6 +637,13 @@ fn actual_policy_file_wiring(birth: &str, owner: &str) -> bool {
 
     fn result_body(body: &syn::Block) -> Option<&syn::Block> {
         for statement in &body.stmts {
+            if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "requested")
+                && let Some(initializer) = &local.init
+                && let Some(body) = native_requested_block(&initializer.expr)
+            {
+                return Some(body);
+            }
             if let Some(nested) = linux(statement)
                 && let Some(result) = result_body(nested)
             {
@@ -1562,11 +1627,7 @@ fn actual_read_cap_handoff(source: &str) -> bool {
     fn refuse(statement: &syn::Stmt, names: &[&str]) -> bool {
         matches!(statement,syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_))
             if call.method=="refuse" && call.args.is_empty()
-                && if names == ["stage", "acquisition"] {
-                    matches!(&*call.receiver, syn::Expr::MethodCall(borrow)
-                        if borrow.method == "as_mut" && borrow.args.is_empty()
-                            && field_path(&borrow.receiver,names))
-                } else { field_path(&call.receiver,names) })
+                && field_path(&call.receiver,names))
     }
     function.block.stmts.len() == 3
         && matches!(function.block.stmts.last(),Some(syn::Stmt::Expr(value,None)) if is_path(value,"result"))
@@ -1608,7 +1669,7 @@ fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
             "stage.owner.refused = true;",
             "stage.owner.refused = false;",
         ),
-        ("stage.acquisition.as_mut().refuse();", ""),
+        ("stage.acquisition.refuse();", ""),
         ("actual.refuse();", ""),
     ] {
         let changed = body.replacen(before, after, 1);
@@ -2287,7 +2348,7 @@ fn actual_pending_restore_checks_borrow_old_original_and_always_check_old_histor
     let expected = [
         "self.history.check()?;",
         "self.original.interval_data()?",
-        "StageAcquisition::borrowed(&mut self.original)",
+        "EnrolledStageFrame::app(&mut self.original, &self.owner)?",
         "stage.check()",
         "let checked=self.history.check();",
         "requested.is_err() || checked.is_err()",
@@ -2599,7 +2660,7 @@ fn actual_pending_counter_pairs_before_admission_and_reads_only_under_old_origin
             "attempt.owner.history.restored_reader_data(&selected)?",
             "lineage.require_restored_reader_data(&expected)?",
             "attempt.owner.original.interval_data()?",
-            "StageAcquisition::borrowed(&mut attempt.owner.original)",
+            "EnrolledStageFrame::app(&mut attempt.owner.original, &attempt.owner.owner)?",
             "attempt.owner.counter.admit",
             "attempt.owner.counter.request",
             "lineage.read(&selected,&mut reads,&mut stage)?",
@@ -2630,8 +2691,8 @@ fn actual_pending_counter_pairs_before_admission_and_reads_only_under_old_origin
     for (from, to) in [
         ("lineage.require_restored_reader_data(&expected)?;", ""),
         (
-            "StageAcquisition::borrowed(&mut attempt.owner.original)",
-            "StageAcquisition::owned(NativeAcquisition::begin(5)?)",
+            "EnrolledStageFrame::app(&mut attempt.owner.original, &attempt.owner.owner)?",
+            "EnrolledStageFrame::fresh(NativeAcquisition::begin(5)?)",
         ),
         (
             "lineage.read(&selected,&mut reads,&mut stage)?",
@@ -3029,7 +3090,7 @@ fn actual_restored_file_factory_spends_before_check_and_retains_both_old_posts()
         "attempt.owner.file_continuity_attempted=true;",
         "attempt.owner.check()?;",
         "attempt.owner.original.interval_data()?",
-        "StageAcquisition::borrowed(&mut attempt.owner.original)",
+        "EnrolledStageFrame::app(&mut attempt.owner.original, &attempt.owner.owner)?",
         "stage.capture_same_owner()?",
         "Rc::clone(&attempt.owner.history)",
         "file.check_current(&mut stage)?;",
@@ -3455,7 +3516,7 @@ fn actual_restored_peer_factory_spends_before_checks_and_preserves_outer_old_pos
         "attempt.owner.peer_continuity_attempted=true;",
         "attempt.owner.check()?;",
         "attempt.owner.original.interval_data()?",
-        "StageAcquisition::borrowed(&mut attempt.owner.original)",
+        "EnrolledStageFrame::app(&mut attempt.owner.original, &attempt.owner.owner)?",
         "let same = stage.capture_same_owner()?;",
         "RestoredAppPeerContinuity {history:Rc::clone(&attempt.owner.history),same}",
         "let mut acquisition = stage.narrow_io_acquisition(5)?;",
@@ -3736,7 +3797,7 @@ fn actual_controller_native_retirement_consumes_stage_and_moves_same_owner_only_
         "NativeAcquisition::begin",
         "into_connection_clock",
         "begin_current",
-        "StageAcquisition::owned",
+        "EnrolledStageFrame::fresh",
         "capture_same_owner",
         "callback",
         "try_clone",
@@ -3829,7 +3890,7 @@ fn actual_retained_controller_native_and_attempt_drop_are_only_negative_and_fiel
                     && let Some(stage) = &mut self.stage
                 {
                     stage.owner.refused = true;
-                    stage.acquisition.as_mut().refuse();
+                    stage.acquisition.refuse();
                 }
             }),
         ),
@@ -4001,7 +4062,7 @@ fn actual_restored_controller_check_requires_same_parent_retired_predecessor_and
                 .retired
                 .acquisition
                 .as_mut()
-                .require_retired_predecessor(&mut request.acquisition)?;
+                .require_retired_predecessor(request.original_mut()?)?;
             let mut stage = attempt
                 .parent
                 .retired
@@ -4035,7 +4096,7 @@ fn actual_restored_controller_check_requires_same_parent_retired_predecessor_and
             "",
         ),
         (
-            "attempt.parent.retired.acquisition.as_mut().require_retired_predecessor(&mut request.acquisition)?;",
+            "attempt.parent.retired.acquisition.as_mut().require_retired_predecessor(request.original_mut()?)?;",
             "attempt.parent.retired.check()?;",
         ),
         (
@@ -4399,10 +4460,12 @@ fn app_installed_owner_retains_whole_prepared_input_and_all_independent_posts() 
             #[cfg(target_os = "linux")]
             {
                 let (_, deadline) = self.pending.original.interval_data()?;
+                let acquisition =
+                    EnrolledStageFrame::app(&mut self.pending.original, &self.pending.owner)?;
                 let mut stage = EnrolledRoleStage {
                     owner: &mut self.pending.owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::borrowed(&mut self.pending.original),
+                    acquisition,
                     deadline,
                 };
                 self.file.check_current(&mut stage)?;
@@ -4504,7 +4567,7 @@ fn restored_request_capture_holds_the_real_parent_before_native_work_and_keeps_n
                 .ok_or_else(|| anyhow::anyhow!("restore_current_capture_missing"))?;
             pending
                 .original
-                .require_retired_predecessor(&mut fresh.acquisition)?;
+                .require_retired_predecessor(fresh.original_mut()?)?;
             pending.owner.borrow_current_request(fresh)?.check()?;
             Ok(captured)
         }
@@ -5255,10 +5318,14 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
         {
             let requested: Result<()> = (|| {
                 let (_, deadline) = self.prepared.pending.original.interval_data()?;
+                let acquisition = EnrolledStageFrame::app(
+                    &mut self.prepared.pending.original,
+                    &self.prepared.pending.owner,
+                )?;
                 let mut stage = EnrolledRoleStage {
                     owner: &mut self.prepared.pending.owner,
                     purpose: StagePurpose::CurrentRole,
-                    acquisition: StageAcquisition::borrowed(&mut self.prepared.pending.original),
+                    acquisition,
                     deadline,
                 };
                 let mut acquisition = stage.narrow_io_acquisition(5)?;
@@ -5361,7 +5428,32 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
     let mut masked = expected.clone();
     let body = posts(&mut masked);
     let file = one_local(body, "file");
-    let acquisition = one_local(body, "acquisition");
+    let acquisitions = body
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            let syn::Stmt::Local(local) = statement else {
+                return None;
+            };
+            if !matches!(&local.pat, syn::Pat::Ident(id) if id.ident == "acquisition") {
+                return None;
+            }
+            let syn::Expr::Try(attempt) = &*local.init.as_ref()?.expr else {
+                return None;
+            };
+            let syn::Expr::MethodCall(call) = &*attempt.expr else {
+                return None;
+            };
+            (enrollment_call_tokens(&call.receiver) == "stage"
+                && call.method == "narrow_io_acquisition"
+                && call.args.len() == 1
+                && enrollment_call_tokens(&call.args[0]) == "5")
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(acquisitions.len(), 1, "actual stage I/O loan");
+    let acquisition = acquisitions[0];
     assert!(acquisition < file);
     body.stmts.swap(file, acquisition);
     assert_ne!(actual, normalize(&masked));

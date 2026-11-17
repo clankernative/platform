@@ -19,13 +19,17 @@ use std::time::Duration;
 mod consumer;
 pub(in crate::security_epoch) use consumer::{
     AuthenticatedRestoreExecution, ExecutionSourceLoan, FencedRegistryLoan,
-    FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
-    RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
+    FencedRestoreContinuation, PendingRestoreExecution, ReservationRegistryLoan,
+    ReservationSourceLoan, RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
     RestoreWriterActivationLoan, RestoreWriterConfirmation, RestoreWriterExchangeContext,
     RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan, TargetSettlementSourceLoan,
     WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use consumer::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
+pub(in crate::security_epoch) use consumer::{
+    PendingControllerCurrentInstallation, RestoreInstalledOutputLoan,
+    RetiredControllerCurrentInstallation,
+};
 
 pub(in crate::security_epoch) struct PendingApproval {
     ceremony: ControllerCeremony,
@@ -204,8 +208,10 @@ impl<'metadata, 'storage, 'role> RestoreAuthenticationAction<'metadata, 'storage
 }
 
 impl PendingApproval {
-    pub(in crate::security_epoch) fn challenge_data(&self) -> Result<String> {
-        self.ceremony.encoded_challenge()
+    pub(in crate::security_epoch) fn request_options_data(
+        &self,
+    ) -> Result<crate::security_epoch::restore_webauthn::RestorePasskeyPrompt> {
+        self.ceremony.request_options_data()
     }
 
     pub(in crate::security_epoch) fn approve<'metadata, 'storage, 'role>(

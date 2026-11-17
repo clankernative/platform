@@ -31,6 +31,8 @@ pub(super) enum Protocol {
     CurrentStorage,
     InitialServing,
     CurrentServing,
+    ProtectedRestoreAdmission,
+    ProtectedRestoreCommand,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +217,13 @@ impl Protocol {
                 (Shell, Consumed),
                 (Controller, Released),
             ],
+            Self::ProtectedRestoreAdmission => &[
+                (Controller, Hello),
+                (Shell, Bind),
+                (Controller, Grant),
+                (Shell, Confirm),
+            ],
+            Self::ProtectedRestoreCommand => &[(Shell, Hello), (Controller, Complete)],
         }
     }
 
@@ -233,7 +242,9 @@ impl Protocol {
                             | Self::RestoredInstallation
                             | Self::CurrentStorage
                             | Self::InitialServing
-                            | Self::CurrentServing,
+                            | Self::CurrentServing
+                            | Self::ProtectedRestoreAdmission
+                            | Self::ProtectedRestoreCommand,
                         StagePurpose::CurrentRole
                     )
             ),
@@ -253,6 +264,10 @@ impl Transcript {
                     Actor::App | Actor::Controller
                 )
                 | (Protocol::InitialServing, Actor::Shell | Actor::Controller)
+                | (
+                    Protocol::ProtectedRestoreAdmission,
+                    Actor::Shell | Actor::Controller
+                )
         );
         Self {
             protocol,
@@ -291,6 +306,9 @@ impl Transcript {
                     Protocol::CurrentStorage
                 }
                 Protocol::InitialServing | Protocol::CurrentServing => Protocol::CurrentServing,
+                Protocol::ProtectedRestoreAdmission | Protocol::ProtectedRestoreCommand => {
+                    Protocol::ProtectedRestoreCommand
+                }
                 Protocol::RestoredInstallation => {
                     self.require_installed_current_data(self.actor)?;
                     ensure!(
@@ -481,6 +499,50 @@ impl Transcript {
         self.narrow_restore_receive_at(Protocol::RestoredInstallation, Actor::App, 1, observation)
     }
 
+    /// DATA-only meet after a protected packet and its native authentication.
+    /// The native adapter must first persist the reduction in the actual saved
+    /// request. This cursor cannot create a clock, sender or permission.
+    pub(super) fn narrow_protected_received(&mut self, observation: Observation) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                !self.refused
+                    && !self.busy
+                    && !self.waiting
+                    && self.purpose == StagePurpose::CurrentRole
+                    && matches!(
+                        (self.protocol, self.actor, self.position),
+                        (Protocol::ProtectedRestoreAdmission, Actor::Shell, 1 | 3)
+                            | (
+                                Protocol::ProtectedRestoreAdmission,
+                                Actor::Controller,
+                                2 | 4
+                            )
+                            | (Protocol::ProtectedRestoreCommand, Actor::Controller, 1)
+                            | (Protocol::ProtectedRestoreCommand, Actor::Shell, 2)
+                    ),
+                "native_handshake_protected_receive_narrow_order"
+            );
+            let previous = self
+                .clock
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("native_handshake_protected_original_missing"))?;
+            ensure!(
+                previous.domain == observation.domain
+                    && previous.origin == observation.origin
+                    && previous.deadline >= observation.deadline
+                    && previous.now <= observation.now
+                    && observation.origin <= observation.now
+                    && observation.now < observation.deadline
+                    && observation.deadline > observation.origin
+                    && observation.deadline - observation.origin <= Duration::from_secs(5),
+                "native_handshake_protected_receive_original_changed"
+            );
+            self.clock = Some(observation);
+            Ok(())
+        })();
+        self.finish_result(result)
+    }
+
     fn narrow_restore_receive(
         &mut self,
         expected: Protocol,
@@ -665,10 +727,11 @@ impl Transcript {
         } else {
             Direction::Receive
         };
-        let sequence = if matches!(
-            self.protocol,
-            Protocol::CurrentStorage | Protocol::CurrentServing
-        ) && matches!(step, Step::BeginReady | Step::Hello | Step::Offer)
+        let sequence = if self.protocol == Protocol::ProtectedRestoreCommand
+            || (matches!(
+                self.protocol,
+                Protocol::CurrentStorage | Protocol::CurrentServing
+            ) && matches!(step, Step::BeginReady | Step::Hello | Step::Offer))
         {
             Some(self.sequence)
         } else {

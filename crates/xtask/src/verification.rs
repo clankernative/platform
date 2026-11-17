@@ -708,6 +708,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                         "crates/day2/tests/reactive_queries.test.mjs",
                         "crates/day2/tests/reactive_query_forms.test.mjs",
                         "crates/day2/tests/restore_passkey_export.test.mjs",
+                        "crates/day2/tests/protected_restore_browser.test.mjs",
                         "crates/day2/tests/startup_shell.test.mjs",
                     ]),
                     Duration::from_secs(60),
@@ -2733,7 +2734,9 @@ mod tests {
             "crates/day2/tests/reactive_query_forms.test.mjs",
             "assets/reactive-queries.js",
             "crates/day2/tests/restore_passkey_export.test.mjs",
+            "crates/day2/tests/protected_restore_browser.test.mjs",
             "assets/restore-passkey-export.js",
+            "assets/protected-restore.js",
         ] {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap())?;

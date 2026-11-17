@@ -1,7 +1,7 @@
 //! Native identity join of the WHOLE genuine post-installed carrier.
 //! Every borrowed counter/physical/target owner stays in that carrier. This is
 //! not an owned Controller, ordinary Current or a successful restore result.
-use super::ControllerCurrentInstallationLoan;
+use super::{ControllerCurrentInstallationLoan, LostRestoreWriterConfirmation};
 use crate::security_epoch::native_enrollment::{
     CurrentStoragePeerPhase, EnrolledRoleStage, NativeRole, RetainedControllerNative,
     SameEnrolledOwner,
@@ -255,6 +255,132 @@ impl Drop for RestoredControllerCurrentReadLoan<'_, '_, '_> {
         if self.disposition != RestoredReadDisposition::Settled {
             self.refuse();
         }
+    }
+}
+
+/// Nonescaping physical/original borrow for the single installed operator
+/// packet. Only the whole post-App-acceptance driver constructs this. DATA
+/// returned by check is not a completed restore or a reusable permission.
+pub(in crate::security_epoch) struct RestoreInstalledOutputLoan<'borrow, 'target, 'selection> {
+    original: &'borrow mut crate::security_epoch::restore_original::RestoreOriginalGuard,
+    approval: &'borrow crate::security_epoch::restore_approval::ApprovalRequest,
+    operation: &'borrow day2_capabilities::Digest,
+    creator: &'borrow crate::security_epoch::native_enrollment::RestoreCreatorData,
+    report: &'borrow crate::security_epoch::kernel::restore::completion::TargetReport,
+    target: &'borrow mut crate::security_epoch::restore_staging::NativeStagedTarget<
+        'target,
+        'selection,
+    >,
+    cohort: &'borrow mut crate::security_epoch::restore_staging::RestoreControllerCohort,
+    refused: &'borrow std::rc::Rc<std::cell::Cell<bool>>,
+    _lost: LostRestoreWriterConfirmation,
+}
+
+impl RestoreInstalledOutputLoan<'_, '_, '_> {
+    pub(in crate::security_epoch) fn check(
+        &mut self,
+        storage: &mut crate::security_epoch::native_enrollment::EnrolledStorageStage<'_, '_>,
+    ) -> Result<crate::security_epoch::native_enrollment::RestoreInstalledOutputData> {
+        let requested = (|| {
+            ensure!(
+                self.refused.get(),
+                "restore_output_outside_installed_carrier"
+            );
+            storage.check_restore_original(self.original, self.approval, self.operation)?;
+            let cohort = self.cohort.check(self.target, self.creator, self.report)?;
+            ensure!(
+                self.report.target_incarnation == self.approval.target.incarnation
+                    && self.report.target_epoch == self.approval.target.security_epoch
+                    && self.report.artifact == self.approval.target.artifact
+                    && self.report.schema == self.approval.target.schema,
+                "restore_output_installed_target_changed"
+            );
+            Ok(
+                crate::security_epoch::native_enrollment::RestoreInstalledOutputData {
+                    approval: self.approval.commitment()?,
+                    operation: self.operation.clone(),
+                    full_archive: self.approval.full_archive_digest.clone(),
+                    target: self.approval.target.clone(),
+                    executor: self.approval.executor.clone(),
+                    installed: day2_capabilities::Digest::of(&(
+                        "day2-protected-restore-installed-output-v1",
+                        self.report,
+                        &cohort,
+                    ))?,
+                },
+            )
+        })();
+        // Actual original post is independent of all DATA and physical failures.
+        let post = storage.check_restore_original(self.original, self.approval, self.operation);
+        if requested.is_err() || post.is_err() {
+            self.refuse();
+        }
+        let data = requested?;
+        post?;
+        Ok(data)
+    }
+
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.refused.set(true);
+        self.original.refuse();
+        self.target.refuse();
+    }
+}
+
+/// Own the complete installation before any terminal precheck. Even a panic
+/// before the first native packet step refuses both actual retained roots.
+struct ProtectedInstalledAttempt<
+    'call,
+    'peer,
+    'frame,
+    'confirm,
+    'metadata,
+    'storage,
+    'role,
+    'target,
+    'selection,
+> {
+    installation: Option<
+        PendingControllerCurrentInstallation<
+            'frame,
+            'confirm,
+            'metadata,
+            'storage,
+            'role,
+            'target,
+            'selection,
+        >,
+    >,
+    turn: &'call mut crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'peer>,
+    completed: bool,
+}
+
+impl Drop for ProtectedInstalledAttempt<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.turn.refuse();
+            if let Some(installation) = &mut self.installation {
+                installation.refuse();
+            }
+        }
+    }
+}
+
+// Pure precedence for two already-observed outcomes; this owns no authority.
+fn installed_observed<T>(
+    requested: std::thread::Result<Result<T>>,
+    post: std::thread::Result<Result<()>>,
+) -> Result<T> {
+    match requested {
+        Err(payload) => std::panic::resume_unwind(payload),
+        Ok(Err(error)) => Err(error),
+        Ok(Ok(value)) => match post {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(post) => {
+                post?;
+                Ok(value)
+            }
+        },
     }
 }
 
@@ -530,12 +656,13 @@ impl<'frame, 'confirm, 'metadata, 'storage, 'role, 'target, 'selection>
         Ok(pending)
     }
 
-    /// Consume the genuine installed ACK carrier. Its final independent full
-    /// parent/lineage and native identity posts precede old counter completion.
-    /// From then on only the fixed old release, terminal physical close and
-    /// owned native retirement are allowed; no parent/provider read follows.
-    pub(in crate::security_epoch) fn retire_old_current(
-        mut self,
+    /// The sole terminal restore driver: actual App installed acceptance and
+    /// its full post FIRST, then one fixed operator packet under independent
+    /// complete pre/posts at every native step. Old counter/release/retirement
+    /// is LAST. No old original may be sampled after that consuming retirement.
+    pub(in crate::security_epoch) fn finish_protected_restore(
+        self,
+        turn: &mut crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'_>,
     ) -> Result<
         RetiredControllerCurrentInstallation<
             'frame,
@@ -547,24 +674,115 @@ impl<'frame, 'confirm, 'metadata, 'storage, 'role, 'target, 'selection>
             'selection,
         >,
     > {
-        self.check()?;
-        let accepted = self.loan.send_installed_acceptance();
-        // Run the actual full installed/native/lineage post even on a send,
-        // poll or primary native error. A sent packet is not final permission.
-        let checked = self.check();
-        if accepted.is_err() || checked.is_err() {
-            self.refuse();
+        let mut attempt = ProtectedInstalledAttempt {
+            installation: Some(self),
+            turn,
+            completed: false,
+        };
+        {
+            let installation = attempt
+                .installation
+                .as_mut()
+                .context("restore_output_installation_missing")?;
+            installation.check()?;
+            let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                installation.loan.send_installed_acceptance()
+            }));
+            let post =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| installation.check()));
+            installed_observed(requested, post)?;
         }
-        accepted?;
-        checked?;
-        let native = retire_controller(&mut self.loan)?;
-        // Moving the WHOLE actual carrier preserves every lifetime and all
-        // negative destructors. No I/O, callback or positive old check follows.
-        Ok(RetiredControllerCurrentInstallation {
+        let mut state = super::RoleHandoffProgress::Prepare;
+        while state != super::RoleHandoffProgress::Delivered {
+            let operation = state.operation()?;
+            let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                attempt
+                    .installation
+                    .as_mut()
+                    .context("restore_output_installation_missing")?
+                    .installed_output_step(attempt.turn, operation)
+            }));
+            // This runs even after a native error/unwind; the short stage and
+            // loan have ended, so it is the WHOLE actual parent/native post.
+            let post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                attempt
+                    .installation
+                    .as_mut()
+                    .context("restore_output_installation_missing")?
+                    .check()
+            }));
+            let progress = installed_observed(requested, post)?;
+            state = state.after(operation, progress)?;
+        }
+        let mut installation = attempt
+            .installation
+            .take()
+            .context("restore_output_installation_missing")?;
+        installation.check()?;
+        let native = retire_controller(&mut installation.loan)?;
+        // No I/O, callback, positive parent/clock check or wait follows retirement.
+        let retired = RetiredControllerCurrentInstallation {
             native,
             counter: crate::security_epoch::authenticated_reads::CounterConnectionSlot::new(),
-            pending: self,
-        })
+            pending: installation,
+        };
+        attempt.completed = true;
+        Ok(retired)
+    }
+
+    fn installed_output_step(
+        &mut self,
+        turn: &mut crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'_>,
+        operation: super::RoleHandoffIo,
+    ) -> Result<crate::security_epoch::native_enrollment::ReceiverProgress> {
+        self.check()?;
+        let frame = &mut self
+            .loan
+            .installation
+            .installation
+            .installation
+            .installation
+            .installation
+            .installation
+            .installation
+            .frame;
+        let owner = &mut *frame.confirmation.owner;
+        // The actual pessimistic mark spans the native short loan and is
+        // cleared only by the caller's existing full independent parent post.
+        owner.refused.set(true);
+        let physical = owner
+            .auth
+            .action
+            .reader
+            .loan
+            .physical
+            .as_mut()
+            .context("native_restore_physical_closed")?;
+        let stage = physical.controller_stage()?;
+        let mut loan = RestoreInstalledOutputLoan {
+            original: &mut owner.auth.original,
+            approval: &owner.auth.record.statement.request,
+            operation: &owner.auth.operation,
+            creator: &frame.creator,
+            report: &frame.confirmation.target,
+            target: frame.target,
+            cohort: frame
+                .cohort
+                .as_mut()
+                .context("restore_current_cohort_missing")?,
+            refused: &owner.refused,
+            _lost: LostRestoreWriterConfirmation {
+                refused: std::rc::Rc::clone(&owner.refused),
+            },
+        };
+        use crate::security_epoch::native_enrollment::ProtectedRestoreInstalledIo as Io;
+        let operation = match operation {
+            super::RoleHandoffIo::Prepare => Io::Prepare,
+            super::RoleHandoffIo::Sign => Io::Sign,
+            super::RoleHandoffIo::Send => Io::Send,
+            super::RoleHandoffIo::Poll => Io::Poll,
+        };
+        turn.installed_output(stage, &mut loan, operation)
     }
 }
 
@@ -590,7 +808,7 @@ impl PendingControllerCurrentInstallation<'_, '_, '_, '_, '_, '_, '_> {
         Ok(())
     }
 
-    pub(super) fn refuse(&mut self) {
+    pub(in crate::security_epoch) fn refuse(&mut self) {
         self.loan.refuse();
     }
 }
@@ -699,6 +917,18 @@ const _: () = {
             }
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <RestoreInstalledOutputLoan<'static, 'static, 'static> as Ambiguous<_>>::check;
+            let _ = <ProtectedInstalledAttempt<
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+                'static,
+            > as Ambiguous<_>>::check;
             let _ = <PendingControllerCurrentInstallation<
                 'static,
                 'static,
@@ -1763,65 +1993,65 @@ mod source_tests {
     }
 
     fn retirement_flow(method: &syn::ImplItemFn) -> bool {
-        if method.sig.inputs.len() != 1
+        if method.sig.inputs.len() != 2
             || !matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_none())
-            || method.block.stmts.len() != 8
         {
             return false;
         }
         let expected: syn::Block = syn::parse_quote!({
-            self.check()?;
-            let accepted = self.loan.send_installed_acceptance();
-            let checked = self.check();
-            if accepted.is_err() || checked.is_err() {
-                self.refuse();
+            let mut attempt = ProtectedInstalledAttempt {
+                installation: Some(self),
+                turn,
+                completed: false,
+            };
+            {
+                let installation = attempt
+                    .installation
+                    .as_mut()
+                    .context("restore_output_installation_missing")?;
+                installation.check()?;
+                let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    installation.loan.send_installed_acceptance()
+                }));
+                let post =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| installation.check()));
+                installed_observed(requested, post)?;
             }
-            accepted?;
-            checked?;
-            let native = retire_controller(&mut self.loan)?;
+            let mut state = super::RoleHandoffProgress::Prepare;
+            while state != super::RoleHandoffProgress::Delivered {
+                let operation = state.operation()?;
+                let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    attempt
+                        .installation
+                        .as_mut()
+                        .context("restore_output_installation_missing")?
+                        .installed_output_step(attempt.turn, operation)
+                }));
+                let post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    attempt
+                        .installation
+                        .as_mut()
+                        .context("restore_output_installation_missing")?
+                        .check()
+                }));
+                let progress = installed_observed(requested, post)?;
+                state = state.after(operation, progress)?;
+            }
+            let mut installation = attempt
+                .installation
+                .take()
+                .context("restore_output_installation_missing")?;
+            installation.check()?;
+            let native = retire_controller(&mut installation.loan)?;
+            let retired = RetiredControllerCurrentInstallation {
+                native,
+                counter: crate::security_epoch::authenticated_reads::CounterConnectionSlot::new(),
+                pending: installation,
+            };
+            attempt.completed = true;
+            Ok(retired)
         });
-        if method.block.stmts[..7]
-            .iter()
-            .map(|item| item.to_token_stream().to_string())
-            .collect::<Vec<_>>()
-            != expected
-                .stmts
-                .iter()
-                .map(|item| item.to_token_stream().to_string())
-                .collect::<Vec<_>>()
-        {
-            return false;
-        }
-        let syn::Stmt::Expr(syn::Expr::Call(result), None) = &method.block.stmts[7] else {
-            return false;
-        };
-        if !matches!(&*result.func, syn::Expr::Path(path) if path.path.is_ident("Ok"))
-            || result.args.len() != 1
-        {
-            return false;
-        }
-        let Some(syn::Expr::Struct(carrier)) = result.args.first() else {
-            return false;
-        };
-        carrier
-            .path
-            .is_ident("RetiredControllerCurrentInstallation")
-            && carrier.rest.is_none()
-            && carrier.fields.len() == 3
-            && carrier.fields.iter().all(|field| match &field.member {
-                syn::Member::Named(name) if name == "native" => {
-                    matches!(&field.expr, syn::Expr::Path(path) if path.path.is_ident("native"))
-                }
-                syn::Member::Named(name) if name == "pending" => {
-                    matches!(&field.expr, syn::Expr::Path(path) if path.path.is_ident("self"))
-                }
-                syn::Member::Named(name) if name == "counter" => {
-                    matches!(&field.expr, syn::Expr::Call(call)
-                        if call.args.is_empty()
-                        && canonical(call.func.to_token_stream()) == canonical(quote::quote!(crate::security_epoch::authenticated_reads::CounterConnectionSlot::new)))
-                }
-                _ => false,
-            })
+        same_loan_body(&method.block, &expected)
     }
 
     fn scoped_arguments(ty: &syn::Type, expected: &str) -> Option<Vec<String>> {
@@ -1849,52 +2079,85 @@ mod source_tests {
 
     #[test]
     fn actual_retirement_consumes_whole_post_ack_carrier_after_final_full_checks() {
-        let actual = method("PendingControllerCurrentInstallation", "retire_old_current");
+        let actual = method(
+            "PendingControllerCurrentInstallation",
+            "finish_protected_restore",
+        );
         assert!(retirement_flow(&actual));
-        let mut no_post = actual.clone();
-        no_post.block.stmts.remove(0);
-        assert!(!retirement_flow(&no_post));
-        let mut late_post = actual.clone();
-        late_post.block.stmts.swap(0, 1);
-        assert!(!retirement_flow(&late_post));
-        let mut omitted_loan = actual.clone();
-        omitted_loan.block.stmts[6] = syn::parse_quote! {
-            let native = retire_controller(&mut other.loan)?;
-        };
-        assert!(!retirement_flow(&omitted_loan));
-        let mut detached = actual.clone();
-        detached.block.stmts[7] = syn::Stmt::Expr(syn::parse_quote!(Ok(native)), None);
-        assert!(!retirement_flow(&detached));
-        let mut wrong_acceptance = actual.clone();
-        wrong_acceptance.block.stmts[1] = syn::parse_quote! {
-            let accepted = other.loan.send_installed_acceptance();
-        };
-        assert!(!retirement_flow(&wrong_acceptance));
-        let mut conditional_post = actual.clone();
-        conditional_post.block.stmts[2] = syn::parse_quote! {
-            let checked = if accepted.is_ok() { self.check() } else { Ok(()) };
-        };
-        assert!(!retirement_flow(&conditional_post));
-        let mut replaced_primary = actual.clone();
-        replaced_primary.block.stmts.swap(4, 5);
-        assert!(!retirement_flow(&replaced_primary));
+        // Actual whole-method mutants, not duplicate fixtures. Preserve the
+        // original no-post/wrong-owner/primary/old-reader/whole-carrier cuts,
+        // now also requiring App acceptance BEFORE operator output.
+        fn fragment(text: &str) -> String {
+            let block: syn::Block = syn::parse_str(&format!("{{{text}}}")).unwrap();
+            let statements = &block.stmts;
+            loan_tokens(quote::quote!(#(#statements)*))
+        }
+        let original = loan_tokens(actual.to_token_stream());
+        for (before, after) in [
+            ("installation.check()?;", "Ok::<(),anyhow::Error>(())?;"),
+            (
+                "installation.loan.send_installed_acceptance()",
+                "other.loan.send_installed_acceptance()",
+            ),
+            (
+                "let post=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| installation.check()));",
+                "let post=Ok(Ok(()));",
+            ),
+            (
+                "let progress=installed_observed(requested,post)?;",
+                "let progress=installed_observed(post,requested)?;",
+            ),
+            (
+                "let native=retire_controller(&mut installation.loan)?;",
+                "let native=retire_controller(&mut other.loan)?;",
+            ),
+            (
+                "let mut state=super::RoleHandoffProgress::Prepare;",
+                "let mut state=super::RoleHandoffProgress::Delivered;",
+            ),
+            (
+                "state=state.after(operation,progress)?;",
+                "state=super::RoleHandoffProgress::Delivered;",
+            ),
+            (
+                "attempt.completed=true;",
+                "installation.check()?;attempt.completed=true;",
+            ),
+            ("Ok(retired)", "Ok(native)"),
+        ] {
+            let before = fragment(before);
+            // The initial native check and final check are both required.
+            assert!(
+                original.contains(&before),
+                "actual terminal source target: {before}"
+            );
+            let changed = original.replacen(&before, &fragment(after), 1);
+            let changed: syn::ImplItemFn = syn::parse_str(&changed).unwrap();
+            assert!(!retirement_flow(&changed));
+        }
         let mut old_counter = actual.clone();
-        let syn::Stmt::Expr(syn::Expr::Call(result), None) = &mut old_counter.block.stmts[7] else {
-            panic!("actual return");
+        let syn::Stmt::Local(retired) = &mut old_counter.block.stmts[7] else {
+            panic!("actual retained carrier");
         };
-        let Some(syn::Expr::Struct(carrier)) = result.args.first_mut() else {
-            panic!("actual whole carrier");
+        let syn::Expr::Struct(carrier) = &mut *retired.init.as_mut().unwrap().expr else {
+            panic!("actual retained literal");
         };
-        let counter = carrier
+        carrier
             .fields
             .iter_mut()
             .find(|field| matches!(&field.member,syn::Member::Named(name) if name=="counter"))
-            .unwrap();
-        counter.expr = syn::parse_quote!(reader.reads);
+            .unwrap()
+            .expr = syn::parse_quote!(reader.reads);
         assert!(
             !retirement_flow(&old_counter),
-            "old administrative reader cannot supply the new counter slot"
+            "old administrative reader cannot supply the new slot"
         );
+        let mut early = actual.clone();
+        early
+            .block
+            .stmts
+            .insert(1, syn::parse_quote!(attempt.completed=true;));
+        assert!(!retirement_flow(&early));
         let syn::ReturnType::Type(_, returned) = actual.sig.output else {
             panic!("missing owned output");
         };
@@ -1922,6 +2185,305 @@ mod source_tests {
                 "selection"
             ]
         );
+    }
+
+    #[test]
+    fn actual_installed_output_step_prechecks_same_carrier_and_lends_only_actual_native_fields() {
+        let actual = method(
+            "PendingControllerCurrentInstallation",
+            "installed_output_step",
+        );
+        let expected: syn::Block = syn::parse_quote!({
+            self.check()?;
+            let frame = &mut self
+                .loan
+                .installation
+                .installation
+                .installation
+                .installation
+                .installation
+                .installation
+                .installation
+                .frame;
+            let owner = &mut *frame.confirmation.owner;
+            owner.refused.set(true);
+            let physical = owner
+                .auth
+                .action
+                .reader
+                .loan
+                .physical
+                .as_mut()
+                .context("native_restore_physical_closed")?;
+            let stage = physical.controller_stage()?;
+            let mut loan = RestoreInstalledOutputLoan {
+                original: &mut owner.auth.original,
+                approval: &owner.auth.record.statement.request,
+                operation: &owner.auth.operation,
+                creator: &frame.creator,
+                report: &frame.confirmation.target,
+                target: frame.target,
+                cohort: frame
+                    .cohort
+                    .as_mut()
+                    .context("restore_current_cohort_missing")?,
+                refused: &owner.refused,
+                _lost: LostRestoreWriterConfirmation {
+                    refused: std::rc::Rc::clone(&owner.refused),
+                },
+            };
+            use crate::security_epoch::native_enrollment::ProtectedRestoreInstalledIo as Io;
+            let operation = match operation {
+                super::RoleHandoffIo::Prepare => Io::Prepare,
+                super::RoleHandoffIo::Sign => Io::Sign,
+                super::RoleHandoffIo::Send => Io::Send,
+                super::RoleHandoffIo::Poll => Io::Poll,
+            };
+            turn.installed_output(stage, &mut loan, operation)
+        });
+        assert!(same_loan_body(&actual.block, &expected));
+        let original = loan_tokens(actual.block.to_token_stream());
+        // Compare actual AST fragments; no whitespace deletion or test-string
+        // matching can erase a production mutation target.
+        fn statement(text: &str) -> String {
+            let block: syn::Block = syn::parse_str(&format!("{{{text}}}")).unwrap();
+            let stmts = &block.stmts;
+            loan_tokens(quote::quote!(#(#stmts)*))
+        }
+        fn expression(text: &str) -> String {
+            let expr: syn::Expr = syn::parse_str(text).unwrap();
+            loan_tokens(expr.to_token_stream())
+        }
+        let cuts = [
+            (
+                statement("self.check()?;"),
+                statement("Ok::<(),anyhow::Error>(())?;"),
+            ),
+            (
+                statement("owner.refused.set(true);"),
+                statement("owner.refused.set(false);"),
+            ),
+            (
+                statement("let stage=physical.controller_stage()?;"),
+                statement("let stage=other.controller_stage()?;"),
+            ),
+            (
+                expression("&mut owner.auth.original"),
+                expression("&mut other.auth.original"),
+            ),
+            (
+                expression("&owner.auth.record.statement.request"),
+                expression("&other.auth.record.statement.request"),
+            ),
+            (
+                expression("&owner.auth.operation"),
+                expression("&other.auth.operation"),
+            ),
+            (expression("&frame.creator"), expression("&other.creator")),
+            (
+                expression("&frame.confirmation.target"),
+                expression("&other.confirmation.target"),
+            ),
+            (expression("frame.target"), expression("other.target")),
+            (
+                expression("frame.cohort.as_mut().context(\"restore_current_cohort_missing\")?"),
+                expression("other.cohort.as_mut().context(\"restore_current_cohort_missing\")?"),
+            ),
+            (
+                expression("turn.installed_output(stage,&mut loan,operation)"),
+                expression("other.installed_output(stage,&mut loan,operation)"),
+            ),
+        ];
+        for (before, after) in cuts {
+            assert_eq!(
+                original.matches(&before).count(),
+                1,
+                "one actual output-step target: {before}"
+            );
+            let changed: syn::Block =
+                syn::parse_str(&original.replacen(&before, &after, 1)).unwrap();
+            assert!(!same_loan_body(&changed, &expected));
+        }
+        let mut late_pre = actual.block.clone();
+        late_pre.stmts.swap(0, 4);
+        assert!(!same_loan_body(&late_pre, &expected));
+        let mut late_mark = actual.block.clone();
+        late_mark.stmts.swap(3, 6);
+        assert!(!same_loan_body(&late_mark, &expected));
+        // The source borrow MUST end before the caller's independent full post.
+        let whole = method(
+            "PendingControllerCurrentInstallation",
+            "finish_protected_restore",
+        );
+        assert!(retirement_flow(&whole));
+    }
+
+    #[test]
+    fn actual_installed_output_loan_joins_original_and_exact_held_target_even_on_failure() {
+        let actual = method("RestoreInstalledOutputLoan", "check");
+        let expected: syn::Block = syn::parse_quote!({
+            let requested = (|| {
+                ensure!(
+                    self.refused.get(),
+                    "restore_output_outside_installed_carrier"
+                );
+                storage.check_restore_original(self.original, self.approval, self.operation)?;
+                let cohort = self.cohort.check(self.target, self.creator, self.report)?;
+                ensure!(
+                    self.report.target_incarnation == self.approval.target.incarnation
+                        && self.report.target_epoch == self.approval.target.security_epoch
+                        && self.report.artifact == self.approval.target.artifact
+                        && self.report.schema == self.approval.target.schema,
+                    "restore_output_installed_target_changed"
+                );
+                Ok(
+                    crate::security_epoch::native_enrollment::RestoreInstalledOutputData {
+                        approval: self.approval.commitment()?,
+                        operation: self.operation.clone(),
+                        full_archive: self.approval.full_archive_digest.clone(),
+                        target: self.approval.target.clone(),
+                        executor: self.approval.executor.clone(),
+                        installed: day2_capabilities::Digest::of(&(
+                            "day2-protected-restore-installed-output-v1",
+                            self.report,
+                            &cohort,
+                        ))?,
+                    },
+                )
+            })();
+            let post = storage.check_restore_original(self.original, self.approval, self.operation);
+            if requested.is_err() || post.is_err() {
+                self.refuse();
+            }
+            let data = requested?;
+            post?;
+            Ok(data)
+        });
+        assert!(same_loan_body(&actual.block, &expected));
+        let original = loan_tokens(actual.block.to_token_stream());
+        fn fragment(text: &str) -> String {
+            let block: syn::Block = syn::parse_str(&format!("{{{text}}}")).unwrap();
+            let stmts = &block.stmts;
+            loan_tokens(quote::quote!(#(#stmts)*))
+        }
+        for (before, after) in [
+            (
+                "storage.check_restore_original(self.original,self.approval,self.operation)?;",
+                "Ok::<(),anyhow::Error>(())?;",
+            ),
+            (
+                "let cohort=self.cohort.check(self.target,self.creator,self.report)?;",
+                "let cohort=other.cohort.check(other.target,self.creator,self.report)?;",
+            ),
+            (
+                "let post=storage.check_restore_original(self.original,self.approval,self.operation);",
+                "let post=if requested.is_ok(){storage.check_restore_original(self.original,self.approval,self.operation)}else{Ok(())};",
+            ),
+            ("let data=requested?;post?;", "post?;let data=requested?;"),
+            (
+                "if requested.is_err()||post.is_err(){self.refuse();}",
+                "if requested.is_err()&&post.is_err(){self.refuse();}",
+            ),
+        ] {
+            let before = fragment(before);
+            assert_eq!(original.matches(&before).count(), 1);
+            let changed: syn::Block =
+                syn::parse_str(&original.replacen(&before, &fragment(after), 1)).unwrap();
+            assert!(!same_loan_body(&changed, &expected));
+        }
+    }
+
+    #[test]
+    fn actual_installed_output_drop_refuses_turn_and_whole_carrier_before_any_terminal_check() {
+        let file = syn::parse_file(include_str!("native_current.rs")).unwrap();
+        let drops=file.items.iter().filter_map(|item|{
+            let syn::Item::Impl(item)=item else{return None};
+            if !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|s|s.ident=="ProtectedInstalledAttempt")) || item.trait_.as_ref().is_none_or(|(_,path,_)|!path.is_ident("Drop")){return None;}
+            item.items.iter().find_map(|method|match method{syn::ImplItem::Fn(method) if method.sig.ident=="drop"=>Some(method),_=>None})
+        }).collect::<Vec<_>>();
+        assert_eq!(drops.len(), 1);
+        let expected: syn::Block = syn::parse_quote!({
+            if !self.completed {
+                self.turn.refuse();
+                if let Some(installation) = &mut self.installation {
+                    installation.refuse();
+                }
+            }
+        });
+        assert!(same_loan_body(&drops[0].block, &expected));
+        let mut omitted = drops[0].block.clone();
+        omitted.stmts.clear();
+        assert!(!same_loan_body(&omitted, &expected));
+        let mut inverted = drops[0].block.clone();
+        let syn::Stmt::Expr(syn::Expr::If(condition), _) = &mut inverted.stmts[0] else {
+            panic!("actual negative Drop");
+        };
+        *condition.cond = syn::parse_quote!(self.completed);
+        assert!(!same_loan_body(&inverted, &expected));
+    }
+
+    #[test]
+    fn installed_output_keeps_primary_type_pointer_and_independent_post_unwind() {
+        struct Primary;
+        impl std::fmt::Debug for Primary {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign debug");
+            }
+        }
+        impl std::fmt::Display for Primary {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign display");
+            }
+        }
+        impl std::error::Error for Primary {}
+        let error = anyhow::Error::new(Primary);
+        let pointer = error.downcast_ref::<Primary>().unwrap() as *const Primary;
+        let result = super::installed_observed::<()>(Ok(Err(error)), Err(Box::new("post panic")))
+            .unwrap_err();
+        assert_eq!(
+            result.downcast_ref::<Primary>().unwrap() as *const Primary,
+            pointer
+        );
+        assert!(
+            super::installed_observed(Ok(Ok(7)), Ok(Err(anyhow::anyhow!("post refused")))).is_err()
+        );
+        assert_eq!(super::installed_observed(Ok(Ok(7)), Ok(Ok(()))).unwrap(), 7);
+        let panic = std::panic::catch_unwind(|| {
+            super::installed_observed::<()>(Err(Box::new("first")), Err(Box::new("second")))
+        })
+        .unwrap_err();
+        assert_eq!(*panic.downcast::<&str>().unwrap(), "first");
+    }
+
+    #[test]
+    fn installed_output_same_packet_order_never_skips_preparation_or_restarts_after_delivery() {
+        use super::super::{RoleHandoffIo as I, RoleHandoffProgress as S};
+        use crate::security_epoch::native_enrollment::ReceiverProgress as P;
+        let mut state = S::Prepare;
+        for (operation, progress, next) in [
+            (I::Prepare, P::Advanced, S::Sign),
+            (I::Sign, P::Advanced, S::Send),
+            (I::Send, P::Interrupted, S::Send),
+            (I::Send, P::WouldBlock, S::Poll),
+            (I::Poll, P::Interrupted, S::Poll),
+            (I::Poll, P::Advanced, S::Send),
+            (I::Send, P::Delivered, S::Delivered),
+        ] {
+            assert_eq!(state.operation().unwrap(), operation);
+            state = state.after(operation, progress).unwrap();
+            assert_eq!(state, next);
+        }
+        assert!(state.operation().is_err());
+        for state in [S::Prepare, S::Sign, S::Send, S::Poll] {
+            for operation in [I::Prepare, I::Sign, I::Send, I::Poll] {
+                if state.operation().unwrap() != operation {
+                    assert!(state.after(operation, P::Delivered).is_err());
+                }
+            }
+        }
+        assert!(S::Prepare.after(I::Prepare, P::Delivered).is_err());
+        assert!(S::Sign.after(I::Sign, P::Delivered).is_err());
+        assert!(S::Refused.operation().is_err());
     }
 
     fn terminal_flow(body: &syn::Block) -> bool {

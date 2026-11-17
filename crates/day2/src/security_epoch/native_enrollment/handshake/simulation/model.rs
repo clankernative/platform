@@ -114,10 +114,18 @@ pub(super) fn contract(protocol: Protocol, sequence: u64) -> Vec<(Actor, Frame)>
             (Shell, Consumed),
             (Controller, Released),
         ],
+        Protocol::ProtectedRestoreAdmission => &[
+            (Controller, Hello),
+            (Shell, Bind),
+            (Controller, Grant),
+            (Shell, Confirm),
+        ],
+        Protocol::ProtectedRestoreCommand => &[(Shell, Hello), (Controller, Complete)],
     };
     wire.iter()
         .map(|&(actor, step)| {
             let number = match protocol {
+                Protocol::ProtectedRestoreCommand => Some(sequence),
                 Protocol::CurrentStorage | Protocol::CurrentServing
                     if matches!(step, BeginReady | Hello | Offer) =>
                 {
@@ -187,7 +195,9 @@ impl Machine for Model {
             Protocol::InitialStorage | Protocol::RestoredStorage => {
                 [Actor::App, Actor::Controller].contains(&actor)
             }
-            Protocol::InitialServing => [Actor::Shell, Actor::Controller].contains(&actor),
+            Protocol::InitialServing | Protocol::ProtectedRestoreAdmission => {
+                [Actor::Shell, Actor::Controller].contains(&actor)
+            }
             _ => false,
         };
         Self {
@@ -311,6 +321,9 @@ impl Machine for Model {
                     Protocol::CurrentStorage
                 }
                 Protocol::InitialServing | Protocol::CurrentServing => Protocol::CurrentServing,
+                Protocol::ProtectedRestoreAdmission | Protocol::ProtectedRestoreCommand => {
+                    Protocol::ProtectedRestoreCommand
+                }
                 _ => anyhow::bail!("model enrollment is not renewable"),
             };
             let purpose_allowed = match protocol {
@@ -318,7 +331,9 @@ impl Machine for Model {
                     purpose,
                     StagePurpose::CurrentRole | StagePurpose::StorageBootstrap
                 ),
-                Protocol::CurrentServing => purpose == StagePurpose::CurrentRole,
+                Protocol::CurrentServing | Protocol::ProtectedRestoreCommand => {
+                    purpose == StagePurpose::CurrentRole
+                }
                 _ => false,
             };
             ensure!(purpose_allowed, "model purpose");
@@ -334,6 +349,47 @@ impl Machine for Model {
 
     fn check_original(&mut self, clock: Observation) -> Result<()> {
         let result = self.clock(clock);
+        self.result(result)
+    }
+
+    fn narrow_protected_received(&mut self, clock: Observation) -> Result<()> {
+        let result = (|| {
+            let contract = self.contract();
+            let received = self
+                .accepted
+                .len()
+                .checked_sub(1)
+                .and_then(|index| contract.get(index));
+            ensure!(
+                !self.terminal
+                    && self.outstanding.is_none()
+                    && !self.restore_stop
+                    && self.purpose == StagePurpose::CurrentRole
+                    && matches!(
+                        self.protocol,
+                        Protocol::ProtectedRestoreAdmission | Protocol::ProtectedRestoreCommand
+                    )
+                    && received.is_some_and(|(sender, _)| *sender != self.actor),
+                "model protected receive position"
+            );
+            let previous = self
+                .last_clock
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("model protected original absent"))?;
+            ensure!(
+                clock.domain == previous.domain
+                    && clock.origin == previous.origin
+                    && clock.deadline <= previous.deadline
+                    && clock.now >= previous.now
+                    && clock.origin <= clock.now
+                    && clock.now < clock.deadline
+                    && clock.deadline > clock.origin
+                    && clock.deadline.as_nanos() - clock.origin.as_nanos() <= 5_000_000_000,
+                "model protected original changed"
+            );
+            self.last_clock = Some(clock);
+            Ok(())
+        })();
         self.result(result)
     }
 

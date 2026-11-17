@@ -68,6 +68,49 @@ impl<'metadata, 'storage, 'role, 'selection> NativeRestore<'metadata, 'storage, 
         })
     }
 
+    /// Actual restore composition on the same dedicated per-app Controller
+    /// executor. All archive/selection/loan/target/peer lifetimes remain lexical
+    /// locals. Neither a receipt nor a projection can substitute for an owner.
+    pub(super) fn run_protected(
+        &mut self,
+        turn: crate::security_epoch::native_enrollment::ProtectedRestoreTurn<'_>,
+        attempt: crate::security_epoch::bootstrap::ProtectedRestoreAttempt,
+    ) -> Result<()> {
+        let intent = self.intent.clone();
+        let mut parent = self.begin()?;
+        let (projection, _receipt) = parent.stage_and_settle(&intent)?;
+        // This is the same retained parent after its complete settlement post.
+        // Only the actual reset result supplies this private projection; no
+        // external DATA, reopened file or caller callback enters the factory.
+        let mut target = NativeStagedTarget {
+            state: &mut parent.state,
+            root: &mut parent.root,
+            selection: parent.selection.reborrow(),
+            intent: &intent,
+            projection,
+            cohort_attempted: false,
+            artifact: parent
+                .installed
+                .as_mut()
+                .context("restore_artifact_not_installed")?,
+        };
+        let mut candidate = parent.loan.receive_writer(&mut target)?;
+        let mut confirmation = candidate.confirm(&mut parent.loan)?;
+        let mut activated = confirmation.activate_writer(candidate.target, &mut candidate.peer)?;
+        activated.release_keeper()?;
+        let installation = activated.install_controller()?;
+        let mut completed = installation.finish_issuer()?;
+        completed.release_app_role()?;
+        let activated = completed.activate_app_role()?;
+        let decision = activated.send_app_decision()?;
+        let prepared = decision.receive_prepared_app_confirmation()?;
+        let accepted = prepared.send_controller_acceptance()?;
+        let installed = accepted.receive_installed_app_confirmation()?;
+        let pending = installed.prepare_controller_current()?;
+        let retired = turn.finish_installed(pending)?;
+        attempt.serve_installed(retired)
+    }
+
     fn begin(&mut self) -> Result<NativeParent<'_, 'metadata, 'storage, 'role, '_>> {
         let mut loan = self.owner.borrow_write()?;
         let Some(state) = self.pending.take() else {
@@ -151,7 +194,10 @@ impl NativeParent<'_, '_, '_, '_, '_> {
     fn stage_and_settle(
         &mut self,
         intent: &crate::security_epoch::kernel::restore::Intent,
-    ) -> Result<crate::security_epoch::kernel::restore::completion::Receipt> {
+    ) -> Result<(
+        Projection,
+        crate::security_epoch::kernel::restore::completion::Receipt,
+    )> {
         let result = (|| {
             self.selection
                 .require_native_input(&self.state.input, intent)?;
@@ -175,7 +221,7 @@ impl NativeParent<'_, '_, '_, '_, '_> {
                     root: &mut self.root,
                     selection: self.selection.reborrow(),
                     intent,
-                    projection,
+                    projection: projection.clone(),
                     cohort_attempted: false,
                     artifact: self
                         .installed
@@ -187,7 +233,7 @@ impl NativeParent<'_, '_, '_, '_, '_> {
             let post = self.current();
             let receipt = requested?;
             post?;
-            Ok(receipt)
+            Ok((projection, receipt))
         })();
         if result.is_err() {
             self.refuse();

@@ -43,7 +43,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -59,7 +59,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -124,7 +124,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -152,7 +152,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
             acquisition.refuse();
         }
         result
@@ -212,7 +212,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
             acquisition.refuse();
         }
         result
@@ -252,7 +252,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
             acquisition.refuse();
         }
         result
@@ -283,7 +283,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
             acquisition.refuse();
         }
         result
@@ -322,7 +322,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.as_mut().refuse();
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -389,7 +389,7 @@ mod restore_signer_exclusion_tests {
         guard < statement
             && statement < sign
             && tokens.contains("self . stage . owner . refused = true")
-            && tokens.contains("self . stage . acquisition . as_mut () . refuse ()")
+            && tokens.contains("self . stage . acquisition . refuse ()")
     }
 
     #[test]
