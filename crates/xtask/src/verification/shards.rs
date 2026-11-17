@@ -2270,13 +2270,14 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            26
+            27
         );
         assert!(steps.contains("build-lifecycle"));
         assert!(steps.contains("build-reports-search"));
         assert!(steps.contains("build-verification-actors"));
         assert!(steps.contains("build-verification-setup"));
         assert!(steps.contains("build-credential-selectable"));
+        assert!(steps.contains("build-restore-native"));
         assert!(!steps.contains("test-workspace-runtime"));
         assert!(!steps.contains("control-simulation"));
         assert!(steps.contains("test-binaries") && steps.contains("test-docs"));
