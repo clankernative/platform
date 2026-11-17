@@ -21,8 +21,8 @@ pub(in crate::security_epoch) use stop::{
     ExecutionSourceLoan, FencedRegistryLoan, FencedRestoreContinuation, ReservationRegistryLoan,
     ReservationSourceLoan, RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
     RestoreWriterActivationLoan, RestoreWriterConfirmation, RestoreWriterExchangeContext,
-    RestoreWriterReleaseLoan, TargetSettlementSourceLoan, WriterConfirmationSourceLoan,
-    WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
+    RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan, TargetSettlementSourceLoan,
+    WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use stop::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
 

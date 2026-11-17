@@ -3619,10 +3619,11 @@ fn actual_controller_native_retirement_consumes_stage_and_moves_same_owner_only_
         "attempt.stage.as_mut()",
         "stage.require_current_role()?;",
         "stage.owner.role == NativeRole::EpochController",
+        "let request_state=Rc::new(RestoredRequestGate::new());",
         "stage.acquisition.retire_owned(&mut stage.owner.clock)",
-        "let refusal = requested?;",
+        "let (refusal,request_state) = requested?;",
         "attempt.stage.take()",
-        "RetainedControllerNative {owner:stage.owner,refusal}",
+        "RetainedControllerNative {retired:stage,refusal,request_state}",
         "attempt.completed=true;",
         "Ok(retained)",
     ];
@@ -3778,12 +3779,35 @@ fn actual_controller_native_retirement_consumes_stage_and_moves_same_owner_only_
     assert!(
         matches!(args.args.first(),Some(syn::GenericArgument::Lifetime(lifetime)) if lifetime.ident=="role")
     );
-    let fresh = restored_history_method(source, "RetainedControllerNative", "begin_current_stage");
-    let expected: syn::Block = syn::parse_quote!({ self.owner.begin_current_stage() });
+    let fields = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "RetainedControllerNative" => {
+                Some(&item.fields)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let retired = fields
+        .iter()
+        .find(|field| field.ident.as_ref().is_some_and(|name| name == "retired"))
+        .unwrap();
+    let expected: syn::Type = syn::parse_quote!(EnrolledRoleStage<'role>);
     assert_eq!(
-        fresh,
-        native_source_tokens(&expected.to_token_stream().to_string())
+        retired.ty.to_token_stream().to_string(),
+        expected.to_token_stream().to_string()
     );
+    // The old original stays owned as a negative predecessor, never an
+    // exported stage or an independently reconstructed clock/owner.
+    let methods = file.items.iter().filter_map(|item| match item {
+        syn::Item::Impl(item) if item.trait_.is_none() && matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == "RetainedControllerNative")) => Some(item),
+        _ => None,
+    }).flat_map(|item| item.items.iter()).filter_map(|item| match item {
+        syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(methods, ["refuse", "capture_current_request"]);
 }
 
 #[test]
@@ -3795,8 +3819,7 @@ fn actual_retained_controller_native_and_attempt_drop_are_only_negative_and_fiel
         (
             "RetainedControllerNative",
             syn::parse_quote!({
-                self.owner.refused = true;
-                self.refusal.refuse();
+                self.refuse();
             }),
         ),
         (
@@ -3820,7 +3843,12 @@ fn actual_retained_controller_native_and_attempt_drop_are_only_negative_and_fiel
         );
     }
     let file = syn::parse_file(source).unwrap();
-    for name in ["RetainedControllerNative", "ControllerNativeRetirement"] {
+    for name in [
+        "RetainedControllerNative",
+        "ControllerNativeRetirement",
+        "CapturedRestoredControllerRequest",
+        "RestoredControllerRequestAttempt",
+    ] {
         let entries = file
             .items
             .iter()
@@ -3837,6 +3865,357 @@ fn actual_retained_controller_native_and_attempt_drop_are_only_negative_and_fiel
                 .all(|field| matches!(field.vis, syn::Visibility::Inherited))
         );
         assert!(entries[0].attrs.iter().all(|a|matches!(&a.meta,syn::Meta::NameValue(value) if value.path.is_ident("doc") && matches!(&value.value,syn::Expr::Lit(value) if matches!(&value.lit,syn::Lit::Str(_))))));
+    }
+}
+
+#[test]
+fn actual_restored_controller_capture_uses_one_new_request_and_burns_both_real_roots() {
+    let source = include_str!("owner.rs");
+    let capture = restored_history_method(
+        source,
+        "RetainedControllerNative",
+        "capture_current_request",
+    );
+    let expected: syn::Block = syn::parse_quote!({
+        let mut captured = CapturedRestoredControllerRequest {
+            refusal: RestoredCaptureRefusal::new(&self.request_state),
+            predecessor: self.retired.acquisition.as_ref().retained_refusal(),
+            request: None,
+        };
+        {
+            let mut attempt = RestoredControllerRequestAttempt {
+                captured: &mut captured,
+                parent: self,
+                completed: false,
+            };
+            attempt.captured.refusal.gate.capture()?;
+            attempt.captured.request = Some(attempt.parent.retired.owner.begin_current_request()?);
+            attempt.captured.check(attempt.parent)?;
+            attempt.completed = true;
+        }
+        Ok(captured)
+    });
+    let canonical = |block: &syn::Block| {
+        restored_history_method(
+            &quote::quote!(impl Expected { fn checked() #block }).to_string(),
+            "Expected",
+            "checked",
+        )
+    };
+    let expected = canonical(&expected);
+    assert_eq!(capture, expected);
+    // Actual production-body mutations: bypass native continuity, hide it in
+    // unreachable code, or re-begin the request after the saved check. Each
+    // is parsed Rust and fails the exact closed authority wiring oracle.
+    let checked = native_source_tokens("attempt.captured.check(attempt.parent)?;");
+    assert_eq!(capture.matches(&checked).count(), 1);
+    for replacement in [
+        "",
+        "if false {attempt.captured.check(attempt.parent)?;}",
+        "attempt.captured.check(attempt.parent)?; attempt.captured.request=Some(attempt.parent.retired.owner.begin_current_request()?);",
+        "let _=attempt.captured.check(attempt.parent);",
+    ] {
+        let changed = capture.replacen(&checked, replacement, 1);
+        let changed = syn::parse_str::<syn::Block>(&changed).unwrap();
+        assert_ne!(canonical(&changed), expected);
+    }
+    for (owner, method, expected) in [
+        (
+            "RetainedControllerNative",
+            "refuse",
+            syn::parse_quote!({
+                self.request_state.refuse();
+                self.retired.owner.refused = true;
+                self.refusal.refuse();
+            }),
+        ),
+        (
+            "CapturedRestoredControllerRequest",
+            "refuse",
+            syn::parse_quote!({
+                self.refusal.refuse();
+                self.predecessor.refuse();
+                if let Some(request) = &mut self.request {
+                    request.refuse();
+                }
+            }),
+        ),
+        (
+            "CapturedRestoredControllerRequest",
+            "drop",
+            syn::parse_quote!({
+                if self.refusal.armed {
+                    self.refuse();
+                }
+            }),
+        ),
+        (
+            "RestoredControllerRequestAttempt",
+            "drop",
+            syn::parse_quote!({
+                if !self.completed {
+                    self.captured.refuse();
+                    self.parent.refuse();
+                }
+            }),
+        ),
+    ] {
+        let expected: syn::Block = expected;
+        assert_eq!(
+            restored_history_method(source, owner, method),
+            canonical(&expected)
+        );
+    }
+}
+
+#[test]
+fn actual_restored_controller_check_requires_same_parent_retired_predecessor_and_saved_native_request()
+ {
+    let source = include_str!("owner.rs");
+    let check = restored_history_method(source, "CapturedRestoredControllerRequest", "check");
+    let expected: syn::Block = syn::parse_quote!({
+        let mut attempt = RestoredControllerRequestAttempt {
+            captured: self,
+            parent,
+            completed: false,
+        };
+        let checked = (|| {
+            ensure!(
+                Rc::ptr_eq(
+                    &attempt.parent.request_state,
+                    &attempt.captured.refusal.gate
+                ) && attempt.parent.request_state.state.get() == RestoredRequestState::Captured,
+                "restore_controller_capture_parent_changed_or_spent"
+            );
+            attempt
+                .captured
+                .predecessor
+                .require_same(&attempt.parent.refusal)?;
+            let request = attempt
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            attempt
+                .parent
+                .retired
+                .acquisition
+                .as_mut()
+                .require_retired_predecessor(&mut request.acquisition)?;
+            let mut stage = attempt
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            stage.require_current_role()?;
+            ensure!(
+                stage.owner.role == NativeRole::EpochController,
+                "restore_controller_capture_role_changed"
+            );
+            Ok(())
+        })();
+        checked?;
+        attempt.completed = true;
+        Ok(())
+    });
+    let canonical = |block: &syn::Block| {
+        restored_history_method(
+            &quote::quote!(impl Expected { fn checked() #block }).to_string(),
+            "Expected",
+            "checked",
+        )
+    };
+    let expected = canonical(&expected);
+    assert_eq!(check, expected);
+    // A different parent, old-stage reuse, purpose bypass, swallowed failure,
+    // and premature disarm all alter real accepting wiring, not a test helper.
+    for (needle, replacement) in [
+        (
+            "attempt.captured.predecessor.require_same(&attempt.parent.refusal)?;",
+            "",
+        ),
+        (
+            "attempt.parent.retired.acquisition.as_mut().require_retired_predecessor(&mut request.acquisition)?;",
+            "attempt.parent.retired.check()?;",
+        ),
+        (
+            "attempt.parent.retired.owner.borrow_current_request(request)?",
+            "attempt.parent.retired.owner.begin_current_stage()?",
+        ),
+        (
+            "stage.require_current_role()?;",
+            "if false {stage.require_current_role()?;}",
+        ),
+        ("checked?;", "let _=checked;"),
+        (
+            "checked?;attempt.completed=true;",
+            "attempt.completed=true;checked?;",
+        ),
+    ] {
+        let needle = native_source_tokens(needle);
+        assert_eq!(check.matches(&needle).count(), 1);
+        let changed = check.replacen(&needle, replacement, 1);
+        let changed = syn::parse_str::<syn::Block>(&changed).unwrap();
+        assert_ne!(canonical(&changed), expected);
+    }
+    // Lexable path/identifier stems match every argument list without an
+    // unmatched opening call delimiter in the token-stream parser.
+    for forbidden in [
+        "retired.check",
+        "retired.acquisition.as_mut().check",
+        "begin_current_stage",
+        "finish_known",
+        "into_connection_clock",
+        "context",
+        "callback",
+    ] {
+        assert!(!check.contains(&native_source_tokens(forbidden)));
+    }
+}
+
+#[test]
+fn restored_controller_reader_uses_the_saved_request_and_checked_controller_phase_only() {
+    let native = restored_history_method(
+        include_str!("owner.rs"),
+        "CapturedRestoredControllerRequest",
+        "checked_current_reader",
+    );
+    let steps = [
+        "RestoredControllerPeerAttempt",
+        "attempt.native.captured.check(attempt.native.parent)?",
+        "attempt.native.captured.request.as_mut()",
+        "attempt.native.parent.retired.owner.borrow_current_request(request)?",
+        "stage.owner.role == NativeRole::EpochController && &stage.owner.policy.store == selected",
+        "attempt.phase.checked_restored_controller_reader(&mut stage,selected)",
+        "let checked=attempt.native.captured.check(attempt.native.parent);",
+        "let reader=requested?;",
+        "checked?;",
+        "attempt.native.completed=true;",
+        "Ok(reader)",
+    ];
+    assert!(restored_history_order(&native, &steps));
+    for step in steps {
+        let token = native_source_tokens(step);
+        assert_eq!(native.matches(&token).count(), 1, "{step}");
+        assert!(!restored_history_order(
+            &native.replacen(&token, "unrelated", 1),
+            &steps
+        ));
+    }
+    let phase = restored_history_method(
+        include_str!("storage_peer/continuation.rs"),
+        "CurrentStoragePeerPhase",
+        "checked_restored_controller_reader",
+    );
+    let steps = [
+        "self.request().purpose()==StoragePeerPurpose::CurrentServing",
+        "match&self.owner",
+        "RestoredPeerTail::Controller",
+        "self.check(stage)?",
+        "installed.current_reader_data(peer,selected)",
+        "let checked=self.check(stage);",
+        "self.refuse()",
+        "stage.refuse_serving()",
+        "let reader=requested?;",
+        "checked?;",
+        "Ok(reader)",
+    ];
+    assert!(restored_history_order(&phase, &steps));
+    for step in steps
+        .iter()
+        .filter(|step| **step != "RestoredPeerTail::Controller")
+    {
+        let token = native_source_tokens(step);
+        assert_eq!(phase.matches(&token).count(), 1, "{step}");
+        assert!(!restored_history_order(
+            &phase.replacen(&token, "unrelated", 1),
+            &steps
+        ));
+    }
+    for body in [&native, &phase] {
+        for forbidden in [
+            "begin_current_request",
+            "begin_current_stage",
+            "NativeAcquisition::begin",
+            "pending.check",
+            "retired.check",
+            "from_app_install",
+        ] {
+            assert!(
+                !body.contains(&native_source_tokens(forbidden)),
+                "{forbidden}"
+            );
+        }
+    }
+    let drop = restored_history_method(
+        include_str!("owner.rs"),
+        "RestoredControllerPeerAttempt",
+        "drop",
+    );
+    assert!(restored_history_order(
+        &drop,
+        &["if!self.native.completed", "self.phase.refuse()"]
+    ));
+}
+
+#[test]
+fn restored_controller_reader_derives_only_actual_receiver_data_and_never_checks_old_originals() {
+    use quote::ToTokens;
+    let binding: syn::Stmt = syn::parse_str("let state=&peer.receiver.receiver;").unwrap();
+    assert_eq!(
+        native_source_tokens(&binding.to_token_stream().to_string()),
+        native_source_tokens("let state = &peer.receiver.receiver;")
+    );
+    let condition: syn::Expr = syn::parse_str(
+        "!self.refused&&!state.refused.get()&&state.socket.is_none()&&self.transcript.is_none()",
+    )
+    .unwrap();
+    assert_eq!(
+        native_source_tokens(&condition.to_token_stream().to_string()),
+        native_source_tokens(
+            "!self.refused && !state.refused.get() && state.socket.is_none() && self.transcript.is_none()"
+        )
+    );
+    let body = restored_history_method(
+        include_str!("owner/restore_receiver.rs"),
+        "InstalledRestoredAppConfirmation",
+        "current_reader_data",
+    );
+    let steps = [
+        "let state = &peer.receiver.receiver;",
+        "!self.refused && !state.refused.get() && state.socket.is_none() && self.transcript.is_none()",
+        "state.app.as_ref()",
+        "self.message.verify_restored_app(app)?",
+        "state.projection.as_ref()",
+        "state.activation.as_ref()",
+        "crate::security_epoch::firestore::RestoreWriterPeerRead::new(selected,projection,activation,&app.holder_data()?)",
+        "if requested.is_err()",
+        "self.refuse()",
+        "peer.refuse()",
+    ];
+    assert!(restored_history_order(&body, &steps));
+    for step in steps {
+        let token = native_source_tokens(step);
+        assert_eq!(body.matches(&token).count(), 1, "{step}");
+        assert!(!restored_history_order(
+            &body.replacen(&token, "unrelated", 1),
+            &steps
+        ));
+    }
+    for forbidden in [
+        "check_inner",
+        "pending.check",
+        "require_peer_phase",
+        "original.sample",
+        "original.remaining",
+        "stage",
+        "CounterRequest",
+        "ActiveObservation",
+    ] {
+        assert!(
+            !body.contains(&native_source_tokens(forbidden)),
+            "{forbidden}"
+        );
     }
 }
 
@@ -4210,6 +4589,648 @@ fn restored_request_capture_holds_the_real_parent_before_native_work_and_keeps_n
 }
 
 #[test]
+fn restored_controller_peer_bridge_keeps_fixed_purpose_saved_request_and_independent_posts() {
+    let source = include_str!("owner.rs");
+    let fixed = "super::RestoredPeerConnection::prepare_controller(inputs.peer.take().expect(\"actual restored Controller peer\"),inputs.installed.take().expect(\"actual installed App confirmation\"),&mut stage,super::StoragePeerPurpose::CurrentServing)";
+    let narrowing = "ensure!(expected.is_none_or(|request|request.purpose()==super::StoragePeerPurpose::CurrentServing),\"restore_controller_serving_request_required\");";
+    fn canonical(stmts: &[syn::Stmt]) -> String {
+        let block: syn::Block = syn::parse_quote!({#(#stmts)*});
+        restored_history_method(
+            &quote::quote!(impl Shape {fn checked() #block}).to_string(),
+            "Shape",
+            "checked",
+        )
+    }
+    fn direct_requested(body: &syn::Block, index: usize) -> Option<&syn::Block> {
+        let syn::Stmt::Local(local) = body.stmts.get(index)? else {
+            return None;
+        };
+        if !matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="requested") {
+            return None;
+        }
+        let syn::Expr::Call(call) = &*local.init.as_ref()?.expr else {
+            return None;
+        };
+        if !call.args.is_empty() {
+            return None;
+        }
+        let syn::Expr::Paren(paren) = &*call.func else {
+            return None;
+        };
+        let syn::Expr::Closure(closure) = &*paren.expr else {
+            return None;
+        };
+        if closure.asyncness.is_some() || !closure.inputs.is_empty() {
+            return None;
+        }
+        let syn::Expr::Block(block) = &*closure.body else {
+            return None;
+        };
+        Some(&block.block)
+    }
+    for (method, input, result, operation) in [
+        (
+            "prepare_current_peer",
+            Some(
+                "let mut inputs=RestoredControllerPeerInputs{peer:Some(peer),installed:Some(installed)};",
+            ),
+            "rendezvous",
+            "super::RestoredPeerConnection::prepare_controller",
+        ),
+        (
+            "accept_current_peer",
+            None,
+            "phase",
+            "rendezvous.accept_current",
+        ),
+    ] {
+        let actual = restored_history_method(source, "CapturedRestoredControllerRequest", method);
+        let mut before = Vec::new();
+        if let Some(input) = input {
+            before.push(input);
+        }
+        before.push("let mut attempt=RestoredControllerRequestAttempt{captured:self,parent,completed:false};");
+        // Compare parsed statements for the closed call and both independent
+        // Results. A post hidden inside the fallible operation would not pass.
+        let body: syn::Block = syn::parse_str(&actual).unwrap();
+        let first = usize::from(input.is_some());
+        for (index, prefix) in before.iter().take(first + 1).enumerate() {
+            let expected: syn::Stmt = syn::parse_str(prefix).unwrap();
+            assert_eq!(
+                canonical(&body.stmts[index..=index]),
+                canonical(&[expected])
+            );
+        }
+        let requested = direct_requested(&body, first + 1).unwrap();
+        let pre: syn::Stmt = syn::parse_quote!(attempt.captured.check(attempt.parent)?;);
+        assert_eq!(canonical(&requested.stmts[..1]), canonical(&[pre]));
+        let borrow: syn::Block = syn::parse_quote!({
+            let request = attempt
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+        });
+        let borrowed = if input.is_some() { 1 } else { 2 };
+        assert_eq!(
+            canonical(&requested.stmts[borrowed..borrowed + 2]),
+            canonical(&borrow.stmts)
+        );
+        assert_eq!(requested.stmts.len(), borrowed + 3);
+        let tail = if input.is_some() {
+            fixed
+        } else {
+            "rendezvous.accept_current(&mut stage,expected)"
+        };
+        let tail: syn::Block = syn::parse_str(&format!("{{{tail}}}")).unwrap();
+        assert_eq!(
+            canonical(&requested.stmts[borrowed + 2..]),
+            canonical(&tail.stmts)
+        );
+        if input.is_none() {
+            let narrowing: syn::Stmt = syn::parse_str(narrowing).unwrap();
+            assert_eq!(canonical(&requested.stmts[1..2]), canonical(&[narrowing]));
+        }
+        // The precheck must execute in the actual direct call, rather than
+        // merely appearing in a nested, never-invoked closure.
+        let mut hidden = body.clone();
+        let mut hidden_requested = requested.clone();
+        hidden_requested.stmts[0] = syn::parse_quote!(let _=||{attempt.captured.check(attempt.parent)?;Ok::<(),anyhow::Error>(())};);
+        let original = canonical(&requested.stmts[..1]);
+        assert_ne!(canonical(&hidden_requested.stmts[..1]), original);
+        let syn::Stmt::Local(local) = &mut hidden.stmts[first + 1] else {
+            unreachable!();
+        };
+        local.init.as_mut().unwrap().expr = syn::parse_quote!(|| #hidden_requested);
+        assert!(direct_requested(&hidden, first + 1).is_none());
+        let suffix: syn::Block = syn::parse_str(&format!(
+            "{{let checked=attempt.captured.check(attempt.parent);let {result}=requested?;checked?;attempt.completed=true;Ok({result})}}"
+        )).unwrap();
+        assert_eq!(
+            canonical(&body.stmts[first + 2..]),
+            canonical(&suffix.stmts)
+        );
+        let ordered = [
+            "attempt.captured.check(attempt.parent)?;",
+            "attempt.captured.request.as_mut()",
+            "attempt.parent.retired.owner.borrow_current_request(request)?",
+            operation,
+        ];
+        assert!(restored_history_order(&actual, &ordered));
+        let checked = native_source_tokens("let checked=attempt.captured.check(attempt.parent);");
+        assert_eq!(actual.matches(&checked).count(), 1);
+        for replacement in [
+            "let checked=Ok(());",
+            "let checked={requested.as_ref().map(|_|()).map_err(|_|anyhow::anyhow!(\"masked\"))};",
+        ] {
+            let changed = actual.replacen(&checked, replacement, 1);
+            let changed: syn::Block = syn::parse_str(&changed).unwrap();
+            assert_ne!(
+                canonical(&changed.stmts[first + 2..]),
+                canonical(&suffix.stmts)
+            );
+        }
+        // Error precedence and disarming must remain after both evaluations.
+        let primary = native_source_tokens(&format!("let {result}=requested?;checked?;"));
+        assert_eq!(actual.matches(&primary).count(), 1);
+        let changed = actual.replacen(&primary, &format!("checked?;let {result}=requested?;"), 1);
+        let changed: syn::Block = syn::parse_str(&changed).unwrap();
+        assert_ne!(
+            canonical(&changed.stmts[first + 2..]),
+            canonical(&suffix.stmts)
+        );
+        for forbidden in [
+            "begin_current_request",
+            "begin_current_stage",
+            "into_connection_clock",
+            "callback",
+            "context",
+            "finish_known",
+        ] {
+            assert!(
+                !actual.contains(&native_source_tokens(forbidden)),
+                "{method}: {forbidden}"
+            );
+        }
+    }
+    let prepare = restored_history_method(
+        source,
+        "CapturedRestoredControllerRequest",
+        "prepare_current_peer",
+    );
+    assert!(prepare.contains(&native_source_tokens(fixed)));
+    let changed = prepare.replace("CurrentServing", "AdminRead");
+    assert!(!changed.contains(&native_source_tokens(fixed)));
+    let accept = restored_history_method(
+        source,
+        "CapturedRestoredControllerRequest",
+        "accept_current_peer",
+    );
+    assert!(restored_history_order(
+        &accept,
+        &[narrowing, "rendezvous.accept_current(&mut stage,expected)"]
+    ));
+    let changed = accept.replace(&native_source_tokens(narrowing), "");
+    assert!(!restored_history_order(
+        &changed,
+        &[narrowing, "rendezvous.accept_current(&mut stage,expected)"]
+    ));
+}
+
+#[test]
+fn restored_controller_consuming_entry_keeps_independent_posts_and_settles_actual_owners_last() {
+    fn canonical(stmts: &[syn::Stmt]) -> String {
+        let body: syn::Block = syn::parse_quote!({#(#stmts)*});
+        restored_history_method(
+            &quote::quote!(impl Expected {fn checked() #body}).to_string(),
+            "Expected",
+            "checked",
+        )
+    }
+    fn requested(body: &syn::Block) -> Option<&syn::Block> {
+        let syn::Stmt::Local(local) = body.stmts.get(1)? else {
+            return None;
+        };
+        let syn::Expr::Call(call) = &*local.init.as_ref()?.expr else {
+            return None;
+        };
+        let syn::Expr::Paren(paren) = &*call.func else {
+            return None;
+        };
+        let syn::Expr::Closure(closure) = &*paren.expr else {
+            return None;
+        };
+        let syn::Expr::Block(block) = &*closure.body else {
+            return None;
+        };
+        Some(&block.block)
+    }
+    fn closed(body: &syn::Block) -> bool {
+        if body.stmts.len() != 13 {
+            return false;
+        }
+        let guard: syn::Block = syn::parse_quote!({
+            let mut attempt = RestoredControllerServingAttempt {
+                native: RestoredControllerRequestAttempt {
+                    captured: &mut self,
+                    parent,
+                    completed: false,
+                },
+                phase: Some(phase),
+                returned: None,
+                loan,
+            };
+        });
+        if canonical(&body.stmts[..1]) != canonical(&guard.stmts) {
+            return false;
+        }
+        let Some(inner) = requested(body) else {
+            return false;
+        };
+        if inner.stmts.len() != 13 {
+            return false;
+        }
+        let prefix: syn::Block = syn::parse_quote!({
+            attempt.native.captured.check(attempt.native.parent)?;
+            let request = attempt
+                .native
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .native
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            ensure!(
+                stage.owner.role == NativeRole::EpochController
+                    && &stage.owner.policy.store == selected,
+                "restore_controller_reader_selection_changed"
+            );
+            let phase = attempt
+                .phase
+                .as_mut()
+                .context("restore_controller_phase_missing")?;
+            let reader = phase.checked_restored_controller_reader(&mut stage, selected)?;
+        });
+        if canonical(&inner.stmts[..6]) != canonical(&prefix.stmts) {
+            return false;
+        }
+        let suffix: syn::Block = syn::parse_quote!({
+            let requested = attempt.loan.observe(&mut stage, phase, &reader);
+            let phase_post = phase.check(&mut stage);
+            let native_post = stage.check();
+            let snapshot = requested?;
+            phase_post?;
+            native_post?;
+            Ok(snapshot)
+        });
+        if canonical(&inner.stmts[6..]) != canonical(&suffix.stmts) {
+            return false;
+        }
+        let post: syn::Block = syn::parse_quote!({
+            let native_post = attempt.native.captured.check(attempt.native.parent);
+            let snapshot = requested?;
+            native_post?;
+        });
+        if canonical(&body.stmts[2..5]) != canonical(&post.stmts) {
+            return false;
+        }
+        let syn::Stmt::Expr(syn::Expr::Block(final_phase), _) = &body.stmts[5] else {
+            return false;
+        };
+        if final_phase.block.stmts.len() != 9 {
+            return false;
+        }
+        let phase_post: syn::Block = syn::parse_quote!({
+            let finished = match phase.finish_restored(&mut stage) {
+                Ok(peer) => {
+                    attempt.returned = Some(peer);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+            let physical_post = attempt.loan.final_check(&mut stage);
+            let native_post = stage.check();
+            finished?;
+            physical_post?;
+            native_post?;
+        });
+        if canonical(&final_phase.block.stmts[3..]) != canonical(&phase_post.stmts) {
+            return false;
+        }
+        let finish: syn::Block = syn::parse_quote!({
+            RestoredRequestGate::begin_final(
+                &attempt.native.parent.request_state,
+                &attempt.native.captured.refusal.gate,
+            )?;
+            attempt
+                .native
+                .captured
+                .request
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?
+                .finish(attempt.native.parent.retired.owner)?;
+            let peer = attempt
+                .returned
+                .take()
+                .context("restore_controller_peer_missing")?;
+            attempt.native.parent.request_state.finish()?;
+            attempt.native.captured.refusal.transfer();
+            attempt.native.completed = true;
+            Ok((peer, snapshot))
+        });
+        canonical(&body.stmts[6..]) == canonical(&finish.stmts)
+    }
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(
+        source,
+        "CapturedRestoredControllerRequest",
+        "serve_current_peer",
+    );
+    let body: syn::Block = syn::parse_str(&actual).unwrap();
+    assert!(closed(&body));
+    for (from, to) in [
+        (
+            "let phase_post=phase.check(&mut stage);",
+            "let phase_post=if requested.is_ok(){phase.check(&mut stage)}else{Ok(())};",
+        ),
+        ("let native_post=stage.check();", "let native_post=Ok(());"),
+        (
+            "let snapshot=requested?;phase_post?;native_post?;",
+            "phase_post?;native_post?;let snapshot=requested?;",
+        ),
+        (
+            "let native_post=attempt.native.captured.check(attempt.native.parent);",
+            "let native_post=Ok(());",
+        ),
+        (
+            "phase.finish_restored(&mut stage)",
+            "phase.finish_checked(&mut stage)",
+        ),
+        (
+            "let physical_post=attempt.loan.final_check(&mut stage);",
+            "let physical_post=Ok(());",
+        ),
+        (
+            "let physical_post=attempt.loan.final_check(&mut stage);",
+            "let physical_post=if finished.is_ok(){attempt.loan.final_check(&mut stage)}else{Ok(())};",
+        ),
+        (
+            "finished?;physical_post?;native_post?;",
+            "physical_post?;finished?;native_post?;",
+        ),
+        (".finish(attempt.native.parent.retired.owner)?;", ";"),
+        (
+            "attempt.native.parent.request_state.finish()?;attempt.native.captured.refusal.transfer();",
+            "attempt.native.captured.refusal.transfer();attempt.native.parent.request_state.finish()?;",
+        ),
+        ("Ok((peer,snapshot))", "Ok((foreign,snapshot))"),
+    ] {
+        let from = native_source_tokens(from);
+        assert!(actual.contains(&from), "mutation target {from}");
+        let changed = actual.replacen(&from, &native_source_tokens(to), 1);
+        let changed: syn::Block = syn::parse_str(&changed).unwrap();
+        assert!(!closed(&changed), "{from}");
+    }
+    for required in [
+        "attempt.native.captured.check(attempt.native.parent)?;",
+        "attempt.native.parent.retired.owner.borrow_current_request(request)?",
+        "stage.owner.role==NativeRole::EpochController && &stage.owner.policy.store==selected",
+        "phase.checked_restored_controller_reader(&mut stage,selected)?",
+    ] {
+        let required = native_source_tokens(required);
+        assert!(actual.contains(&required));
+    }
+    for forbidden in [
+        "NativeAcquisition::begin",
+        "begin_current_request",
+        "retired.check",
+        "from_app_install",
+        "callback",
+    ] {
+        assert!(
+            !actual.contains(&native_source_tokens(forbidden)),
+            "{forbidden}"
+        );
+    }
+}
+
+#[test]
+fn restored_controller_consuming_guard_and_capture_loss_refuse_until_real_final_settlement() {
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(source, "RestoredControllerServingAttempt", "drop");
+    let expected: syn::Block = syn::parse_quote!({
+        if !self.native.completed {
+            if let Some(phase) = &mut self.phase {
+                phase.refuse();
+            }
+            self.loan.refuse();
+        }
+    });
+    let canonical = |body: &syn::Block| {
+        restored_history_method(
+            &quote::quote!(impl Expected { fn checked() #body }).to_string(),
+            "Expected",
+            "checked",
+        )
+    };
+    assert_eq!(actual, canonical(&expected));
+    for cut in 0..expected.stmts.len() {
+        let mut missing = expected.clone();
+        missing.stmts.remove(cut);
+        assert_ne!(actual, canonical(&missing));
+    }
+    let captured = restored_history_method(source, "CapturedRestoredControllerRequest", "drop");
+    let expected: syn::Block = syn::parse_quote!({
+        if self.refusal.armed {
+            self.refuse();
+        }
+    });
+    assert_eq!(captured, canonical(&expected));
+}
+
+#[test]
+fn restored_controller_warm_preparation_consumes_the_returned_peer_on_the_saved_request() {
+    let actual = restored_history_method(
+        include_str!("owner.rs"),
+        "CapturedRestoredControllerRequest",
+        "prepare_retained_current_peer",
+    );
+    let expected: syn::Block = syn::parse_quote!({
+        let mut attempt = RestoredControllerRequestAttempt {
+            captured: self,
+            parent,
+            completed: false,
+        };
+        let requested = (|| {
+            attempt.captured.check(attempt.parent)?;
+            let request = attempt
+                .captured
+                .request
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("restore_controller_capture_missing"))?;
+            let mut stage = attempt
+                .parent
+                .retired
+                .owner
+                .borrow_current_request(request)?;
+            peer.prepare_retained_controller(&mut stage)
+        })();
+        let checked = attempt.captured.check(attempt.parent);
+        let rendezvous = requested?;
+        checked?;
+        attempt.completed = true;
+        Ok(rendezvous)
+    });
+    let normalized = restored_history_method(
+        &quote::quote!(impl Expected {fn checked() #expected}).to_string(),
+        "Expected",
+        "checked",
+    );
+    assert_eq!(actual, normalized);
+    for (from, to) in [
+        ("attempt.captured.check(attempt.parent)?;", ""),
+        (
+            "attempt.parent.retired.owner.borrow_current_request(request)?",
+            "attempt.parent.retired.owner.begin_current_stage()?",
+        ),
+        (
+            "peer.prepare_retained_controller(&mut stage)",
+            "Ok(untrusted)",
+        ),
+        (
+            "let checked=attempt.captured.check(attempt.parent);",
+            "let checked=Ok(());",
+        ),
+        (
+            "let rendezvous=requested?;checked?;",
+            "checked?;let rendezvous=requested?;",
+        ),
+        (
+            "checked?;attempt.completed=true;",
+            "attempt.completed=true;checked?;",
+        ),
+    ] {
+        let from = native_source_tokens(from);
+        assert_eq!(actual.matches(&from).count(), 1, "{from}");
+        assert_ne!(
+            actual.replacen(&from, &native_source_tokens(to), 1),
+            normalized
+        );
+    }
+    for forbidden in [
+        "prepare_controller",
+        "begin_current_request",
+        "NativeAcquisition::begin",
+        "callback",
+        "try_clone",
+    ] {
+        assert!(
+            !actual.contains(&native_source_tokens(forbidden)),
+            "{forbidden}"
+        );
+    }
+}
+
+#[test]
+fn restored_controller_warm_factory_rejects_first_and_app_tails_without_reopening() {
+    let source = include_str!("storage_peer/continuation.rs");
+    let actual = restored_history_method(
+        source,
+        "RestoredPeerConnection",
+        "prepare_retained_controller",
+    );
+    let expected: syn::Block = syn::parse_quote!({
+        let requested = (|| {
+            ensure!(
+                self.owner.origin == ConnectionOrigin::RestoredCurrent
+                    && matches!(&self.tail, RestoredPeerTail::Controller { .. }),
+                "restore_controller_completed_peer_required"
+            );
+            self.prepare_current(stage, StoragePeerPurpose::CurrentServing)
+        })();
+        if requested.is_err() {
+            stage.refuse_serving();
+        }
+        requested
+    });
+    let normalized = restored_history_method(
+        &quote::quote!(impl Expected {fn checked() #expected}).to_string(),
+        "Expected",
+        "checked",
+    );
+    assert_eq!(actual, normalized);
+    for (from, to) in [
+        (
+            "ConnectionOrigin::RestoredCurrent",
+            "ConnectionOrigin::RestoredFirst",
+        ),
+        ("RestoredPeerTail::Controller", "RestoredPeerTail::App"),
+        (
+            "StoragePeerPurpose::CurrentServing",
+            "StoragePeerPurpose::AdminRead",
+        ),
+        ("stage.refuse_serving();", ""),
+    ] {
+        let from = native_source_tokens(from);
+        assert_eq!(actual.matches(&from).count(), 1);
+        assert_ne!(
+            actual.replacen(&from, &native_source_tokens(to), 1),
+            normalized
+        );
+    }
+    for forbidden in [
+        "from_port",
+        "take_current_peer",
+        "prepare_controller",
+        "NativeAcquisition::begin",
+        "connect",
+        "try_clone",
+    ] {
+        assert!(
+            !actual.contains(&native_source_tokens(forbidden)),
+            "{forbidden}"
+        );
+    }
+    let lost = restored_history_method(source, "RestoredPeerConnection", "drop");
+    assert!(lost.contains(&native_source_tokens("self.owner.disposition.refuse();")));
+    assert!(lost.contains(&native_source_tokens("self.tail.refuse();")));
+}
+
+#[test]
+fn restored_controller_peer_inputs_keep_both_real_owners_armed_until_port_transfer() {
+    let source = include_str!("owner.rs");
+    let actual = restored_history_method(source, "RestoredControllerPeerInputs", "drop");
+    let expected: syn::Block = syn::parse_quote!({
+        if let Some(peer) = &mut self.peer {
+            peer.refuse();
+        }
+        if let Some(installed) = &mut self.installed {
+            installed.refuse();
+        }
+    });
+    let canonical = |body: &syn::Block| {
+        restored_history_method(
+            &quote::quote!(impl Guard {fn drop() #body}).to_string(),
+            "Guard",
+            "drop",
+        )
+    };
+    assert_eq!(actual, canonical(&expected));
+    for index in 0..expected.stmts.len() {
+        let mut changed = expected.clone();
+        changed.stmts.remove(index);
+        assert_ne!(actual, canonical(&changed));
+    }
+    let file = syn::parse_file(source).unwrap();
+    let fields = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "RestoredControllerPeerInputs" => {
+                Some(&item.fields)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].len(), 2);
+    assert!(
+        fields[0]
+            .iter()
+            .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+    );
+}
+
+#[test]
 fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_guards() {
     use quote::ToTokens;
     let source = include_str!("owner.rs");
@@ -4255,6 +5276,7 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
             }
             requested?;
             checked?;
+            let request_state = Rc::new(RestoredRequestGate::new());
             self.prepared
                 .pending
                 .owner
@@ -4262,7 +5284,7 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
                 .retire_checked(&mut self.prepared.pending.original)?;
             Ok(RetiredRestoredAppNative {
                 installed: self,
-                request_state: Rc::new(RestoredRequestGate::new()),
+                request_state,
                 current_peer: None,
             })
         }
@@ -4278,6 +5300,19 @@ fn app_keeper_handoff_retires_actual_original_last_and_never_discards_negative_g
         )
     };
     assert_eq!(actual, normalize(&expected));
+    // Allocation after retirement would widen the last-sample-to-handoff
+    // interval. The real production body, including Linux gating, is checked.
+    let mut allocated_late = expected.clone();
+    let syn::Stmt::Expr(syn::Expr::Block(linux), None) = allocated_late.stmts.last_mut().unwrap()
+    else {
+        panic!("Linux body");
+    };
+    let positions=linux.block.stmts.iter().enumerate().filter_map(|(index,stmt)|
+        matches!(stmt,syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(id) if id.ident=="request_state")).then_some(index)
+    ).collect::<Vec<_>>();
+    assert_eq!(positions.len(), 1);
+    linux.block.stmts.swap(positions[0], positions[0] + 1);
+    assert_ne!(actual, normalize(&allocated_late));
     let syn::Stmt::Expr(syn::Expr::Block(linux), None) = expected.stmts.last().unwrap() else {
         panic!("Linux body");
     };

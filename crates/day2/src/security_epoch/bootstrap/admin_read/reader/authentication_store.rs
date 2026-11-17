@@ -16,8 +16,8 @@ pub(in crate::security_epoch) use producer::{
     FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
     RestoreFinalInstallationLoan, RestoreTargetCheck, RestoreWriteLoan,
     RestoreWriterActivationLoan, RestoreWriterConfirmation, RestoreWriterExchangeContext,
-    RestoreWriterReleaseLoan, TargetSettlementSourceLoan, WriterConfirmationSourceLoan,
-    WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
+    RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan, TargetSettlementSourceLoan,
+    WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use producer::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};
 

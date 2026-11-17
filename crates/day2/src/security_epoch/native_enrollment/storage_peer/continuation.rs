@@ -195,6 +195,44 @@ enum PeerPhaseOwner<'peer> {
     Restored(Box<RestoredPeerConnection<'peer>>),
 }
 
+impl CurrentStoragePeerPhase<'_> {
+    /// Fixed Controller-only DATA selection. The complete actual phase keeps
+    /// its historical tail; no borrowed initial/App owner can supply this.
+    pub(in crate::security_epoch::native_enrollment) fn checked_restored_controller_reader(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+    ) -> Result<crate::security_epoch::firestore::RestoreWriterPeerRead> {
+        let requested = (|| {
+            ensure!(
+                self.request().purpose() == StoragePeerPurpose::CurrentServing,
+                "restore_controller_reader_serving_required"
+            );
+            match &self.owner {
+                PeerPhaseOwner::Restored(connection)
+                    if matches!(&connection.tail, RestoredPeerTail::Controller { .. }) => {}
+                _ => anyhow::bail!("restore_controller_reader_tail_required"),
+            }
+            self.check(stage)?;
+            let PeerPhaseOwner::Restored(connection) = &mut self.owner else {
+                anyhow::bail!("restore_controller_reader_tail_required");
+            };
+            let RestoredPeerTail::Controller { peer, installed } = &mut connection.tail else {
+                anyhow::bail!("restore_controller_reader_tail_required");
+            };
+            installed.current_reader_data(peer, selected)
+        })();
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            stage.refuse_serving();
+        }
+        let reader = requested?;
+        checked?;
+        Ok(reader)
+    }
+}
+
 impl std::ops::Deref for PeerPhaseOwner<'_> {
     type Target = RetainedPeer;
 
@@ -378,6 +416,26 @@ impl<'tail> RestoredPeerConnection<'tail> {
     ) -> Result<ControllerCurrentRendezvous<'tail>> {
         let port = peer.take_current_peer(installed, stage)?;
         Self::from_port(port, stage)?.prepare_current(stage, purpose)
+    }
+
+    /// Only a completed Controller connection may enter this fixed warm
+    /// preparation. First-transfer and App tails cannot substitute for it.
+    pub(in crate::security_epoch::native_enrollment) fn prepare_retained_controller(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<ControllerCurrentRendezvous<'tail>> {
+        let requested = (|| {
+            ensure!(
+                self.owner.origin == ConnectionOrigin::RestoredCurrent
+                    && matches!(&self.tail, RestoredPeerTail::Controller { .. }),
+                "restore_controller_completed_peer_required"
+            );
+            self.prepare_current(stage, StoragePeerPurpose::CurrentServing)
+        })();
+        if requested.is_err() {
+            stage.refuse_serving();
+        }
+        requested
     }
 
     pub(in crate::security_epoch) fn prepare_current(

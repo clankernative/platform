@@ -550,23 +550,7 @@ impl NativeStagedTarget<'_, '_> {
             );
             self.state.join()?;
             self.root.check(&self.state.root)?;
-            self.artifact.check(self.state)?;
-            require_active_creator_metadata(
-                &self
-                    .state
-                    .creator
-                    .as_ref()
-                    .context("restore_creator_missing")?
-                    .metadata()?,
-                creator,
-            )?;
-            ensure!(
-                self.selection
-                    .native_report(&self.state.input, self.intent, &self.projection)?
-                    == *report,
-                "restore_cohort_target_changed"
-            );
-            Ok(())
+            self.active_metadata(creator, report)
         })();
         let post = self.root.check(&self.state.root);
         if requested.is_err() || post.is_err() {
@@ -574,6 +558,59 @@ impl NativeStagedTarget<'_, '_> {
         }
         requested?;
         post
+    }
+
+    /// The same target predicates under a genuine fresh Controller stage.
+    /// The caller retains that actual saved request; old restore originals
+    /// contribute only their negative identity through root.check_current.
+    fn active_current_identity(
+        &mut self,
+        stage: &mut crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
+        creator: &crate::security_epoch::native_enrollment::RestoreCreatorData,
+        report: &crate::security_epoch::kernel::restore::completion::TargetReport,
+    ) -> Result<()> {
+        let requested: Result<()> = (|| {
+            self.root.check_current(&self.state.root, stage)?;
+            ensure!(
+                self.state.complete && self.state.sql.is_none(),
+                "restore_cohort_target_not_complete"
+            );
+            self.state.join()?;
+            self.active_metadata(creator, report)
+        })();
+        let post = self.root.check_current(&self.state.root, stage);
+        if requested.is_err() || post.is_err() {
+            stage.refuse_serving();
+            self.refuse();
+        }
+        requested?;
+        post
+    }
+
+    /// Shared comparison only. This never selects an interval or supplies
+    /// authority; both fixed callers bracket it with their actual root guard.
+    fn active_metadata(
+        &mut self,
+        creator: &crate::security_epoch::native_enrollment::RestoreCreatorData,
+        report: &crate::security_epoch::kernel::restore::completion::TargetReport,
+    ) -> Result<()> {
+        self.artifact.check(self.state)?;
+        require_active_creator_metadata(
+            &self
+                .state
+                .creator
+                .as_ref()
+                .context("restore_creator_missing")?
+                .metadata()?,
+            creator,
+        )?;
+        ensure!(
+            self.selection
+                .native_report(&self.state.input, self.intent, &self.projection)?
+                == *report,
+            "restore_cohort_target_changed"
+        );
+        Ok(())
     }
 
     /// Fixed native-local guards bracket EVERY actual descriptor operation.
@@ -1625,6 +1662,57 @@ pub(in crate::security_epoch) struct RestoreControllerCohort {
     local: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
+/// A fixed validation scope, never a permission or caller-selected callback.
+/// Only the two cohort entries construct it. The ordinary Current entry must
+/// retain its actual stage; it cannot fall back to the retired restore clock.
+struct RestoreCohortValidation<'target, 'state, 'selection, 'stage, 'role> {
+    target: &'target mut NativeStagedTarget<'state, 'selection>,
+    stage: Option<&'stage mut crate::security_epoch::native_enrollment::EnrolledRoleStage<'role>>,
+    completed: bool,
+}
+
+impl RestoreCohortValidation<'_, '_, '_, '_, '_> {
+    fn check(
+        &mut self,
+        creator: &crate::security_epoch::native_enrollment::RestoreCreatorData,
+        report: &crate::security_epoch::kernel::restore::completion::TargetReport,
+    ) -> Result<()> {
+        match self.stage.as_deref_mut() {
+            Some(stage) => self.target.active_current_identity(stage, creator, report),
+            None => self.target.active_local_identity(creator, report),
+        }
+    }
+}
+
+impl Drop for RestoreCohortValidation<'_, '_, '_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            if let Some(stage) = self.stage.as_deref_mut() {
+                stage.refuse_serving();
+            }
+            self.target.refuse();
+        }
+    }
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> { fn check() {} }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <RestoreCohortValidation<'static, 'static, 'static, 'static, 'static> as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
+
 #[derive(PartialEq, Eq)]
 struct CohortIdentity {
     device: u64,
@@ -1710,35 +1798,76 @@ impl RestoreControllerCohort {
         creator: &crate::security_epoch::native_enrollment::RestoreCreatorData,
         report: &crate::security_epoch::kernel::restore::completion::TargetReport,
     ) -> Result<crate::security_epoch::native_enrollment::SqliteCohort> {
+        let mut validation = RestoreCohortValidation {
+            target,
+            stage: None,
+            completed: false,
+        };
+        let requested = self.check_in(&mut validation, creator, report);
+        if requested.is_ok() {
+            validation.completed = true;
+        }
+        requested
+    }
+
+    /// Validate the retained cohort under the actual new request. The closed
+    /// Controller driver must hold that same saved-request identity throughout;
+    /// this result is comparison DATA, not an ordinary Current constructor.
+    pub(in crate::security_epoch) fn check_current(
+        &mut self,
+        target: &mut NativeStagedTarget<'_, '_>,
+        stage: &mut crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
+        creator: &crate::security_epoch::native_enrollment::RestoreCreatorData,
+        report: &crate::security_epoch::kernel::restore::completion::TargetReport,
+    ) -> Result<crate::security_epoch::native_enrollment::SqliteCohort> {
+        let mut validation = RestoreCohortValidation {
+            target,
+            stage: Some(stage),
+            completed: false,
+        };
+        let requested = self.check_in(&mut validation, creator, report);
+        if requested.is_ok() {
+            validation.completed = true;
+        }
+        requested
+    }
+
+    fn check_in(
+        &mut self,
+        validation: &mut RestoreCohortValidation<'_, '_, '_, '_, '_>,
+        creator: &crate::security_epoch::native_enrollment::RestoreCreatorData,
+        report: &crate::security_epoch::kernel::restore::completion::TargetReport,
+    ) -> Result<crate::security_epoch::native_enrollment::SqliteCohort> {
         let requested: Result<_> = (|| {
-            target.active_local_identity(creator, report)?;
+            validation.check(creator, report)?;
             for (index, name) in ["app.sqlite", "app.sqlite-wal", "app.sqlite-shm"]
                 .into_iter()
                 .enumerate()
             {
-                target.active_local_identity(creator, report)?;
+                validation.check(creator, report)?;
                 let held = cohort_identity(&self.members[index], creator);
-                let post = target.active_local_identity(creator, report);
+                let post = validation.check(creator, report);
                 ensure!(
                     held? == self.identities[index],
                     "restore_cohort_held_member_changed"
                 );
                 post?;
-                target.active_local_identity(creator, report)?;
+                validation.check(creator, report)?;
                 let named = pin_cohort_member(
-                    target
+                    validation
+                        .target
                         .state
                         .directory
                         .as_ref()
                         .context("restore_directory_missing")?,
                     name,
                 );
-                let post = target.active_local_identity(creator, report);
+                let post = validation.check(creator, report);
                 let named = named?;
                 post?;
-                target.active_local_identity(creator, report)?;
+                validation.check(creator, report)?;
                 let observed = cohort_identity(&named, creator);
-                let post = target.active_local_identity(creator, report);
+                let post = validation.check(creator, report);
                 ensure!(
                     observed? == self.identities[index],
                     "restore_cohort_named_member_changed"
@@ -1751,7 +1880,8 @@ impl RestoreControllerCohort {
                     .all(|identity| identity.mount == self.identities[0].mount),
                 "restore_cohort_cross_mount"
             );
-            let metadata = target
+            let metadata = validation
+                .target
                 .state
                 .creator
                 .as_ref()
@@ -1768,9 +1898,9 @@ impl RestoreControllerCohort {
                 (self.identities[2].device, self.identities[2].inode),
             )
         })();
-        let post = target.active_local_identity(creator, report);
+        let post = validation.check(creator, report);
         if requested.is_err() || post.is_err() {
-            target.refuse();
+            validation.target.refuse();
         }
         let data = requested?;
         post?;
@@ -1922,12 +2052,12 @@ mod cohort_source_tests {
         ordered(
             body,
             &[
-                "target . active_local_identity (creator , report) ?",
+                "validation . check (creator , report) ?",
                 "\"app.sqlite\"",
                 "\"app.sqlite-wal\"",
                 "\"app.sqlite-shm\"",
                 "cohort_identity (& self . members [index] , creator)",
-                "let post = target . active_local_identity (creator , report)",
+                "let post = validation . check (creator , report)",
                 "held ? == self . identities [index]",
                 "post ?",
                 "let named = pin_cohort_member",
@@ -1939,13 +2069,172 @@ mod cohort_source_tests {
                 "self . identities [0] . device",
                 "self . identities [0] . inode",
                 "SqliteCohort :: from_identities",
-                "let post = target . active_local_identity (creator , report)",
+                "let post = validation . check (creator , report)",
                 "requested . is_err () || post . is_err ()",
                 "let data = requested ? ; post ? ; Ok (data)",
             ],
         ) && !body.contains("self . identities =")
             && !body.contains("Connection")
     }
+
+    fn same_block(actual: &str, expected: &str) -> bool {
+        let expected: syn::Block = syn::parse_str(expected).unwrap();
+        let normalized = |value: &str| value.replace(" , )", " )").replace(" , }", " }");
+        normalized(actual) == normalized(&expected.to_token_stream().to_string())
+    }
+
+    #[test]
+    fn fixed_cohort_entries_keep_current_stage_and_only_complete_after_the_shared_validation() {
+        let source = include_str!("writer.rs");
+        for (name, stage) in [("check", "None"), ("check_current", "Some(stage)")] {
+            let actual = block(source, "RestoreControllerCohort", name);
+            let expected = format!("{{
+                let mut validation = RestoreCohortValidation {{ target, stage: {stage}, completed: false }};
+                let requested = self.check_in(&mut validation, creator, report);
+                if requested.is_ok() {{ validation.completed = true; }}
+                requested
+            }}");
+            assert!(same_block(&actual, &expected), "fixed entry {name}");
+            for (from, to) in [
+                ("completed : false", "completed : true"),
+                ("if requested . is_ok ()", "if true"),
+                (
+                    "self . check_in (& mut validation , creator , report)",
+                    "Ok (untrusted)",
+                ),
+            ] {
+                assert_eq!(actual.matches(from).count(), 1);
+                assert!(!same_block(&actual.replacen(from, to, 1), &expected));
+            }
+            if name == "check_current" {
+                assert_eq!(actual.matches("stage : Some (stage)").count(), 1);
+                assert!(!same_block(
+                    &actual.replacen("stage : Some (stage)", "stage : None", 1),
+                    &expected
+                ));
+            }
+        }
+        let selection = block(source, "RestoreCohortValidation", "check");
+        assert!(same_block(
+            &selection,
+            "{
+            match self.stage.as_deref_mut() {
+                Some(stage) => self.target.active_current_identity(stage, creator, report),
+                None => self.target.active_local_identity(creator, report),
+            }
+        }"
+        ));
+    }
+
+    fn current_target(body: &str) -> bool {
+        ordered(
+            body,
+            &[
+                "let requested : Result < () > =",
+                "self . root . check_current (& self . state . root , stage) ?",
+                "self . state . complete && self . state . sql . is_none ()",
+                "self . state . join () ?",
+                "self . active_metadata (creator , report)",
+                "let post = self . root . check_current (& self . state . root , stage)",
+                "requested . is_err () || post . is_err ()",
+                "stage . refuse_serving () ; self . refuse ()",
+                "requested ? ; post",
+            ],
+        ) && body.matches("self . root . check_current").count() == 2
+            && !body.contains("self . root . check (")
+            && !body.contains("original")
+            && !body.contains("begin_")
+    }
+
+    #[test]
+    fn fresh_target_checks_same_root_and_complete_metadata_before_and_after_without_old_clock() {
+        let source = include_str!("writer.rs");
+        let actual = block(source, "NativeStagedTarget", "active_current_identity");
+        assert!(current_target(&actual));
+        for (from, to) in [
+            (
+                "self . root . check_current (& self . state . root , stage) ?",
+                "self . root . check (& self . state . root) ?",
+            ),
+            ("self . state . join () ?", "Ok::<(),anyhow::Error>(()) ?"),
+            ("self . active_metadata (creator , report)", "Ok(())"),
+            (
+                "let post = self . root . check_current (& self . state . root , stage)",
+                "let post=Ok(())",
+            ),
+            (
+                "stage . refuse_serving () ; self . refuse ()",
+                "self . refuse ()",
+            ),
+            ("requested ? ; post", "post ? ; requested"),
+        ] {
+            assert_eq!(actual.matches(from).count(), 1);
+            assert!(
+                !current_target(&actual.replacen(from, to, 1)),
+                "current cut {from}"
+            );
+        }
+        let metadata = block(source, "NativeStagedTarget", "active_metadata");
+        assert!(same_block(&metadata,"{
+            self.artifact.check(self.state)?;
+            require_active_creator_metadata(
+                &self.state.creator.as_ref().context(\"restore_creator_missing\")?.metadata()?,
+                creator,
+            )?;
+            ensure!(
+                self.selection.native_report(&self.state.input, self.intent, &self.projection)? == *report,
+                \"restore_cohort_target_changed\"
+            );
+            Ok(())
+        }"));
+        let original = block(source, "NativeStagedTarget", "active_local_identity");
+        assert!(ordered(
+            &original,
+            &[
+                "self . state . join () ?",
+                "self . root . check (& self . state . root) ?",
+                "self . active_metadata (creator , report)",
+                "let post = self . root . check (& self . state . root)",
+                "requested ? ; post"
+            ]
+        ));
+        assert_eq!(
+            original
+                .matches("self . active_metadata (creator , report)")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn incomplete_cohort_scope_refuses_the_actual_stage_and_target_even_before_first_check() {
+        let file = syn::parse_file(include_str!("writer.rs")).unwrap();
+        let drops:Vec<_>=file.items.iter().filter_map(|item| {
+            let syn::Item::Impl(item)=item else {return None;};
+            if !item.trait_.as_ref().is_some_and(|(_,path,_)|path.is_ident("Drop"))
+                || !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|p|p.ident=="RestoreCohortValidation")) {return None;}
+            item.items.iter().find_map(|item|match item {
+                syn::ImplItem::Fn(method) if method.sig.ident=="drop"=>Some(method.block.to_token_stream().to_string()),_=>None,
+            })
+        }).collect();
+        assert_eq!(drops.len(), 1);
+        let expected = "{
+            if !self.completed {
+                if let Some(stage)=self.stage.as_deref_mut() { stage.refuse_serving(); }
+                self.target.refuse();
+            }
+        }";
+        assert!(same_block(&drops[0], expected));
+        for (from, to) in [
+            ("stage . refuse_serving ()", "unrelated()"),
+            ("self . target . refuse ()", "unrelated()"),
+            ("! self . completed", "self . completed"),
+        ] {
+            assert_eq!(drops[0].matches(from).count(), 1);
+            assert!(!same_block(&drops[0].replacen(from, to, 1), expected));
+        }
+    }
+
     #[test]
     fn actual_controller_cohort_spends_once_pins_only_three_members_and_rechecks_held_and_named_identity()
      {
@@ -1977,13 +2266,13 @@ mod cohort_source_tests {
                 "capture cut {from}"
             );
         }
-        let actual = block(source, "RestoreControllerCohort", "check");
+        let actual = block(source, "RestoreControllerCohort", "check_in");
         assert!(retained(&actual));
         for (from, to) in [
             ("held ? == self . identities [index]", "true"),
             ("observed ? == self . identities [index]", "true"),
             (
-                "let post = target . active_local_identity (creator , report)",
+                "let post = validation . check (creator , report)",
                 "let post = Ok::<(),anyhow::Error>(())",
             ),
             ("identity . mount == self . identities [0] . mount", "true"),

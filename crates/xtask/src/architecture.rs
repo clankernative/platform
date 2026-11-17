@@ -368,12 +368,13 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         // Closed offline restore DATA builder: constructs its own fresh memory
         // connection, accepts no raw Connection/callback, bounds/deserializes
         // exact captured bytes, joins the prepared complete application reset
-        // in its sole outer transaction, then bounds/freezes the
-        // NOCOPY image before close. No production Checks implementation or
-        // native/Runtime factory exists. No borrowed SQL callback is admitted.
+        // in its sole outer transaction, then bounds/freezes the NOCOPY image
+        // before close. The native profile refuses RWO generation objects
+        // before reset. This DATA builder supplies no native/Runtime authority;
+        // no borrowed SQL callback is admitted.
         (
             "crates/day2/src/security_epoch/restore_staging.rs",
-            "sha256:be5b54418fea3ab588f92ba3e17d4f77b244eea5e10f7d315bd4efe822795c60",
+            "sha256:69ee4ddb9ca48d038bc602714c363ee99bed04eb781979d48bc558bf0a366e4a",
         ),
         // Serde wire serialization, unrelated to SQLite Connection::serialize.
         (

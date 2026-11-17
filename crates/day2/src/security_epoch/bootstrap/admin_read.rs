@@ -20,8 +20,9 @@ pub(in crate::security_epoch) use reader::{
     FencedRestoreContinuation, ReservationRegistryLoan, ReservationSourceLoan,
     RestoreAuthenticationAction, RestoreFinalInstallationLoan, RestoreTargetCheck,
     RestoreWriteLoan, RestoreWriterActivationLoan, RestoreWriterConfirmation,
-    RestoreWriterExchangeContext, RestoreWriterReleaseLoan, TargetSettlementSourceLoan,
-    WriterConfirmationSourceLoan, WriterMayRegistryLoan, WriterRegistryLoan, WriterSendSourceLoan,
+    RestoreWriterExchangeContext, RestoreWriterReleaseLoan, RestoredControllerCurrentReadLoan,
+    TargetSettlementSourceLoan, WriterConfirmationSourceLoan, WriterMayRegistryLoan,
+    WriterRegistryLoan, WriterSendSourceLoan,
 };
 pub(crate) use reader::{ControllerAdminReader, ControllerRegistryData};
 pub(crate) use reader::{FencedReadUnit, ReservationReadUnit, WriterMayReadUnit, WriterReadUnit};

@@ -302,6 +302,516 @@ fn unsupported_scope_digest_application_and_non_file_source_create_no_target() -
     })
 }
 
+// Only prepares this existing unqualified fixture before its first attempt.
+// Production obtains its source from the captured, sealed native archive.
+fn refresh_fixture_source(world: &mut World) -> Result<Vec<u8>> {
+    assert!(!world.owner.state.attempted);
+    let bytes = world.owner.application.db.serialize(MAIN_DB)?.to_vec();
+    std::fs::write(world.source.path().join("app.sqlite"), &bytes)?;
+    world.source_digest = Digest::new(&bytes);
+    world.owner.state.input.database = world.source_digest.clone();
+    Ok(bytes)
+}
+
+fn require_generation_refusal(mut world: World) -> Result<()> {
+    let repaired_source = std::fs::read(world.source.path().join("app.sqlite"))?;
+    let source = refresh_fixture_source(&mut world)?;
+    let before = application::tests::snapshot(&world.owner.application.db)?;
+    let error = execute(&mut world.owner).unwrap_err();
+    assert_eq!(
+        error.root_cause().to_string(),
+        "native_restore_runtime_generation_unsupported"
+    );
+    assert!(world.owner.refused && world.owner.state.attempted && !world.owner.state.complete);
+    assert!(!world.owner.state.directory_may_exist && world.owner.state.creator.is_none());
+    assert_eq!(world.owner.state.written, 0);
+    assert!(!world.owner.state.target_dir()?.exists());
+    assert_eq!(
+        std::fs::read(world.source.path().join("app.sqlite"))?,
+        source
+    );
+    let scratch = world
+        .owner
+        .state
+        .sql
+        .as_ref()
+        .context("refused scratch missing")?;
+    assert!(before == application::tests::snapshot(scratch)?);
+    // Repairing the selected DATA cannot repair this actual spent fixture
+    // owner. In particular it cannot reach target creation after refusal.
+    std::fs::write(world.source.path().join("app.sqlite"), &repaired_source)?;
+    world.owner.state.input.database = Digest::new(&repaired_source);
+    assert!(execute(&mut world.owner).is_err());
+    assert!(world.owner.refused && !world.owner.state.directory_may_exist);
+    assert!(!world.owner.state.target_dir()?.exists());
+    Ok(())
+}
+
+#[test]
+fn native_profile_refuses_each_generation_name_and_object_substitution_without_mutation()
+-> Result<()> {
+    effects::scope(simulation::World::new(21010), || {
+        for name in [
+            "day2_rollout_generations",
+            "day2_rollout_runtime",
+            "day2_invocation_runtime",
+        ] {
+            for name in [name.to_owned(), name.to_ascii_uppercase()] {
+                for definition in [
+                    format!("CREATE TABLE {name}(id TEXT) STRICT"),
+                    format!("CREATE TABLE {name}(wrong BLOB); INSERT INTO {name} VALUES(x'00')"),
+                    format!("CREATE VIEW {name} AS SELECT 1 AS value"),
+                    format!("CREATE INDEX {name} ON fixture_business(value)"),
+                    format!(
+                        "CREATE TRIGGER {name} AFTER INSERT ON fixture_business BEGIN SELECT 1; END"
+                    ),
+                ] {
+                    let world = world()?;
+                    world.owner.application.db.execute_batch(&definition)?;
+                    require_generation_refusal(world)?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn active_and_inactive_generation_archives_keep_their_captured_executor_history_on_refusal()
+-> Result<()> {
+    effects::scope(simulation::World::new(21011), || {
+        for active in [false, true] {
+            let world = world()?;
+            let id = world.owner.application.seed_runtime_generation_history()?;
+            if !active {
+                world
+                    .owner
+                    .application
+                    .db
+                    .execute("DELETE FROM day2_rollout_runtime", [])?;
+            }
+            assert_eq!(
+                world.owner.application.db.query_row(
+                    "SELECT generation FROM day2_invocation_runtime WHERE invocation='old-work'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )?,
+                id
+            );
+            require_generation_refusal(world)?;
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn native_reset_keeps_current_held_captures_and_digest_backed_trace_history() -> Result<()> {
+    effects::scope(simulation::World::new(21012), || {
+        let mut world = world()?;
+        let trace = world.owner.application.seed_current_backup_contents()?;
+        refresh_fixture_source(&mut world)?;
+        let captured = application::tests::snapshot(&world.owner.application.db)?;
+        assert!(!captured["day2_capture_deliveries"].is_empty());
+        assert!(!captured["day2_trace_policies"].is_empty());
+        let projection = execute(&mut world.owner)?;
+        assert!(projection.reset.credentials.newly_revoked > 0);
+        let target = world.owner.state.target_dir()?.join("app.sqlite");
+        for _ in 0..2 {
+            let db = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let restored = application::tests::snapshot(&db)?;
+            for table in [
+                "day2_capture_deliveries",
+                "day2_trace_policies",
+                "day2_credential_receipts",
+                "day2_app_outgoing",
+            ] {
+                assert!(
+                    captured[table] == restored[table],
+                    "historical archive DATA changed: {table}"
+                );
+            }
+            let raw: String = db.query_row(
+                "SELECT trace FROM day2_invocations WHERE id='old-work'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(crate::journal::load_trace(&db, &raw)?, trace);
+            assert!(!crate::authority_state::current(&db)?.document.enabled);
+            world.owner.application.require_image(&db, true)?;
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn actual_native_image_entries_propagate_profile_refusal_on_the_same_captured_database() {
+    use quote::ToTokens;
+    fn compact(value: &impl ToTokens) -> String {
+        value
+            .to_token_stream()
+            .to_string()
+            .split_whitespace()
+            .collect::<String>()
+            .replace(",)", ")")
+    }
+    fn direct_window(block: &syn::Block, expected: &[syn::Stmt]) -> bool {
+        block
+            .stmts
+            .windows(expected.len())
+            .filter(|window| {
+                window
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| compact(a) == compact(b))
+            })
+            .count()
+            == 1
+    }
+    fn variables<'a>(block: &'a syn::Block, name: &str) -> Vec<(usize, &'a syn::Expr)> {
+        block
+            .stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, stmt)| {
+                let syn::Stmt::Local(local) = stmt else {
+                    return None;
+                };
+                if !local.attrs.is_empty()
+                    || !matches!(&local.pat, syn::Pat::Ident(binding)
+                if binding.ident==name && binding.mutability.is_none())
+                {
+                    return None;
+                }
+                let init = local.init.as_ref()?;
+                init.diverge.is_none().then_some((index, &*init.expr))
+            })
+            .collect()
+    }
+    fn synchronous(expression: &syn::Expr) -> Option<&syn::ExprClosure> {
+        match expression {
+            syn::Expr::Closure(closure)
+                if closure.inputs.is_empty()
+                    && closure.asyncness.is_none()
+                    && closure.attrs.is_empty() =>
+            {
+                Some(closure)
+            }
+            syn::Expr::Paren(paren) if paren.attrs.is_empty() => synchronous(&paren.expr),
+            _ => None,
+        }
+    }
+    fn image_window(block: &syn::Block) -> Option<&syn::Block> {
+        let mut roots = variables(block, "reset")
+            .into_iter()
+            .filter_map(|(index, expr)| {
+                let syn::Expr::Block(reset) = expr else {
+                    return None;
+                };
+                reset.attrs.is_empty().then_some((index, &reset.block))
+            });
+        let (index, reset) = roots.next()?;
+        if roots.next().is_some() {
+            return None;
+        }
+        // The actual saved Result must survive independent posts and be
+        // propagated. An immediately executed but ignored IIFE is insufficient.
+        let tail: syn::Block = syn::parse_quote!({
+            drop(loan);
+            let post = owner.local_sql();
+            let reset = reset?;
+            post?;
+            close_sql_context(owner)?;
+            Ok(reset)
+        });
+        let tail = tail.stmts;
+        let actual = block.stmts.get(index + 1..)?;
+        if actual.len() != tail.len()
+            || !actual
+                .iter()
+                .zip(&tail)
+                .all(|(a, b)| compact(a) == compact(b))
+        {
+            return None;
+        }
+        let prefix: Vec<syn::Stmt> = vec![
+            syn::parse_quote!(let current=&mut *loan.owner;),
+            syn::parse_quote!(let db=loan.db.as_mut().context("restore_sql_missing")?;),
+        ];
+        if reset.stmts.len() != 3
+            || !reset
+                .stmts
+                .iter()
+                .take(2)
+                .zip(&prefix)
+                .all(|(a, b)| compact(a) == compact(b))
+        {
+            return None;
+        }
+        let syn::Stmt::Expr(syn::Expr::Call(call), None) = &reset.stmts[2] else {
+            return None;
+        };
+        if !call.attrs.is_empty() || !call.args.is_empty() {
+            return None;
+        }
+        let closure = synchronous(&call.func)?;
+        let syn::Expr::Block(body) = &*closure.body else {
+            return None;
+        };
+        if !body.attrs.is_empty() {
+            return None;
+        }
+        let prefix: Vec<syn::Stmt> = vec![
+            syn::parse_quote!(db.pragma_update(None,"temp_store","MEMORY")?;),
+            syn::parse_quote!(let memory=MemoryAdmission::configure(db)?;),
+        ];
+        if !body
+            .block
+            .stmts
+            .iter()
+            .take(2)
+            .zip(&prefix)
+            .all(|(a, b)| compact(a) == compact(b))
+        {
+            return None;
+        }
+        let syn::Stmt::Expr(syn::Expr::Block(scope), _) = body.block.stmts.get(2)? else {
+            return None;
+        };
+        let alias: syn::Stmt = syn::parse_quote!(let db=&mut *memory.db;);
+        if !scope.attrs.is_empty()
+            || scope.block.stmts.first().map(compact) != Some(compact(&alias))
+        {
+            return None;
+        }
+        Some(&scope.block)
+    }
+    fn capture_window(block: &syn::Block) -> Option<&syn::Block> {
+        let mut roots = variables(block, "previous").into_iter();
+        let (_, expression) = roots.next()?;
+        if roots.next().is_some() {
+            return None;
+        }
+        let syn::Expr::Try(tried) = expression else {
+            return None;
+        };
+        if !tried.attrs.is_empty() {
+            return None;
+        }
+        let syn::Expr::MethodCall(call) = &*tried.expr else {
+            return None;
+        };
+        if !call.attrs.is_empty()
+            || call.method != "observe"
+            || call.args.len() != 1
+            || !matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("capture"))
+        {
+            return None;
+        }
+        let closure = synchronous(call.args.first()?)?;
+        let syn::Expr::Block(body) = &*closure.body else {
+            return None;
+        };
+        let prefix: Vec<syn::Stmt> = vec![
+            syn::parse_quote!(let mut db=rusqlite::Connection::open_in_memory()?;),
+            syn::parse_quote!(db.pragma_update(None,"temp_store","MEMORY")?;),
+            syn::parse_quote!(let memory=super::MemoryAdmission::configure(&mut db)?;),
+        ];
+        let mut returned: syn::Block = syn::parse_quote!({
+            crate::backup_archive::verify_snapshot(&manifest, &artifact, memory.db)
+        });
+        let returned = returned.stmts.pop().unwrap();
+        if !body.attrs.is_empty()
+            || body.block.stmts.len() != 7
+            || !body
+                .block
+                .stmts
+                .iter()
+                .take(3)
+                .zip(&prefix)
+                .all(|(a, b)| compact(a) == compact(b))
+            || body.block.stmts.last().map(compact) != Some(compact(&returned))
+        {
+            return None;
+        }
+        Some(&body.block)
+    }
+    fn guarded(block: &syn::Block, expected: &[syn::Stmt], entry: &str) -> bool {
+        struct Calls(usize);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if matches!(&*call.func,syn::Expr::Path(path) if path.path.segments.last().is_some_and(|name|name.ident=="require_no_runtime_generation_objects"))
+                {
+                    self.0 += 1;
+                }
+                visit::visit_expr_call(self, call);
+            }
+        }
+        let window = match entry {
+            "prepare_image" => image_window(block),
+            "capture_snapshot" => capture_window(block),
+            "MemoryHook::enter" => Some(block),
+            _ => None,
+        };
+        let mut calls = Calls(0);
+        calls.visit_block(block);
+        calls.0 == 1 && window.is_some_and(|window| direct_window(window, expected))
+    }
+    fn function(source: &str, name: &str) -> syn::Block {
+        let mut functions = syn::parse_file(source)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == name => Some(*item.block),
+                _ => None,
+            });
+        let function = functions.next().unwrap();
+        assert!(functions.next().is_none(), "one actual production function");
+        function
+    }
+    let staging = include_str!("../restore_staging.rs");
+    let archive = include_str!("archive.rs");
+    for (source, name, expected, call) in [
+        (
+            staging,
+            "prepare_image",
+            vec![
+                syn::parse_quote!(db.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;),
+                syn::parse_quote!(memory_shape(db, Some(image.len()))?;),
+                syn::parse_quote!(self::require_no_runtime_generation_objects(db)?;),
+            ],
+            "self::require_no_runtime_generation_objects(db)?;",
+        ),
+        (
+            archive,
+            "capture_snapshot",
+            vec![
+                syn::parse_quote!(memory.db.deserialize_read_exact(rusqlite::MAIN_DB, &image[..], image.len(), false)?;),
+                syn::parse_quote!(super::memory_shape(memory.db, Some(image.len()))?;),
+                syn::parse_quote!(super::require_no_runtime_generation_objects(memory.db)?;),
+            ],
+            "super::require_no_runtime_generation_objects(memory.db)?;",
+        ),
+    ] {
+        assert!(guarded(&function(source, name), &expected, name));
+        assert_eq!(source.matches(call).count(), 1);
+        // Moving the WHOLE checked sequence into dead/deferred code used to
+        // satisfy a recursive window search. These controls exercise that gap,
+        // not just a wrapped individual guard call.
+        for decoy in [
+            quote::quote!({ if false { #(#expected)* } }),
+            quote::quote!({ match false { true => { #(#expected)* }, false => {} } }),
+            quote::quote!({ for _ in [] { #(#expected)* } }),
+            quote::quote!({ let _unused = || -> Result<()> { #(#expected)* Ok(()) }; }),
+            quote::quote!({ fn unused() -> Result<()> { #(#expected)* Ok(()) } }),
+            quote::quote!({ let _unused = async { #(#expected)* }; }),
+            quote::quote!({ let _unused = (async || -> Result<()> { #(#expected)* Ok(()) })(); }),
+            quote::quote!({ let _unused = (|| -> Result<()> { #(#expected)* Ok(()) })(); }),
+            quote::quote!({ #[cfg(any())] { #(#expected)* } }),
+            quote::quote!({ #[cfg(any())] let _unused = (|| -> Result<()> { #(#expected)* Ok(()) })(); }),
+            quote::quote!({ let _unused = false && { #(#expected)* true }; }),
+            quote::quote!({ capture.observe(|| -> Result<()> { #(#expected)* Ok(()) }); }),
+        ] {
+            let decoy: syn::Block = syn::parse2(decoy).unwrap();
+            assert!(!guarded(&decoy, &expected, name));
+        }
+        for changed in [
+            String::new(),
+            format!("if false {{ {call} }}"),
+            format!("let _ = {};", call.trim_end_matches("?;")),
+            call.replace("(db)", "(foreign)")
+                .replace("(memory.db)", "(foreign)"),
+        ] {
+            assert!(!guarded(
+                &function(&source.replacen(call, &changed, 1), name),
+                &expected,
+                name
+            ));
+        }
+        let original = function(source, name);
+        if name == "prepare_image" {
+            let mut ignored = original.clone();
+            let propagated: syn::Stmt = syn::parse_quote!(let reset=reset?;);
+            let tail = ignored
+                .stmts
+                .iter()
+                .position(|stmt| compact(stmt) == compact(&propagated))
+                .unwrap();
+            ignored.stmts[tail] = syn::parse_quote!(let reset=reset.unwrap_or_default(););
+            assert!(!guarded(&ignored, &expected, name));
+        } else {
+            let mut ignored = original.clone();
+            for statement in &mut ignored.stmts {
+                if let syn::Stmt::Local(local) = statement
+                    && matches!(&local.pat,syn::Pat::Ident(binding) if binding.ident=="previous")
+                {
+                    let init = local.init.as_mut().unwrap();
+                    let syn::Expr::Try(tried) = &*init.expr else {
+                        panic!("actual checked observation");
+                    };
+                    init.expr = tried.expr.clone();
+                }
+            }
+            assert!(!guarded(&ignored, &expected, name));
+        }
+        struct ActualBlock<'a> {
+            call: &'a syn::Stmt,
+            found: Option<syn::Block>,
+        }
+        impl<'ast> Visit<'ast> for ActualBlock<'_> {
+            fn visit_block(&mut self, block: &'ast syn::Block) {
+                if block
+                    .stmts
+                    .iter()
+                    .any(|stmt| compact(stmt) == compact(self.call))
+                {
+                    assert!(self.found.is_none());
+                    self.found = Some(block.clone());
+                }
+                visit::visit_block(self, block);
+            }
+        }
+        let mut selected = ActualBlock {
+            call: &expected[2],
+            found: None,
+        };
+        selected.visit_block(&original);
+        let mut ignored = selected.found.unwrap();
+        assert!(direct_window(&ignored, &expected));
+        let index = ignored
+            .stmts
+            .iter()
+            .position(|stmt| compact(stmt) == compact(&expected[2]))
+            .unwrap();
+        ignored.stmts.swap(index - 1, index);
+        assert!(!direct_window(&ignored, &expected));
+    }
+    let file = syn::parse_file(staging).unwrap();
+    let hook = file.items.iter().find_map(|item| match item {
+        syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|name|name.ident=="MemoryHook")) => item.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(item) if item.sig.ident=="enter" => Some(item.block.clone()), _=>None,
+        }), _=>None,
+    }).unwrap();
+    let expected = [
+        syn::parse_quote!(memory_shape(tx, None)?;),
+        syn::parse_quote!(self::require_no_runtime_generation_objects(tx)?;),
+    ];
+    assert!(guarded(&hook, &expected, "MemoryHook::enter"));
+    for replacement in [
+        syn::parse_quote!(Ok(())?;),
+        syn::parse_quote!(let _ = self::require_no_runtime_generation_objects(tx);),
+    ] {
+        let mut ignored = hook.clone();
+        let index = ignored
+            .stmts
+            .iter()
+            .position(|stmt| compact(stmt) == compact(&expected[1]))
+            .unwrap();
+        ignored.stmts[index] = replacement;
+        assert!(!guarded(&ignored, &expected, "MemoryHook::enter"));
+    }
+}
+
 #[test]
 fn existing_target_and_postcheck_failure_keep_the_primary_io_cause() -> Result<()> {
     effects::scope(simulation::World::new(2003), || {
@@ -1464,6 +1974,7 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
         let ordered = [
             "MemoryAdmission :: configure (db)",
             "db . deserialize_read_exact (MAIN_DB , & image [..] , image . len () , false)",
+            "self :: require_no_runtime_generation_objects (db)",
             "memory . begin ()",
             "current . application (& tx)",
             "application :: reset_in (& tx , & hook , & selected , & ns , epoch)",
@@ -1514,6 +2025,11 @@ fn actual_staging_owns_one_complete_reset_commit_serialize_and_unconditional_pos
     let source = include_str!("../restore_staging.rs");
     assert!(valid(source));
     for (from, to) in [
+        ("self::require_no_runtime_generation_objects(db)?;", ""),
+        (
+            "self::require_no_runtime_generation_objects(db)?;",
+            "self::require_no_runtime_generation_objects(foreign)?;",
+        ),
         (
             "let memory = MemoryAdmission::configure(db)?;",
             "let memory = MemoryAdmission::configure(foreign)?;",

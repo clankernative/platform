@@ -1,5 +1,51 @@
 # Restored-writer transition and peer protocol
 
+## Retained Controller Current driver
+
+The fixed consuming Controller driver retains the whole installed carrier,
+including its target, physical cohort, reader selection, native connection and
+negative predecessor roots. It checks actual peer readiness before capturing a
+new request. A first peer and every returned warm peer remain real owned values;
+neither a request identifier nor a previously observed snapshot constructs one.
+Idle pacing acquires no request, grant or replacement clock.
+
+Each request lends one fixed storage reader. Its first observation stays live
+through Known and acknowledgement, and must still pass before the second read.
+The two snapshots must match. Physical, peer and native posts run independently
+on failure. The completed counter original remains retained through native peer
+and saved-request settlement; consuming loan disposal is last. An error, lost
+loan or peer never returns the carrier to availability. This loop returns no
+ordinary Current object or completed operator restore result.
+
+The native archive profile explicitly refuses any schema object named
+`day2_rollout_generations`, `day2_rollout_runtime` or `day2_invocation_runtime`,
+case-insensitively. Empty, inactive, partial and malformed units are unsupported
+too. The check reads the captured image and the actual reset connection before
+mutation or target creation. It never drops an active selection, installs RWO
+tables or backfills captured executor history. A failure preserves the source
+and permanently refuses that attempt. Supporting ordinary RWO generations would
+require a separately reviewed complete transition.
+
+Current application-held captures, digest-backed trace policies, recorded
+observations, uncertain effects and budget debt remain part of the complete
+database. They are not disposable side stores. The existing sixteen-MiB image
+bound remains; larger valid application databases refuse without pruning. Only
+ordinary maintenance's two explicitly rebuildable auxiliary databases have its
+separate omission rule; this native archive profile does not adopt that rule.
+
+The scheduled backup binary and release helper retain their actual shared
+`OperationLease` through snapshot, verification and offsite completion. This is
+not a lease spanning separate standalone backup commands. This Controller driver
+does not enter that maintenance profile, forge its lease or substitute a native
+grant for it. Rehearsal, final checkpoint/admission and target-only recovery
+remain separate guarded operations. Native stop/drain, current-writer and
+captured-executor checks stay required independently.
+
+The final Host installer and protected operator route remain separate work.
+Portable SQLite/source controls qualify these comparisons and failure paths;
+they do not qualify genuine native owners, Linux execution or an operational
+end-to-end restore.
+
 This is the DATA/protocol portion of secure restore. It does not supply a genuine
 approval, complete incumbent fencing, an accepting archive reader, a native
 creator/P3, a receiving App keeper or a serving writer. The native supplier must

@@ -23,6 +23,7 @@ use std::{cell::Cell, rc::Rc};
 
 mod native_current;
 pub(in crate::security_epoch) use native_current::PendingControllerCurrentInstallation;
+pub(in crate::security_epoch) use native_current::RestoredControllerCurrentReadLoan;
 
 /// A closed borrow of the actual authenticated executor's fields, keeping its
 /// native source separately borrowable. No factory accepts replacement fields

@@ -13,7 +13,7 @@ use crate::security_epoch::{
     },
     credential_material::CredentialMaterial,
     identity_protocol,
-    native_clock::NativeAcquisition,
+    native_clock::{NativeAcquisition, NativeOriginalRefusal},
     native_enrollment::{EnrolledRoleStage, NativeRole, SameEnrolledOwner, StagePurpose},
     transport::{NativeHttp, Route},
 };
@@ -1545,6 +1545,32 @@ pub(in crate::security_epoch) struct RestoreCreatorRoot {
     volume_identity: DirectoryIdentity,
     directory_identity: DirectoryIdentity,
     original: NativeAcquisition,
+    previous: NativeOriginalRefusal,
+    owner: SameEnrolledOwner,
+    policy: InitialBootstrapPolicy,
+    store: EpochStore,
+}
+
+struct RestoreRootCurrentAttempt<'root, 'stage, 'role> {
+    root: &'root mut RestoreCreatorRoot,
+    stage: &'stage mut EnrolledRoleStage<'role>,
+    current: Option<NativeAcquisition>,
+    completed: bool,
+}
+
+impl Drop for RestoreRootCurrentAttempt<'_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            // Negative roots are usable during unwind, without observing the
+            // retired interval. Both actual connection and request stay dead.
+            self.stage.refuse_serving();
+            self.root.previous.refuse();
+            self.root.original.refuse();
+            if let Some(current) = &mut self.current {
+                current.refuse();
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1634,7 +1660,11 @@ impl CurrentVolumePhase<'_, '_> {
                 directory,
                 volume_identity,
                 directory_identity,
+                previous: original.retained_refusal(),
                 original,
+                owner: self.reader.stage.capture_same_owner()?,
+                policy: self.reader.policy.clone(),
+                store: self.reader.store.clone(),
             };
             root.check(held_root)?;
             // Physical admission does not retain provider-call authority for
@@ -1652,6 +1682,80 @@ impl CurrentVolumePhase<'_, '_> {
 }
 
 impl RestoreCreatorRoot {
+    /// Physical comparison under the actual fresh Controller request only.
+    /// The original retained during restore is negative identity, never a
+    /// sampled/renewed clock. This returns no Current, descriptor or witness.
+    pub(in crate::security_epoch) fn check_current(
+        &mut self,
+        held_root: &File,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        let mut attempt = RestoreRootCurrentAttempt {
+            root: self,
+            stage,
+            current: None,
+            completed: false,
+        };
+        let requested: Result<()> = (|| {
+            attempt
+                .root
+                .previous
+                .require_same(&attempt.root.original.retained_refusal())?;
+            attempt.stage.check_current_selection(
+                &attempt.root.policy,
+                &attempt.root.store,
+                NativeRole::EpochController,
+            )?;
+            attempt.root.owner.check(attempt.stage)?;
+            attempt.current = Some(
+                attempt
+                    .stage
+                    .narrow_io_acquisition(attempt.root.store.max_lease_seconds)?,
+            );
+            let current = attempt
+                .current
+                .as_mut()
+                .context("restore_root_current_missing")?;
+            current.remaining()?;
+            ensure!(
+                directory_identity(&attempt.root.volume)? == attempt.root.volume_identity
+                    && restore_private_directory(&attempt.root.directory)?
+                        == attempt.root.directory_identity
+                    && restore_private_directory(held_root)? == attempt.root.directory_identity,
+                "restore_writer_root_changed"
+            );
+            let named = restore_pin_directory(&attempt.root.volume)?;
+            ensure!(
+                restore_private_directory(&named)? == attempt.root.directory_identity,
+                "restore_writer_named_root_changed"
+            );
+            current.remaining()?;
+            Ok(())
+        })();
+        // Every native post is evaluated even after descriptor, path or primary
+        // failure. The child meets its actual shorter bound back into this SAME
+        // saved request; no scalar deadline or replacement acquisition is used.
+        let native_post = attempt.root.owner.check(attempt.stage);
+        let selected_post = attempt.stage.check_current_selection(
+            &attempt.root.policy,
+            &attempt.root.store,
+            NativeRole::EpochController,
+        );
+        let view_post = match &mut attempt.current {
+            Some(current) => attempt
+                .root
+                .owner
+                .meet_current_read_view(attempt.stage, current),
+            None => Err(anyhow::anyhow!("restore_root_current_missing")),
+        };
+        requested?;
+        native_post?;
+        selected_post?;
+        view_post?;
+        attempt.completed = true;
+        Ok(())
+    }
+
     /// Check the staging State's held file as INPUT; no root/FD can escape.
     /// The consuming Parent must also check its actual retained loan before
     /// every effect. These physical checks alone are not current authority.
@@ -1686,6 +1790,26 @@ impl Drop for RestoreCreatorRoot {
         self.original.refuse();
     }
 }
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <RestoreRootCurrentAttempt<'static, 'static, 'static> as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
 
 #[cfg(test)]
 #[path = "native_volume/restore_writer/tests.rs"]
