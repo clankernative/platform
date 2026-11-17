@@ -123,6 +123,13 @@ impl Manager {
         crate::oauth::native_management::runtime_response_scope(&self.runtime)
     }
 
+    pub(in crate::oauth) fn native_captured_response_scope(
+        &self,
+        sink: &crate::oauth::native_management::Sink,
+    ) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+        crate::oauth::native_management::captured_runtime_response_scope(&self.runtime, sink)
+    }
+
     pub(in crate::oauth) fn new(
         runtime: Arc<Runtime>,
         authority: Arc<admission::ArtifactApprovalAuthority>,

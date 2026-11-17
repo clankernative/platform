@@ -9,6 +9,85 @@ use std::{marker::PhantomData, rc::Rc, thread::ThreadId, time::Duration};
 
 const ORIGINAL: Duration = Duration::from_secs(300);
 
+/// Denial-only identity for the final restored HTTP executor. This owns no
+/// enrollment, clock, original, file or serving permission and exposes none.
+/// Keep direct thread observations in this existing controlled native boundary;
+/// consumer routing retains its actual registry and refusal roots separately.
+pub(super) struct ExecutorThread {
+    thread: ThreadId,
+    local: PhantomData<Rc<()>>,
+}
+
+impl ExecutorThread {
+    pub(super) fn here() -> Self {
+        Self {
+            thread: std::thread::current().id(),
+            local: PhantomData,
+        }
+    }
+
+    pub(super) fn check(&self) -> Result<()> {
+        ensure!(
+            self.thread == std::thread::current().id(),
+            "restored executor thread changed"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(super) fn foreign_executor_thread_data_fixture() -> ExecutorThread {
+    // Identity DATA only. This builds no native role, original or positive
+    // parent; a consumer can use it only to exercise its actual denial path.
+    let thread = std::thread::spawn(|| std::thread::current().id())
+        .join()
+        .unwrap();
+    ExecutorThread {
+        thread,
+        local: PhantomData,
+    }
+}
+
+#[cfg(test)]
+mod executor_thread_tests {
+    use super::*;
+
+    #[test]
+    fn actual_executor_identity_accepts_only_the_current_thread_without_an_original() -> Result<()>
+    {
+        let current = ExecutorThread::here();
+        current.check()?;
+        let foreign = foreign_executor_thread_data_fixture();
+        assert_eq!(
+            foreign.check().unwrap_err().to_string(),
+            "restored executor thread changed"
+        );
+        current.check()?;
+        Ok(())
+    }
+
+    const _: () = {
+        macro_rules! assert_not_impl {
+            ($bound:path) => {{
+                trait Ambiguous<T> {
+                    fn check() {}
+                }
+                impl<T: ?Sized> Ambiguous<()> for T {}
+                impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+                let _ = <ExecutorThread as Ambiguous<_>>::check;
+            }};
+        }
+        assert_not_impl!(Clone);
+        assert_not_impl!(Copy);
+        assert_not_impl!(Default);
+        assert_not_impl!(std::fmt::Debug);
+        assert_not_impl!(Send);
+        assert_not_impl!(Sync);
+        assert_not_impl!(serde::Serialize);
+        assert_not_impl!(serde::Deserialize<'static>);
+    };
+}
+
 /// Private composition seam implemented by the enrolled role adapter. Each
 /// sample reborrows the SAME accepted request against the retained enrollment;
 /// it may not replace either clock domain or restart either original. No production

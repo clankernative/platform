@@ -308,9 +308,9 @@ impl Endpoint {
     ) -> Result<()> {
         let scope = match self {
             Self::App(host) => {
-                response.app_scope(|| crate::web::native_runtime_response_scope(host))?
+                response.app_scope(|| crate::web::native_captured_response_scope(host, sink))?
             }
-            Self::Receiver(receiver) => receiver.native_runtime_response_scope()?,
+            Self::Receiver(receiver) => receiver.native_captured_response_scope(sink)?,
             Self::Shell(_) => None,
             #[cfg(test)]
             Self::Test(_) => None,
@@ -360,12 +360,74 @@ pub(crate) async fn serve(
     .await
 }
 
+/// Continue only the genuine restored executor already installed on THIS
+/// thread. This never enrolls again or moves a !Send owner to a new thread.
+pub(crate) async fn serve_restored(
+    endpoint: Endpoint,
+    listener: TcpListener,
+    admission: Arc<AtomicBool>,
+    owner: super::native_management::RestoredExecutorGuard,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    owner.require_executor()?;
+    let reactor = REACTOR
+        .with(|slot| slot.borrow().clone())
+        .or_else(|| Handle::try_current().ok())
+        .context("restored HTTP readiness runtime missing")?;
+    struct RestoreReactor(Option<Handle>);
+    impl Drop for RestoreReactor {
+        fn drop(&mut self) {
+            REACTOR.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let _reactor = RestoreReactor(REACTOR.with(|slot| slot.replace(Some(reactor))));
+    run(
+        endpoint,
+        listener,
+        crate::web::MAX_QUEUED,
+        admission,
+        shutdown,
+        ExecutorInstallation::Restored(owner),
+    )
+    .await
+}
+
 pub(crate) async fn serve_app(
     startup: crate::deployment::NativeAppStartup,
     admission: Arc<AtomicBool>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     launch(Launch::App(Box::new(startup), admission), shutdown).await
+}
+
+/// Only resource DATA crosses the final executor's thread boundary. The
+/// genuine restore receiver, parent and captured requests are born there.
+pub(crate) async fn serve_restored_app(
+    published: std::path::PathBuf,
+    listener: TcpListener,
+    concurrency: usize,
+    admission: Arc<AtomicBool>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    ensure!((1..=32).contains(&concurrency), "invalid HTTP concurrency");
+    launch(
+        Launch::Restored {
+            published,
+            listener,
+            concurrency,
+            admission,
+        },
+        shutdown,
+    )
+    .await
+}
+
+struct RestoredAdmission(Arc<AtomicBool>);
+
+impl Drop for RestoredAdmission {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 enum Launch {
@@ -376,6 +438,12 @@ enum Launch {
         admission: Arc<AtomicBool>,
     },
     App(Box<crate::deployment::NativeAppStartup>, Arc<AtomicBool>),
+    Restored {
+        published: std::path::PathBuf,
+        listener: TcpListener,
+        concurrency: usize,
+        admission: Arc<AtomicBool>,
+    },
 }
 
 impl Launch {
@@ -386,7 +454,37 @@ impl Launch {
                 listener,
                 capacity,
                 admission,
-            } => run(endpoint, listener, capacity, admission, shutdown, false).await,
+            } => {
+                run(
+                    endpoint,
+                    listener,
+                    capacity,
+                    admission,
+                    shutdown,
+                    ExecutorInstallation::Enroll,
+                )
+                .await
+            }
+            Self::Restored {
+                published,
+                listener,
+                concurrency,
+                admission,
+            } => {
+                let _closed = RestoredAdmission(Arc::clone(&admission));
+                ensure!(
+                    admission.load(Ordering::Acquire),
+                    "restored HTTP admission closed"
+                );
+                let installed =
+                    crate::security_epoch::native_enrollment::install_restored_app_host(
+                        &published,
+                        listener,
+                        concurrency,
+                        admission,
+                    )?;
+                installed.serve(shutdown).await
+            }
             Self::App(startup, admission) => {
                 let scopes = startup.selections()?;
                 super::native_management::install(
@@ -404,7 +502,7 @@ impl Launch {
                     crate::web::MAX_QUEUED,
                     admission,
                     shutdown,
-                    true,
+                    ExecutorInstallation::InitialInstalled,
                 )
                 .await
             }
@@ -430,13 +528,19 @@ async fn launch(launch: Launch, shutdown: impl Future<Output = ()> + Send + 'sta
     completion.await.context("native HTTP owner terminated")?
 }
 
+enum ExecutorInstallation {
+    Enroll,
+    InitialInstalled,
+    Restored(super::native_management::RestoredExecutorGuard),
+}
+
 async fn run(
     endpoint: Endpoint,
     listener: TcpListener,
     capacity: usize,
     admission: Arc<AtomicBool>,
     shutdown: impl Future<Output = ()>,
-    enrolled: bool,
+    installation: ExecutorInstallation,
 ) -> Result<()> {
     let owner = std::thread::current().id();
     // Fixtures create their originals on this final executor too. Only Send
@@ -449,19 +553,24 @@ async fn run(
         }
         endpoint => endpoint,
     };
-    if !enrolled {
+    if matches!(&installation, ExecutorInstallation::Enroll) {
         endpoint.install()?;
     }
     let (live_sender, mut live_receiver) = tokio::sync::mpsc::channel(32);
     LIVE.with(|slot| slot.replace(Some(live_sender)));
-    struct Clear;
+    struct Clear(ExecutorInstallation);
     impl Drop for Clear {
         fn drop(&mut self) {
-            super::native_management::clear();
+            match &self.0 {
+                ExecutorInstallation::Restored(owner) => owner.retire(),
+                ExecutorInstallation::Enroll | ExecutorInstallation::InitialInstalled => {
+                    super::native_management::clear()
+                }
+            }
             LIVE.with(|slot| slot.borrow_mut().take());
         }
     }
-    let _clear = Clear;
+    let _clear = Clear(installation);
     let endpoint = &endpoint;
     let (pump_stop, pump_stopped) = tokio::sync::watch::channel(false);
     let mut pump = std::pin::pin!(endpoint.pump(pump_stopped));
@@ -904,16 +1013,17 @@ mod finite_response_tests {
                         && matches!(&node.args[0], syn::Expr::Closure(closure)
                             if matches!(&*closure.body, syn::Expr::Call(call)
                                 if matches!(&*call.func, syn::Expr::Path(path)
-                                    if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["crate", "web", "native_runtime_response_scope"])
-                                && call.args.len() == 1
-                                && matches!(&call.args[0], syn::Expr::Path(path) if path.path.is_ident("host"))));
+                                    if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["crate", "web", "native_captured_response_scope"])
+                                && call.args.len() == 2
+                                && matches!(&call.args[0], syn::Expr::Path(path) if path.path.is_ident("host"))
+                                && matches!(&call.args[1], syn::Expr::Path(path) if path.path.is_ident("sink"))));
                     return;
                 }
                 syn::visit::visit_expr_method_call(self, node);
             }
             fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
                 if matches!(&*node.func, syn::Expr::Path(path)
-                    if path.path.segments.last().is_some_and(|part| part.ident == "native_runtime_response_scope"))
+                    if path.path.segments.last().is_some_and(|part| part.ident == "native_captured_response_scope"))
                 {
                     self.direct += 1;
                 }
@@ -947,15 +1057,22 @@ mod finite_response_tests {
         assert!(app_scope_wiring_is_preserved(source));
         let selected = concat!(
             "response.app_scope(|| crate::web::",
-            "native_runtime_response_scope(host))?"
+            "native_captured_response_scope(host, sink))?"
         );
         assert_eq!(source.matches(selected).count(), 1);
         let old = source.replacen(
             selected,
-            "crate::web::native_runtime_response_scope(host)?",
+            "crate::web::native_captured_response_scope(host, sink)?",
             1,
         );
         assert!(!app_scope_wiring_is_preserved(&old));
+        for replacement in [
+            "response.app_scope(|| crate::web::native_captured_response_scope(host, other))?",
+            "response.app_scope(|| crate::web::native_runtime_response_scope(host))?",
+        ] {
+            let changed = source.replacen(selected, replacement, 1);
+            assert!(!app_scope_wiring_is_preserved(&changed));
+        }
     }
 
     fn metadata_sink() -> super::super::native_management::Sink {
@@ -1188,6 +1305,314 @@ mod finite_response_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_server_retains_the_actual_installation_until_async_exit_and_retires_it() {
+        use quote::ToTokens;
+        use syn::visit::Visit;
+        let file = syn::parse_file(include_str!("native_http.rs")).unwrap();
+        let function = |name: &str| {
+            file.items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == name => Some(item),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let restored = function("serve_restored");
+        let first: syn::Stmt = syn::parse_quote!(owner.require_executor()?;);
+        let tail: syn::Stmt = syn::Stmt::Expr(
+            syn::parse_quote!(
+                run(
+                    endpoint,
+                    listener,
+                    crate::web::MAX_QUEUED,
+                    admission,
+                    shutdown,
+                    ExecutorInstallation::Restored(owner),
+                )
+                .await
+            ),
+            None,
+        );
+        let forwards = |body: &syn::Block| {
+            body.stmts.first().is_some_and(|actual| {
+                actual.to_token_stream().to_string() == first.to_token_stream().to_string()
+            }) && body.stmts.last().is_some_and(|actual| {
+                actual.to_token_stream().to_string() == tail.to_token_stream().to_string()
+            })
+        };
+        assert!(forwards(&restored.block));
+        let mut foreign = (*restored.block).clone();
+        *foreign.stmts.last_mut().unwrap() = syn::Stmt::Expr(
+            syn::parse_quote!(
+                run(
+                    endpoint,
+                    listener,
+                    crate::web::MAX_QUEUED,
+                    admission,
+                    shutdown,
+                    ExecutorInstallation::Enroll
+                )
+                .await
+            ),
+            None,
+        );
+        assert!(!forwards(&foreign));
+        let mut unchecked = (*restored.block).clone();
+        unchecked.stmts.remove(0);
+        assert!(!forwards(&unchecked));
+        fn retained(body: &syn::Block) -> bool {
+            use quote::ToTokens;
+            use syn::ext::IdentExt;
+            fn named(path: &syn::Path, name: &str) -> bool {
+                path.get_ident()
+                    .is_some_and(|actual| actual.unraw() == name)
+            }
+            let expected_guard: syn::Stmt = syn::parse_quote!(let _clear = Clear(installation););
+            let guards = body.stmts.iter().enumerate().filter(|(_, stmt)| {
+                matches!(stmt, syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(name) if name.ident == "_clear"))
+            }).collect::<Vec<_>>();
+            let [(guard, actual)] = guards.as_slice() else {
+                return false;
+            };
+            if actual.to_token_stream().to_string() != expected_guard.to_token_stream().to_string()
+            {
+                return false;
+            }
+            let Some(syn::Stmt::Expr(syn::Expr::Loop(_), None)) = body.stmts.last() else {
+                return false;
+            };
+            if *guard >= body.stmts.len() - 1 {
+                return false;
+            }
+            let structure: syn::ItemStruct = syn::parse_quote!(
+                struct Clear(ExecutorInstallation);
+            );
+            let disposal: syn::ItemImpl = syn::parse_quote!(impl Drop for Clear {
+                fn drop(&mut self) {
+                    match &self.0 {
+                        ExecutorInstallation::Restored(owner) => owner.retire(),
+                        ExecutorInstallation::Enroll | ExecutorInstallation::InitialInstalled => {
+                            super::native_management::clear()
+                        }
+                    }
+                    LIVE.with(|slot| slot.borrow_mut().take());
+                }
+            });
+            let structures = body.stmts[..*guard].iter().filter(|stmt| matches!(stmt,
+                syn::Stmt::Item(syn::Item::Struct(item)) if item.to_token_stream().to_string() == structure.to_token_stream().to_string()
+            )).count();
+            let disposals = body.stmts[..*guard].iter().filter(|stmt| matches!(stmt,
+                syn::Stmt::Item(syn::Item::Impl(item)) if item.to_token_stream().to_string() == disposal.to_token_stream().to_string()
+            )).count();
+            #[derive(Default)]
+            struct Uses {
+                constructions: usize,
+                moves: usize,
+            }
+            impl<'ast> syn::visit::Visit<'ast> for Uses {
+                fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                    self.constructions += usize::from(
+                        matches!(&*call.func,syn::Expr::Path(path) if path.qself.is_none() && named(&path.path,"Clear")),
+                    );
+                    syn::visit::visit_expr_call(self, call);
+                }
+                fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+                    self.moves += usize::from(path.qself.is_none() && named(&path.path, "_clear"));
+                    syn::visit::visit_expr_path(self, path);
+                }
+            }
+            let mut uses = Uses::default();
+            uses.visit_block(body);
+            fn mentions(tokens: proc_macro2::TokenStream) -> usize {
+                tokens
+                    .into_iter()
+                    .map(|token| match token {
+                        proc_macro2::TokenTree::Group(group) => mentions(group.stream()),
+                        proc_macro2::TokenTree::Ident(name) => {
+                            usize::from(name.unraw() == "_clear")
+                        }
+                        _ => 0,
+                    })
+                    .sum()
+            }
+            // The sole identifier is the declaration. Also inspect opaque
+            // macro tokens so an early move cannot hide inside select!.
+            structures == 1
+                && disposals == 1
+                && uses.constructions == 1
+                && uses.moves == 0
+                && mentions(body.to_token_stream()) == 1
+        }
+        let run = function("run");
+        assert!(retained(&run.block));
+        let guard = run.block.stmts.iter().position(|stmt| matches!(stmt,
+            syn::Stmt::Local(local) if matches!(&local.pat,syn::Pat::Ident(name) if name.ident == "_clear")
+        )).unwrap();
+        let mut early = (*run.block).clone();
+        early
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(drop(_clear);));
+        assert!(!retained(&early));
+        let mut raw_early = (*run.block).clone();
+        raw_early
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(drop(r#_clear);));
+        assert!(!retained(&raw_early));
+        let mut hidden = (*run.block).clone();
+        hidden
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(opaque! { drop(_clear); }));
+        assert!(!retained(&hidden));
+        let mut raw_hidden = (*run.block).clone();
+        raw_hidden
+            .stmts
+            .insert(guard + 1, syn::parse_quote!(opaque! { drop(r#_clear); }));
+        assert!(!retained(&raw_hidden));
+        let mut raw_extra = (*run.block).clone();
+        raw_extra.stmts.insert(
+            guard + 1,
+            syn::parse_quote!(let extra = r#Clear(other_installation);),
+        );
+        assert!(!retained(&raw_extra));
+        let mut removed = (*run.block).clone();
+        removed.stmts.remove(guard);
+        assert!(!retained(&removed));
+        let mut foreign = (*run.block).clone();
+        foreign.stmts[guard] = syn::parse_quote!(let _clear = Clear(other_installation););
+        assert!(!retained(&foreign));
+        let mut conditional = (*run.block).clone();
+        conditional.stmts[guard] = syn::parse_quote!(if false {
+            let _clear = Clear(installation);
+        });
+        assert!(!retained(&conditional));
+        let mut no_retirement = (*run.block).clone();
+        let disposal = no_retirement.stmts.iter_mut().find(|stmt| matches!(stmt,
+            syn::Stmt::Item(syn::Item::Impl(item)) if matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("Clear"))
+        )).unwrap();
+        *disposal = syn::parse_quote!(impl Drop for Clear { fn drop(&mut self) {} });
+        assert!(!retained(&no_retirement));
+    }
+
+    #[test]
+    fn restored_admission_closes_on_normal_error_and_unwind_without_a_native_owner() {
+        for panic in [false, true] {
+            let admission = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let retained = std::sync::Arc::clone(&admission);
+            let result = std::panic::catch_unwind(|| {
+                let _closed = super::RestoredAdmission(admission);
+                if panic {
+                    std::panic::panic_any(31u8);
+                }
+                Err::<(), _>("actual failure")
+            });
+            if panic {
+                assert_eq!(*result.unwrap_err().downcast::<u8>().unwrap(), 31);
+            } else {
+                assert_eq!(result.unwrap().unwrap_err(), "actual failure");
+            }
+            assert!(!retained.load(std::sync::atomic::Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn restored_launch_creates_native_owners_only_on_the_existing_final_executor_and_never_reenrolls()
+     {
+        use quote::ToTokens;
+        let file = syn::parse_file(include_str!("native_http.rs")).unwrap();
+        let entry = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "serve_restored_app" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let private_entry: syn::Visibility = syn::parse_quote!(pub(crate));
+        assert_eq!(
+            entry.vis.to_token_stream().to_string(),
+            private_entry.to_token_stream().to_string()
+        );
+        let expected: syn::Block = syn::parse_quote!({
+            ensure!((1..=32).contains(&concurrency), "invalid HTTP concurrency");
+            launch(
+                Launch::Restored {
+                    published,
+                    listener,
+                    concurrency,
+                    admission,
+                },
+                shutdown,
+            )
+            .await
+        });
+        assert_eq!(
+            entry.block.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        let run = file
+            .items
+            .iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("Launch")) {
+                    return None;
+                }
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == "run" => Some(item),
+                    _ => None,
+                })
+            })
+            .unwrap();
+        let syn::Stmt::Expr(syn::Expr::Match(branches), _) = &run.block.stmts[0] else {
+            panic!("actual source choice");
+        };
+        let branches = branches.arms.iter().filter(|arm| matches!(&arm.pat,syn::Pat::Struct(value) if value.path.segments.last().unwrap().ident == "Restored")).collect::<Vec<_>>();
+        assert_eq!(branches.len(), 1);
+        let syn::Expr::Block(branch) = &*branches[0].body else {
+            panic!("actual restored branch");
+        };
+        let expected: syn::Block = syn::parse_quote!({
+            let _closed = RestoredAdmission(Arc::clone(&admission));
+            ensure!(
+                admission.load(Ordering::Acquire),
+                "restored HTTP admission closed"
+            );
+            let installed = crate::security_epoch::native_enrollment::install_restored_app_host(
+                &published,
+                listener,
+                concurrency,
+                admission,
+            )?;
+            installed.serve(shutdown).await
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&branch.block));
+        for index in 0..branch.block.stmts.len() {
+            let mut changed = branch.block.clone();
+            changed.stmts.remove(index);
+            assert!(!guarded(&changed));
+        }
+        let mut wrong = branch.block.clone();
+        wrong.stmts[2] = syn::parse_quote!(let installed = fake_metadata.install_host(&published,listener,concurrency,admission)?;);
+        assert!(!guarded(&wrong));
+        let mut relaunched = branch.block.clone();
+        *relaunched.stmts.last_mut().unwrap() =
+            syn::Stmt::Expr(syn::parse_quote!(launch(installed, shutdown).await), None);
+        assert!(!guarded(&relaunched));
+        let source = branch.block.to_token_stream().to_string();
+        assert!(
+            !source.contains("Endpoint ::")
+                && !source.contains("native_management :: install")
+                && !source.contains("serve_app")
+        );
+    }
+
     use super::*;
     use axum::body::Bytes;
     use std::sync::{Condvar, Mutex};

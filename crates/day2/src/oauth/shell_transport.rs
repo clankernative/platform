@@ -456,6 +456,16 @@ impl AppApprovalReceiver {
         )
     }
 
+    pub(crate) fn native_captured_response_scope(
+        &self,
+        sink: &crate::oauth::native_management::Sink,
+    ) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+        self.management.as_ref().map_or_else(
+            || Ok(None),
+            |manager| manager.native_captured_response_scope(sink),
+        )
+    }
+
     fn dispatch(
         &self,
         method: &Method,

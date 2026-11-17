@@ -10,13 +10,13 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "scope": "const",
-      "fingerprint": "sha256:97f0640a4b09eaa4ca8269f9f1aa1d917524d5d85aaa2eca4f0bf3e42d4384e4",
+      "fingerprint": "sha256:9c362055c9cf80e26adf6c4578927ac4d9a115e3ce400ca809acd243436cd90f",
       "registration": null
     },
     {
       "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
       "scope": "const",
-      "fingerprint": "sha256:3a0e52266e5b4c08ab8b5fe189104924bade24310b0478b2572adc32e76f0a91",
+      "fingerprint": "sha256:696c88040d5b70eb1b9b53e450a98a23d91af8647b8d3389fabfd6bc9f7b39ec",
       "registration": null
     },
     {
@@ -28,7 +28,7 @@
     {
       "source": "crates/day2/src/oauth/native_management/response.rs",
       "scope": "const",
-      "fingerprint": "sha256:bb122587ec457e196937446c147ffcda028ccb1c4e882ccf542c87e0ab284112",
+      "fingerprint": "sha256:35c697043be43a1ef34fed27f2f535e1502e0d0c6646a35cd783e13fe4cc9944",
       "registration": null
     },
     {
@@ -125,7 +125,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "scope": "const",
-      "fingerprint": "sha256:663731a2b1117af5f3a558a7b4dc0a80e9cbdce37f919ebd3b7b1ab001b84609",
+      "fingerprint": "sha256:893c53348f0e524c2b1c484fc4289182b2cc43cf07672f3819c7c0e9f0e43be8",
       "registration": null
     },
     {
@@ -382,7 +382,7 @@
         }
       ],
       "methods": [
-        "pub (crate) fn bind_listener (self , runtime : Arc < Runtime > , current : & mut crate :: oauth :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < crate :: web :: BoundRestoredListener >",
+        "pub (crate) fn bind_listener (self , runtime : Arc < Runtime > , current : & mut crate :: oauth :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < (crate :: web :: BoundRestoredListener , crate :: oauth :: native_management :: NativeSelection ,) >",
         "pub (crate) fn install (self , runtime : Arc < Runtime > , mut parent : crate :: security_epoch :: serving :: RestoredAppServingOwner , mut captured : crate :: security_epoch :: serving :: CapturedRestoredServingRequest) -> Result < RestoredHostInstallation >"
       ],
       "factories": [
@@ -394,7 +394,7 @@
       "material_uses": [
         {
           "owner": "ConfiguredRestoredHost",
-          "signature": "pub (crate) fn bind_listener (self , runtime : Arc < Runtime > , current : & mut crate :: oauth :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < crate :: web :: BoundRestoredListener >"
+          "signature": "pub (crate) fn bind_listener (self , runtime : Arc < Runtime > , current : & mut crate :: oauth :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < (crate :: web :: BoundRestoredListener , crate :: oauth :: native_management :: NativeSelection ,) >"
         },
         {
           "owner": "ConfiguredRestoredHost",
@@ -425,9 +425,15 @@
         }
       ],
       "methods": [
-        "pub (crate) fn configure (self , runtime : & mut Arc < Runtime >) -> Result < ConfiguredRestoredHost >"
+        "pub (crate) fn configure (self , runtime : & mut Arc < Runtime >) -> Result < ConfiguredRestoredHost >",
+        "pub (crate) fn prepare (runtime : & Runtime , listener : tokio :: net :: TcpListener , concurrency : usize , admission : Arc < AtomicBool >) -> Result < Self >"
       ],
-      "factories": [],
+      "factories": [
+        {
+          "owner": "NativeRestoredHostInputs",
+          "signature": "pub (crate) fn prepare (runtime : & Runtime , listener : tokio :: net :: TcpListener , concurrency : usize , admission : Arc < AtomicBool >) -> Result < Self >"
+        }
+      ],
       "material_uses": [
         {
           "owner": "NativeRestoredHostInputs",
@@ -457,14 +463,26 @@
           }
         }
       ],
-      "methods": [],
+      "methods": [
+        "pub (crate) fn from_listener (listener : crate :: web :: InstalledRestoredListener) -> Self",
+        "pub (crate) async fn serve (self , shutdown : impl std :: future :: Future < Output = () >) -> Result < () >"
+      ],
       "factories": [
         {
           "owner": "ConfiguredRestoredHost",
           "signature": "pub (crate) fn install (self , runtime : Arc < Runtime > , mut parent : crate :: security_epoch :: serving :: RestoredAppServingOwner , mut captured : crate :: security_epoch :: serving :: CapturedRestoredServingRequest) -> Result < RestoredHostInstallation >"
+        },
+        {
+          "owner": "RestoredHostInstallation",
+          "signature": "pub (crate) fn from_listener (listener : crate :: web :: InstalledRestoredListener) -> Self"
         }
       ],
-      "material_uses": [],
+      "material_uses": [
+        {
+          "owner": "RestoredHostInstallation",
+          "signature": "pub (crate) async fn serve (self , shutdown : impl std :: future :: Future < Output = () >) -> Result < () >"
+        }
+      ],
       "proof_uses": []
     },
     {
@@ -794,6 +812,10 @@
       ],
       "factories": [
         {
+          "owner": null,
+          "signature": "async fn drive_restored_unit < 'request , 'original , T : hyper :: rt :: Write + Unpin > (request : & mut super :: request :: Lease , routing : & mut RestoredHostRouting , context : NativeConsumerContext < 'request , 'original > , runtime : & crate :: store :: Runtime , transport : & mut Transport < T > , first : (u64 , Operation) , refused : Rc < Cell < bool > >) -> Result < CompletedResponse >"
+        },
+        {
           "owner": "ResponseBorrow < '_ , '_ , '_ >",
           "signature": "async fn drive < T : hyper :: rt :: Write + Unpin > (& mut self , transport : & mut Transport < T > , mut request : (u64 , Operation)) -> Result < CompletedResponse >"
         }
@@ -857,6 +879,7 @@
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn from_restored < 'scope , 'request , 'native_original > (runtime : & 'a crate :: store :: Runtime , scope : & 'a mut RestoredServingScope < 'scope , 'request , 'native_original > , intent : & FreshIntent , phase : Phase , guard : & 'a ConsumerGuard) -> Result < Self >",
         "fn prepare_finalization (& mut self) -> Result < () >",
         "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (super) fn refuse (& mut self)",
@@ -873,6 +896,10 @@
         {
           "owner": null,
           "signature": "fn with_consumer_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , role : NativeRole , response : Option < & ResponseIdentity > , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < 'a , 'role , 'original >",
+          "signature": "fn from_restored < 'scope , 'request , 'native_original > (runtime : & 'a crate :: store :: Runtime , scope : & 'a mut RestoredServingScope < 'scope , 'request , 'native_original > , intent : & FreshIntent , phase : Phase , guard : & 'a ConsumerGuard) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -945,6 +972,10 @@
           "signature": "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >"
         },
         {
+          "owner": "RequestOwner",
+          "signature": "pub (super) fn with_human_consumer < T > (& self , sink : & Sink , intent : & FreshIntent , phase : super :: Phase , wall : i64 , guard : & super :: ConsumerGuard , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
           "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
           "signature": "fn human (owner : & 'owner mut Consumer < 'stage , 'role , 'original > , commit : SqlCommit) -> Self"
         }
@@ -998,6 +1029,14 @@
         {
           "owner": null,
           "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , response : Option < & ResponseIdentity > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ > , Option < & mut ServingParticipant > ,) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RequestOwner",
+          "signature": "pub (super) fn with_human_consumer < T > (& self , sink : & Sink , intent : & FreshIntent , phase : super :: Phase , wall : i64 , guard : & super :: ConsumerGuard , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Sink",
+          "signature": "async fn drive_restored_response < T : hyper :: rt :: Write + Unpin > (& self , mut transport : Transport < T > , first : (u64 , Operation) , intent : Option < FreshIntent > , effects : crate :: managed_credentials :: effects :: Captured , mut lease : Lease < Owners >) -> Result < () >"
         },
         {
           "owner": "Sink",
@@ -1094,6 +1133,7 @@
       "methods": [
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "fn from_restored < 'scope , 'request , 'original > (runtime : & 'a crate :: store :: Runtime , scope : & 'a mut RestoredServingScope < 'scope , 'request , 'original >) -> Result < Self >",
         "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "fn prepare_sql_commit (& mut self) -> Result < () >",
         "pub (super) fn refuse (& mut self)",
@@ -1107,6 +1147,10 @@
         {
           "owner": "AppCreator < '_ >",
           "signature": "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < 'a , 'role >",
+          "signature": "fn from_restored < 'scope , 'request , 'original > (runtime : & 'a crate :: store :: Runtime , scope : & 'a mut RestoredServingScope < 'scope , 'request , 'original >) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -1155,6 +1199,10 @@
           "signature": "pub (super) fn refuse (& mut self)"
         },
         {
+          "owner": "RequestOwner",
+          "signature": "pub (super) fn with_pending < T > (& self , sink : & Sink , app : & str , original : & mut super :: Original < EnrolledClock > , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
           "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
           "signature": "fn pending (owner : & 'owner mut PendingWriter < 'stage , 'role > , commit : SqlCommit) -> Self"
         }
@@ -1165,7 +1213,153 @@
     },
     {
       "source": "crates/day2/src/oauth/native_management.rs",
-      "type_name": "PreparedRestoredListener",
+      "type_name": "RestoredExecutorGuard",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "consumer_context"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
+        }
+      ],
+      "methods": [
+        "pub (crate) fn require_executor (& self) -> Result < () >",
+        "pub (crate) fn retire (& self)"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn install_restored_owner (mut routing : RestoredHostRouting , runtime : & crate :: store :: Runtime) -> Result < RestoredExecutorGuard >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoredExecutorGuard",
+          "signature": "pub (crate) fn require_executor (& self) -> Result < () >"
+        },
+        {
+          "owner": "RestoredExecutorGuard",
+          "signature": "pub (crate) fn retire (& self)"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:cb2f2112411a24db36eec2dc7e2a7a43e7267fef96bba64b4a5eab272c8b01c9"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "RestoredHostRouting",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "consumer_context"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
+        }
+      ],
+      "methods": [
+        "fn capture_human_clock (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink) -> Result < EnrolledOriginalClock >",
+        "fn capture_request (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink) -> Result < () >",
+        "fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < AuthorityScope >",
+        "fn sample_human_clock (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink , clock : & mut EnrolledOriginalClock) -> Result < Duration >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn prepare_restored_listener (configured : crate :: deployment :: ConfiguredRestoredHost , runtime : std :: sync :: Arc < crate :: store :: Runtime > , mut parent : crate :: security_epoch :: serving :: RestoredAppServingOwner , captured : crate :: security_epoch :: serving :: CapturedRestoredServingRequest) -> Result < RestoredHostRouting >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "async fn drive_restored_unit < 'request , 'original , T : hyper :: rt :: Write + Unpin > (request : & mut super :: request :: Lease , routing : & mut RestoredHostRouting , context : NativeConsumerContext < 'request , 'original > , runtime : & crate :: store :: Runtime , transport : & mut Transport < T > , first : (u64 , Operation) , refused : Rc < Cell < bool > >) -> Result < CompletedResponse >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn install_restored_host (mut routing : RestoredHostRouting) -> Result < crate :: deployment :: RestoredHostInstallation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn install_restored_owner (mut routing : RestoredHostRouting , runtime : & crate :: store :: Runtime) -> Result < RestoredExecutorGuard >"
+        },
+        {
+          "owner": "Owners",
+          "signature": "fn from_restored (routing : RestoredHostRouting) -> Result < Self >"
+        },
+        {
+          "owner": "RequestOwner",
+          "signature": "pub (super) fn sample_human_clock (& self , sink : & Sink , expected : & Role < RestoredHostRouting > , selection : & super :: NativeSelection , clock : & mut crate :: security_epoch :: native_enrollment :: EnrolledOriginalClock) -> Result < std :: time :: Duration >"
+        },
+        {
+          "owner": "RestoredHostRouting",
+          "signature": "fn capture_human_clock (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink) -> Result < EnrolledOriginalClock >"
+        },
+        {
+          "owner": "RestoredHostRouting",
+          "signature": "fn capture_request (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink) -> Result < () >"
+        },
+        {
+          "owner": "RestoredHostRouting",
+          "signature": "fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < AuthorityScope >"
+        },
+        {
+          "owner": "RestoredHostRouting",
+          "signature": "fn sample_human_clock (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink , clock : & mut EnrolledOriginalClock) -> Result < Duration >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:34bd22222ca92a35c387e984ca686653daa74a4a48a7d8d0b61366eeec9ca75a"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "RestoredRoutingAttempt",
       "kind": "private_material",
       "consuming_methods": [],
       "owning_children": [
@@ -1201,12 +1395,21 @@
       "methods": [],
       "factories": [
         {
-          "owner": null,
-          "signature": "pub (crate) fn prepare_restored_listener (configured : crate :: deployment :: ConfiguredRestoredHost , runtime : std :: sync :: Arc < crate :: store :: Runtime > , mut parent : crate :: security_epoch :: serving :: RestoredAppServingOwner , captured : crate :: security_epoch :: serving :: CapturedRestoredServingRequest) -> Result < PreparedRestoredListener >"
+          "owner": "RestoredHostRouting",
+          "signature": "fn capture_human_clock (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink) -> Result < EnrolledOriginalClock >"
+        },
+        {
+          "owner": "RestoredHostRouting",
+          "signature": "fn capture_request (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink) -> Result < () >"
+        },
+        {
+          "owner": "RestoredHostRouting",
+          "signature": "fn sample_human_clock (& mut self , runtime : & crate :: store :: Runtime , sink : & Sink , clock : & mut EnrolledOriginalClock) -> Result < Duration >"
         }
       ],
       "material_uses": [],
-      "proof_uses": []
+      "proof_uses": [],
+      "destructor": "sha256:c58320717accd3d9b7307e876467b9df3dd8ed7e5dae3f2153aa15f285fb8898"
     },
     {
       "source": "crates/day2/src/oauth/native_management.rs",
@@ -1336,16 +1539,17 @@
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn from_restored < 'scope , 'request , 'original > (runtime : & 'a crate :: store :: Runtime , phase : RuntimePhase , current : & 'a mut crate :: security_epoch :: serving :: RestoredServingScope < 'scope , 'request , 'original , >) -> Result < Self >",
         "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (super) fn refuse (& mut self)",
+        "pub (crate) fn require_restored_startup_selection (& mut self , runtime : & crate :: store :: Runtime , selection : & NativeSelection) -> Result < () >",
+        "pub (crate) fn require_restored_startup_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (super) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "fn require_sql_write (& mut self) -> Result < () >",
         "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
         "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >",
         "pub (crate) fn sql_read < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
-        "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >",
-        "fn from_restored < 'scope , 'request , 'original > (runtime : & 'a crate :: store :: Runtime , phase : RuntimePhase , current : & 'a mut crate :: security_epoch :: serving :: RestoredServingScope < 'scope , 'request , 'original , >) -> Result < Self >",
-        "pub (crate) fn require_restored_startup_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
-        "pub (super) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
       ],
       "factories": [
         {
@@ -1367,6 +1571,10 @@
           "signature": "pub (super) fn with_runtime_consumer < T > (runtime : & crate :: store :: Runtime , phase : RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
         },
         {
+          "owner": "RequestOwner",
+          "signature": "pub (super) fn with_runtime_consumer < T > (& self , sink : & Sink , runtime : & crate :: store :: Runtime , phase : super :: RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
           "owner": "RuntimeConsumer < '_ , '_ >",
           "signature": "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
         },
@@ -1377,6 +1585,14 @@
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
           "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (crate) fn require_restored_startup_selection (& mut self , runtime : & crate :: store :: Runtime , selection : & NativeSelection) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (crate) fn require_restored_startup_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
         },
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
@@ -1404,19 +1620,19 @@
         },
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
           "signature": "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "pub (super) fn with_consumer < T > (& self , runtime : & crate :: store :: Runtime , phase : super :: RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
         },
         {
           "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
           "signature": "fn runtime (owner : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self"
-        },
-        {
-          "owner": "RuntimeConsumer < '_ , '_ >",
-          "signature": "pub (crate) fn require_restored_startup_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
-        },
-        {
-          "owner": "RuntimeConsumer < '_ , '_ >",
-          "signature": "pub (super) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -1569,6 +1785,7 @@
         "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , native : ConsumerRequestOrigin , lease : ConsumerLeaseOrigin) -> Result < Self >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn require_affinity (& mut self , actual : & NativeConsumerAffinity) -> Result < () >",
+        "pub (crate) fn require_captured (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >",
         "pub (crate) fn require_human (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime , intent : & FreshIntent , phase : Phase) -> Result < () >",
         "pub (crate) fn require_origin (& mut self , actual : & NativeConsumerOrigin) -> Result < () >",
         "pub (crate) fn require_response (& mut self , runtime : & Runtime) -> Result < () >",
@@ -1579,6 +1796,7 @@
         "pub (crate) fn response_complete (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >",
         "pub (super) fn runtime_http (runtime : & 'request Runtime , phase : super :: RuntimePhase , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >",
         "fn runtime_input (runtime : & 'request Runtime , origin : ConsumerOrigin < 'request > , purpose : RuntimeServingUse) -> Result < Self >",
+        "pub (super) fn runtime_operation (runtime : & 'request Runtime , phase : super :: RuntimePhase , frame : & 'request RuntimeRequest) -> Result < Self >",
         "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , native : ConsumerRequestOrigin , lease : ConsumerLeaseOrigin) -> Result < Self >",
         "pub (super) fn startup_sql (runtime : & 'request Runtime , request : & super :: request :: StartupRequest) -> Result < Self >"
       ],
@@ -1606,6 +1824,10 @@
         {
           "owner": "NativeConsumerContext < 'request , 'static >",
           "signature": "pub (super) fn runtime_http (runtime : & 'request Runtime , phase : super :: RuntimePhase , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_operation (runtime : & 'request Runtime , phase : super :: RuntimePhase , frame : & 'request RuntimeRequest) -> Result < Self >"
         },
         {
           "owner": "NativeConsumerContext < 'request , 'static >",
@@ -1659,6 +1881,10 @@
         },
         {
           "owner": "NativeConsumerContext < 'request , 'original >",
+          "signature": "pub (crate) fn require_captured (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'original >",
           "signature": "pub (crate) fn require_human (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime , intent : & FreshIntent , phase : Phase) -> Result < () >"
         },
         {
@@ -1705,6 +1931,7 @@
         "pub (crate) fn require_origin (& mut self , actual : & NativeConsumerOrigin) -> Result < () >",
         "fn require_response_binding (& mut self) -> Result < () >",
         "pub (crate) fn require_runtime (& mut self , runtime : & Runtime) -> Result < () >",
+        "pub (super) fn runtime_operation (runtime : & 'request Runtime , frame : & 'request RuntimeRequest , request : & super :: request :: Lease) -> Result < Self >",
         "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >",
         "pub (super) fn startup (runtime : & 'request Runtime , request : & super :: request :: StartupLease) -> Result < Self >"
       ],
@@ -1712,6 +1939,10 @@
         {
           "owner": "NativeRequestFinalContext < 'request , 'original >",
           "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_operation (runtime : & 'request Runtime , frame : & 'request RuntimeRequest , request : & super :: request :: Lease) -> Result < Self >"
         },
         {
           "owner": "NativeRequestFinalContext < 'request , 'static >",
@@ -1758,6 +1989,27 @@
       ],
       "proof_uses": [],
       "destructor": "sha256:3bcc28869c053e0e8298c98271fcf15753c587c4d2ddde96d495418c40b5fa80"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
+      "type_name": "RuntimeContextFactoryAttempt",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "NativeConsumerContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_operation (runtime : & 'request Runtime , phase : super :: RuntimePhase , frame : & 'request RuntimeRequest) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_operation (runtime : & 'request Runtime , frame : & 'request RuntimeRequest , request : & super :: request :: Lease) -> Result < Self >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "destructor": "sha256:5b674edb6a3348c6ba8b9ea47f7e929f81b1c389a98fd9a90bf98ab2ca7b53d2"
     },
     {
       "source": "crates/day2/src/oauth/native_management/request.rs",
@@ -2001,6 +2253,84 @@
       "proof_uses": []
     },
     {
+      "source": "crates/day2/src/oauth/native_management/response.rs",
+      "type_name": "HumanSetup",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "RequestOwner",
+          "signature": "pub (super) fn with_human_consumer < T > (& self , sink : & Sink , intent : & FreshIntent , phase : super :: Phase , wall : i64 , guard : & super :: ConsumerGuard , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "destructor": "sha256:2b77b2a19222d78247c5f3262f5d00b05de47e9c689d801007cc0fe7bb05ad8d"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response.rs",
+      "type_name": "RuntimeRequest",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "fn capture (runtime : & crate :: store :: Runtime) -> Result < Rc < Self > >",
+        "pub (super) fn consumer_origin (& self , runtime : & crate :: store :: Runtime) -> Result < super :: request :: ConsumerRequestOrigin >",
+        "fn finish (& self) -> Result < () >",
+        "pub (super) fn refuse (& self)",
+        "pub (super) fn require_origin (& self , native : & super :: request :: ConsumerRequestOrigin) -> Result < () >",
+        "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (super) fn require_scope (& self , scope : & AuthorityScope) -> Result < () >",
+        "pub (super) fn run < T > (runtime : & crate :: store :: Runtime , operation : impl FnOnce () -> Result < T >) -> Result < T >",
+        "fn run_captured < T > (frame : Rc < Self > , operation : impl FnOnce () -> Result < T >) -> Result < T >",
+        "pub (super) fn with_consumer < T > (& self , runtime : & crate :: store :: Runtime , phase : super :: RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "RuntimeRequest",
+          "signature": "fn capture (runtime : & crate :: store :: Runtime) -> Result < Rc < Self > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RuntimeRequest",
+          "signature": "fn finish (& self) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "fn run_captured < T > (frame : Rc < Self > , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "pub (super) fn consumer_origin (& self , runtime : & crate :: store :: Runtime) -> Result < super :: request :: ConsumerRequestOrigin >"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "pub (super) fn refuse (& self)"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "pub (super) fn require_origin (& self , native : & super :: request :: ConsumerRequestOrigin) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "pub (super) fn require_scope (& self , scope : & AuthorityScope) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeRequest",
+          "signature": "pub (super) fn with_consumer < T > (& self , runtime : & crate :: store :: Runtime , phase : super :: RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:c275ee86f1cb8f37948a042c75b009ad4b6cd574626174245f9da27fb5237623"
+    },
+    {
       "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
       "type_name": "AppAuthorityStop",
       "kind": "private_material",
@@ -2090,6 +2420,7 @@
       "owning_children": [],
       "methods": [
         "pub (super) fn capture_app (& self , scope : & AuthorityScope , response : & ResponseIdentity) -> Result < () >",
+        "pub (super) fn capture_app_owner (& self , scope : & AuthorityScope , response : & ResponseIdentity , owner : & super :: Owners) -> Result < () >",
         "pub (super) fn capture_shell (& self , response : & ResponseIdentity) -> Result < () >",
         "pub (super) fn new () -> Self",
         "pub (super) fn prepare (& self , response : & ResponseIdentity) -> Result < Terminal >",
@@ -2106,6 +2437,10 @@
         {
           "owner": "ResponseTickets",
           "signature": "pub (super) fn capture_app (& self , scope : & AuthorityScope , response : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": "ResponseTickets",
+          "signature": "pub (super) fn capture_app_owner (& self , scope : & AuthorityScope , response : & ResponseIdentity , owner : & super :: Owners) -> Result < () >"
         },
         {
           "owner": "ResponseTickets",
@@ -10055,6 +10390,7 @@
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn checked_restored_reader_data (& mut self , selection : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >",
         "pub (super) fn from_restore (mut port : super :: RestoredRoleInstallPort) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn install_host (self , lineage : crate :: security_epoch :: bootstrap :: ActiveLineage , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >",
         "pub (in crate :: security_epoch) fn prepare_current_native (mut self , lineage : crate :: security_epoch :: bootstrap :: ActiveLineage) -> Result < PreparedRestoredAppNative >",
         "fn prepare_file_continuity (& mut self) -> Result < RestoredAppFileContinuity >",
         "fn prepare_peer_continuity (& mut self) -> Result < RestoredAppPeerContinuity >",
@@ -10082,6 +10418,10 @@
         {
           "owner": "PendingRestoredEnrollment",
           "signature": "pub (in crate :: security_epoch) fn checked_restored_reader_data (& mut self , selection : & day2_capabilities :: security_epoch :: EpochStore) -> Result < crate :: security_epoch :: firestore :: RestoreWriterPeerRead >"
+        },
+        {
+          "owner": "PendingRestoredEnrollment",
+          "signature": "pub (in crate :: security_epoch) fn install_host (self , lineage : crate :: security_epoch :: bootstrap :: ActiveLineage , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >"
         },
         {
           "owner": "PendingRestoredEnrollment",
@@ -10627,14 +10967,38 @@
           }
         }
       ],
-      "methods": [],
+      "methods": [
+        "fn check_posts (& mut self) -> Result < () >",
+        "fn require_parent (& mut self) -> Result < () >"
+      ],
       "factories": [
         {
           "owner": "CapturedRestoredAppRequest",
           "signature": "pub (in crate :: security_epoch) fn begin_current < 'scope , 'request , 'original > (& 'scope mut self , parent : & 'scope mut RetiredRestoredAppNative , context : NativeConsumerContext < 'request , 'original >) -> Result < RestoredAppCurrentPeer < 'scope , 'request , 'original > >"
+        },
+        {
+          "owner": "CapturedRestoredAppRequest",
+          "signature": "pub (in crate :: security_epoch) fn capture_human_clock (& mut self , parent : & mut RetiredRestoredAppNative) -> Result < EnrolledOriginalClock >"
+        },
+        {
+          "owner": "CapturedRestoredAppRequest",
+          "signature": "pub (in crate :: security_epoch) fn sample_human_clock (& mut self , parent : & mut RetiredRestoredAppNative , clock : & mut EnrolledOriginalClock) -> Result < Duration >"
+        },
+        {
+          "owner": "RestoredAppHostSetupNative",
+          "signature": "fn check_native (& mut self) -> Result < () >"
         }
       ],
-      "material_uses": [],
+      "material_uses": [
+        {
+          "owner": "RestoredAppBeginAttempt < '_ , '_ , '_ >",
+          "signature": "fn check_posts (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RestoredAppBeginAttempt < '_ , '_ , '_ >",
+          "signature": "fn require_parent (& mut self) -> Result < () >"
+        }
+      ],
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": [],
@@ -10685,6 +11049,7 @@
         "pub (in crate :: security_epoch) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime , access : NativeSqlUse) -> Result < () >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn reobserve (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require_captured (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_human (& mut self , intent : & crate :: oauth :: fresh_auth :: FreshIntent , phase : crate :: oauth :: native_management :: Phase) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_response (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
@@ -10742,6 +11107,10 @@
         {
           "owner": "RestoredAppCurrentPeer < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn reobserve (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RestoredAppCurrentPeer < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_captured (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
         },
         {
           "owner": "RestoredAppCurrentPeer < '_ , '_ , '_ >",
@@ -10868,7 +11237,7 @@
       ],
       "methods": [
         "fn check_native (& mut self) -> Result < () >",
-        "fn install (mut self , inputs : crate :: deployment :: NativeRestoredHostInputs) -> Result < crate :: deployment :: RestoredHostInstallation >",
+        "fn install (mut self , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)"
       ],
       "factories": [
@@ -10884,7 +11253,7 @@
         },
         {
           "owner": "RestoredAppHostSetupNative",
-          "signature": "fn install (mut self , inputs : crate :: deployment :: NativeRestoredHostInputs) -> Result < crate :: deployment :: RestoredHostInstallation >"
+          "signature": "fn install (mut self , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >"
         },
         {
           "owner": "RestoredAppHostSetupNative",
@@ -10946,6 +11315,58 @@
       ],
       "proof_uses": [],
       "destructor": "sha256:b0253b59932dc60bb0fad69514a7a49b7d488213bfaff7cf0d2b284587274ec3"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "RestoredAppRefusal",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "restore_receiver"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "storage"
+          }
+        }
+      ],
+      "methods": [
+        "pub (crate) fn refuse (& self)"
+      ],
+      "factories": [
+        {
+          "owner": "RetiredRestoredAppNative",
+          "signature": "pub (in crate :: security_epoch) fn retained_refusal (& self) -> RestoredAppRefusal"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RestoredAppRefusal",
+          "signature": "pub (crate) fn refuse (& self)"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -11316,72 +11737,6 @@
       "kind": "private_material",
       "consuming_methods": [],
       "destructor": "sha256:0d7f5f0026c194bc466ae0d723be90e0464590c330505684f8c63a9b80a453bb"
-    },
-    {
-      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
-      "type_name": "RestoredHumanClockAttempt",
-      "kind": "private_material",
-      "consuming_methods": [],
-      "owning_children": [
-        {
-          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore.rs",
-          "registration": {
-            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
-            "module": "restore"
-          }
-        },
-        {
-          "source": "crates/day2/src/security_epoch/native_enrollment/owner/restore_receiver.rs",
-          "registration": {
-            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
-            "module": "restore_receiver"
-          }
-        },
-        {
-          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
-          "registration": {
-            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
-            "module": "serving"
-          }
-        },
-        {
-          "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
-          "registration": {
-            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
-            "module": "storage"
-          }
-        }
-      ],
-      "methods": [
-        "fn check_posts (& mut self) -> Result < () >",
-        "fn require_parent (& mut self) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "CapturedRestoredAppRequest",
-          "signature": "pub (in crate :: security_epoch) fn capture_human_clock (& mut self , parent : & mut RetiredRestoredAppNative) -> Result < EnrolledOriginalClock >"
-        },
-        {
-          "owner": "CapturedRestoredAppRequest",
-          "signature": "pub (in crate :: security_epoch) fn sample_human_clock (& mut self , parent : & mut RetiredRestoredAppNative , clock : & mut EnrolledOriginalClock) -> Result < Duration >"
-        },
-        {
-          "owner": "RestoredAppHostSetupNative",
-          "signature": "fn check_native (& mut self) -> Result < () >"
-        }
-      ],
-      "material_uses": [
-        {
-          "owner": "RestoredHumanClockAttempt < '_ , '_ >",
-          "signature": "fn check_posts (& mut self) -> Result < () >"
-        },
-        {
-          "owner": "RestoredHumanClockAttempt < '_ , '_ >",
-          "signature": "fn require_parent (& mut self) -> Result < () >"
-        }
-      ],
-      "proof_uses": [],
-      "destructor": "sha256:cf5e766bbd435afbf7a6ca171466e63b8902aabc6b17bd998d884f35770e955e"
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -12030,8 +12385,9 @@
       ],
       "methods": [
         "pub (in crate :: security_epoch) fn capture_request (& mut self) -> Result < CapturedRestoredAppRequest >",
-        "pub (in crate :: security_epoch) fn install_host (self , inputs : crate :: deployment :: NativeRestoredHostInputs) -> Result < crate :: deployment :: RestoredHostInstallation >",
-        "pub (in crate :: security_epoch) fn prepare_host_native (self) -> Result < RestoredAppHostSetupNative >"
+        "pub (in crate :: security_epoch) fn install_host (self , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >",
+        "pub (in crate :: security_epoch) fn prepare_host_native (self) -> Result < RestoredAppHostSetupNative >",
+        "pub (in crate :: security_epoch) fn retained_refusal (& self) -> RestoredAppRefusal"
       ],
       "factories": [
         {
@@ -12040,10 +12396,6 @@
         }
       ],
       "material_uses": [
-        {
-          "owner": "RetiredRestoredAppNative",
-          "signature": "pub (in crate :: security_epoch) fn capture_request (& mut self) -> Result < CapturedRestoredAppRequest >"
-        },
         {
           "owner": "CapturedRestoredAppRequest",
           "signature": "pub (in crate :: security_epoch) fn begin_current < 'scope , 'request , 'original > (& 'scope mut self , parent : & 'scope mut RetiredRestoredAppNative , context : NativeConsumerContext < 'request , 'original >) -> Result < RestoredAppCurrentPeer < 'scope , 'request , 'original > >"
@@ -12062,11 +12414,19 @@
         },
         {
           "owner": "RetiredRestoredAppNative",
-          "signature": "pub (in crate :: security_epoch) fn install_host (self , inputs : crate :: deployment :: NativeRestoredHostInputs) -> Result < crate :: deployment :: RestoredHostInstallation >"
+          "signature": "pub (in crate :: security_epoch) fn capture_request (& mut self) -> Result < CapturedRestoredAppRequest >"
+        },
+        {
+          "owner": "RetiredRestoredAppNative",
+          "signature": "pub (in crate :: security_epoch) fn install_host (self , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >"
         },
         {
           "owner": "RetiredRestoredAppNative",
           "signature": "pub (in crate :: security_epoch) fn prepare_host_native (self) -> Result < RestoredAppHostSetupNative >"
+        },
+        {
+          "owner": "RetiredRestoredAppNative",
+          "signature": "pub (in crate :: security_epoch) fn retained_refusal (& self) -> RestoredAppRefusal"
         }
       ],
       "proof_uses": [],
@@ -12360,6 +12720,7 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self) -> Result < () >",
         "fn check_current_keeper (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn check_current_peer_anchors (& mut self , stage : & mut EnrolledRoleStage < '_ > , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn install_host (self , selection : & day2_capabilities :: security_epoch :: EpochStore , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >",
         "pub (in crate :: security_epoch :: native_enrollment) fn prepare_ordinary_role (mut self) -> Result < super :: super :: owner :: PendingRestoredEnrollment >",
         "fn prepare_runtime (& mut self) -> Result < crate :: store :: Runtime >",
         "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)",
@@ -12388,6 +12749,10 @@
         {
           "owner": "AcceptedRestoredApp",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AcceptedRestoredApp",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn install_host (self , selection : & day2_capabilities :: security_epoch :: EpochStore , listener : tokio :: net :: TcpListener , concurrency : usize , admission : std :: sync :: Arc < std :: sync :: atomic :: AtomicBool >) -> Result < RestoredHostInstallation >"
         },
         {
           "owner": "AcceptedRestoredApp",
@@ -18856,7 +19221,8 @@
       "methods": [
         "pub (crate) fn capture_request (& mut self) -> Result < CapturedRestoredServingRequest >",
         "pub (in crate :: security_epoch) fn from_native (native : RetiredRestoredAppNative) -> Self",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn retained_refusal (& self) -> Result < RestoredAppRefusal >"
       ],
       "factories": [
         {
@@ -18888,6 +19254,10 @@
         {
           "owner": "RestoredAppServingOwner",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "RestoredAppServingOwner",
+          "signature": "pub (crate) fn retained_refusal (& self) -> Result < RestoredAppRefusal >"
         }
       ],
       "proof_uses": []
@@ -18899,11 +19269,13 @@
       "consuming_methods": [],
       "owning_children": [],
       "methods": [
+        "pub (crate) fn borrow_human (& mut self , runtime : & crate :: store :: Runtime , intent : & crate :: oauth :: fresh_auth :: FreshIntent , phase : crate :: oauth :: native_management :: Phase) -> Result < & mut dyn RestoredHumanCurrent >",
+        "pub (crate) fn borrow_pending (& mut self , runtime : & crate :: store :: Runtime) -> Result < & mut dyn RestoredSqlCurrent >",
         "pub (crate) fn borrow_response (& mut self , runtime : & crate :: store :: Runtime) -> Result < & mut dyn RestoredResponseCurrent >",
         "pub (crate) fn borrow_runtime (& mut self , runtime : & crate :: store :: Runtime , purpose : RuntimeServingUse) -> Result < & mut dyn RestoredRuntimeCurrent >",
         "pub (crate) fn finish (self) -> Result < () >",
         "pub (crate) fn finish_excluded (& mut self) -> Result < () >",
-        "pub (crate) fn require_human (& mut self , runtime : & crate :: store :: Runtime , intent : & crate :: oauth :: fresh_auth :: FreshIntent , phase : crate :: oauth :: native_management :: Phase) -> Result < () >"
+        "pub (crate) fn require_app_selection (& mut self , runtime : & crate :: store :: Runtime , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore) -> Result < () >"
       ],
       "factories": [
         {
@@ -18912,6 +19284,14 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "RestoredServingScope < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn borrow_human (& mut self , runtime : & crate :: store :: Runtime , intent : & crate :: oauth :: fresh_auth :: FreshIntent , phase : crate :: oauth :: native_management :: Phase) -> Result < & mut dyn RestoredHumanCurrent >"
+        },
+        {
+          "owner": "RestoredServingScope < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn borrow_pending (& mut self , runtime : & crate :: store :: Runtime) -> Result < & mut dyn RestoredSqlCurrent >"
+        },
         {
           "owner": "RestoredServingScope < '_ , '_ , '_ >",
           "signature": "pub (crate) fn borrow_response (& mut self , runtime : & crate :: store :: Runtime) -> Result < & mut dyn RestoredResponseCurrent >"
@@ -18930,7 +19310,7 @@
         },
         {
           "owner": "RestoredServingScope < '_ , '_ , '_ >",
-          "signature": "pub (crate) fn require_human (& mut self , runtime : & crate :: store :: Runtime , intent : & crate :: oauth :: fresh_auth :: FreshIntent , phase : crate :: oauth :: native_management :: Phase) -> Result < () >"
+          "signature": "pub (crate) fn require_app_selection (& mut self , runtime : & crate :: store :: Runtime , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore) -> Result < () >"
         }
       ],
       "proof_uses": []
@@ -20886,10 +21266,38 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn bind (runtime : Arc < Runtime > , listener : TcpListener , edge : & crate :: artifact :: Edge , verifier : crate :: iap :: Verifier , receiver : Arc < crate :: oauth :: shell_transport :: AppApprovalReceiver > , concurrency : usize , current : & mut crate :: oauth :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < BoundRestoredListener >"
+          "signature": "pub (super) fn bind (runtime : Arc < Runtime > , listener : TcpListener , edge : & crate :: artifact :: Edge , verifier : crate :: iap :: Verifier , receiver : Arc < crate :: oauth :: shell_transport :: AppApprovalReceiver > , options : RestoredListenerOptions , current : & mut crate :: oauth :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < BoundRestoredListener >"
         }
       ],
-      "material_uses": [],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn install (prepared : BoundRestoredListener , routing : crate :: oauth :: native_management :: RestoredHostRouting) -> Result < InstalledRestoredListener >"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/web_restored_listener.rs",
+      "type_name": "InstalledRestoredListener",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (crate) async fn serve (self , shutdown : impl std :: future :: Future < Output = () >) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn install (prepared : BoundRestoredListener , routing : crate :: oauth :: native_management :: RestoredHostRouting) -> Result < InstalledRestoredListener >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "InstalledRestoredListener",
+          "signature": "pub (crate) async fn serve (self , shutdown : impl std :: future :: Future < Output = () >) -> Result < () >"
+        }
+      ],
       "proof_uses": []
     }
   ],

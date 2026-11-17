@@ -3,6 +3,7 @@
 //! no mode, clock fallback or ordinary-role adoption is implemented here.
 #[cfg(target_os = "linux")]
 use super::{birth, channel, issuer_peer, policy, protocol};
+use crate::deployment::RestoredHostInstallation;
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_clock::{NativeAcquisition, NativeOriginalRefusal};
 #[cfg(target_os = "linux")]
@@ -21,6 +22,46 @@ mod preparation;
 mod read_identity;
 mod receiver;
 mod transport;
+
+/// One fixed native admission and installation operation. All intermediate
+/// owners stay inside the genuine receiver's lifetime. The path is only a
+/// desired input checked against the Controller's signed Instance digest;
+/// it cannot supply a process, keeper, lineage or grant.
+pub(crate) fn install_restored_app_host(
+    published: &std::path::Path,
+    listener: tokio::net::TcpListener,
+    concurrency: usize,
+    admission: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<RestoredHostInstallation> {
+    let receiver = RestoredAppReceiver::begin()?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (receiver, published, listener, concurrency, admission);
+        anyhow::bail!("native_restore_platform_unsupported");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let selection = receiver.policy.store.clone();
+        let accepted = receiver
+            .receive()?
+            .connect_restore()?
+            .capture_reset_file()?
+            .prepare()?
+            .await_writer()?
+            .authenticate_read()?
+            .reobserve_writer()?
+            .admit_installed_artifact()?
+            .select_instance(published)?
+            .enter_writer_phase()?
+            .create_keeper()?
+            .acknowledge()?
+            .receive_role_handoff()?
+            .receive_role_decision()?
+            .confirm_with_issuer()?
+            .await_controller_acceptance()?;
+        accepted.install_host(&selection, listener, concurrency, admission)
+    }
+}
 
 // Fields stay private to this closed module. Only the reviewed client and
 // fixed restore transport children may borrow the same actual owners. This
@@ -651,4 +692,59 @@ struct ReceivedRestorePacket {
     #[cfg(target_os = "linux")]
     packet: rustix::net::ReceivedPidfdPacket,
     local_only: PhantomData<Rc<()>>,
+}
+
+// Resource-free negative roots only: no AcceptedRestoredApp, keeper, enrolled
+// owner, native stage or successful history loan is fabricated by these tests.
+#[cfg(test)]
+mod refusal_test_support {
+    use super::*;
+
+    impl RestoredAppHistory {
+        pub(in crate::security_epoch::native_enrollment) fn empty_refusal_test_root() -> Rc<Self> {
+            #[cfg(target_os = "linux")]
+            let negative_original = |label: &[u8]| {
+                NativeAcquisition::fixture(
+                    day2_capabilities::Digest::new(label),
+                    std::process::id(),
+                    std::time::Duration::from_secs(100),
+                    std::time::Duration::from_secs(5),
+                )
+                .retained_refusal()
+            };
+            Rc::new(Self {
+                retained: Cell::new(None),
+                refused: Cell::new(false),
+                #[cfg(target_os = "linux")]
+                receiver_refusal: negative_original(b"negative-only receiver fixture"),
+                #[cfg(target_os = "linux")]
+                reader_refusal: negative_original(b"negative-only reader fixture"),
+                #[cfg(target_os = "linux")]
+                channel_refusal: Rc::new(Cell::new(false)),
+            })
+        }
+
+        pub(in crate::security_epoch::native_enrollment) fn all_refusal_test_roots_set(
+            &self,
+        ) -> bool {
+            if !self.refused.get() {
+                return false;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                self.receiver_refusal
+                    .require_same(&self.receiver_refusal)
+                    .is_err()
+                    && self
+                        .reader_refusal
+                        .require_same(&self.reader_refusal)
+                        .is_err()
+                    && self.channel_refusal.get()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                true
+            }
+        }
+    }
 }

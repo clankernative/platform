@@ -8,10 +8,12 @@ use super::{
 };
 use crate::security_epoch::native_enrollment::{
     EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeRole,
+    RestoredAppRefusal,
 };
 use crate::security_epoch::serving::{
-    CurrentServingPhase, NativeProviderUse, NativeSqlUse, ResponseIdentity, RestoredRuntimeCurrent,
-    ServingParticipant, ServingUse,
+    CurrentServingPhase, NativeProviderUse, NativeSqlUse, ResponseIdentity, RestoredHumanCurrent,
+    RestoredRuntimeCurrent, RestoredServingScope, RestoredSqlCurrent, ServingParticipant,
+    ServingUse,
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
@@ -32,6 +34,7 @@ mod response_tickets;
 pub(crate) use consumer_context::{
     NativeConsumerAffinity, NativeConsumerContext, NativeRequestFinalContext,
 };
+use response::RuntimeRequest;
 pub(crate) use response_tickets::AppAuthorityStop;
 
 type Role = response::Role<EnrolledProcessRoleOwner>;
@@ -52,34 +55,101 @@ impl NativeSelection {
 
 struct EnrolledClock {
     clock: EnrolledOriginalClock,
-    role: Role,
+    source: EnrolledClockSource,
     selection: NativeSelection,
     kind: NativeRole,
 }
+
+enum EnrolledClockSource {
+    Initial(Role),
+    Restored(response::Role<RestoredHostRouting>),
+}
+
 impl Clock for EnrolledClock {
     fn origin(&self) -> Duration {
         self.clock.origin()
     }
     fn sample(&mut self) -> Result<Duration> {
-        let mut role = self
-            .role
-            .try_borrow_mut()
-            .context("native role already borrowed")?;
-        current_sink()?
-            .request
-            .with_stage(&mut role, &self.selection, self.kind, |mut stage| {
-                self.clock.sample(&mut stage)
-            })
+        let sink = current_sink()?;
+        match &self.source {
+            EnrolledClockSource::Initial(role) => {
+                let mut role = role
+                    .try_borrow_mut()
+                    .context("native role already borrowed")?;
+                sink.request
+                    .with_stage(&mut role, &self.selection, self.kind, |mut stage| {
+                        self.clock.sample(&mut stage)
+                    })
+            }
+            EnrolledClockSource::Restored(routing) => sink.request_owner.sample_human_clock(
+                &sink,
+                routing,
+                &self.selection,
+                &mut self.clock,
+            ),
+        }
     }
 }
 
 struct Owners {
-    role: Role,
+    source: OwnerSource,
     kind: NativeRole,
     selection: NativeSelection,
     originals: BTreeMap<String, StoredOriginal<EnrolledClock>>,
-    storage: AppStorage,
     response_rights: response_tickets::ResponseRights,
+}
+
+struct InitialOwner {
+    role: Role,
+    storage: AppStorage,
+}
+
+enum OwnerSource {
+    Initial(InitialOwner),
+    Restored {
+        routing: response::Role<RestoredHostRouting>,
+        refusal: Rc<RestoredAppRefusal>,
+    },
+}
+
+impl Owners {
+    fn refuse(&mut self) {
+        match &mut self.source {
+            OwnerSource::Initial(initial) => initial.storage.refuse(),
+            OwnerSource::Restored { refusal, .. } => refusal.refuse(),
+        }
+    }
+
+    /// Only a real prepared graph may enter this source. Ticket bookkeeping
+    /// never proves native authority; any prior same-scope issuance entry
+    /// (including dead/sealed/unknown) makes this first-install profile refuse.
+    fn from_restored(routing: RestoredHostRouting) -> Result<Self> {
+        let selection = routing.selection.clone();
+        let refusal = Rc::clone(&routing.refusal);
+        let owners = Self {
+            source: OwnerSource::Restored {
+                routing: response::Role::new(routing),
+                refusal,
+            },
+            kind: NativeRole::AppHost,
+            selection,
+            originals: BTreeMap::new(),
+            response_rights: response_tickets::ResponseRights::new(),
+        };
+        owners
+            .response_rights
+            .install_issuance(owners.selection.scope())?;
+        Ok(owners)
+    }
+}
+
+impl Drop for Owners {
+    fn drop(&mut self) {
+        self.refuse();
+        for stored in self.originals.values_mut() {
+            stored.original.refuse();
+        }
+    }
 }
 
 /// Produced only by the actual response loop after its Complete operation
@@ -177,7 +247,51 @@ impl AppStorage {
 
 thread_local! {
     static OWNERS: Rc<RefCell<response::Registry<Owners>>> = Rc::new(RefCell::new(response::Registry::default()));
-    static ACTIVE_SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
+    static ACTIVE_REQUEST: RefCell<Option<ActiveRequest>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone)]
+enum ActiveRequest {
+    Http(Sink),
+    Runtime(Rc<RuntimeRequest>),
+}
+
+pub(super) fn require_new_runtime_frame() -> Result<()> {
+    ACTIVE_REQUEST.with(|slot| {
+        ensure!(
+            slot.try_borrow()?.is_none(),
+            "native operation already active"
+        );
+        Ok(())
+    })
+}
+
+fn with_runtime_frame<T>(
+    frame: Rc<RuntimeRequest>,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    require_new_runtime_frame()?;
+    let previous =
+        ACTIVE_REQUEST.with(|slot| slot.replace(Some(ActiveRequest::Runtime(Rc::clone(&frame)))));
+    let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    let restored = ACTIVE_REQUEST.with(|slot| {
+        *slot.try_borrow_mut()? = previous;
+        Ok::<_, anyhow::Error>(())
+    });
+    if restored.is_err() {
+        frame.refuse();
+    }
+    match requested {
+        Ok(result) => {
+            let value = result?;
+            restored?;
+            Ok(value)
+        }
+        Err(payload) => {
+            frame.refuse();
+            std::panic::resume_unwind(payload)
+        }
+    }
 }
 
 /// Install only on the final HTTP executor; each explicitly selected scope
@@ -242,11 +356,13 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                 .insert(
                     selection.scope().app.as_str().into(),
                     Owners {
-                        role: Role::new(role),
+                        source: OwnerSource::Initial(InitialOwner {
+                            role: Role::new(role),
+                            storage,
+                        }),
                         kind,
                         selection: selection.clone(),
                         originals: BTreeMap::new(),
-                        storage,
                         response_rights,
                     }
                 )
@@ -301,17 +417,21 @@ pub(crate) fn prepare_initial_app_storage(
             owners.selection.policy == *policy && owners.selection.store == *store,
             "native App selected policy changed"
         );
+        let OwnerSource::Initial(initial) = &mut owners.source else {
+            owners.refuse();
+            anyhow::bail!("initial native owner required; restored source cannot fall back");
+        };
         // Consume the completed connector before waiting or acquiring a new
         // stage. A failed/unknown attempt cannot reconnect or adopt from DATA.
         let AppStorage::Connected(mut connection) =
-            std::mem::replace(&mut owners.storage, AppStorage::Refused)
+            std::mem::replace(&mut initial.storage, AppStorage::Refused)
         else {
             anyhow::bail!("native App storage attempt already spent");
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             {
                 connection.wait_ready()?;
-                let mut role = owners.role.try_borrow_mut()?;
+                let mut role = initial.role.try_borrow_mut()?;
                 let mut stage = role.begin_initial_first_holder_stage()?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
                 let mut offer = AuthenticatedInitialHolderOffer::receive(*connection, &mut stage)?;
@@ -320,7 +440,7 @@ pub(crate) fn prepare_initial_app_storage(
                 )?;
                 let holder = offer.finish(file)?;
                 let storage = AppInitialStorageContinuity::retain(holder)?;
-                owners.storage = AppStorage::Bootstrapping(Box::new(AppStorageBootstrap::retain(
+                initial.storage = AppStorage::Bootstrapping(Box::new(AppStorageBootstrap::retain(
                     storage, policy, store,
                 )?));
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
@@ -331,19 +451,19 @@ pub(crate) fn prepare_initial_app_storage(
             // serving never selects this purpose. A failed or incomplete step
             // cannot restart this once-only startup attempt.
             for _ in 0..6 {
-                let AppStorage::Bootstrapping(storage) = &mut owners.storage else {
+                let AppStorage::Bootstrapping(storage) = &mut initial.storage else {
                     anyhow::bail!("native App bootstrap owner unavailable")
                 };
                 storage.prepare_current()?;
-                let mut role = owners.role.try_borrow_mut()?;
+                let mut role = initial.role.try_borrow_mut()?;
                 let mut stage = role.begin_storage_bootstrap_stage()?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
                 storage.advance(&mut stage)?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
             }
-            let storage = std::mem::replace(&mut owners.storage, AppStorage::Refused);
+            let storage = std::mem::replace(&mut initial.storage, AppStorage::Refused);
             let AppStorage::Bootstrapping(storage) = storage else {
-                owners.storage = storage;
+                initial.storage = storage;
                 anyhow::bail!("native App bootstrap owner unavailable")
             };
             match storage.into_active() {
@@ -351,14 +471,14 @@ pub(crate) fn prepare_initial_app_storage(
                     // Connection admission completes before any HTTP original
                     // can borrow this participant. Warm requests cannot mint
                     // provider credentials or enter this cold constructor.
-                    let mut role = owners.role.try_borrow_mut()?;
+                    let mut role = initial.role.try_borrow_mut()?;
                     let mut stage = role.begin_current_stage()?;
                     let participant = ServingParticipant::app(storage, &mut stage)?;
-                    owners.storage = AppStorage::Participant(Box::new(participant));
+                    initial.storage = AppStorage::Participant(Box::new(participant));
                     Ok(())
                 }
                 Err(storage) => {
-                    owners.storage = AppStorage::Bootstrapping(storage);
+                    initial.storage = AppStorage::Bootstrapping(storage);
                     anyhow::bail!("native App activation incomplete")
                 }
             }
@@ -366,11 +486,11 @@ pub(crate) fn prepare_initial_app_storage(
         match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
-                owners.storage.refuse();
+                initial.storage.refuse();
                 Err(error)
             }
             Err(panic) => {
-                owners.storage.refuse();
+                initial.storage.refuse();
                 std::panic::resume_unwind(panic)
             }
         }
@@ -394,12 +514,16 @@ fn with_app_participant<T>(
             owners.kind == NativeRole::AppHost,
             "native storage requires App owner"
         );
-        let AppStorage::Participant(storage) = &mut owners.storage else {
+        let OwnerSource::Initial(initial) = &mut owners.source else {
+            owners.refuse();
+            anyhow::bail!("initial native owner required; restored source cannot fall back");
+        };
+        let AppStorage::Participant(storage) = &mut initial.storage else {
             anyhow::bail!("native active App holder unavailable")
         };
         let request = current_sink()?.request;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut role = owners.role.try_borrow_mut()?;
+            let mut role = initial.role.try_borrow_mut()?;
             request.with_stage(&mut role, &owners.selection, owners.kind, |mut stage| {
                 storage.prepare_current()?;
                 let value = operation(storage, &mut stage)?;
@@ -410,11 +534,11 @@ fn with_app_participant<T>(
         match result {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => {
-                owners.storage.refuse();
+                initial.storage.refuse();
                 Err(error)
             }
             Err(panic) => {
-                owners.storage.refuse();
+                initial.storage.refuse();
                 std::panic::resume_unwind(panic)
             }
         }
@@ -427,9 +551,18 @@ pub(crate) fn with_app_request<T>(
     scope: &AuthorityScope,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if ACTIVE_SINK.with(|slot| slot.try_borrow().map(|slot| slot.is_some()))? {
-        return operation();
+    if let Some(active) =
+        ACTIVE_REQUEST.with(|slot| Ok::<_, anyhow::Error>(slot.try_borrow()?.clone()))?
+    {
+        match active {
+            ActiveRequest::Http(_) => return operation(),
+            ActiveRequest::Runtime(frame) => {
+                frame.require_scope(scope)?;
+                return operation();
+            }
+        }
     }
+    response::require_autonomous_source(scope)?;
     let sink = Sink::new();
     sink.capture_app_request(scope)?;
     let result =
@@ -464,10 +597,22 @@ pub(crate) fn with_runtime_operation<T>(
     runtime: &crate::store::Runtime,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<Option<T>> {
+    if let Some(active) =
+        ACTIVE_REQUEST.with(|slot| Ok::<_, anyhow::Error>(slot.try_borrow()?.clone()))?
+    {
+        match active {
+            ActiveRequest::Runtime(frame) => {
+                frame.require_runtime(runtime)?;
+                return operation().map(Some);
+            }
+            ActiveRequest::Http(sink) if sink.request_owner.uses_restored()? => return Ok(None),
+            ActiveRequest::Http(_) => {}
+        }
+    }
     if !runtime.uses_native_storage() {
         return operation().map(Some);
     }
-    let scope = OWNERS.with(|owners| {
+    let selected = OWNERS.with(|owners| {
         let owners = owners.try_borrow()?;
         // The leased owner is deliberately absent from the available map.
         // Exclude this unstarted wakeup before trying to resolve that value.
@@ -482,11 +627,17 @@ pub(crate) fn with_runtime_operation<T>(
                 && owner.selection.scope().app.as_str() == runtime.app(),
             "native operation owner changed"
         );
-        Ok(Some(owner.selection.scope().clone()))
+        Ok(Some((
+            owner.selection.scope().clone(),
+            matches!(&owner.source, OwnerSource::Restored { .. }),
+        )))
     })?;
-    let Some(scope) = scope else {
+    let Some((scope, restored)) = selected else {
         return Ok(None);
     };
+    if restored {
+        return response::RuntimeRequest::run(runtime, operation).map(Some);
+    }
     with_app_request(&scope, operation).map(Some)
 }
 
@@ -623,11 +774,28 @@ enum PendingSource<'a, 'role> {
         current: &'a mut dyn CurrentServingPhase,
         stage: &'a mut EnrolledRoleStage<'role>,
     },
+    Restored {
+        current: &'a mut dyn RestoredSqlCurrent,
+        runtime: &'a crate::store::Runtime,
+    },
     #[cfg(test)]
     Simulated {
         original: &'a mut Original<fixtures::SimulationClock>,
         stage: fixtures::SimulationStage,
     },
+}
+
+impl<'a, 'role> PendingWriter<'a, 'role> {
+    fn from_restored<'scope, 'request, 'original>(
+        runtime: &'a crate::store::Runtime,
+        scope: &'a mut RestoredServingScope<'scope, 'request, 'original>,
+    ) -> Result<Self> {
+        let current = scope.borrow_pending(runtime)?;
+        Ok(Self {
+            source: PendingSource::Restored { current, runtime },
+            committed: false,
+        })
+    }
 }
 
 impl PendingWriter<'_, '_> {
@@ -687,6 +855,7 @@ impl PendingWriter<'_, '_> {
                 let sample = original.clock.clock.sample(stage);
                 original.check_capture_sample(sample)
             }
+            PendingSource::Restored { current, .. } => current.check(),
             #[cfg(test)]
             PendingSource::Simulated { original, stage } => {
                 stage.check()?;
@@ -713,6 +882,7 @@ impl PendingWriter<'_, '_> {
             self.check()?;
             match &mut self.source {
                 PendingSource::Native { current, stage, .. } => current.arm(stage)?,
+                PendingSource::Restored { current, .. } => current.arm()?,
                 #[cfg(test)]
                 PendingSource::Simulated { .. } => {}
             }
@@ -721,6 +891,7 @@ impl PendingWriter<'_, '_> {
             self.check()?;
             match &mut self.source {
                 PendingSource::Native { current, stage, .. } => current.finish_known(stage)?,
+                PendingSource::Restored { current, .. } => current.finish_known()?,
                 #[cfg(test)]
                 PendingSource::Simulated { .. } => {}
             }
@@ -749,6 +920,7 @@ impl PendingWriter<'_, '_> {
                 original.refuse();
                 current.refuse();
             }
+            PendingSource::Restored { current, .. } => current.refuse(),
             #[cfg(test)]
             PendingSource::Simulated { original, .. } => original.refuse(),
         }
@@ -757,17 +929,21 @@ impl PendingWriter<'_, '_> {
 
 fn capture(owners: &mut Owners, expected: NativeRole) -> Result<Original<EnrolledClock>> {
     ensure!(owners.kind == expected, "native original role changed");
+    let OwnerSource::Initial(initial) = &mut owners.source else {
+        owners.refuse();
+        anyhow::bail!("initial native owner required; restored source cannot fall back");
+    };
     // Human originals can mint reveal, exchange and signature rights which
     // outlive their SQL/response. This first restore profile cannot fence them.
     // Mark BEFORE capture, never clear the debt after a local completion.
     owners.response_rights.mark_unfenced()?;
-    let clock = owners
+    let clock = initial
         .role
         .try_borrow_mut()?
         .capture_original_clock(expected)?;
     Original::capture(EnrolledClock {
         clock,
-        role: owners.role.clone(),
+        source: EnrolledClockSource::Initial(initial.role.clone()),
         selection: owners.selection.clone(),
         kind: owners.kind,
     })
@@ -782,6 +958,16 @@ pub(super) fn capture_app<'a>(
     #[cfg(test)]
     if let Some(captured) = fixtures::capture_app(start, app)? {
         return Ok(captured);
+    }
+    let sink = current_sink()?;
+    if sink.request_owner.uses_restored()? {
+        let clock = sink.request_owner.capture_human_clock(&sink, app)?;
+        return Ok(AppCreator {
+            original: CapturedOriginal::Native(Box::new(Original::capture(clock)?)),
+            app: app.into(),
+            start,
+            pending: PendingCaptureState::Captured,
+        });
     }
     OWNERS.with(|owners| {
         let mut owners = owners.try_borrow_mut()?;
@@ -811,35 +997,41 @@ impl AppCreator<'_> {
         self.pending = PendingCaptureState::Attempted;
         let result = match &mut self.original {
             CapturedOriginal::Native(original) => {
-                let scope = OWNERS.with(|owners| {
-                    let owners = owners.try_borrow()?;
-                    Ok::<_, anyhow::Error>(
-                        owners
-                            .get(&self.app)
-                            .context("native Pending executor missing")?
-                            .selection
-                            .scope()
-                            .clone(),
-                    )
-                })?;
-                with_app_participant(&scope, |participant, stage| {
-                    crate::security_epoch::serving::with_current_runtime_serving(
-                        participant,
-                        stage,
-                        crate::security_epoch::serving::RuntimeServingUse::PendingCapture,
-                        |current, same| {
-                            PendingWriter {
-                                source: PendingSource::Native {
-                                    original,
-                                    current,
-                                    stage: same,
-                                },
-                                committed: false,
-                            }
-                            .run(operation)
-                        },
-                    )
-                })
+                let sink = current_sink()?;
+                if sink.request_owner.uses_restored()? {
+                    sink.request_owner
+                        .with_pending(&sink, &self.app, original, operation)
+                } else {
+                    let scope = OWNERS.with(|owners| {
+                        let owners = owners.try_borrow()?;
+                        Ok::<_, anyhow::Error>(
+                            owners
+                                .get(&self.app)
+                                .context("native Pending executor missing")?
+                                .selection
+                                .scope()
+                                .clone(),
+                        )
+                    })?;
+                    with_app_participant(&scope, |participant, stage| {
+                        crate::security_epoch::serving::with_current_runtime_serving(
+                            participant,
+                            stage,
+                            crate::security_epoch::serving::RuntimeServingUse::PendingCapture,
+                            |current, same| {
+                                PendingWriter {
+                                    source: PendingSource::Native {
+                                        original,
+                                        current,
+                                        stage: same,
+                                    },
+                                    committed: false,
+                                }
+                                .run(operation)
+                            },
+                        )
+                    })
+                }
             }
             #[cfg(test)]
             CapturedOriginal::Simulated(original) => fixtures::with_pending(original, operation),
@@ -887,6 +1079,10 @@ impl AppCreator<'_> {
             "native original wall clock moved backwards"
         );
         original.bind(intent, current_wall)?;
+        let sink = current_sink()?;
+        if sink.request_owner.uses_restored()? {
+            return sink.request_owner.bind_human(&sink, intent, original);
+        }
         OWNERS.with(|owners| {
             let mut owners = owners.try_borrow_mut()?;
             let owners = owners
@@ -897,6 +1093,10 @@ impl AppCreator<'_> {
                     && !owners.originals.contains_key(intent.attempt()),
                 "native App original cannot be replaced"
             );
+            let OwnerSource::Initial(initial) = &mut owners.source else {
+                owners.refuse();
+                anyhow::bail!("restored App binding route not installed");
+            };
             owners.originals.insert(
                 intent.attempt().into(),
                 StoredOriginal::new(original, intent),
@@ -905,7 +1105,7 @@ impl AppCreator<'_> {
                 NativeRole::AppHost,
                 intent,
                 &mut owners.originals.get_mut(intent.attempt()).unwrap().response,
-                Some(&mut owners.storage),
+                Some(&mut initial.storage),
             )?;
             Ok(())
         })
@@ -933,11 +1133,15 @@ pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<()> {
         if let Some(original) = owners.originals.get_mut(intent.attempt()) {
             validate_enlist(NativeRole::SecurityShell, intent, &original.response)?;
             original.original.check(intent, wall)?;
+            let OwnerSource::Initial(initial) = &mut owners.source else {
+                owners.refuse();
+                anyhow::bail!("restored App cannot supply a Shell original");
+            };
             enlist(
                 NativeRole::SecurityShell,
                 intent,
                 &mut original.response,
-                Some(&mut owners.storage),
+                Some(&mut initial.storage),
             )?;
             return Ok(());
         }
@@ -953,11 +1157,15 @@ pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<()> {
             intent.attempt().into(),
             StoredOriginal::new(original, intent),
         );
+        let OwnerSource::Initial(initial) = &mut owners.source else {
+            owners.refuse();
+            anyhow::bail!("restored App cannot supply a Shell original");
+        };
         enlist(
             NativeRole::SecurityShell,
             intent,
             &mut owners.originals.get_mut(intent.attempt()).unwrap().response,
-            Some(&mut owners.storage),
+            Some(&mut initial.storage),
         )?;
         Ok(())
     })
@@ -1116,12 +1324,118 @@ impl<'a, 'role> RuntimeConsumer<'a, 'role> {
     }
 }
 
-/// Prepared resources stay opaque alongside the whole native parent. There is
-/// no server/Runtime/native getter or run method: the final-executor installer
-/// remains closed until ordinary request consumers are joined in place.
-pub(crate) struct PreparedRestoredListener {
-    server: crate::web::BoundRestoredListener,
+/// The routing source retains the actual prepared listener, the SAME Runtime
+/// allocation and the whole restored parent. Preparation does not publish an
+/// Endpoint, registry owner or LIVE state; the fixed final installer owns publication.
+pub(crate) struct RestoredHostRouting {
+    server: Option<crate::web::BoundRestoredListener>,
     parent: crate::security_epoch::serving::RestoredAppServingOwner,
+    runtime: std::sync::Arc<crate::store::Runtime>,
+    refusal: Rc<RestoredAppRefusal>,
+    selection: NativeSelection,
+}
+
+struct RestoredRoutingAttempt<'owner, 'sink> {
+    owner: &'owner mut RestoredHostRouting,
+    sink: &'sink Sink,
+    completed: bool,
+}
+
+impl Drop for RestoredRoutingAttempt<'_, '_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.sink.abort();
+            self.owner.parent.refuse();
+        }
+    }
+}
+
+impl Drop for RestoredHostRouting {
+    fn drop(&mut self) {
+        self.refusal.refuse();
+        self.parent.refuse();
+    }
+}
+
+impl RestoredHostRouting {
+    fn require_runtime(&mut self, runtime: &crate::store::Runtime) -> Result<AuthorityScope> {
+        let selected = (|| {
+            ensure!(
+                std::ptr::eq(std::sync::Arc::as_ptr(&self.runtime), runtime),
+                "restored routing Runtime changed"
+            );
+            let scope = sql_runtime_scope(runtime)?;
+            ensure!(
+                self.selection.scope() == &scope,
+                "restored routing selection changed"
+            );
+            Ok(scope)
+        })();
+        if selected.is_err() {
+            self.parent.refuse();
+        }
+        selected
+    }
+
+    /// Before queueing, capture the real request from the whole retained
+    /// parent. A routing Sink or Runtime Arc cannot manufacture its owner.
+    fn capture_request(&mut self, runtime: &crate::store::Runtime, sink: &Sink) -> Result<()> {
+        let mut attempt = RestoredRoutingAttempt {
+            owner: self,
+            sink,
+            completed: false,
+        };
+        let scope = attempt.owner.require_runtime(runtime)?;
+        ensure!(attempt.sink.is_open(), "native response sink closed");
+        attempt
+            .sink
+            .request
+            .capture_restored_app(&scope, &mut attempt.owner.parent)?;
+        attempt.completed = true;
+        Ok(())
+    }
+
+    fn capture_human_clock(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        sink: &Sink,
+    ) -> Result<EnrolledOriginalClock> {
+        let mut attempt = RestoredRoutingAttempt {
+            owner: self,
+            sink,
+            completed: false,
+        };
+        let scope = attempt.owner.require_runtime(runtime)?;
+        ensure!(attempt.sink.is_open(), "native response sink closed");
+        let clock = attempt
+            .sink
+            .request
+            .capture_restored_human_clock(&scope, &mut attempt.owner.parent)?;
+        attempt.completed = true;
+        Ok(clock)
+    }
+
+    fn sample_human_clock(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        sink: &Sink,
+        clock: &mut EnrolledOriginalClock,
+    ) -> Result<Duration> {
+        let mut attempt = RestoredRoutingAttempt {
+            owner: self,
+            sink,
+            completed: false,
+        };
+        let scope = attempt.owner.require_runtime(runtime)?;
+        ensure!(attempt.sink.is_open(), "native response sink closed");
+        let now = attempt.sink.request.sample_restored_human_clock(
+            &scope,
+            &mut attempt.owner.parent,
+            clock,
+        )?;
+        attempt.completed = true;
+        Ok(now)
+    }
 }
 
 const _: () = {
@@ -1132,7 +1446,8 @@ const _: () = {
             }
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
-            let _ = <PreparedRestoredListener as Ambiguous<_>>::check;
+            let _ = <RestoredHostRouting as Ambiguous<_>>::check;
+            let _ = <RestoredRoutingAttempt<'static, 'static> as Ambiguous<_>>::check;
             let _ = <CompletedResponse as Ambiguous<_>>::check;
         }};
     }
@@ -1146,6 +1461,248 @@ const _: () = {
     assert_not_impl!(serde::Deserialize<'static>);
 };
 
+/// Exact lifetime of one installed restored executor. This contains only
+/// direct refusal/cleanup roots; the whole positive parent stays in OWNERS.
+pub(crate) struct RestoredExecutorGuard {
+    registry: Rc<RefCell<response::Registry<Owners>>>,
+    app: String,
+    refusal: Rc<RestoredAppRefusal>,
+    executor: super::native_original::ExecutorThread,
+}
+
+impl RestoredExecutorGuard {
+    pub(crate) fn retire(&self) {
+        self.refusal.refuse();
+        if let Ok(mut entries) = self.registry.try_borrow_mut() {
+            entries.retire_parent(&self.app, &self.refusal);
+        }
+    }
+
+    pub(crate) fn require_executor(&self) -> Result<()> {
+        if let Err(error) = self.executor.check() {
+            self.refusal.refuse();
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RestoredExecutorGuard {
+    fn drop(&mut self) {
+        // Never wait for a registry/role loan to release before refusal.
+        self.retire();
+    }
+}
+
+/// Fixed whole-carrier installation: the only resource extraction is into
+/// the private listener factory, after BOTH startup settlements succeeded.
+pub(crate) fn install_restored_host(
+    mut routing: RestoredHostRouting,
+) -> Result<crate::deployment::RestoredHostInstallation> {
+    let server = routing
+        .server
+        .take()
+        .context("restored listener already consumed")?;
+    let installed = crate::web::install_restored_listener(server, routing)?;
+    Ok(crate::deployment::RestoredHostInstallation::from_listener(
+        installed,
+    ))
+}
+
+/// No enrollment, clock, I/O or rebinding follows startup completion here.
+/// First installation requires both registry collections and the immutable
+/// same-scope issuance index to be empty; neither can be reset or replaced.
+pub(crate) fn install_restored_owner(
+    mut routing: RestoredHostRouting,
+    runtime: &crate::store::Runtime,
+) -> Result<RestoredExecutorGuard> {
+    let scope = routing.require_runtime(runtime)?;
+    ensure!(
+        routing.server.is_none(),
+        "restored resources not retained by installer"
+    );
+    let app = scope.app.as_str().to_owned();
+    let refusal = Rc::clone(&routing.refusal);
+    let registry = OWNERS.with(Rc::clone);
+    {
+        let mut entries = registry.try_borrow_mut()?;
+        entries.require_unleased()?;
+        ensure!(entries.is_empty(), "restored executor already installed");
+        let owner = Owners::from_restored(routing)?;
+        entries.insert(app.clone(), owner);
+    }
+    Ok(RestoredExecutorGuard {
+        registry,
+        app,
+        refusal,
+        executor: super::native_original::ExecutorThread::here(),
+    })
+}
+
+#[cfg(test)]
+mod restored_executor_install_source_tests {
+    use super::{Owners, RestoredExecutorGuard, response};
+    use quote::ToTokens;
+    use std::{cell::RefCell, rc::Rc};
+
+    fn method(name: &str) -> syn::ImplItemFn {
+        syn::parse_file(include_str!("native_management.rs")).unwrap().items.into_iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("RestoredExecutorGuard")) { return None; }
+            item.items.into_iter().find_map(|item| match item { syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item), _ => None })
+        }).unwrap()
+    }
+
+    #[test]
+    fn actual_executor_disposal_refuses_before_borrow_and_only_retires_its_exact_parent() {
+        let actual = method("retire");
+        let expected: syn::Block = syn::parse_quote!({
+            self.refusal.refuse();
+            if let Ok(mut entries) = self.registry.try_borrow_mut() {
+                entries.retire_parent(&self.app, &self.refusal);
+            }
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let mut late = actual.block.clone();
+        late.stmts.swap(0, 1);
+        assert!(!guarded(&late));
+        let mut global = actual.block.clone();
+        global.stmts[1] = syn::parse_quote!(clear(););
+        assert!(!guarded(&global));
+        let mut missing = actual.block.clone();
+        missing.stmts.remove(0);
+        assert!(!guarded(&missing));
+        let expected: syn::Block = syn::parse_quote!({
+            self.retire();
+        });
+        assert_eq!(
+            method("drop").block.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+
+    #[test]
+    fn actual_executor_check_uses_its_saved_binding_and_refuses_before_forwarding_error() {
+        let actual = method("require_executor");
+        let expected: syn::Block = syn::parse_quote!({
+            if let Err(error) = self.executor.check() {
+                self.refusal.refuse();
+                return Err(error);
+            }
+            Ok(())
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let mut omitted = actual.block.clone();
+        omitted.stmts.remove(0);
+        assert!(!guarded(&omitted));
+        let mut recaptured = actual.block.clone();
+        recaptured.stmts[0] = syn::parse_quote!(if let Err(error) =
+            super::native_original::ExecutorThread::here().check()
+        {
+            self.refusal.refuse();
+            return Err(error);
+        });
+        assert!(!guarded(&recaptured));
+        let mut swallowed = actual.block.clone();
+        swallowed.stmts[0] = syn::parse_quote!(if let Err(_error) = self.executor.check() {
+            self.refusal.refuse();
+            return Ok(());
+        });
+        assert!(!guarded(&swallowed));
+        let mut late = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::If(branch), _) = &mut late.stmts[0] else {
+            panic!("actual checked refusal branch");
+        };
+        branch.then_branch.stmts.swap(0, 1);
+        assert!(!guarded(&late));
+        let mut replaced = actual.block.clone();
+        replaced.stmts.insert(
+            0,
+            syn::parse_quote!(let executor = super::native_original::ExecutorThread::here();),
+        );
+        assert!(!guarded(&replaced));
+    }
+
+    #[test]
+    fn actual_wrong_executor_check_refuses_both_existing_native_negative_roots() {
+        use crate::security_epoch::native_enrollment::{
+            negative_parent_refusal_roots, new_negative_parent_refusal_fixture,
+        };
+        let refusal = Rc::new(new_negative_parent_refusal_fixture());
+        assert_eq!(negative_parent_refusal_roots(&refusal), [false, false]);
+        // Empty registry and real denial cells only: no enrolled parent,
+        // owner, original, installation or successful permission is fabricated.
+        let guard = RestoredExecutorGuard {
+            registry: Rc::new(RefCell::new(response::Registry::<Owners>::default())),
+            app: "no-positive-parent".into(),
+            refusal: Rc::clone(&refusal),
+            executor: super::super::native_original::foreign_executor_thread_data_fixture(),
+        };
+        assert_eq!(
+            guard.require_executor().unwrap_err().to_string(),
+            "restored executor thread changed"
+        );
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true, true]);
+        drop(guard);
+        assert_eq!(negative_parent_refusal_roots(&refusal), [true, true]);
+    }
+
+    #[test]
+    fn actual_first_install_consumes_the_whole_parent_after_exact_runtime_and_empty_registry() {
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let actual = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "install_restored_owner" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            let scope = routing.require_runtime(runtime)?;
+            ensure!(
+                routing.server.is_none(),
+                "restored resources not retained by installer"
+            );
+            let app = scope.app.as_str().to_owned();
+            let refusal = Rc::clone(&routing.refusal);
+            let registry = OWNERS.with(Rc::clone);
+            {
+                let mut entries = registry.try_borrow_mut()?;
+                entries.require_unleased()?;
+                ensure!(entries.is_empty(), "restored executor already installed");
+                let owner = Owners::from_restored(routing)?;
+                entries.insert(app.clone(), owner);
+            }
+            Ok(RestoredExecutorGuard {
+                registry,
+                app,
+                refusal,
+                executor: super::native_original::ExecutorThread::here(),
+            })
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let mut no_runtime = actual.block.clone();
+        no_runtime.stmts.remove(0);
+        assert!(!guarded(&no_runtime));
+        let mut occupied = actual.block.clone();
+        let syn::Stmt::Expr(syn::Expr::Block(block), _) = &mut occupied.stmts[5] else {
+            panic!("actual registration block");
+        };
+        block.block.stmts.remove(1);
+        assert!(!guarded(&occupied));
+    }
+}
+
 /// Fixed startup operation, not a callback port or an executor installation.
 /// The genuine capture predates configuration. Both its borrowed SQL unit and
 /// its distinct enclosing native request settle before the server can escape.
@@ -1155,29 +1712,43 @@ pub(crate) fn prepare_restored_listener(
     runtime: std::sync::Arc<crate::store::Runtime>,
     mut parent: crate::security_epoch::serving::RestoredAppServingOwner,
     captured: crate::security_epoch::serving::CapturedRestoredServingRequest,
-) -> Result<PreparedRestoredListener> {
+) -> Result<RestoredHostRouting> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let request =
             request::StartupRequest::from_capture(sql_runtime_scope(&runtime)?, captured)?;
         // Resolve the actual captured origin while it is still in the slot;
         // taking the lease moves that same capture rather than recapturing it.
-        let context = NativeConsumerContext::startup_sql(&runtime, &request)?;
+        let (context, refusal) = (
+            NativeConsumerContext::startup_sql(&runtime, &request)?,
+            Rc::new(parent.retained_refusal()?),
+        );
         let mut lease = request.take()?;
-        let server = {
+        let (server, selection) = {
             let mut scope = lease.begin_current(&mut parent, context)?;
-            let server =
-                RuntimeConsumer::from_restored(&runtime, RuntimePhase::SqlWrite, &mut scope)?.run(
-                    |current| configured.bind_listener(std::sync::Arc::clone(&runtime), current),
-                )?;
-            scope.finish()?;
-            server
+            let requested =
+                RuntimeConsumer::from_restored(&runtime, RuntimePhase::SqlWrite, &mut scope)
+                    .and_then(|mut current| {
+                        current.run(|current| {
+                            configured.bind_listener(std::sync::Arc::clone(&runtime), current)
+                        })
+                    });
+            let finished = scope.finish();
+            let built = requested?;
+            finished?;
+            built
         };
         let context = NativeRequestFinalContext::startup(&runtime, &lease)?;
         lease.finish(&mut parent, context)?;
-        Ok(server)
+        Ok((server, refusal, selection))
     }));
     match result {
-        Ok(Ok(server)) => Ok(PreparedRestoredListener { server, parent }),
+        Ok(Ok((server, refusal, selection))) => Ok(RestoredHostRouting {
+            server: Some(server),
+            parent,
+            runtime,
+            refusal,
+            selection,
+        }),
         Ok(Err(error)) => {
             parent.refuse();
             Err(error)
@@ -1393,6 +1964,10 @@ impl PendingWriter<'_, '_> {
                 );
                 stage.check_for(&sql_runtime_scope(runtime)?, NativeRole::AppHost)?;
             }
+            PendingSource::Restored { current, .. } => {
+                current.require_runtime(runtime)?;
+                current.prepare_sql(runtime, NativeSqlUse::Read)?;
+            }
             #[cfg(test)]
             PendingSource::Simulated { .. } => {
                 ensure!(
@@ -1407,6 +1982,9 @@ impl PendingWriter<'_, '_> {
 
     fn require_sql_write(&mut self) -> Result<()> {
         ensure!(!self.committed, "native Pending commit already attempted");
+        if let PendingSource::Restored { current, runtime } = &mut self.source {
+            current.prepare_sql(runtime, NativeSqlUse::Write)?;
+        }
         self.check()
     }
 }
@@ -1417,20 +1995,27 @@ impl Consumer<'_, '_, '_> {
             !self.finalized,
             "native consumer finalization already attempted"
         );
-        ensure!(
-            self.original.intent.app() == runtime.app(),
-            "native human SQL app changed"
-        );
         match &mut self.source {
-            ConsumerSource::Native { stage, .. } => {
+            ConsumerSource::Native {
+                stage, original, ..
+            } => {
+                ensure!(
+                    original.intent.app() == runtime.app(),
+                    "native human SQL app changed"
+                );
                 ensure!(
                     runtime.uses_native_storage(),
                     "native human SQL file changed"
                 );
                 stage.check_for(&sql_runtime_scope(runtime)?, NativeRole::AppHost)?;
             }
+            ConsumerSource::Restored { current, .. } => current.require_runtime(runtime)?,
             #[cfg(test)]
-            ConsumerSource::Simulated(_) => {
+            ConsumerSource::Simulated { original, .. } => {
+                ensure!(
+                    original.intent.app() == runtime.app(),
+                    "native human SQL app changed"
+                );
                 ensure!(
                     !runtime.uses_native_storage(),
                     "scripted human SQL owner refused"
@@ -1438,12 +2023,16 @@ impl Consumer<'_, '_, '_> {
             }
         }
         if self.armed.get() {
-            self.check()
+            self.check()?;
         } else {
             // Consumer::run only prechecks. Its FIRST actual SQL access arms
             // once; subsequent units borrow/check that same armed original.
-            self.arm()
+            self.arm()?;
         }
+        if let ConsumerSource::Restored { current, .. } = &mut self.source {
+            current.prepare_sql(runtime, NativeSqlUse::Read)?;
+        }
+        Ok(())
     }
 
     fn require_sql_write(&mut self) -> Result<()> {
@@ -1451,6 +2040,9 @@ impl Consumer<'_, '_, '_> {
             !self.finalized,
             "native consumer finalization already attempted"
         );
+        if let ConsumerSource::Restored { current, runtime } = &mut self.source {
+            current.prepare_sql(runtime, NativeSqlUse::Write)?;
+        }
         self.check()
     }
 }
@@ -1472,6 +2064,21 @@ pub(crate) fn with_runtime_sql<T>(
 }
 
 impl RuntimeConsumer<'_, '_> {
+    /// Only the fixed startup SQL consumer can compare desired DATA to its
+    /// genuine native profile; the operation exposes no saved stage or owner.
+    pub(crate) fn require_restored_startup_selection(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        selection: &NativeSelection,
+    ) -> Result<()> {
+        self.require_restored_startup_sql(runtime)?;
+        let RuntimeSource::Restored(current) = &mut self.source else {
+            self.refuse();
+            anyhow::bail!("restored startup selection source required");
+        };
+        current.require_app_selection(runtime, &selection.policy, &selection.store)
+    }
+
     /// Fixed restored startup only. Native/ordinary metadata or an initial
     /// owner cannot choose this source, and no human/provider purpose is lent.
     pub(crate) fn require_restored_startup_sql(
@@ -1675,7 +2282,7 @@ pub(crate) fn await_controller_admin_read(
     // for its own still-live response ticket to drain. This fixed control action
     // produces no response/body/consumer callback and owns its own App original.
     ensure!(
-        ACTIVE_SINK.with(|slot| slot.try_borrow().map(|slot| slot.is_none()))?,
+        ACTIVE_REQUEST.with(|slot| slot.try_borrow().map(|slot| slot.is_none()))?,
         "native_admin_read_standalone_required"
     );
     let scope = sql_runtime_scope(runtime)?;
@@ -1688,13 +2295,17 @@ pub(crate) fn await_controller_admin_read(
             owners.kind == NativeRole::AppHost && owners.selection.scope() == &scope,
             "native_admin_read_app_selection_changed"
         );
+        let OwnerSource::Initial(initial) = &mut owners.source else {
+            owners.refuse();
+            anyhow::bail!("restored source cannot use the initial owner route");
+        };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut role = owners.role.try_borrow_mut()?;
+            let mut role = initial.role.try_borrow_mut()?;
             // Capture BEFORE any storage/peer wait. It does not replace or
             // reset the Controller's independently retained accepting original.
             let mut stage = role.begin_current_stage()?;
             stage.check_for(&scope, NativeRole::AppHost)?;
-            let AppStorage::Participant(storage) = &mut owners.storage else {
+            let AppStorage::Participant(storage) = &mut initial.storage else {
                 anyhow::bail!("native active App holder unavailable");
             };
             storage.prepare_current()?;
@@ -1707,11 +2318,11 @@ pub(crate) fn await_controller_admin_read(
         match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
-                owners.storage.refuse();
+                initial.storage.refuse();
                 Err(error)
             }
             Err(panic) => {
-                owners.storage.refuse();
+                initial.storage.refuse();
                 std::panic::resume_unwind(panic)
             }
         }
@@ -1731,6 +2342,149 @@ mod restored_runtime_source_tests {
     use super::*;
     use quote::ToTokens;
     use syn::visit::Visit;
+
+    #[test]
+    fn captured_pending_factory_borrows_only_its_genuine_selected_sql_scope() {
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let actual = file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().unwrap().ident == "PendingWriter") { return None; }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(item) if item.sig.ident == "from_restored" => Some(item.clone()),
+                _ => None,
+            })
+        }).unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            let current = scope.borrow_pending(runtime)?;
+            Ok(Self {
+                source: PendingSource::Restored { current, runtime },
+                committed: false,
+            })
+        });
+        let guarded = |method: &syn::ImplItemFn| {
+            method.block.to_token_stream().to_string() == expected.to_token_stream().to_string()
+                && method.sig.inputs.len() == 2
+                && matches!(&method.sig.inputs[1], syn::FnArg::Typed(input) if matches!(&*input.ty,
+                    syn::Type::Reference(reference) if reference.mutability.is_some() && matches!(&*reference.elem,
+                        syn::Type::Path(path) if path.path.segments.last().unwrap().ident == "RestoredServingScope")))
+        };
+        assert!(guarded(&actual));
+        for statement in [
+            syn::parse_quote!(let current = scope.borrow_runtime(runtime, RuntimeServingUse::SqlWrite)?;),
+            syn::parse_quote!(let current = replacement;),
+        ] {
+            let mut changed = actual.clone();
+            changed.block.stmts[0] = statement;
+            assert!(!guarded(&changed));
+        }
+        let mut no_scope = actual.clone();
+        no_scope.sig.inputs.pop();
+        assert!(!guarded(&no_scope));
+    }
+
+    #[test]
+    fn restored_human_factory_borrows_the_actual_bound_original_without_a_second_original_reference()
+     {
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let actual = file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else { return None; };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().unwrap().ident == "Consumer") { return None; }
+            item.items.iter().find_map(|item| match item { syn::ImplItem::Fn(item) if item.sig.ident == "from_restored" => Some(item.clone()), _ => None })
+        }).unwrap();
+        let expected: syn::Block = syn::parse_quote!({
+            let current = scope.borrow_human(runtime, intent, phase)?;
+            if guard.intent != *intent
+                || guard.role != NativeRole::AppHost
+                || guard.settled
+                || guard.armed.get()
+            {
+                current.refuse();
+                anyhow::bail!("restored human attempt changed");
+            }
+            Ok(Self {
+                source: ConsumerSource::Restored { current, runtime },
+                armed: &guard.armed,
+                finalized: false,
+            })
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let mut changed = actual.block.clone();
+        changed.stmts[0] = syn::parse_quote!(let current = scope.borrow_runtime(runtime, RuntimeServingUse::SqlWrite)?;);
+        assert!(!guarded(&changed));
+        let mut changed = actual.block.clone();
+        changed.stmts[0] =
+            syn::parse_quote!(let current = scope.borrow_human(runtime, foreign_intent, phase)?;);
+        assert!(!guarded(&changed));
+        let mut changed = actual.block.clone();
+        changed.stmts.remove(1);
+        assert!(!guarded(&changed));
+        let mut changed = actual.block.clone();
+        changed.stmts[2] = syn::Stmt::Expr(
+            syn::parse_quote!(Ok(Self {
+                source: ConsumerSource::Restored { current, runtime },
+                armed: detached,
+                finalized: false,
+            })),
+            None,
+        );
+        assert!(!guarded(&changed));
+        assert_eq!(actual.sig.inputs.len(), 5);
+        assert!(matches!(&actual.sig.inputs[4], syn::FnArg::Typed(argument)
+            if matches!(&*argument.ty, syn::Type::Reference(reference)
+                if reference.mutability.is_none() && matches!(&*reference.elem,
+                    syn::Type::Path(path) if path.path.is_ident("ConsumerGuard")))));
+        let consumer = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == "Consumer" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(consumer.fields.len(), 3);
+        assert!(
+            consumer
+                .fields
+                .iter()
+                .all(|field| field.ident.as_ref().is_none_or(|name| name != "original"))
+        );
+        let source = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Enum(item) if item.ident == "ConsumerSource" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let restored = source
+            .variants
+            .iter()
+            .find(|variant| variant.ident == "Restored")
+            .unwrap();
+        assert_eq!(restored.fields.len(), 2);
+        assert!(restored.fields.iter().all(|field| {
+            field
+                .ident
+                .as_ref()
+                .is_some_and(|name| name == "current" || name == "runtime")
+        }));
+        let native = source
+            .variants
+            .iter()
+            .find(|variant| variant.ident == "Native")
+            .unwrap();
+        let original = native
+            .fields
+            .iter()
+            .find(|field| field.ident.as_ref().is_some_and(|name| name == "original"))
+            .unwrap();
+        assert!(
+            matches!(&original.ty, syn::Type::Reference(reference) if reference.mutability.is_some() && matches!(&*reference.elem, syn::Type::Path(path) if path.path.segments.last().unwrap().ident == "OriginalPhase"))
+        );
+    }
 
     #[test]
     fn fixed_startup_listener_settles_the_same_scope_and_final_request_before_return() {
@@ -1766,27 +2520,40 @@ mod restored_runtime_source_tests {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let request =
                     request::StartupRequest::from_capture(sql_runtime_scope(&runtime)?, captured)?;
-                let context = NativeConsumerContext::startup_sql(&runtime, &request)?;
+                let (context, refusal) = (
+                    NativeConsumerContext::startup_sql(&runtime, &request)?,
+                    Rc::new(parent.retained_refusal()?),
+                );
                 let mut lease = request.take()?;
-                let server = {
+                let (server, selection) = {
                     let mut scope = lease.begin_current(&mut parent, context)?;
-                    let server = RuntimeConsumer::from_restored(
+                    let requested = RuntimeConsumer::from_restored(
                         &runtime,
                         RuntimePhase::SqlWrite,
                         &mut scope,
-                    )?
-                    .run(|current| {
-                        configured.bind_listener(std::sync::Arc::clone(&runtime), current)
-                    })?;
-                    scope.finish()?;
-                    server
+                    )
+                    .and_then(|mut current| {
+                        current.run(|current| {
+                            configured.bind_listener(std::sync::Arc::clone(&runtime), current)
+                        })
+                    });
+                    let finished = scope.finish();
+                    let built = requested?;
+                    finished?;
+                    built
                 };
                 let context = NativeRequestFinalContext::startup(&runtime, &lease)?;
                 lease.finish(&mut parent, context)?;
-                Ok(server)
+                Ok((server, refusal, selection))
             }));
             match result {
-                Ok(Ok(server)) => Ok(PreparedRestoredListener { server, parent }),
+                Ok(Ok((server, refusal, selection))) => Ok(RestoredHostRouting {
+                    server: Some(server),
+                    parent,
+                    runtime,
+                    refusal,
+                    selection,
+                }),
                 Ok(Err(error)) => {
                     parent.refuse();
                     Err(error)
@@ -1839,10 +2606,26 @@ mod restored_runtime_source_tests {
             let syn::Stmt::Local(server) = scope.block.stmts.get_mut(1)? else {
                 return None;
             };
-            let syn::Expr::Try(run) = server.init.as_mut()?.expr.as_mut() else {
+            let syn::Expr::MethodCall(binding) = server.init.as_mut()?.expr.as_mut() else {
                 return None;
             };
-            let syn::Expr::MethodCall(run) = run.expr.as_mut() else {
+            if binding.method != "and_then" || binding.args.len() != 1 {
+                return None;
+            }
+            let syn::Expr::Closure(binding) = binding.args.first_mut()? else {
+                return None;
+            };
+            // Normalize only this actual factory-result callback's sole
+            // expression. Extra work/labels/attributes/semicolons still refuse.
+            if let syn::Expr::Block(block) = &*binding.body
+                && block.attrs.is_empty()
+                && block.label.is_none()
+                && block.block.stmts.len() == 1
+                && let syn::Stmt::Expr(expression, None) = &block.block.stmts[0]
+            {
+                *binding.body = expression.clone();
+            }
+            let syn::Expr::MethodCall(run) = binding.body.as_mut() else {
                 return None;
             };
             if run.method != "run" || run.args.len() != 1 {
@@ -1873,7 +2656,18 @@ mod restored_runtime_source_tests {
         assert!(guarded(&actual.block));
         let mut with_block = (*actual.block).clone();
         let callback = startup_callback(&mut with_block).unwrap();
-        let expression = callback.body.clone();
+        let expression = match &*callback.body {
+            syn::Expr::Block(block) => {
+                let [syn::Stmt::Expr(expression, None)] = block.block.stmts.as_slice() else {
+                    panic!("actual expression-only callback");
+                };
+                expression.clone()
+            }
+            expression => expression.clone(),
+        };
+        *callback.body = expression.clone();
+        assert!(guarded(&with_block));
+        let callback = startup_callback(&mut with_block).unwrap();
         *callback.body = syn::parse_quote!({ #expression });
         assert!(
             guarded(&with_block),
@@ -1979,6 +2773,39 @@ mod restored_runtime_source_tests {
                 syn::parse_str(&source.replacen(&before, &after.to_string(), 1)).unwrap();
             assert!(!guarded(&changed));
         }
+    }
+
+    #[test]
+    fn startup_selection_checks_require_the_actual_restored_sql_write_source() {
+        let actual = method("require_restored_startup_selection");
+        let expected: syn::Block = syn::parse_quote!({
+            self.require_restored_startup_sql(runtime)?;
+            let RuntimeSource::Restored(current) = &mut self.source else {
+                self.refuse();
+                anyhow::bail!("restored startup selection source required");
+            };
+            current.require_app_selection(runtime, &selection.policy, &selection.store)
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let mut omitted = actual.block.clone();
+        omitted.stmts.remove(0);
+        assert!(!guarded(&omitted));
+        let mut foreign = actual.block.clone();
+        foreign.stmts[2] = syn::Stmt::Expr(
+            syn::parse_quote!(current.require_app_selection(
+                runtime,
+                &other.policy,
+                &selection.store
+            )),
+            None,
+        );
+        assert!(!guarded(&foreign));
+        let mut data_only = actual.block.clone();
+        data_only.stmts[2] = syn::Stmt::Expr(syn::parse_quote!(Ok(())), None);
+        assert!(!guarded(&data_only));
     }
 
     fn method(name: &str) -> syn::ImplItemFn {
@@ -2123,6 +2950,269 @@ mod restored_runtime_source_tests {
     }
 }
 
+#[cfg(test)]
+mod restored_routing_source_tests {
+    use quote::ToTokens;
+
+    #[test]
+    fn first_install_bookkeeping_requires_the_whole_parent_and_never_replaces_an_issuance_entry() {
+        let actual = method("Owners", "from_restored");
+        let expected: syn::Block = syn::parse_quote!({
+            let selection = routing.selection.clone();
+            let refusal = Rc::clone(&routing.refusal);
+            let owners = Self {
+                source: OwnerSource::Restored {
+                    routing: response::Role::new(routing),
+                    refusal,
+                },
+                kind: NativeRole::AppHost,
+                selection,
+                originals: BTreeMap::new(),
+                response_rights: response_tickets::ResponseRights::new(),
+            };
+            owners
+                .response_rights
+                .install_issuance(owners.selection.scope())?;
+            Ok(owners)
+        });
+        let guarded = |body: &syn::Block| {
+            body.to_token_stream().to_string() == expected.to_token_stream().to_string()
+        };
+        assert!(guarded(&actual.block));
+        let mut no_index = actual.block.clone();
+        no_index.stmts.remove(3);
+        assert!(!guarded(&no_index));
+        let mut ignored = actual.block.clone();
+        ignored.stmts[3] = syn::parse_quote!(let _ = owners.response_rights.install_issuance(owners.selection.scope()););
+        assert!(!guarded(&ignored));
+        let mut foreign = actual.block.clone();
+        foreign.stmts[1] = syn::parse_quote!(let refusal = Rc::clone(&other.refusal););
+        assert!(!guarded(&foreign));
+        assert_eq!(actual.sig.inputs.len(), 1);
+        let syn::FnArg::Typed(input) = &actual.sig.inputs[0] else {
+            panic!("actual consumed input");
+        };
+        assert!(
+            matches!(&*input.ty, syn::Type::Path(path) if path.path.is_ident("RestoredHostRouting"))
+        );
+        let destructor = method("Owners", "drop");
+        let expected: syn::Block = syn::parse_quote!({
+            self.refuse();
+            for stored in self.originals.values_mut() {
+                stored.original.refuse();
+            }
+        });
+        assert_eq!(
+            destructor.block.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+
+    fn method(owner: &str, name: &str) -> syn::ImplItemFn {
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let mut methods = file.items.into_iter().filter_map(|item| {
+            let syn::Item::Impl(item) = item else {
+                return None;
+            };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident(owner)) {
+                return None;
+            }
+            item.items.into_iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                _ => None,
+            })
+        });
+        let result = methods.next().unwrap();
+        assert!(methods.next().is_none());
+        result
+    }
+
+    fn canonical(stream: proc_macro2::TokenStream) -> String {
+        stream
+            .into_iter()
+            .filter_map(|token| match token {
+                proc_macro2::TokenTree::Punct(punctuation) if punctuation.as_char() == ',' => None,
+                proc_macro2::TokenTree::Group(group) => {
+                    Some(proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+                        group.delimiter(),
+                        canonical(group.stream()).parse().unwrap(),
+                    )))
+                }
+                other => Some(other),
+            })
+            .collect::<proc_macro2::TokenStream>()
+            .to_string()
+    }
+
+    fn capture_is_owned(method: &syn::ImplItemFn) -> bool {
+        let expected: syn::Block = syn::parse_quote!({
+            let mut attempt = RestoredRoutingAttempt {
+                owner: self,
+                sink,
+                completed: false,
+            };
+            let scope = attempt.owner.require_runtime(runtime)?;
+            ensure!(attempt.sink.is_open(), "native response sink closed");
+            attempt
+                .sink
+                .request
+                .capture_restored_app(&scope, &mut attempt.owner.parent)?;
+            attempt.completed = true;
+            Ok(())
+        });
+        canonical(method.block.to_token_stream()) == canonical(expected.to_token_stream())
+    }
+
+    #[test]
+    fn routing_capture_is_runtime_first_armed_and_uses_the_actual_whole_parent() {
+        let actual = method("RestoredHostRouting", "capture_request");
+        assert!(capture_is_owned(&actual));
+        for cut in 0..5 {
+            let mut changed = actual.clone();
+            match cut {
+                0 => {
+                    changed.block.stmts[0] = syn::parse_quote!(let mut attempt = RestoredRoutingAttempt {
+                    owner: self, sink, completed: true,
+                };)
+                }
+                1 => changed.block.stmts.swap(1, 3),
+                2 => {
+                    changed.block.stmts[3] =
+                        syn::parse_quote!(attempt.sink.request.capture_app(&scope)?;)
+                }
+                3 => {
+                    changed.block.stmts[3] = syn::parse_quote!(attempt.sink.request.capture_restored_app(&scope, &mut other.parent)?;)
+                }
+                _ => {
+                    changed.block.stmts.remove(3);
+                }
+            }
+            assert!(!capture_is_owned(&changed), "actual routing cut {cut}");
+        }
+    }
+
+    #[test]
+    fn prepared_routing_moves_all_resources_and_exposes_no_parts_or_live_publication() {
+        // One opaque whole carrier is returned directly by the actual fixed
+        // startup driver; no intermediate wrapper or resource extractor exists.
+        struct Factories(usize);
+        impl<'ast> syn::visit::Visit<'ast> for Factories {
+            fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
+                if value.path.is_ident("RestoredHostRouting") {
+                    self.0 += 1;
+                    assert!(value.rest.is_none());
+                    let fields = value
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.member.to_token_stream().to_string(),
+                                field.expr.to_token_stream().to_string(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        fields,
+                        [
+                            ("server".into(), "Some (server)".into()),
+                            ("parent".into(), "parent".into()),
+                            ("runtime".into(), "runtime".into()),
+                            ("refusal".into(), "refusal".into()),
+                            ("selection".into(), "selection".into())
+                        ]
+                    );
+                }
+                syn::visit::visit_expr_struct(self, value);
+            }
+        }
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let factory = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "prepare_restored_listener" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let mut actual = Factories(0);
+        syn::visit::Visit::visit_item_fn(&mut actual, factory);
+        assert_eq!(actual.0, 1);
+        let expected: syn::ReturnType = syn::parse_quote!(-> Result<RestoredHostRouting>);
+        assert_eq!(
+            factory.sig.output.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        let actual = method("RestoredHostRouting", "drop");
+        let expected: syn::Block = syn::parse_quote!({
+            self.refusal.refuse();
+            self.parent.refuse();
+        });
+        assert_eq!(
+            canonical(actual.block.to_token_stream()),
+            canonical(expected.to_token_stream())
+        );
+        for index in 0..2 {
+            let mut omitted = actual.block.clone();
+            omitted.stmts.remove(index);
+            assert_ne!(
+                canonical(omitted.to_token_stream()),
+                canonical(expected.to_token_stream())
+            );
+        }
+        let file = syn::parse_file(include_str!("native_management.rs")).unwrap();
+        let fields = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Struct(owner) if owner.ident == "RestoredHostRouting" => {
+                    Some(&owner.fields)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(fields.len(), 5);
+        let refusal = fields
+            .iter()
+            .find(|field| field.ident.as_ref().is_some_and(|name| name == "refusal"))
+            .unwrap();
+        let expected: syn::Type = syn::parse_quote!(Rc<RestoredAppRefusal>);
+        assert_eq!(
+            refusal.ty.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+        assert!(
+            fields
+                .iter()
+                .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        );
+    }
+
+    #[test]
+    fn routing_scope_data_cannot_replace_exact_runtime_identity() {
+        let actual = method("RestoredHostRouting", "require_runtime");
+        let source = canonical(actual.block.to_token_stream());
+        let pointer = canonical(quote::quote!(std::ptr::eq(
+            std::sync::Arc::as_ptr(&self.runtime),
+            runtime
+        )));
+        let scope = canonical(quote::quote!(sql_runtime_scope(runtime)));
+        let selected = canonical(quote::quote!(self.selection.scope() == &scope));
+        let refusal = canonical(quote::quote!(self.parent.refuse()));
+        let predicate = |text: &str| {
+            text.matches(&pointer).count() == 1
+                && text.matches(&scope).count() == 1
+                && text.matches(&selected).count() == 1
+                && text.matches(&refusal).count() == 1
+                && text.find(&pointer) < text.find(&scope)
+                && text.find(&scope) < text.find(&selected)
+        };
+        assert!(predicate(&source));
+        assert!(!predicate(&source.replacen(&pointer, "true", 1)));
+        assert!(!predicate(&source.replacen(&selected, "true", 1)));
+        assert!(!predicate(&source.replacen(&refusal, "unrelated ()", 1)));
+    }
+}
+
 fn runtime_serving_use(
     phase: RuntimePhase,
 ) -> Result<crate::security_epoch::serving::RuntimeServingUse> {
@@ -2146,6 +3236,19 @@ pub(super) fn with_runtime_consumer<T>(
     operation: impl FnOnce(&mut RuntimeConsumer<'_, '_>) -> Result<T>,
 ) -> Result<T> {
     let purpose = runtime_serving_use(phase)?;
+    let captured =
+        ACTIVE_REQUEST.with(|slot| Ok::<_, anyhow::Error>(slot.try_borrow()?.clone()))?;
+    match captured {
+        Some(ActiveRequest::Runtime(frame)) => {
+            return frame.with_consumer(runtime, phase, operation);
+        }
+        Some(ActiveRequest::Http(sink)) if sink.request_owner.uses_restored()? => {
+            return sink
+                .request_owner
+                .with_runtime_consumer(&sink, runtime, phase, operation);
+        }
+        Some(ActiveRequest::Http(_)) | None => {}
+    }
     if !runtime.uses_native_storage() {
         #[cfg(test)]
         if let Some(scope) = fixtures::runtime_scope(runtime)? {
@@ -2224,6 +3327,16 @@ pub(crate) fn runtime_response_scope(
     })
 }
 
+/// After capture, selection comes from this exact Sink's retained owner, not
+/// from whichever owner may later be available under the same app name. DATA
+/// only: actual selection/current/transport checks remain in their scopes.
+pub(crate) fn captured_runtime_response_scope(
+    runtime: &crate::store::Runtime,
+    sink: &Sink,
+) -> Result<Option<AuthorityScope>> {
+    sink.request_owner.response_scope(sink, runtime)
+}
+
 fn with_runtime_response<T>(
     scope: &AuthorityScope,
     identity: &ResponseIdentity,
@@ -2239,12 +3352,16 @@ fn with_runtime_response<T>(
             owner.kind == NativeRole::AppHost,
             "native runtime response requires App owner"
         );
-        let AppStorage::Participant(participant) = &mut owner.storage else {
+        let OwnerSource::Initial(initial) = &mut owner.source else {
+            owner.refuse();
+            anyhow::bail!("restored source cannot use the initial owner route");
+        };
+        let AppStorage::Participant(participant) = &mut initial.storage else {
             anyhow::bail!("native runtime response participant unavailable")
         };
         // Pure exact-holder exclusion BEFORE touching the winner's role/clock.
         crate::security_epoch::serving::require_runtime_response(participant, scope, identity)?;
-        let mut role = owner.role.try_borrow_mut()?;
+        let mut role = initial.role.try_borrow_mut()?;
         current_sink()?
             .request
             .with_stage(&mut role, &owner.selection, owner.kind, |mut stage| {
@@ -2297,7 +3414,11 @@ pub(crate) fn with_current_app_role<T>(
                 owners.kind == NativeRole::AppHost,
                 "autonomous runtime requires App owner"
             );
-            let mut role = owners.role.try_borrow_mut()?;
+            let OwnerSource::Initial(initial) = &mut owners.source else {
+                owners.refuse();
+                anyhow::bail!("restored source cannot use the initial owner route");
+            };
+            let mut role = initial.role.try_borrow_mut()?;
             current_sink()?
                 .request
                 .with_stage(&mut role, &owners.selection, owners.kind, |stage| {
@@ -2404,19 +3525,51 @@ impl OriginalPhase<'_> {
 /// settlement. Native construction additionally requires the sealed S3 serving
 /// phase; the simulator can never construct that variant.
 pub(crate) struct Consumer<'a, 'role, 'original> {
-    source: ConsumerSource<'a, 'role>,
-    original: &'a mut OriginalPhase<'original>,
+    source: ConsumerSource<'a, 'role, 'original>,
     armed: &'a std::cell::Cell<bool>,
     finalized: bool,
 }
 
-enum ConsumerSource<'stage, 'role> {
+enum ConsumerSource<'stage, 'role, 'original> {
     Native {
         stage: &'stage mut EnrolledRoleStage<'role>,
         current: &'stage mut dyn CurrentServingPhase,
+        original: &'stage mut OriginalPhase<'original>,
+    },
+    Restored {
+        current: &'stage mut dyn RestoredHumanCurrent,
+        runtime: &'stage crate::store::Runtime,
     },
     #[cfg(test)]
-    Simulated(&'stage mut fixtures::SimulationStage),
+    Simulated {
+        stage: &'stage mut fixtures::SimulationStage,
+        original: &'stage mut OriginalPhase<'original>,
+    },
+}
+
+impl<'a, 'role, 'original> Consumer<'a, 'role, 'original> {
+    fn from_restored<'scope, 'request, 'native_original>(
+        runtime: &'a crate::store::Runtime,
+        scope: &'a mut RestoredServingScope<'scope, 'request, 'native_original>,
+        intent: &FreshIntent,
+        phase: Phase,
+        guard: &'a ConsumerGuard,
+    ) -> Result<Self> {
+        let current = scope.borrow_human(runtime, intent, phase)?;
+        if guard.intent != *intent
+            || guard.role != NativeRole::AppHost
+            || guard.settled
+            || guard.armed.get()
+        {
+            current.refuse();
+            anyhow::bail!("restored human attempt changed");
+        }
+        Ok(Self {
+            source: ConsumerSource::Restored { current, runtime },
+            armed: &guard.armed,
+            finalized: false,
+        })
+    }
 }
 
 impl Consumer<'_, '_, '_> {
@@ -2463,29 +3616,45 @@ impl Consumer<'_, '_, '_> {
     /// serialized observation or registry DATA can supply native permission.
     pub(super) fn require_management_producer(&mut self, intent: &FreshIntent) -> Result<()> {
         intent.require_oauth_management()?;
-        ensure!(
-            self.original.intent == intent
-                && matches!(self.original.phase, Phase::Session | Phase::Signature),
-            "management producer original or consumer changed"
-        );
-        match &self.source {
-            ConsumerSource::Native { .. } => self.check(),
+        match &mut self.source {
+            ConsumerSource::Native { original, .. } => {
+                ensure!(
+                    original.intent == intent
+                        && matches!(original.phase, Phase::Session | Phase::Signature),
+                    "management producer original or consumer changed"
+                );
+            }
+            ConsumerSource::Restored { current, .. } => {
+                current.refuse();
+                anyhow::bail!("restored App cannot supply a Shell management producer");
+            }
             #[cfg(test)]
-            ConsumerSource::Simulated(_) => {
-                anyhow::bail!("native management producer supplier unavailable")
+            ConsumerSource::Simulated { original, .. } => {
+                ensure!(
+                    original.intent == intent
+                        && matches!(original.phase, Phase::Session | Phase::Signature),
+                    "management producer original or consumer changed"
+                );
+                anyhow::bail!("native management producer supplier unavailable");
             }
         }
+        self.check()
     }
 
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = match &mut self.source {
-            ConsumerSource::Native { stage, current } => current
+            ConsumerSource::Native {
+                stage,
+                current,
+                original,
+            } => current
                 .check(stage)
-                .and_then(|()| self.original.check_with_native(stage, self.original.wall)),
+                .and_then(|()| original.check_with_native(stage, original.wall)),
+            ConsumerSource::Restored { current, .. } => current.check(),
             #[cfg(test)]
-            ConsumerSource::Simulated(stage) => self
-                .original
-                .check_at(BorrowedRoleStage::Simulated(stage), self.original.wall),
+            ConsumerSource::Simulated { stage, original } => {
+                original.check_at(BorrowedRoleStage::Simulated(stage), original.wall)
+            }
         };
         if result.is_err() {
             self.refuse();
@@ -2494,7 +3663,19 @@ impl Consumer<'_, '_, '_> {
     }
 
     pub(crate) fn require_signature(&mut self, expected: &FreshIntent) -> Result<()> {
-        self.original.require_signature_intent(expected)?;
+        match &mut self.source {
+            ConsumerSource::Native { original, .. } => {
+                original.require_signature_intent(expected)?
+            }
+            ConsumerSource::Restored { current, .. } => {
+                current.refuse();
+                anyhow::bail!("restored App cannot supply a Shell signature");
+            }
+            #[cfg(test)]
+            ConsumerSource::Simulated { original, .. } => {
+                original.require_signature_intent(expected)?
+            }
+        }
         let result = self.prepare_finalization();
         if result.is_err() {
             self.refuse();
@@ -2512,9 +3693,10 @@ impl Consumer<'_, '_, '_> {
             anyhow::bail!("native consumer attempt already armed");
         }
         let result = match &mut self.source {
-            ConsumerSource::Native { stage, current } => current.arm(stage),
+            ConsumerSource::Native { stage, current, .. } => current.arm(stage),
+            ConsumerSource::Restored { current, .. } => current.arm(),
             #[cfg(test)]
-            ConsumerSource::Simulated(_) => Ok(()),
+            ConsumerSource::Simulated { .. } => Ok(()),
         };
         if result.is_err() {
             self.refuse();
@@ -2569,19 +3751,32 @@ impl Consumer<'_, '_, '_> {
     }
 
     pub(super) fn require_context(&mut self, intent: &FreshIntent, phase: Phase) -> Result<()> {
-        ensure!(
-            self.original.intent == intent && self.original.phase == phase,
-            "native consumer original or phase changed"
-        );
+        match &mut self.source {
+            ConsumerSource::Native { original, .. } => ensure!(
+                original.intent == intent && original.phase == phase,
+                "native consumer original or phase changed"
+            ),
+            ConsumerSource::Restored { current, .. } => current.require_human(intent, phase)?,
+            #[cfg(test)]
+            ConsumerSource::Simulated { original, .. } => ensure!(
+                original.intent == intent && original.phase == phase,
+                "native consumer original or phase changed"
+            ),
+        }
         self.check()
     }
 
     pub(super) fn refuse(&mut self) {
-        self.original.refuse();
         match &mut self.source {
-            ConsumerSource::Native { current, .. } => current.refuse(),
+            ConsumerSource::Native {
+                current, original, ..
+            } => {
+                original.refuse();
+                current.refuse();
+            }
+            ConsumerSource::Restored { current, .. } => current.refuse(),
             #[cfg(test)]
-            ConsumerSource::Simulated(_) => {}
+            ConsumerSource::Simulated { original, .. } => original.refuse(),
         }
     }
 
@@ -2598,14 +3793,22 @@ impl Consumer<'_, '_, '_> {
                 Ok(output) => {
                     checked?;
                     match &mut self.source {
-                        ConsumerSource::Native { current, stage } => {
+                        ConsumerSource::Native {
+                            current,
+                            stage,
+                            original,
+                        } => {
                             current.finish_known(stage)?;
                             // finish_known has not released the owner scope. A
                             // later original failure still refuses that owner.
-                            self.original.check_with_native(stage, self.original.wall)?;
+                            original.check_with_native(stage, original.wall)?;
+                        }
+                        ConsumerSource::Restored { current, .. } => {
+                            current.finish_known()?;
+                            current.check()?;
                         }
                         #[cfg(test)]
-                        ConsumerSource::Simulated(_) => {}
+                        ConsumerSource::Simulated { .. } => {}
                     }
                     Ok(output)
                 }
@@ -2619,8 +3822,11 @@ impl Consumer<'_, '_, '_> {
                     if !self.armed.get() {
                         match &mut self.source {
                             ConsumerSource::Native { current, .. } => current.finish_excluded()?,
+                            ConsumerSource::Restored { current, .. } => {
+                                current.finish_excluded()?
+                            }
                             #[cfg(test)]
-                            ConsumerSource::Simulated(_) => {}
+                            ConsumerSource::Simulated { .. } => {}
                         }
                         excluded = true;
                     }
@@ -2726,6 +3932,24 @@ fn with_consumer_for_role<T>(
         settled: false,
         local: std::marker::PhantomData,
     };
+    let active = ACTIVE_REQUEST.with(|slot| Ok::<_, anyhow::Error>(slot.try_borrow()?.clone()))?;
+    if let Some(ActiveRequest::Runtime(frame)) = &active {
+        frame.refuse();
+        anyhow::bail!("autonomous operation cannot borrow a human original");
+    }
+    if let Some(ActiveRequest::Http(sink)) = active
+        && sink.request_owner.uses_restored()?
+    {
+        ensure!(
+            role == NativeRole::AppHost && response.is_none(),
+            "restored App human purpose changed"
+        );
+        let result = sink
+            .request_owner
+            .with_human_consumer(&sink, intent, phase, wall, &guard, operation);
+        guard.settled = result.is_ok();
+        return result;
+    }
     let result = with_current_for_role(
         intent,
         phase,
@@ -2744,8 +3968,8 @@ fn with_consumer_for_role<T>(
                         source: ConsumerSource::Native {
                             stage: same_stage,
                             current,
+                            original,
                         },
-                        original,
                         armed: &guard.armed,
                         finalized: false,
                     }
@@ -2754,8 +3978,7 @@ fn with_consumer_for_role<T>(
             ),
             #[cfg(test)]
             RoleSource::Simulated(stage) => Consumer {
-                source: ConsumerSource::Simulated(stage),
-                original,
+                source: ConsumerSource::Simulated { stage, original },
                 armed: &guard.armed,
                 finalized: false,
             }
@@ -2833,6 +4056,10 @@ fn with_current_for_role<T>(
             }
             _ => {}
         }
+        let OwnerSource::Initial(initial) = &mut owners.source else {
+            owners.refuse();
+            anyhow::bail!("restored consumers require their actual saved scope");
+        };
         let stored = owners
             .originals
             .get_mut(intent.attempt())
@@ -2842,7 +4069,11 @@ fn with_current_for_role<T>(
         } else {
             validate_enlist(owners.kind, intent, &stored.response)?;
         }
-        let role = stored.original.clock.role.clone();
+        let EnrolledClockSource::Initial(role) = &stored.original.clock.source else {
+            stored.original.refuse();
+            anyhow::bail!("restored original cannot enter an initial role");
+        };
+        let role = role.clone();
         let mut role = role.try_borrow_mut()?;
         current_sink()?
             .request
@@ -2858,7 +4089,7 @@ fn with_current_for_role<T>(
                 };
                 original.check(&mut stage)?;
                 if expected.is_some() {
-                    let AppStorage::Participant(participant) = &mut owners.storage else {
+                    let AppStorage::Participant(participant) = &mut initial.storage else {
                         anyhow::bail!("native serving participant unavailable");
                     };
                     participant.prepare_current()?;
@@ -2868,10 +4099,10 @@ fn with_current_for_role<T>(
                         owners.kind,
                         intent,
                         &mut stored.response,
-                        Some(&mut owners.storage),
+                        Some(&mut initial.storage),
                     )?;
                 }
-                let participant = match &mut owners.storage {
+                let participant = match &mut initial.storage {
                     AppStorage::Participant(participant) => Some(participant.as_mut()),
                     _ => None,
                 };
@@ -2885,7 +4116,7 @@ fn with_current_for_role<T>(
                 });
                 if let Err(error) = checked {
                     original.refuse();
-                    owners.storage.refuse();
+                    initial.storage.refuse();
                     return Err(error);
                 }
                 Ok(value)
@@ -2897,7 +4128,7 @@ fn with_current_for_role<T>(
 /// routing clone cannot clone or replace its native original. Socket delivery
 /// reborrows the actual executor owners; cancellation refuses that same request.
 #[derive(Clone)]
-pub(super) struct Sink {
+pub(crate) struct Sink {
     identity: ResponseIdentity,
     bindings: Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>,
     state: Rc<std::cell::Cell<SinkState>>,
@@ -2905,6 +4136,7 @@ pub(super) struct Sink {
     prepared: Rc<std::cell::Cell<bool>>,
     finite_app_io: Rc<std::cell::Cell<bool>>,
     request: request::Request,
+    request_owner: response::RequestOwner,
     response_tickets: Rc<response_tickets::ResponseTickets>,
 }
 
@@ -2916,21 +4148,28 @@ enum SinkState {
 }
 
 pub(super) fn current_sink() -> Result<Sink> {
-    ACTIVE_SINK.with(|slot| {
-        slot.try_borrow()?
-            .clone()
-            .context("native response scope missing")
+    ACTIVE_REQUEST.with(|slot| match slot.try_borrow()?.as_ref() {
+        Some(ActiveRequest::Http(sink)) => Ok(sink.clone()),
+        Some(ActiveRequest::Runtime(frame)) => {
+            frame.refuse();
+            anyhow::bail!("autonomous operation cannot become HTTP");
+        }
+        None => anyhow::bail!("native response scope missing"),
     })
 }
 
 #[cfg(test)]
 fn model_request_origin() -> Result<Option<Duration>> {
-    ACTIVE_SINK.with(|slot| {
+    ACTIVE_REQUEST.with(|slot| {
         let slot = slot.try_borrow()?;
         match slot.as_ref() {
-            Some(sink) => {
+            Some(ActiveRequest::Http(sink)) => {
                 ensure!(sink.is_open(), "scripted response closed");
                 sink.request.model_origin()
+            }
+            Some(ActiveRequest::Runtime(frame)) => {
+                frame.refuse();
+                anyhow::bail!("autonomous operation has no HTTP model original");
             }
             None => Ok(None),
         }
@@ -2959,13 +4198,13 @@ impl Sink {
             prepared: Rc::new(std::cell::Cell::new(false)),
             finite_app_io: Rc::new(std::cell::Cell::new(false)),
             request: request::Request::new(),
+            request_owner: response::RequestOwner::new(),
             response_tickets: Rc::new(response_tickets::ResponseTickets::new()),
         }
     }
 
     pub(super) fn capture_app_request(&self, scope: &AuthorityScope) -> Result<()> {
-        self.response_tickets.capture_app(scope, &self.identity)?;
-        self.request.capture_app(scope)
+        self.request_owner.capture_app(self, scope)
     }
 
     pub(super) fn capture_shell_request(&self) -> Result<()> {
@@ -2974,7 +4213,7 @@ impl Sink {
     }
 
     pub(super) fn capture_non_native_request(&self) -> Result<()> {
-        self.request.capture_non_native()
+        self.request_owner.capture_non_native(self)
     }
 
     pub(super) fn capture_literal_health(
@@ -2986,7 +4225,7 @@ impl Sink {
 
     #[cfg(test)]
     pub(super) fn capture_model_request(&self) -> Result<()> {
-        self.request.capture_model()
+        self.request_owner.capture_model(self)
     }
 
     /// Called at response creation before Hyper can poll its headers/body.
@@ -3039,6 +4278,17 @@ impl Sink {
                 "native runtime response scope changed"
             );
         }
+        if self.request_owner.prepare_runtime(self, &scope)? {
+            // DATA classification of this Sink's already captured owner only.
+            // The same lease must enter the actual native response driver.
+            if binding.is_none() {
+                *binding = Some(RuntimeBinding {
+                    scope,
+                    effects: crate::managed_credentials::effects::capture(),
+                });
+            }
+            return Ok(());
+        }
         OWNERS.with(|owners| {
             let mut owners = owners.try_borrow_mut()?;
             let owner = owners
@@ -3048,14 +4298,25 @@ impl Sink {
                 owner.kind == NativeRole::AppHost,
                 "native runtime response requires App owner"
             );
-            let AppStorage::Participant(participant) = &mut owner.storage else {
-                anyhow::bail!("native runtime response participant unavailable")
-            };
-            crate::security_epoch::serving::bind_runtime_response(
-                participant,
-                &scope,
-                &self.identity,
-            )
+            match &mut owner.source {
+                OwnerSource::Initial(initial) => {
+                    let AppStorage::Participant(participant) = &mut initial.storage else {
+                        anyhow::bail!("native runtime response participant unavailable");
+                    };
+                    crate::security_epoch::serving::bind_runtime_response(
+                        participant,
+                        &scope,
+                        &self.identity,
+                    )
+                }
+                OwnerSource::Restored { .. } => {
+                    ensure!(
+                        owner.selection.scope() == &scope,
+                        "restored runtime response selection changed"
+                    );
+                    Ok(())
+                }
+            }
         })?;
         if binding.is_none() {
             *binding = Some(RuntimeBinding {
@@ -3126,13 +4387,15 @@ impl Sink {
     }
 
     fn scope_sync<T>(&self, operation: impl FnOnce() -> T) -> T {
-        struct Restore(Option<Sink>);
+        struct Restore(Option<ActiveRequest>);
         impl Drop for Restore {
             fn drop(&mut self) {
-                ACTIVE_SINK.with(|slot| slot.replace(self.0.take()));
+                ACTIVE_REQUEST.with(|slot| slot.replace(self.0.take()));
             }
         }
-        let _restore = Restore(ACTIVE_SINK.with(|slot| slot.replace(Some(self.clone()))));
+        let _restore = Restore(
+            ACTIVE_REQUEST.with(|slot| slot.replace(Some(ActiveRequest::Http(self.clone())))),
+        );
         operation()
     }
 
@@ -3229,6 +4492,7 @@ impl Sink {
             return;
         }
         self.state.set(SinkState::Refused);
+        self.request_owner.refuse();
         self.response_tickets.refuse();
         self.request.refuse();
         response::refuse_leased(self);
@@ -3256,7 +4520,12 @@ impl Sink {
                         owner.kind == NativeRole::AppHost,
                         "native runtime terminal role changed"
                     );
-                    let AppStorage::Participant(participant) = &mut owner.storage else {
+                    let OwnerSource::Initial(initial) = &mut owner.source else {
+                        // Restored abort must select its actual retained lease,
+                        // never a later available owner with the same app DATA.
+                        anyhow::bail!("restored terminal requires the actual captured lease");
+                    };
+                    let AppStorage::Participant(participant) = &mut initial.storage else {
                         anyhow::bail!("native runtime terminal participant unavailable")
                     };
                     crate::security_epoch::serving::refuse_runtime_response(
@@ -3295,14 +4564,16 @@ impl Sink {
         impl<F: Future> Future for Scoped<F> {
             type Output = F::Output;
             fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-                struct Restore(Option<Sink>);
+                struct Restore(Option<ActiveRequest>);
                 impl Drop for Restore {
                     fn drop(&mut self) {
-                        ACTIVE_SINK.with(|slot| slot.replace(self.0.take()));
+                        ACTIVE_REQUEST.with(|slot| slot.replace(self.0.take()));
                     }
                 }
-                let _restore =
-                    Restore(ACTIVE_SINK.with(|slot| slot.replace(Some(self.sink.clone()))));
+                let _restore = Restore(
+                    ACTIVE_REQUEST
+                        .with(|slot| slot.replace(Some(ActiveRequest::Http(self.sink.clone())))),
+                );
                 self.future.as_mut().poll(cx)
             }
         }
@@ -3379,7 +4650,14 @@ fn refuse_response(
             .get_mut(intent.attempt())
             .context("native response original missing")?;
         original.response.require_bound(intent, identity)?;
-        let AppStorage::Participant(participant) = &mut owners.storage else {
+        let OwnerSource::Initial(initial) = &mut owners.source else {
+            // The exact bound original/connection has already been selected.
+            // This is only refusal of that holder, never authority for a new one.
+            original.original.refuse();
+            owners.refuse();
+            return Ok(());
+        };
+        let AppStorage::Participant(participant) = &mut initial.storage else {
             anyhow::bail!("native response participant unavailable")
         };
         // Exact S3 hold first: a retired/losing sink cannot burn an original
@@ -3403,8 +4681,13 @@ fn validate_enlist(
     intent: &FreshIntent,
     response: &ResponseBinding,
 ) -> Result<()> {
-    ACTIVE_SINK.with(|slot| {
-        if let Some(sink) = slot.try_borrow()?.as_ref() {
+    ACTIVE_REQUEST.with(|slot| {
+        let active = slot.try_borrow()?;
+        if let Some(ActiveRequest::Runtime(frame)) = active.as_ref() {
+            frame.refuse();
+            anyhow::bail!("autonomous operation cannot bind a human response");
+        }
+        if let Some(ActiveRequest::Http(sink)) = active.as_ref() {
             ensure!(
                 sink.state.get() == SinkState::Open,
                 "native response sink closed"
@@ -3433,8 +4716,13 @@ fn enlist(
     response: &mut ResponseBinding,
     storage: Option<&mut AppStorage>,
 ) -> Result<()> {
-    ACTIVE_SINK.with(|slot| {
-        if let Some(sink) = slot.try_borrow()?.as_ref() {
+    ACTIVE_REQUEST.with(|slot| {
+        let active = slot.try_borrow()?;
+        if let Some(ActiveRequest::Runtime(frame)) = active.as_ref() {
+            frame.refuse();
+            anyhow::bail!("autonomous operation cannot bind a human response");
+        }
+        if let Some(ActiveRequest::Http(sink)) = active.as_ref() {
             ensure!(
                 sink.state.get() == SinkState::Open,
                 "native response sink closed"
@@ -3469,6 +4757,12 @@ fn enlist(
 }
 
 pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()> {
+    if let Some(ActiveRequest::Http(sink)) =
+        ACTIVE_REQUEST.with(|slot| Ok::<_, anyhow::Error>(slot.try_borrow()?.clone()))?
+        && sink.request_owner.uses_restored()?
+    {
+        return with_consumer(intent, phase, wall, |current| current.check());
+    }
     with_current_original(intent, phase, wall, |stage, original| original.check(stage))
 }
 
@@ -3635,7 +4929,7 @@ mod tests {
                 Ok(())
             })
             .unwrap_err();
-            assert_eq!(error.to_string(), "native request App missing");
+            assert_eq!(error.to_string(), "native autonomous owner missing");
             assert!(!entered.get());
             for phase in [
                 RuntimePhase::Registration,
@@ -3675,6 +4969,42 @@ mod tests {
                 Ok(())
             })
         })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordinary_or_closed_restored_resources_refuse_before_reading_instance_or_provider_inputs()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (ordinary, _, _) =
+            crate::oauth::admission::tests::management_fixture(directory.path())?;
+        let native = crate::store::Runtime::from_native_metadata_for_tests(
+            ordinary.instance_path().to_owned(),
+            ordinary.app().into(),
+            directory.path().join("missing-native.sqlite"),
+            ordinary.artifact().clone(),
+        )?;
+        std::fs::remove_file(ordinary.instance_path())?;
+        for (runtime, admission, concurrency, expected) in [
+            (&ordinary, true, 1, "restored native Runtime required"),
+            (&native, false, 1, "restored host setup closed"),
+            (&native, true, 0, "invalid HTTP concurrency"),
+            (&native, true, 33, "invalid HTTP concurrency"),
+        ] {
+            let listener =
+                tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+            let result = crate::deployment::NativeRestoredHostInputs::prepare(
+                runtime,
+                listener,
+                concurrency,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(admission)),
+            );
+            let error = match result {
+                Ok(_) => anyhow::bail!("unexpected resource admission"),
+                Err(error) => error,
+            };
+            assert_eq!(error.to_string(), expected);
+        }
+        Ok(())
     }
 
     #[test]
@@ -4185,6 +5515,67 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    #[test]
+    fn common_consumer_keeps_only_checked_unarmed_exclusions_and_refuses_uncertain_attempts()
+    -> Result<()> {
+        #[derive(Debug)]
+        struct ActualCause(std::sync::Arc<()>);
+        impl std::fmt::Display for ActualCause {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign cause must not be formatted")
+            }
+        }
+        impl std::error::Error for ActualCause {}
+        for (seed, armed, failed_post, panic) in [
+            (701, false, false, false),
+            (702, false, true, false),
+            (703, true, false, false),
+            (704, false, false, true),
+        ] {
+            let world = super::super::simulation::World::new(seed);
+            super::super::effects::scope(world.clone(), || -> Result<()> {
+                let intent = original_intent("common-checked-exclusion", 305)?;
+                reserve_shell(&intent, 5)?;
+                let cause = std::sync::Arc::new(());
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    with_consumer(&intent, Phase::Session, 5, |current| -> Result<()> {
+                        if armed {
+                            current.arm()?;
+                        }
+                        if failed_post {
+                            world.advance(5);
+                        }
+                        if panic {
+                            std::panic::panic_any(19u8);
+                        }
+                        Err(anyhow::Error::new(ActualCause(std::sync::Arc::clone(
+                            &cause,
+                        ))))
+                    })
+                }));
+                if panic {
+                    assert_eq!(*result.unwrap_err().downcast::<u8>().unwrap(), 19);
+                } else {
+                    let error = result.unwrap().unwrap_err();
+                    assert!(std::sync::Arc::ptr_eq(
+                        &error.downcast_ref::<ActualCause>().unwrap().0,
+                        &cause
+                    ));
+                }
+                let mut entered = false;
+                let later = with_consumer(&intent, Phase::Session, 5, |_| {
+                    entered = true;
+                    Ok(())
+                });
+                let known_exclusion = !armed && !failed_post && !panic;
+                assert_eq!(later.is_ok(), known_exclusion);
+                assert_eq!(entered, known_exclusion);
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -5071,6 +6462,47 @@ pub(crate) mod fixtures {
     }
     pub(super) fn active() -> bool {
         FIXTURE.with(|slot| slot.try_borrow().map_or(true, |fixture| fixture.is_some()))
+    }
+
+    // A positive model classification needs the actual unborrowed fixture,
+    // not active()'s deliberately conservative treatment of a busy slot.
+    pub(super) fn require_model_domain(expected: u64) -> Result<()> {
+        FIXTURE.with(|slot| {
+            let fixture = slot.try_borrow()?;
+            let fixture = fixture.as_ref().context("scripted fixture missing")?;
+            ensure!(
+                fixture.domain == expected,
+                "scripted fixture domain changed"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn strict_model_domain_refuses_busy_and_divergent_actual_fixtures() -> Result<()> {
+        let outer = super::super::simulation::World::new(917_330);
+        let outer_domain = super::super::effects::Hooks::domain(&*outer);
+        let inner = super::super::simulation::World::new(917_331);
+        let inner_domain = super::super::effects::Hooks::domain(&*inner);
+        super::super::effects::scope(outer, || -> Result<()> {
+            require_model_domain(outer_domain)?;
+            FIXTURE.with(|slot| -> Result<()> {
+                let held = slot.borrow_mut();
+                assert!(active());
+                assert!(require_model_domain(outer_domain).is_err());
+                super::super::effects::scope(inner, || -> Result<()> {
+                    drop(held);
+                    assert_eq!(super::super::effects::current_domain(), Some(inner_domain));
+                    assert!(require_model_domain(inner_domain).is_err());
+                    let sink = super::Sink::new();
+                    assert!(sink.capture_model_request().is_err());
+                    assert!(!sink.is_open());
+                    Ok(())
+                })
+            })
+        })?;
+        assert!(require_model_domain(outer_domain).is_err());
+        Ok(())
     }
 
     pub(super) fn pending_intent(
