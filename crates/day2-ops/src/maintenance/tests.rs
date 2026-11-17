@@ -1,7 +1,7 @@
 //! The session against a scripted kubectl (a fake pod filesystem on disk), an
 //! in-memory registry serving a real gzip layer, and a scripted prompt.
 use super::*;
-use std::{cell::RefCell, io::Write as _, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 const NAMESPACE: &str = "app-example";
 const STATEFULSET: &str = "day2-example";
