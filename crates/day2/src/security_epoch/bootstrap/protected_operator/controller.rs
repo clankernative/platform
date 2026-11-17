@@ -1,6 +1,6 @@
 //! Fixed Controller-side consumer of the closed protected-restore interface.
-//! The native transport still refuses admission. The private startup integration
-//! must join its genuine backend; command DATA cannot construct a native peer.
+//! The fixed startup integration uses the genuine native backend; command DATA
+//! cannot construct a native peer or substitute for retained admission.
 use super::super::ActiveControllerStorageContinuity;
 use super::{Input, Pending, ProtectedRestoreCommands};
 use crate::security_epoch::{
@@ -191,7 +191,7 @@ impl ProtectedRestoreSession {
     /// Only readiness DATA precedes the fresh bounded native acceptance. No
     /// role stage, original or action is kept while waiting for the human's
     /// first connection. The actual native accept still checks the real peer.
-    /// The current closed supplier refuses; this adds no startup fallback.
+    /// The fixed native supplier checks the actual peer, with no startup fallback.
     pub(in crate::security_epoch) fn try_accept(
         listener: &mut ProtectedRestoreListener,
         role: &mut EnrolledProcessRoleOwner,

@@ -3,7 +3,9 @@
 The private command `day2 platform restore protected INSTANCE APP` prints
 navigation DATA for the configured security origin. It does not authenticate an
 administrator, approve a restore, send a restore request, open a browser or report
-a completed restore. Final restore execution remains unavailable in this slice.
+a completed restore. Its `execution: not_started` field describes this navigation
+command; actual execution requires the protected browser ceremonies and genuine
+Linux native owners.
 
 The operator opens that origin and uploads the bounded operator input on its
 protected restore page. The URL carries no archive path, command input, approval
@@ -48,13 +50,16 @@ JavaScript cannot represent exactly as positive safe integers; this is a UI
 limitation, not a change to native integer bounds. These presentation checks do
 not verify the approval signature or manufacture native installation evidence.
 
-The native listener, peer admission and terminal packet suppliers still refuse
-in this slice; no usable restore execution is enabled. A prompt, signed record,
-ACK, HTTP status or printed URL cannot stand in for completed installation.
+The native listener, admitted peer, warm commands and dedicated terminal packet
+are wired through the real Linux native owner path. Missing admission, changed
+identity, expiry or uncertain output still refuses permanently. Source wiring
+and portable tests do not establish a qualified installation or successful
+restore. A prompt, signed record, ACK, HTTP status or printed URL cannot stand in
+for completed installation.
 
-The private Controller-loop activation must join the genuine backend before
-publication: mandatory bind currently propagates that backend's refusal. The
-loop retains one session without reset or replacement, consumes the prepared
+Controller-loop activation binds the genuine backend before ordinary serving;
+a failed mandatory bind propagates without fallback. The loop retains one
+session without reset or replacement, consumes the prepared
 whole-owner continuation as its terminal return, then preserves the existing
 active/peer refusal cleanup and the continuation's original result. Source
 mutation checks pin that lifetime; they do not qualify an actual native peer.

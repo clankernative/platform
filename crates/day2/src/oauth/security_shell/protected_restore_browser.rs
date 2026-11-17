@@ -1,7 +1,8 @@
 //! Dedicated IAP browser ceremony. Cookies, prompts, locators and public
 //! approval records are correlation DATA, never restore authority. The final
 //! request uses a distinct consuming native entry; its actual supplier remains
-//! closed until native transport and final settlement are qualified.
+//! bound to genuine native transport; deployment and delivery qualification
+//! remain separate from returned presentation DATA.
 mod state;
 
 use super::{SecurityShell, protected_restore_prompt};

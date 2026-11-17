@@ -1,5 +1,6 @@
 //! Fixed DATA-only Shell courier under the actual saved HTTP original.
-//! The native supplier still refuses; this is not an operational restore route.
+//! Native exchanges retain the actual enrolled peer and saved original;
+//! returned DATA cannot create authority or prove HTTP delivery.
 use super::{OWNERS, OwnerSource, current_sink};
 use crate::security_epoch::native_enrollment::{
     NativeRole, ProtectedRestoreReply, ProtectedRestoreRequest, ProtectedRestoreShell,

@@ -125,7 +125,7 @@ fn run_inner(
     // Mandatory fixed setup, only after the read-only early return and before
     // creating the original file. No setup Current survives human idle time.
     // This private activation must ship with the genuine native backend; the
-    // currently closed backend propagates refusal, never an optional fallback.
+    // genuine backend propagates missing or refused admission, never a fallback.
     let mut protected_listener = ProtectedRestoreListener::bind(&mut role)?;
     let mut protected_session: Option<ProtectedRestoreSession> = None;
     let result = timings

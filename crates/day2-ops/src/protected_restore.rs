@@ -21,7 +21,7 @@ fn selected_entry(instance: &Instance, app: &str) -> Result<Value> {
         "scope": scope,
         "url": format!("{}/restore/protected", edge.origin),
         "instruction": "Open this security origin, select the application and upload the operator input there. IAP and registered passkeys authorize each ceremony.",
-        "execution": "unavailable",
+        "execution": "not_started",
         "notice": "Navigation only. No approval or restore completion is supplied by this command."
     }))
 }
@@ -49,7 +49,7 @@ mod tests {
             "https://security.example.com/restore/protected"
         );
         assert_eq!(data["kind"], "protected_restore_browser_navigation_v1");
-        assert_eq!(data["execution"], "unavailable");
+        assert_eq!(data["execution"], "not_started");
         assert!(!data.as_object().unwrap().contains_key("approval"));
         assert!(!data.as_object().unwrap().contains_key("completed"));
         for app in ["missing", "calendar?adopt=old", "../calendar"] {

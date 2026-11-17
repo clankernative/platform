@@ -663,7 +663,7 @@ pub(crate) struct ProtectedRestoreShell {
 
 /// One exclusive request/reply loan. The caller may read command DATA only;
 /// it receives no channel, role, descriptor or stage. Abandonment poisons the
-/// same actual peer. No factory currently constructs a turn.
+/// same actual peer. Only the fixed authenticated receiver constructs a turn.
 pub(in crate::security_epoch) struct ProtectedRestoreTurn<'peer> {
     peer: &'peer mut ProtectedRestorePeer,
     request: ProtectedRestoreRequest,
@@ -874,8 +874,8 @@ impl ProtectedRestorePeer {
 
     /// Readiness DATA precedes the caller's capture of a fresh bounded request.
     /// It cannot create a stage or retain an original across human idle time.
-    /// Readiness alone cannot admit a turn or grant an action. The warm
-    /// command supplier remains closed until its genuine backend is wired.
+    /// Readiness alone cannot admit a turn or grant an action. The fixed
+    /// receiver separately authenticates the next actual command and sender.
     pub(in crate::security_epoch) fn pending(&mut self) -> Result<bool> {
         let result = (|| {
             ensure!(!self.refused.get(), "protected_restore_peer_refused");
@@ -1265,11 +1265,10 @@ impl ProtectedRestoreTurn<'_> {
     }
 
     /// Result::Ok would mean this bounded DATA reply was sent, never that an
-    /// accepting restore completed or a human received it. Actual native
-    /// final-output settlement needs its own closed integration. No send or
-    /// sender matches this stage's actual negative original identity to the
-    /// receive turn and retains all independent native posts. Equal clock DATA
-    /// cannot substitute for that request, and Authenticate has no generic reply.
+    /// accepting restore completed or a human received it. Authenticate uses
+    /// the separate consuming installed-carrier output. This reply retains the
+    /// receive turn's actual negative original and independent native posts;
+    /// equal clock DATA cannot substitute for that request.
     pub(in crate::security_epoch) fn reply(
         mut self,
         stage: &mut EnrolledRoleStage<'_>,
