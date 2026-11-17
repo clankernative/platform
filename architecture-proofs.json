@@ -10,13 +10,13 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "scope": "const",
-      "fingerprint": "sha256:d17fd54ad1388f185ffbd1f33f99a17c35af2203d999c0207e85a31273c433bf",
+      "fingerprint": "sha256:97f0640a4b09eaa4ca8269f9f1aa1d917524d5d85aaa2eca4f0bf3e42d4384e4",
       "registration": null
     },
     {
       "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
       "scope": "const",
-      "fingerprint": "sha256:102ac28aafb8da05834dc84e800709b29caed45afb2b9c9f9bcdb39c8086acc8",
+      "fingerprint": "sha256:3a0e52266e5b4c08ab8b5fe189104924bade24310b0478b2572adc32e76f0a91",
       "registration": null
     },
     {
@@ -756,6 +756,71 @@
     },
     {
       "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "CompletedResponse",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "consumer_context"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        },
+        {
+          "source": "crates/day2/src/oauth/native_management/response_tickets.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response_tickets"
+          }
+        }
+      ],
+      "methods": [
+        "pub (super) fn require_lease (& self , sink : & Sink , lease : & ConsumerLeaseOrigin) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "ResponseBorrow < '_ , '_ , '_ >",
+          "signature": "async fn drive < T : hyper :: rt :: Write + Unpin > (& mut self , transport : & mut Transport < T > , mut request : (u64 , Operation)) -> Result < CompletedResponse >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CompletedResponse",
+          "signature": "pub (super) fn require_lease (& self , sink : & Sink , lease : & ConsumerLeaseOrigin) -> Result < () >"
+        },
+        {
+          "owner": "FinalContextFactoryAttempt < '_ , '_ >",
+          "signature": "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'original >",
+          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:07f4836aed31808b1a60fa1c402fabc510bd736000cdbd335fb14133034a389d"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "Consumer",
       "owning_children": [
         {
@@ -949,6 +1014,22 @@
           "signature": "pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
         },
         {
+          "owner": "NativeConsumerContext < 'request , 'original >",
+          "signature": "fn bound (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , origin : ConsumerOrigin < 'request >) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'original >",
+          "signature": "pub (super) fn human (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'original >",
+          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , native : ConsumerRequestOrigin , lease : ConsumerLeaseOrigin) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'original >",
+          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
+        {
           "owner": "OriginalPhase < '_ >",
           "signature": "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >"
         },
@@ -971,18 +1052,6 @@
         {
           "owner": "OriginalPhase < '_ >",
           "signature": "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
-        },
-        {
-          "owner": "NativeConsumerContext < 'request , 'original >",
-          "signature": "fn bound (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , origin : ConsumerOrigin < 'request >) -> Result < Self >"
-        },
-        {
-          "owner": "NativeConsumerContext < 'request , 'original >",
-          "signature": "pub (super) fn human (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >"
-        },
-        {
-          "owner": "NativeConsumerContext < 'request , 'original >",
-          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , native : ConsumerRequestOrigin , lease : ConsumerLeaseOrigin) -> Result < Self >"
         }
       ],
       "proof_uses": [],
@@ -1454,6 +1523,34 @@
     },
     {
       "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
+      "type_name": "FinalContextFactoryAttempt",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'original >",
+          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "FinalContextFactoryAttempt < '_ , '_ >",
+          "signature": "fn require_completion (& mut self , completed : & CompletedResponse) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:dac35a080744726f985c3c2d280b9fa4bba27eda419a753c416dd2fff45cea25"
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/consumer_context.rs",
       "type_name": "NativeConsumerContext",
       "kind": "private_material",
       "consuming_methods": [],
@@ -1461,6 +1558,7 @@
       "methods": [
         "pub (crate) fn affinity_data (& self) -> NativeConsumerAffinity",
         "fn bound (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , origin : ConsumerOrigin < 'request >) -> Result < Self >",
+        "pub (super) fn captured (runtime : & 'request Runtime , original : & 'request mut Original < EnrolledClock > , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >",
         "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >",
         "pub (crate) fn check_final (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >",
         "pub (crate) fn check_provider (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime , use_ : NativeProviderUse) -> Result < () >",
@@ -1477,7 +1575,11 @@
         "fn require_response_binding (& mut self) -> Result < () >",
         "pub (crate) fn require_runtime (& mut self , runtime : & Runtime) -> Result < () >",
         "pub (crate) fn require_runtime_purpose (& mut self , runtime : & Runtime , purpose : RuntimeServingUse) -> Result < () >",
+        "pub (crate) fn require_startup_sql (& mut self , runtime : & Runtime) -> Result < () >",
         "pub (crate) fn response_complete (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >",
+        "pub (super) fn runtime_http (runtime : & 'request Runtime , phase : super :: RuntimePhase , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >",
+        "fn runtime_input (runtime : & 'request Runtime , origin : ConsumerOrigin < 'request > , purpose : RuntimeServingUse) -> Result < Self >",
+        "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , native : ConsumerRequestOrigin , lease : ConsumerLeaseOrigin) -> Result < Self >",
         "pub (super) fn startup_sql (runtime : & 'request Runtime , request : & super :: request :: StartupRequest) -> Result < Self >"
       ],
       "factories": [
@@ -1487,11 +1589,27 @@
         },
         {
           "owner": "NativeConsumerContext < 'request , 'original >",
+          "signature": "pub (super) fn captured (runtime : & 'request Runtime , original : & 'request mut Original < EnrolledClock > , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'original >",
           "signature": "pub (super) fn human (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >"
         },
         {
           "owner": "NativeConsumerContext < 'request , 'original >",
           "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , native : ConsumerRequestOrigin , lease : ConsumerLeaseOrigin) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'static >",
+          "signature": "fn runtime_input (runtime : & 'request Runtime , origin : ConsumerOrigin < 'request > , purpose : RuntimeServingUse) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_http (runtime : & 'request Runtime , phase : super :: RuntimePhase , sink : & 'request Sink , native : ConsumerRequestOrigin) -> Result < Self >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , native : ConsumerRequestOrigin , lease : ConsumerLeaseOrigin) -> Result < Self >"
         },
         {
           "owner": "NativeConsumerContext < 'request , 'static >",
@@ -1561,6 +1679,10 @@
         },
         {
           "owner": "NativeConsumerContext < 'request , 'original >",
+          "signature": "pub (crate) fn require_startup_sql (& mut self , runtime : & Runtime) -> Result < () >"
+        },
+        {
+          "owner": "NativeConsumerContext < 'request , 'original >",
           "signature": "pub (crate) fn response_complete (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >"
         }
       ],
@@ -1577,14 +1699,24 @@
         "pub (crate) fn affinity_data (& self) -> NativeConsumerAffinity",
         "pub (crate) fn check_final (& mut self , stage : & mut EnrolledRoleStage < '_ > , runtime : & Runtime) -> Result < () >",
         "pub (crate) fn complete_after_native < 'scope > (mut self , mut token : RestoredAppRequestSettlement < 'scope , 'request , 'original >) -> Result < () >",
+        "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn require_affinity (& mut self , actual : & NativeConsumerAffinity) -> Result < () >",
         "pub (crate) fn require_origin (& mut self , actual : & NativeConsumerOrigin) -> Result < () >",
         "fn require_response_binding (& mut self) -> Result < () >",
         "pub (crate) fn require_runtime (& mut self , runtime : & Runtime) -> Result < () >",
+        "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >",
         "pub (super) fn startup (runtime : & 'request Runtime , request : & super :: request :: StartupLease) -> Result < Self >"
       ],
       "factories": [
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'original >",
+          "signature": "pub (super) fn human_response (runtime : & 'request Runtime , original : & 'request mut OriginalPhase < 'original > , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
+        {
+          "owner": "NativeRequestFinalContext < 'request , 'static >",
+          "signature": "pub (super) fn runtime_response (runtime : & 'request Runtime , sink : & 'request Sink , request : & super :: request :: Lease , lease : ConsumerLeaseOrigin , completed : & 'request CompletedResponse) -> Result < Self >"
+        },
         {
           "owner": "NativeRequestFinalContext < 'request , 'static >",
           "signature": "pub (super) fn startup (runtime : & 'request Runtime , request : & super :: request :: StartupLease) -> Result < Self >"
@@ -1837,10 +1969,14 @@
       "factories": [
         {
           "owner": "Lease < Owners >",
-          "signature": "fn consumer_origin (& self) -> Result < ConsumerLeaseOrigin >"
+          "signature": "pub (super) fn consumer_origin (& self) -> Result < ConsumerLeaseOrigin >"
         }
       ],
       "material_uses": [
+        {
+          "owner": "CompletedResponse",
+          "signature": "pub (super) fn require_lease (& self , sink : & Sink , lease : & ConsumerLeaseOrigin) -> Result < () >"
+        },
         {
           "owner": "ConsumerLeaseOrigin",
           "signature": "pub (super) fn check (& self , sink : & Sink) -> Result < () >"
@@ -10538,21 +10674,22 @@
         }
       ],
       "methods": [
+        "pub (in crate :: security_epoch) fn arm (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_file (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_local (& mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn finish (mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn reobserve (& mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn arm (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish (mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_excluded (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_known (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn prepare_provider (& mut self , runtime : & crate :: store :: Runtime , use_ : NativeProviderUse) -> Result < () >",
         "pub (in crate :: security_epoch) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime , access : NativeSqlUse) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn reobserve (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_human (& mut self , intent : & crate :: oauth :: fresh_auth :: FreshIntent , phase : crate :: oauth :: native_management :: Phase) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_response (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_runtime_purpose (& mut self , runtime : & crate :: store :: Runtime , purpose : RuntimeServingUse) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require_startup_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (in crate :: security_epoch) fn response_complete (& mut self) -> Result < () >"
       ],
       "factories": [
@@ -10621,6 +10758,10 @@
         {
           "owner": "RestoredAppCurrentPeer < '_ , '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn require_runtime_purpose (& mut self , runtime : & crate :: store :: Runtime , purpose : RuntimeServingUse) -> Result < () >"
+        },
+        {
+          "owner": "RestoredAppCurrentPeer < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_startup_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
         },
         {
           "owner": "RestoredAppCurrentPeer < '_ , '_ , '_ >",
