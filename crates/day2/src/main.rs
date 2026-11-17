@@ -83,6 +83,10 @@ fn main() -> Result<()> {
         ["runtime-pair-protocols", instance, app] => serde_json::to_value(
             day2::runtime_pair::protocols(&Runtime::load(Path::new(instance), app)?)?,
         )?,
+        ["runtime-pair-rehearsal-wait", root] => {
+            day2::runtime_pair::rehearsal_wait(Path::new(root))?;
+            serde_json::json!({"staged":true})
+        }
         [
             "runtime-pair-prepare",
             instance,
@@ -113,6 +117,44 @@ fn main() -> Result<()> {
             serde_json::to_value(day2::runtime_pair::admit(
                 &Runtime::load(Path::new(instance), app)?,
                 id,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?)?
+        }
+        ["runtime-pair-handoff", instance, app, id, action, operator] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            let operator = day2::authority_state::LocalOperator::assert_local(operator)?;
+            match *action {
+                "promote" => serde_json::to_value(day2::runtime_pair::promote_handoff(
+                    &runtime, id, &operator,
+                )?)?,
+                "observe" => serde_json::to_value(day2::runtime_pair::next_observation(
+                    &runtime, id, &operator,
+                )?)?,
+                "pending" => {
+                    serde_json::json!({"pending":day2::runtime_pair::inspect_source_pending(&runtime,id,&operator)?})
+                }
+                "aborted" => serde_json::to_value(day2::runtime_pair::inspect_aborted(
+                    &runtime, id, &operator,
+                )?)?,
+                _ => anyhow::bail!("runtime_pair_handoff_action_invalid"),
+            }
+        }
+        [
+            "runtime-pair-handoff",
+            instance,
+            app,
+            id,
+            action,
+            file,
+            operator,
+        ] => {
+            let action = serde_json::from_value(serde_json::json!(action))
+                .map_err(|_| anyhow::anyhow!("runtime_pair_handoff_action_invalid"))?;
+            serde_json::to_value(day2::runtime_pair::apply_observation(
+                &Runtime::load(Path::new(instance), app)?,
+                id,
+                action,
+                Path::new(file),
                 &day2::authority_state::LocalOperator::assert_local(operator)?,
             )?)?
         }

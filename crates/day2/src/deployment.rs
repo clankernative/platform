@@ -18,6 +18,7 @@ use std::{
 mod terminal;
 pub use terminal::NativeTerminalHold;
 mod operation;
+pub(crate) use operation::require_no_runtime_handoff;
 pub use operation::{OperationLease, guard, ping};
 
 /// Container-entrypoint cleanup, after its readiness runtime has stopped.
@@ -644,6 +645,9 @@ fn maintenance_lease(
                 .is_none(),
         "ordinary_store_required"
     );
+    if runtime.rolling() {
+        require_no_runtime_handoff(runtime.instance_path(), runtime.app())?;
+    }
     ensure!(
         runtime.operators()?.contains(operator.name())
             || runtime.sql_read(|db| Ok(crate::authority_state::current(db)?
@@ -696,7 +700,7 @@ pub async fn serve_with(
     access: Access<'_>,
     configure: impl FnOnce(Runtime) -> Result<Runtime> + Send + 'static,
 ) -> Result<()> {
-    serve_configured(instance_path, app, access, None, configure).await
+    serve_configured(instance_path, app, access, None, None, configure).await
 }
 
 /// Native adapters are selected from the typed instance contract only after
@@ -707,7 +711,15 @@ pub(crate) async fn serve_with_oauth(
     access: Access<'_>,
     providers: Option<crate::oauth::host::Providers>,
 ) -> Result<()> {
-    serve_configured(instance_path, app, access, providers, Ok).await
+    serve_configured(instance_path, app, access, providers, None, Ok).await
+}
+
+pub(crate) async fn serve_runtime_pair(
+    instance: &Path,
+    app: &str,
+    selection: crate::runtime_pair::Selection,
+) -> Result<()> {
+    serve_configured(instance, app, Access::Edge, None, Some(selection), Ok).await
 }
 
 /// Closed selected-App startup, consumed only on its final HTTP owner. Runtime
@@ -1277,6 +1289,7 @@ async fn serve_configured(
     app: &str,
     access: Access<'_>,
     providers: Option<crate::oauth::host::Providers>,
+    pair: Option<crate::runtime_pair::Selection>,
     configure: impl FnOnce(Runtime) -> Result<Runtime> + Send + 'static,
 ) -> Result<()> {
     let published_instance_path = instance_path;
@@ -1321,6 +1334,16 @@ async fn serve_configured(
     } else {
         AppStartupRuntime::Ordinary(Box::new(Runtime::load(&instance_path, app)?))
     };
+    if let Some(selection) = &pair {
+        let AppStartupRuntime::Ordinary(runtime) = &runtime else {
+            anyhow::bail!("ordinary_rolling_profile_required")
+        };
+        ensure!(
+            profile.rolling() && !oauth,
+            "ordinary_rolling_profile_required"
+        );
+        crate::runtime_pair::bind_serving_process(runtime, selection)?;
+    }
     if let Ok(expected) = std::env::var("DAY2_EXPECTED_ROLLOUT") {
         let AppStartupRuntime::Ordinary(runtime) = &runtime else {
             anyhow::bail!("ordinary_rolling_profile_required")
@@ -1404,9 +1427,16 @@ async fn serve_configured(
     };
     let runtime = *runtime;
     if let Some(requirements) = &security {
-        requirements.require_runtime()?;
+        runtime.sql_read(|db| {
+            crate::runtime_generation::require_execution(&runtime, db, requirements)
+        })?;
     }
     crate::runtime_generation::register_active(&runtime)?;
+    if runtime.rolling()
+        && runtime.sql_read(|db| crate::runtime_pair::source_quiesced(&runtime, db))?
+    {
+        return Ok(());
+    }
     let runtime = tokio::task::spawn_blocking(move || configure(runtime)).await??;
     let concurrency = usize::from(profile.resources().http_concurrency());
     let server = match access {
@@ -1439,6 +1469,7 @@ async fn serve_configured(
         }
     };
     let admission = server.admission();
+    let serving_health = server.serving_health();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let mut http = tokio::spawn(server.serve(async {
         let _ = shutdown_rx.await;
@@ -1449,7 +1480,9 @@ async fn serve_configured(
         result = &mut http => {
             http_finished = true;
             result.context("HTTP supervisor failed").and_then(|result| result)
-                .and_then(|()| anyhow::bail!("HTTP server stopped unexpectedly"))
+                .and_then(|()| if serving_health.as_ref().is_some_and(|health| health.source_stopped()) {
+                    Ok(())
+                } else { anyhow::bail!("HTTP server stopped unexpectedly") })
         },
     };
     // Stop admission and new claims first. Existing requests/work may finish;

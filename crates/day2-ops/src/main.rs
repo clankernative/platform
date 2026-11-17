@@ -692,6 +692,15 @@ impl Operations {
                 let step = input::<Input>(&request)?.step;
                 self.maintenance()?.rollout(&step)
             }
+            "maintenance-runtime-rollout" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    step: String,
+                }
+                self.maintenance()?
+                    .runtime_rollout(&input::<Input>(&request)?.step)
+            }
             "maintenance-confirm" => self.maintenance()?.confirm(),
             "maintenance-fence" => self.maintenance()?.fence(),
             "maintenance-mark-activated" => self.maintenance()?.mark_activated(),

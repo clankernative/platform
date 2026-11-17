@@ -328,6 +328,13 @@ fn sql_control_name(name: &str) -> bool {
 // borrowed callback is not admitted. Unreviewed sites have no allowance path.
 fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
     const REVIEWED: &[(&str, &str)] = &[
+        // Ordinary-RWO health owns a fresh READ_ONLY metadata connection and
+        // disables waiting only on that connection. No borrowed callback,
+        // native storage constructor, epoch owner or hook is accepted here.
+        (
+            "crates/day2/src/rollout/health.rs",
+            "sha256:210c896aaa6a44f4e53ab9e0ece3404d405f122af53b5bcd286470f0cd2ee4ec",
+        ),
         // The sole fixed accounting wrapper delegates to the closed module;
         // it cannot choose SQL, a role, a connection factory or a ticket.
         (
@@ -8927,6 +8934,38 @@ mod tests {
             syn::parse_file("extern crate rusqlite;").unwrap(),
         )]);
         require_canonical_external_crates(&parsed, &BTreeSet::new()).unwrap();
+    }
+
+    #[test]
+    fn readonly_health_constructor_cannot_become_a_borrowed_connection_control() {
+        let fixed:syn::ItemFn=syn::parse_str(r#"
+            fn observer_connection(path: &Path) -> Result<Connection> {
+                let connection=Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                connection.busy_timeout(Duration::ZERO)?;
+                Ok(connection)
+            }
+        "#).unwrap();
+        let source = "crates/day2/src/rollout/health.rs";
+        let admitted = |source: &str, function: &syn::ItemFn| {
+            sql_control_function_reviewed(
+                source,
+                &day2::digest(function.to_token_stream().to_string().as_bytes()),
+            )
+        };
+        assert!(admitted(source, &fixed));
+        assert!(!admitted("crates/day2/src/impostor.rs", &fixed));
+        let mut borrowed = fixed.clone();
+        borrowed
+            .sig
+            .inputs
+            .push(syn::parse_quote!(loan: &Connection));
+        assert!(!admitted(source, &borrowed));
+        let mut changed = fixed;
+        changed.block.stmts.insert(
+            0,
+            syn::parse_quote!(borrowed.busy_timeout(Duration::ZERO)?;),
+        );
+        assert!(!admitted(source, &changed));
     }
 
     fn fixture(source: &str) -> tempfile::TempDir {

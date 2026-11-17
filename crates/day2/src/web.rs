@@ -157,6 +157,8 @@ pub(crate) struct Host {
     live_capacity: Arc<Semaphore>,
     admitting: Arc<AtomicBool>,
     health_endpoints: bool,
+    serving_health: Option<Arc<crate::rollout::health::Health>>,
+    inflight: std::sync::atomic::AtomicUsize,
     /// Per-request phase timing lines; `None` when the instance turned them off.
     request_timing: Option<crate::request_timing::Output>,
 }
@@ -657,6 +659,9 @@ impl LocalServer {
             PresentationSource::Test(port) => Some(port),
         };
         let host = Arc::new(Host {
+            serving_health: (runtime.rolling() && !runtime.uses_native_storage())
+                .then(|| crate::rollout::health::Health::new(&runtime)),
+            inflight: std::sync::atomic::AtomicUsize::new(0),
             app_secrets: Arc::new(crate::app_secrets::Gcp::default()),
             entropy: entropy.clone(),
             clock: inputs.clock.clone(),
@@ -720,6 +725,10 @@ impl LocalServer {
         Admission(self.host.admitting.clone())
     }
 
+    pub(crate) fn serving_health(&self) -> Option<Arc<crate::rollout::health::Health>> {
+        self.host.serving_health.clone()
+    }
+
     /// Tests read the timing lines this server writes instead of stdout.
     #[cfg(test)]
     pub(crate) fn capture_request_timing(&mut self) -> Result<Arc<Mutex<Vec<String>>>> {
@@ -769,6 +778,15 @@ impl LocalServer {
     }
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
         let (stop, stopped) = tokio::sync::watch::channel(false);
+        let (source_stop, mut source_stopped) = tokio::sync::watch::channel(false);
+        let health = self.host.serving_health.as_ref().map(|health| {
+            tokio::spawn(health.clone().run(
+                self.host.runtime.clone(),
+                self.host.admitting.clone(),
+                source_stop,
+                stopped.clone(),
+            ))
+        });
         let background = if self.host.oauth.is_none() {
             Some(tokio::spawn(crate::host_loop::run(
                 self.host.runtime.clone(),
@@ -785,7 +803,18 @@ impl LocalServer {
         let shutdown_admission = admitting.clone();
         let shutdown_stop = stop.clone();
         let shutdown = async move {
-            shutdown.await;
+            tokio::select! {
+                _=shutdown=>{},
+                _=async {
+                    loop {
+                        match source_stopped.changed().await {
+                            Ok(()) if *source_stopped.borrow() => break,
+                            Ok(()) => {},
+                            Err(_) => std::future::pending::<()>().await,
+                        }
+                    }
+                }=>{},
+            }
             shutdown_admission.store(false, Ordering::Release);
             let _ = shutdown_stop.send(true);
         };
@@ -812,6 +841,9 @@ impl LocalServer {
         let _ = stop.send(true);
         if let Some(background) = background {
             background.await??;
+        }
+        if let Some(health) = health {
+            health.await??;
         }
         result?;
         Ok(())
@@ -973,17 +1005,37 @@ pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeRe
         .clone()
         .run_async(async move {
             if !host.runtime.uses_native_storage()
-                && matches!(request.uri().path(), "/health/ready" | "/health/candidate")
+                && matches!(
+                    request.uri().path(),
+                    "/health/ready" | "/health/candidate" | "/health/drain"
+                )
                 && host.runtime.rolling()
             {
                 suppress_timing(&request);
-                let candidate_probe = request.uri().path() == "/health/candidate";
-                let runtime = host.runtime.clone();
-                let ready = tokio::task::spawn_blocking(move || {
-                    crate::rollout::ready(&runtime, candidate_probe)
-                })
-                .await
-                .is_ok_and(|result| result.unwrap_or(false));
+                let Some(health) = &host.serving_health else {
+                    return NativeResponse::health(request.method(), false);
+                };
+                if request.uri().path() == "/health/drain" {
+                    if !matches!(*request.method(), Method::GET | Method::HEAD) {
+                        return NativeResponse::health(request.method(), false);
+                    }
+                    let data = health.drain(
+                        host.admitting.load(Ordering::Acquire),
+                        host.inflight.load(Ordering::Acquire),
+                        64_usize.saturating_sub(host.live_capacity.available_permits()),
+                    );
+                    return NativeResponse::application(match data {
+                        Some(data) => {
+                            let mut response = axum::Json(data).into_response();
+                            if request.method() == Method::HEAD {
+                                *response.body_mut() = axum::body::Body::empty();
+                            }
+                            response
+                        }
+                        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    });
+                }
+                let ready = health.ready(request.uri().path() == "/health/candidate");
                 return NativeResponse::health(
                     request.method(),
                     ready && host.admitting.load(Ordering::Acquire),
@@ -993,6 +1045,14 @@ pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeRe
                 suppress_timing(&request);
                 return response;
             }
+            struct Inflight(Arc<Host>);
+            impl Drop for Inflight {
+                fn drop(&mut self) {
+                    self.0.inflight.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            host.inflight.fetch_add(1, Ordering::AcqRel);
+            let _inflight = Inflight(host.clone());
             NativeResponse::application(handle_inner(host, request).await)
         })
         .await

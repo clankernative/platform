@@ -117,7 +117,7 @@ pub fn authorize_in(
 ) -> Result<AuthorityStamp> {
     let active = active_in(connection, runtime)?;
     if let Some(requirements) = &active.document.security {
-        requirements.require_runtime()?;
+        crate::runtime_generation::require_execution(runtime, connection, requirements)?;
     }
     active.document.authorize_audit(actor)?;
     Ok(active.stamp)

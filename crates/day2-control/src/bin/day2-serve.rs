@@ -34,16 +34,18 @@ fn run_pair_executor(arguments: &[std::ffi::OsString]) -> Result<()> {
         println!("{}", serde_json::json!({"settled":outcomes.len()}));
         return Ok(());
     }
-    let candidate = day2::runtime_pair::Candidate::open(&instance, app, selection)?;
     let evidence = PathBuf::from(&arguments[4]);
     if arguments[2] == "--runtime-candidate-check" {
+        let candidate = day2::runtime_pair::Candidate::open(&instance, app, selection)?;
         println!("{}", serde_json::to_string(&candidate.check(&evidence)?)?);
     } else {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()?;
-        let result = runtime.block_on(candidate.serve(&evidence));
+        let result = runtime.block_on(day2::runtime_pair::supervise(
+            &instance, app, selection, &evidence,
+        ));
         runtime.shutdown_timeout(Duration::from_secs(1));
         result?;
     }

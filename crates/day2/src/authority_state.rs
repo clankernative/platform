@@ -791,7 +791,7 @@ pub(crate) fn authorize_in(
         Failure::Forbidden
     );
     if let Some(requirements) = &active.document.security {
-        requirements.require_runtime()?;
+        crate::runtime_generation::require_execution(runtime, connection, requirements)?;
     }
     active
         .document

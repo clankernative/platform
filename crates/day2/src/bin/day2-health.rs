@@ -6,9 +6,41 @@ use std::{
     time::Duration,
 };
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DrainStatus {
+    generation: String,
+    admitting: bool,
+    inflight: u64,
+    streams: u64,
+    quiesced: bool,
+}
+
+fn drain_response(bytes: &[u8]) -> Result<DrainStatus> {
+    ensure!(bytes.len() <= 8192, "drain response budget");
+    let split = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("drain response invalid"))?;
+    ensure!(bytes.starts_with(b"HTTP/1.1 200 "), "not ready");
+    let status: DrainStatus = serde_json::from_slice(&bytes[split + 4..])
+        .map_err(|_| anyhow::anyhow!("drain response invalid"))?;
+    ensure!(
+        status
+            .generation
+            .strip_prefix("sha256:")
+            .is_some_and(|hash| hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+        "drain generation invalid"
+    );
+    Ok(status)
+}
+
 fn check(arguments: &[String]) -> Result<()> {
     if arguments == ["--help"] {
-        println!("usage: day2-health PUBLISHED_PORT [--candidate | --drain-delay]");
+        println!("usage: day2-health PUBLISHED_PORT [--candidate | --drain | --drain-delay]");
         return Ok(());
     }
     if arguments.len() == 2 && arguments[1] == "--drain-delay" {
@@ -16,10 +48,14 @@ fn check(arguments: &[String]) -> Result<()> {
         return Ok(());
     }
     ensure!(
-        arguments.len() == 1 || (arguments.len() == 2 && arguments[1] == "--candidate"),
-        "usage: day2-health PUBLISHED_PORT [--candidate]"
+        arguments.len() == 1
+            || (arguments.len() == 2 && matches!(arguments[1].as_str(), "--candidate" | "--drain")),
+        "usage: day2-health PUBLISHED_PORT [--candidate | --drain]"
     );
-    let path = if arguments.len() == 2 {
+    let draining = arguments.get(1).is_some_and(|mode| mode == "--drain");
+    let path = if draining {
+        "/health/drain"
+    } else if arguments.len() == 2 {
         "/health/candidate"
     } else {
         "/health/ready"
@@ -39,6 +75,12 @@ fn check(arguments: &[String]) -> Result<()> {
         socket,
         "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{published}\r\nConnection: close\r\n\r\n"
     )?;
+    if draining {
+        let mut bytes = Vec::new();
+        socket.take(8193).read_to_end(&mut bytes)?;
+        println!("{}", serde_json::to_string(&drain_response(&bytes)?)?);
+        return Ok(());
+    }
     let mut line = String::new();
     BufReader::new(socket).take(1024).read_line(&mut line)?;
     ensure!(
@@ -46,6 +88,18 @@ fn check(arguments: &[String]) -> Result<()> {
         "not ready"
     );
     Ok(())
+}
+
+#[test]
+fn drain_metadata_is_closed_bounded_and_never_echoes_malformed_private_values() {
+    let body = serde_json::json!({"generation":format!("sha256:{}","a".repeat(64)),"admitting":true,"inflight":2,"streams":0,"quiesced":false});
+    let bytes = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{body}");
+    assert_eq!(drain_response(bytes.as_bytes()).unwrap().inflight, 2);
+    assert!(drain_response(&vec![b'x'; 8193]).is_err());
+    let error = drain_response(b"HTTP/1.1 200 OK\r\n\r\n{\"private-value\":\"secret\"}")
+        .err()
+        .unwrap();
+    assert_eq!(format!("{error:#}"), "drain response invalid");
 }
 
 fn main() {
