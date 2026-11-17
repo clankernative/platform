@@ -1111,12 +1111,7 @@ fn capture_snapshot(
     let encoded = read_file(capture, &root, "backup.json", MANIFEST_BYTES)?;
     let manifest: Manifest = serde_json::from_slice(&encoded.bytes)?;
     let artifact_relative = manifest.artifact_relative()?;
-    ensure!(
-        manifest.provider_databases.is_empty()
-            && manifest.rollout_artifacts.is_none()
-            && manifest.companion_state.is_empty(),
-        "restore_archive_unhandled_graph"
-    );
+    super::require_native_archive_graph(&manifest)?;
     ensure!(
         manifest.artifact == intent.archive.artifact.as_str()
             && manifest.database == intent.archive.image.as_str()

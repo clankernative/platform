@@ -22,7 +22,7 @@ pub(in crate::security_epoch) use writer::{
 };
 use zeroize::Zeroizing;
 
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
 mod application;
@@ -523,7 +523,7 @@ impl Drop for SqlLoan<'_, '_, '_, '_, '_, '_, '_> {
     }
 }
 
-fn image_shape(bytes: &[u8]) -> Result<()> {
+pub(super) fn image_shape(bytes: &[u8]) -> Result<()> {
     ensure!(
         (100..=usize::try_from(MAX_BYTES)?).contains(&bytes.len())
             && &bytes[..16] == b"SQLite format 3\0"
@@ -539,7 +539,7 @@ fn image_shape(bytes: &[u8]) -> Result<()> {
 /// import it, clear its active slot or backfill captured invocation owners.
 /// Inspect the actual captured/deserialized database, including other schema
 /// objects using a reserved name. This read supplies no restore authority.
-fn require_no_runtime_generation_objects(db: &Connection) -> Result<()> {
+pub(super) fn require_no_runtime_generation_objects(db: &Connection) -> Result<()> {
     let present: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema
          WHERE name COLLATE NOCASE IN
@@ -551,7 +551,21 @@ fn require_no_runtime_generation_objects(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn memory_shape(db: &Connection, expected: Option<usize>) -> Result<usize> {
+/// One native graph profile, shared by existing capture and the mechanical
+/// snapshot verifier. Success is historical DATA, never an archive/owner source.
+pub(super) fn require_native_archive_graph(
+    manifest: &crate::backup_archive::Manifest,
+) -> Result<()> {
+    ensure!(
+        manifest.provider_databases.is_empty()
+            && manifest.rollout_artifacts.is_none()
+            && manifest.companion_state.is_empty(),
+        "restore_archive_unhandled_graph"
+    );
+    Ok(())
+}
+
+pub(super) fn memory_shape(db: &Connection, expected: Option<usize>) -> Result<usize> {
     ensure!(
         db.path().is_none_or(str::is_empty),
         "restore_memory_image_required"

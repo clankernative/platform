@@ -976,6 +976,10 @@ pub(crate) fn build_credential_selectable(root: &Path) -> Result<PathBuf> {
     build_fixture(root, "credential-selectable", &BTreeMap::new())
 }
 
+pub(crate) fn build_restore_native(root: &Path) -> Result<PathBuf> {
+    build_fixture(root, "restore-native", &BTreeMap::new())
+}
+
 fn fixture_build(
     root: &Path,
     fixture: &str,
@@ -1062,6 +1066,11 @@ fn fixture_build(
             root,
             "fixtures/credential-metadata-conformance",
             "fixtures/credential-selectable-conformance",
+        ),
+        "restore-native" => FixtureBuild::overlay(
+            root,
+            "fixtures/credential-metadata-conformance",
+            "fixtures/restore-native-conformance",
         ),
         "connection-declaration" => {
             FixtureBuild::plain(root, "fixtures/connection-declaration-conformance")
@@ -1887,6 +1896,9 @@ fn configure_tests(
             command.args(["--skip", test]);
         }
     }
+    if !fixtures.contains_key("restore-native") || !fixtures.contains_key("reports") {
+        command.args(["--skip", "security_epoch::native_backup::fixture::normal_fixture_image_matches_canonical_verifier_and_refuses_substitutions"]);
+    }
     if !fixtures.contains_key("oauth-calendar") {
         command.args([
             "--skip",
@@ -1915,6 +1927,7 @@ fn configure_tests(
     }
     for (fixture, variable) in [
         ("reports", "DAY2_TEST_REPORTS_ARTIFACT"),
+        ("restore-native", "DAY2_TEST_RESTORE_NATIVE_ARTIFACT"),
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
         ("reports-search", "DAY2_TEST_REPORTS_SEARCH_ARTIFACT"),
@@ -2176,6 +2189,7 @@ fn required_steps(scope: &str) -> Result<Vec<&'static str>> {
             "build-delegation",
             "build-credential-metadata",
             "build-credential-selectable",
+            "build-restore-native",
             "build-connection-declaration",
             "build-oauth-calendar",
             "build-oauth-gitlab",
@@ -3671,6 +3685,7 @@ mod tests {
             "build-delegation",
             "build-credential-metadata",
             "build-credential-selectable",
+            "build-restore-native",
             "build-connection-declaration",
             "build-oauth-calendar",
             "build-oauth-gitlab",

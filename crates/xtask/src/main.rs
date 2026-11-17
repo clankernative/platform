@@ -713,6 +713,13 @@ fn main() -> Result<()> {
                 verification::build_credential_selectable(&root)?.display()
             );
         }
+        "build-restore-native" => {
+            ensure!(
+                args.next().is_none(),
+                "native restore fixture accepts no arguments"
+            );
+            println!("{}", verification::build_restore_native(&root)?.display());
+        }
         "build-delegation-business" => verification::build_delegation_business(&root)?,
         "catalog-candidate" => {
             let instance = PathBuf::from(
