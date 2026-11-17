@@ -28,6 +28,7 @@ mod native_toolchain;
 mod provider_conformance;
 mod release_inputs;
 mod roc_packages;
+mod runtime_image;
 mod tooling;
 mod tooling_distribution;
 mod ui_assembly;
@@ -332,6 +333,7 @@ fn main() -> Result<()> {
         "linux-strict-denial",
         "linux-provision-package",
         "linux-provision-inspect",
+        "verify-runtime-image",
         "architecture-proof-candidate-inventory",
         "admit-roc-packages",
     ]
@@ -1017,6 +1019,16 @@ fn main() -> Result<()> {
             let shard = args.next().context("usage: xtask verify-shard SHARD")?;
             ensure!(args.next().is_none(), "usage: xtask verify-shard SHARD");
             verification::execute(&root, &format!("verify-shard-{shard}"))?;
+        }
+        "verify-runtime-image" => {
+            let usage = "usage: xtask verify-runtime-image BASE_IMAGE QUALIFIED_BASE_ID APP_IMAGE ARTIFACT NEW_DIRECTORY";
+            let base = args.next().context(usage)?;
+            let qualified = args.next().context(usage)?;
+            let app = args.next().context(usage)?;
+            let artifact = PathBuf::from(args.next().context(usage)?);
+            let output = PathBuf::from(args.next().context(usage)?);
+            ensure!(args.next().is_none(), "{usage}");
+            runtime_image::execute(&root, &base, &qualified, &app, &artifact, &output)?;
         }
         "qualify-linux" => {
             let output = PathBuf::from(

@@ -160,16 +160,16 @@ impl PodObservation {
         } else {
             &release.source
         };
-        let digest = software
-            .image
-            .rsplit_once('@')
-            .context("runtime_pair_image_changed")?
-            .1;
+        software.require_runtime_image()?;
+        software
+            .composition
+            .as_ref()
+            .context("runtime_pair_image_composition_required")?
+            .require_image_id(&self.image_id)?;
         ensure!(
             self.node == placement.node
                 && self.pvc_uid == placement.pvc_uid
                 && self.image == software.image
-                && self.image_id.ends_with(&format!("@{digest}"))
                 && self.endpoint.port == binding.backend.port,
             "runtime_pair_pod_binding_changed"
         );

@@ -14,6 +14,7 @@ import ops.Check
 import ops.Ci
 import ops.Verify
 import ops.Linux
+import ops.RuntimeImage
 import ops.Provision
 import ops.Simulation
 import ops.ProviderConformance
@@ -97,6 +98,7 @@ run! = |args| match args {
 	["verify-queue-find"] => Verify.queue_find!(call!)
 	["verify-queue-admit"] => Verify.queue_admit!(call!)
 	["qualify-linux"] => Linux.run!(call!)
+	["verify-runtime-image"] => RuntimeImage.run!(call!)
 	["strict-linux"] => Linux.strict!(call!)
 	["provision-linux"] => Provision.smoke!(call!)
 	["control-verify"] => Verify.control!(call!)

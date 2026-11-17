@@ -193,14 +193,14 @@ tests do not establish two-binary or real-ingress qualification.
 The request keeps the existing source/target immutable images, same compiled
 artifact, effective instance, exact controller/PVC UID and incumbent node. It adds
 one closed `runtime_pair` record with `receipt`, `receipt_digest`, `project`,
-`backend_service` and Kubernetes `service`. The receipt pins the exact directed
+`backend_service`, Kubernetes `service` and both measured image compositions. The receipt pins the exact directed
 qualified pair and local-only profile. No app deployment compiles Platform or its
 SDK/operator tooling. The local-only profile rejects provider/OAuth/native-store,
 sidecar and credential initialization combinations; unsupported shapes refuse
 while Source serves. Existing protocol-3 installations require the explicit
 bootstrap decision; no journal migration or stopped fallback is supplied.
 
-The native protocol now versions the release journal at 4 and serving, operation
+The native protocol now versions the release journal at 5 (R3 composition binding) and serving, operation
 and execution leases at 2. The same journal records bound, promoted, withdrawing,
 quiesced and complete handoff states. Actual measured Source and Target code
 remain separate execution approvals; the artifact's original SDK/security
@@ -327,6 +327,42 @@ those software inputs instead of rebuilding an equivalent wrapper per source
 commit. Keep build receipts separate from installed-deployment provenance.
 
 ## Runtime-pair admission
+
+R3 image composition separates the registry descriptor used by Kubernetes,
+the exact native builder image witness recorded by qualification, the canonical OCI
+configuration digest, and the application artifact. The fixed app Dockerfile adds one artifact layer to the
+qualified runtime. After pushing that image, an operator runs:
+
+```console
+build-out/bin/xtask verify-runtime-image BASE_IMAGE@sha256:DIGEST QUALIFIED_BASE_ID APP_IMAGE@sha256:DIGEST ARTIFACT_DIRECTORY NEW_DIRECTORY
+```
+
+`QUALIFIED_BASE_ID` is the exact image identity in the shared native qualification
+receipt. It must be a measured root, native manifest or configuration node of the
+base OCI graph; the deployment independently requires that exact approved value.
+The private `RuntimeImage.roc` recipe measures the resolved image configurations,
+the inherited OCI layer descriptors, and the added layer's actual bytes.
+A root or manifest witness binds the inherited blob addresses directly. A
+configuration witness also requires measuring the base layers against its DiffIDs. It refuses
+changed execution settings, additional layers, links, whiteouts, extended
+permissions, writable files, extra paths and missing or altered artifact files.
+`composition.json` binds both immutable image references, the qualified native base identity, both native manifests and OCI configurations,
+the exact artifact/tree/layer, and verifier/recipe identities. It grants no
+qualification or pod attestation. The operator reviews and pins this DATA in the
+maintenance request as `runtime_pair.source_composition` and
+`runtime_pair.target_composition`. Both must bind the same unchanged artifact and
+their selected app images. Journal admission and every later read retain those
+bindings and require the native base identity from the exact qualification receipt.
+Pod image observations must match the pinned root or its one measured native
+manifest; a configuration digest or unrelated manifest is refused.
+
+This verifier consumes the existing compiled workflow runner and never builds
+Platform or the runner. Its temporary saved-image archive is bounded and removed
+after successful measurement. Compiled SDK production and runtime-pair native
+qualification remain shared platform-release operations. This first R3 slice
+does not produce native/strict/pair qualification or enable installed apps.
+The closed journal protocol is now version 5; both runtimes in a future qualified
+pair must understand the composition fields. Older receipts are refused.
 
 Publish an operator-owned transition receipt for one exact source and target
 runtime pair. A target runtime's native and strict receipts, or an app rolling

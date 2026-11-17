@@ -286,7 +286,20 @@ pub(super) fn inspect_artifact(path: &Path) -> Result<Value> {
 
 /// The logged child is a trusted platform/Docker command, never an app-selected
 /// command. Logs are private fixture evidence, bounded separately from workers.
-fn logged(output: &Path, name: &str, command: &mut Command, seconds: u64) -> Result<()> {
+pub(super) fn logged(output: &Path, name: &str, command: &mut Command, seconds: u64) -> Result<()> {
+    logged_bounded(output, name, command, seconds, None)
+}
+
+/// Same finite child supervisor, with one additional operator-owned output
+/// file budget. The image exporter must be stopped while writing an oversized
+/// archive rather than discovering the excess only after filling the disk.
+pub(super) fn logged_bounded(
+    output: &Path,
+    name: &str,
+    command: &mut Command,
+    seconds: u64,
+    produced: Option<(&Path, u64)>,
+) -> Result<()> {
     eprintln!("Linux qualification: {name}");
     let path = output.join(format!("{name}.log"));
     let log = fs::OpenOptions::new()
@@ -305,6 +318,10 @@ fn logged(output: &Path, name: &str, command: &mut Command, seconds: u64) -> Res
         }
         if started.elapsed() > Duration::from_secs(seconds)
             || fs::metadata(&path)?.len() > 16 * 1024 * 1024
+            || produced.is_some_and(|(path, limit)| match fs::metadata(path) {
+                Ok(metadata) => !metadata.is_file() || metadata.len() > limit,
+                Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+            })
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -321,6 +338,13 @@ fn logged(output: &Path, name: &str, command: &mut Command, seconds: u64) -> Res
         fs::metadata(path)?.len() <= 16 * 1024 * 1024,
         "qualification log budget"
     );
+    if let Some((path, limit)) = produced {
+        let metadata = fs::metadata(path)?;
+        ensure!(
+            metadata.is_file() && metadata.len() <= limit,
+            "native output file budget"
+        );
+    }
     eprintln!("Linux qualification passed: {name}");
     Ok(())
 }

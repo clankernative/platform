@@ -135,14 +135,8 @@ impl Execution {
                         )?,
                 "runtime_pair_generation_changed"
             );
-            release
-                .source
-                .runtime
-                .require_image(&release.source.image)?;
-            release
-                .target
-                .runtime
-                .require_image(&release.target.image)?;
+            release.source.require_runtime_image()?;
+            release.target.require_runtime_image()?;
             if let Some(check) = check {
                 ensure!(
                     check.generation == *candidate && check.attempt == *attempt && *attempt > 0,
@@ -208,14 +202,8 @@ fn admit_in(runtime: &Runtime, db: &Connection, id: &str) -> Result<Release> {
         release.placement.is_some(),
         "runtime_pair_placement_required"
     );
-    release
-        .source
-        .runtime
-        .require_image(&release.source.image)?;
-    release
-        .target
-        .runtime
-        .require_image(&release.target.image)?;
+    release.source.require_runtime_image()?;
+    release.target.require_runtime_image()?;
     let source = runtime_generation::expected_id(runtime.scope(), &release.source.runtime)?;
     runtime_generation::require_expected(db, runtime.scope(), &source, &release.source.runtime)?;
     runtime_generation::require_active(db, &source)?;
@@ -322,7 +310,7 @@ fn require_executor(
         selection.image == software.image,
         "runtime_pair_image_changed"
     );
-    software.runtime.require_image(&selection.image)?;
+    software.require_runtime_image()?;
     ensure!(
         *measured == software.runtime.code()?,
         "runtime_pair_executor_code_changed"

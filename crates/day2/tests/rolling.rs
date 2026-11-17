@@ -133,8 +133,32 @@ fn runtime_protocol_manifest_is_reusable_across_different_app_schemas() -> Resul
 fn runtime_pair_refusal_preserves_current_authority_and_writable_incumbent() -> Result<()> {
     let (world, different_artifact, operator) = stock_fixture()?;
     let bytes = fs::read(world.runtime.instance_path())?;
+    // Synthetic image DATA for refusal checks; this grants no native qualification.
+    let composition = |image: &str| day2::runtime_pair::Composition {
+        version: 1,
+        base_image: format!("registry/runtime@{}", day2::digest(b"native fixture")),
+        base_native: day2::digest(b"native fixture"),
+        base_manifest: day2::digest(b"base manifest"),
+        base_config: day2::digest(b"base configuration"),
+        image: image.into(),
+        manifest: day2::digest(format!("manifest:{image}").as_bytes()),
+        config: day2::digest(format!("configuration:{image}").as_bytes()),
+        artifact: world.runtime.artifact().id().into(),
+        artifact_tree: day2::digest(b"artifact tree"),
+        layer: day2::digest(b"artifact layer"),
+        verifier: day2::digest(b"verifier"),
+        recipe: day2::digest(b"recipe"),
+    };
     let request = day2::runtime_pair::Request {
         id: "runtime-pair".into(),
+        source_composition: composition(&format!(
+            "registry/app@{}",
+            day2::digest(b"source runtime")
+        )),
+        target_composition: composition(&format!(
+            "registry/app@{}",
+            day2::digest(b"target runtime")
+        )),
         source_image: format!("registry/app@{}", day2::digest(b"source runtime")),
         target_image: format!("registry/app@{}", day2::digest(b"target runtime")),
         receipt_digest: day2::digest(b"unqualified receipt"),

@@ -209,6 +209,45 @@ fn healthy(world: &World, n: u64) -> HealthObservation {
     }
 }
 
+#[test]
+fn pod_observation_accepts_only_the_pinned_root_or_its_measured_native_manifest() -> Result<()> {
+    let mut world = bound_world()?;
+    let mut original = promoted(&mut world)?;
+    verified_probe(&mut original);
+    round(&mut original, 1);
+    for target in [false, true] {
+        let generation = if target {
+            &world.release.target
+        } else {
+            &world.release.source
+        };
+        let composition = generation.composition.as_ref().unwrap();
+        let mut observation = healthy(&world, 1);
+        handoff::withdraw_in(&mut original.clone(), observation.clone())?;
+        let observed = if target {
+            &mut observation.target
+        } else {
+            observation.source.as_mut().unwrap()
+        };
+        observed.image_id = format!("docker-pullable://registry/app@{}", composition.manifest);
+        handoff::withdraw_in(&mut original.clone(), observation.clone())?;
+        for wrong in [
+            &composition.config,
+            &composition.base_config,
+            &crate::digest(b"another manifest"),
+        ] {
+            let observed = if target {
+                &mut observation.target
+            } else {
+                observation.source.as_mut().unwrap()
+            };
+            observed.image_id = format!("docker-pullable://registry/app@{wrong}");
+            assert!(handoff::withdraw_in(&mut original.clone(), observation.clone()).is_err());
+        }
+    }
+    Ok(())
+}
+
 fn verified_probe(release: &mut Release) {
     release.probe = Some(rollout::Probe {
         definition: rollout::ProbeDefinition {

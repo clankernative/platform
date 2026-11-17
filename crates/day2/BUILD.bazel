@@ -54,6 +54,7 @@ COMPILE_INPUTS = [
     "//:ops/GkeRelease.roc",
     "//:ops/Infra.roc",
     "//:ops/Linux.roc",
+    "//:ops/RuntimeImage.roc",
     "//:ops/LocalDev.roc",
     "//:ops/Maintain.roc",
     "//:ops/NativeEnrollment.roc",

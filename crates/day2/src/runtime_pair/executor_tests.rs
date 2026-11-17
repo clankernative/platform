@@ -15,6 +15,38 @@ struct World {
     release: Release,
 }
 
+#[test]
+fn persisted_pair_requires_composition_even_before_executor_admission() -> Result<()> {
+    let world = World::new()?;
+    let original = world.release;
+    for target in [false, true] {
+        for change in 0..3 {
+            let mut release = original.clone();
+            let generation = if target {
+                &mut release.target
+            } else {
+                &mut release.source
+            };
+            match change {
+                0 => generation.composition = None,
+                1 => {
+                    generation.composition.as_mut().unwrap().base_native =
+                        crate::digest(b"another base")
+                }
+                _ => {
+                    generation.composition.as_mut().unwrap().artifact =
+                        crate::digest(b"another artifact")
+                }
+            }
+            rollout::write(&world.db, &release)?;
+            assert!(rollout::state(&world.db).is_err());
+        }
+    }
+    rollout::write(&world.db, &original)?;
+    assert_eq!(rollout::state(&world.db)?.unwrap(), original);
+    Ok(())
+}
+
 impl World {
     fn new() -> Result<Self> {
         let root = tempfile::tempdir()?;
@@ -53,6 +85,11 @@ impl World {
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL")?;
         let receipt = super::super::tests::receipt();
         let generation = |identity: RuntimeIdentity, label: &[u8]| Generation {
+            composition: Some(super::super::image::tests::composition(
+                &identity,
+                &format!("registry/sdk@{}", crate::digest(label)),
+                runtime.artifact().id(),
+            )),
             artifact: runtime.artifact().id().into(),
             runtime: identity,
             instance_digest: runtime.instance_digest().into(),

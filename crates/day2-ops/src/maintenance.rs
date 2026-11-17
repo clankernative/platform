@@ -393,6 +393,17 @@ impl Request {
         match (&self.runtime_pair, operation) {
             (Some(pair), Operation::RuntimeRollout) => {
                 pair.validate()?;
+                let artifact = format!("sha256:{}", self.artifact_id);
+                ensure!(
+                    pair.source_composition.image == self.app_image
+                        && self
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| pair.target_composition.image == target.app_image)
+                        && pair.source_composition.artifact == artifact
+                        && pair.target_composition.artifact == artifact,
+                    "runtime_pair_image_composition_changed"
+                );
                 ensure!(
                     self.target
                         .as_ref()
