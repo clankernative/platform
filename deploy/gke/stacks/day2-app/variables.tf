@@ -285,6 +285,13 @@ variable "backup_bucket" {
   }
 }
 
+variable "backup_operation_lock" {
+  description = "Whether the scheduled backup holds the shared backup/release operation lock (day2-backup --operation-lock). Keep true. Set false only while this app still runs an image whose day2-backup predates the flag (it rejects it). Maintenance from an operator that requires the lock then refuses this app until it is true again, so set it back to true immediately before the app's own activation onto a build that supports it."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "backup_schedule" {
   description = "Cron schedule of the off-cluster backup, in UTC. Default: hourly at minute 17."
   type        = string

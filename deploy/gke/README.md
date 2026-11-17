@@ -786,7 +786,9 @@ Jobs kept). Each run:
 2. runs one container of the StatefulSet's exact app image:
    `/usr/local/bin/day2-backup /srv/day2/instance.json <app_id> /backup/snapshot
    --operation-lock --upload-gcs <project>-<app>-backups --object-prefix <app_id>`, with the same
-   instance ConfigMap (`subPath`), state volume and baked artifact. It takes an
+   instance ConfigMap (`subPath`), state volume and baked artifact.
+   `backup_operation_lock = false` omits `--operation-lock` for one app whose
+   image predates it ([activation recovery](../../docs/ACTIVATION-RECOVERY.md#backup-and-release-exclusion)). It takes an
    online SQLite snapshot beside the serving pod without its lock and verifies
    the bundle ([Linux guide](../linux-sqlite/README.md#online-backup-in-the-runtime-image));
 3. in the same process, takes the pod's access token from the GKE metadata

@@ -1300,6 +1300,22 @@ run "state_ownership_is_idempotent_with_only_cap_chown" {
   }
 }
 
+run "backup_operation_lock_is_per_app" {
+  command = plan
+
+  variables {
+    backup_operation_lock = false
+  }
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "/backup/snapshot", "--upload-gcs", "example-tools-example-backups", "--object-prefix", "example_app"]) &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-backup"])
+    )
+    error_message = "An app on an image whose day2-backup predates the operation lock can keep scheduled backups by opting out; only the flag is omitted."
+  }
+}
+
 run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
   command = plan
 
