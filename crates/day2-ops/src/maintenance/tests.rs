@@ -1,7 +1,7 @@
 //! The session against a scripted kubectl (a fake pod filesystem on disk), an
 //! in-memory registry serving a real gzip layer, and a scripted prompt.
 use super::*;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, io::Write as _, rc::Rc};
 
 const NAMESPACE: &str = "app-example";
 const STATEFULSET: &str = "day2-example";
@@ -516,6 +516,13 @@ impl Cluster for FakeCluster {
                 Self::copy(&self.pod_path(from), &self.pod_path(to))?;
                 String::new()
             }
+            ["exec", _, "--", "rm", "-f", path] => {
+                let path = self.pod_path(path);
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+                String::new()
+            }
             ["exec", _, "--", "rm", "-rf", paths @ ..] => {
                 for path in paths {
                     fs::remove_dir_all(self.pod_path(path))?;
@@ -565,7 +572,12 @@ impl Cluster for FakeCluster {
             }
             ["exec", _, "--", HOST, request] => self.host(request)?,
             ["exec", _, "--", DAY2, "migration-plan", .., plan] => {
-                fs::write(self.pod_path(plan), br#"{"format":1,"add_nullable_text":[]}"#)?;
+                // Like `day2 migration-plan`, refuse to replace an existing plan.
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(self.pod_path(plan))?
+                    .write_all(br#"{"format":1,"add_nullable_text":[]}"#)?;
                 String::new()
             }
             ["exec", _, "--", DAY2, "migration-apply", ..] => r#"{"applied":true}"#.into(),
