@@ -31,6 +31,12 @@ JsonValue := [Object(List((Str, JsonValue))), Array(List(JsonValue)), String(Str
 		_ => Err(BadJson("expected a string"))
 	}
 
+	is_null : JsonValue -> Bool
+	is_null = |node| match node {
+		Null => Bool.True
+		_ => Bool.False
+	}
+
 	u64 : JsonValue -> Try(U64, [BadJson(Str)])
 	u64 = |node| match node {
 		Number(text) => {

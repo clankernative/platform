@@ -25,13 +25,21 @@ InstanceSpec :: {
 	## The platform's own source. An instance selects a commit, never a fork.
 	platform_repository = "github.com/clankernative/platform"
 
-	## The status app branch protection requires; only the platform posts it.
-	required_check = "day2 / verification"
+	## The job context of <org>/app-ci's required org-scoped workflow. Gitea posts
+	## it as "<org>/app-ci: day2 / verification (pull_request)" and counts only a
+	## status its Actions user produced for that source workflow, so neither an app
+	## workflow nor an API caller can satisfy it.
+	required_context = "day2 / verification (pull_request)"
 
 	App : {
 		id : Str,
 		delivery : Str,
 		sdk : Str,
+		owners : List(Str),
+		size : Str,
+		verification : U64,
+		schedules : Str,
+		extension : Try(Extension, [Null]),
 		repository : Str,
 		hostname : Str,
 		namespace : Str,
@@ -40,6 +48,14 @@ InstanceSpec :: {
 		state_prefix : Str,
 		edge_state_prefix : Str,
 		backup_bucket : Str,
+	}
+
+	## A self-hosted Chrome extension: every name is derived from the app and its pinned ID.
+	Extension : {
+		id : Str,
+		update_url : Str,
+		downloads : List(Str),
+		signing_secret : Str,
 	}
 
 	Derived : {
@@ -98,7 +114,7 @@ InstanceSpec :: {
 			operators: spec.operators,
 			instance_repository: "${spec.org}/instance",
 			app_ci_repository: "${spec.org}/app-ci",
-			required_check,
+			required_check: "${spec.org}/app-ci: ${required_context}",
 			sdk_registry: "${registry}/day2",
 			tofu_state_bucket,
 			apps: spec.apps.map(|bound| derive_app(spec.org, spec.domain, spec.project, registry, bound)),
@@ -108,17 +124,52 @@ InstanceSpec :: {
 
 Delivery : [Automatic, Manual, Paused]
 
-SpecApp : { id : Names.AppId, sdk : Str, delivery : Delivery }
+Size : [Standard, Large]
+
+Schedules : [Enabled, Paused]
+
+ExtensionPin : [NoExtension, Pinned(Str)]
+
+SpecApp : {
+	id : Names.AppId,
+	sdk : Str,
+	delivery : Delivery,
+	extension : ExtensionPin,
+	owners : List(Str),
+	size : Size,
+	verification : U64,
+	schedules : Schedules,
+}
 
 derive_app : Str, Str, Str, Str, SpecApp -> InstanceSpec.App
 derive_app = |org, domain, project, registry, bound| {
 	id = bound.id.to_str()
+	hostname = "${id}.${domain}"
 	{
 		id,
 		delivery: delivery_name(bound.delivery),
 		sdk: bound.sdk,
+		owners: bound.owners,
+		size: match bound.size {
+			Standard => "standard"
+			Large => "large"
+		},
+		verification: bound.verification,
+		schedules: match bound.schedules {
+			Enabled => "enabled"
+			Paused => "paused"
+		},
+		extension: match bound.extension {
+			NoExtension => Err(Null)
+			Pinned(extension_id) => Ok({
+				id: extension_id,
+				update_url: "https://${hostname}/downloads/updates.xml",
+				downloads: ["/downloads/${id}.crx", "/downloads/updates.xml"],
+				signing_secret: "${id}-chrome-extension-signing-key",
+			})
+		},
 		repository: "${org}/${id}",
-		hostname: "${id}.${domain}",
+		hostname,
 		namespace: "app-${id}",
 		image: "${registry}/${id}/${id}",
 		state_bucket: "${project}-${id}-state",
@@ -227,7 +278,7 @@ checked = |raw| {
 	if !ascending(app_pairs.map(|pair| pair.0)) {
 		return Err(BadJson("apps must be sorted by id"))
 	}
-	apps = check_apps(app_pairs, [])?
+	apps = check_apps(app_pairs, people, [])?
 	Ok(
 		InstanceSpec.{
 			installation,
@@ -245,8 +296,8 @@ checked = |raw| {
 	)
 }
 
-check_apps : List((Str, JsonValue)), List(SpecApp) -> Try(List(SpecApp), [BadJson(Str)])
-check_apps = |pairs, done| match pairs {
+check_apps : List((Str, JsonValue)), Str, List(SpecApp) -> Try(List(SpecApp), [BadJson(Str)])
+check_apps = |pairs, people, done| match pairs {
 	[] => Ok(done)
 	[(key, node), .. as rest] => {
 		id =
@@ -264,7 +315,7 @@ check_apps = |pairs, done| match pairs {
 						),
 				)?
 		at = "apps.${key}"
-		exact(node, at, ["sdk", "delivery"])?
+		exact(node, at, ["sdk", "delivery", "extension", "owners", "size", "verification", "schedules"])?
 		sdk = text(node, "sdk")?
 		if !(sdk.starts_with("sha256:") and sdk.drop_prefix("sha256:").to_utf8().len() == 64)
 			or !sdk.drop_prefix("sha256:").to_utf8().all(hex) {
@@ -276,7 +327,53 @@ check_apps = |pairs, done| match pairs {
 			"paused" => Paused
 			_ => return Err(BadJson("${at}.delivery must be automatic, manual or paused"))
 		}
-		check_apps(rest, done.append({ id, sdk, delivery }))
+		extension_node = node.get("extension")?
+		extension =
+			if extension_node.is_null() {
+				NoExtension
+			} else {
+				pinned =
+					extension_node
+						.string()
+						.map_err(|_| BadJson("${at}.extension must be null or a Chrome extension ID"))?
+				if !(pinned.to_utf8().len() == 32 and pinned.to_utf8().all(|byte| byte >= 'a' and byte <= 'p')) {
+					return Err(BadJson("${at}.extension must be null or 32 letters a-p, a Chrome extension ID"))
+				}
+				Pinned(pinned)
+			}
+		owner_nodes = node.get("owners")?.array().map_err(|_| BadJson("${at}.owners must be an array"))?
+		if owner_nodes.is_empty() or owner_nodes.len() > 32 {
+			return Err(BadJson("${at}.owners must list 1 to 32 people"))
+		}
+		owners = strings(owner_nodes, "${at}.owners", [])?
+		for owner in owners {
+			if !valid_email(owner, people) {
+				return Err(BadJson("${at}.owners must be lowercase addresses at domains.people"))
+			}
+		}
+		if !ascending(owners) {
+			return Err(BadJson("${at}.owners must be sorted and unique"))
+		}
+		size = match text(node, "size")? {
+			"standard" => Standard
+			"large" => Large
+			_ => return Err(BadJson("${at}.size must be standard or large"))
+		}
+		verification =
+			node.get("verification")?.u64().map_err(|_| BadJson("${at}.verification must be an integer from 4 to 100"))?
+		if verification < 4 or verification > 100 {
+			return Err(BadJson("${at}.verification must be an integer from 4 to 100"))
+		}
+		schedules = match text(node, "schedules")? {
+			"enabled" => Enabled
+			"paused" => Paused
+			_ => return Err(BadJson("${at}.schedules must be enabled or paused"))
+		}
+		check_apps(
+			rest,
+			people,
+			done.append({ id, sdk, delivery, extension, owners, size, verification, schedules }),
+		)
 	}
 }
 
@@ -418,8 +515,11 @@ sample =
 	\\"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools"},
 	\\"domains":{"people":"example.com","apps":"apps.example.com"},
 	\\"operators":["ada@example.com","grace@example.com"],
-	\\"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic"},
-	\\"home":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"manual"}}}
+	\\"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic",
+	\\"extension":"jldmikbinomhomcbmeppagennfohakni","owners":["lin@example.com"],"size":"standard",
+	\\"verification":4,"schedules":"enabled"},
+	\\"home":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"manual","extension":null,
+	\\"owners":["kay@example.com","lin@example.com"],"size":"large","verification":6,"schedules":"paused"}}}
 
 expect match InstanceSpec.from_json(sample) {
 	Ok(spec) => {
@@ -429,24 +529,53 @@ expect match InstanceSpec.from_json(sample) {
 			== "tools/instance"
 			and names.app_ci_repository
 				== "tools/app-ci"
-				and names.sdk_registry
-					== "us-central1-docker.pkg.dev/exampleco-tools/day2"
-					and names.tofu_state_bucket
-						== "exampleco-tools-tofu-state"
-						and first
-							== Ok({
-								id: "go",
-								delivery: "automatic",
-								sdk: "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
-								repository: "tools/go",
-								hostname: "go.apps.example.com",
-								namespace: "app-go",
-								image: "us-central1-docker.pkg.dev/exampleco-tools/go/go",
-								state_bucket: "exampleco-tools-go-state",
-								state_prefix: "day2-app/go",
-								edge_state_prefix: "platform/app/go",
-								backup_bucket: "exampleco-tools-go-backups",
-							})
+				and names.required_check
+					== "tools/app-ci: day2 / verification (pull_request)"
+					and names.sdk_registry
+						== "us-central1-docker.pkg.dev/exampleco-tools/day2"
+						and names.tofu_state_bucket
+							== "exampleco-tools-tofu-state"
+							and first
+								== Ok({
+									id: "go",
+									delivery: "automatic",
+									sdk: "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
+									owners: ["lin@example.com"],
+									size: "standard",
+									verification: 4,
+									schedules: "enabled",
+									extension: Ok({
+										id: "jldmikbinomhomcbmeppagennfohakni",
+										update_url: "https://go.apps.example.com/downloads/updates.xml",
+										downloads: ["/downloads/go.crx", "/downloads/updates.xml"],
+										signing_secret: "go-chrome-extension-signing-key",
+									}),
+									repository: "tools/go",
+									hostname: "go.apps.example.com",
+									namespace: "app-go",
+									image: "us-central1-docker.pkg.dev/exampleco-tools/go/go",
+									state_bucket: "exampleco-tools-go-state",
+									state_prefix: "day2-app/go",
+									edge_state_prefix: "platform/app/go",
+									backup_bucket: "exampleco-tools-go-backups",
+								})
+	}
+	Err(_) => Bool.False
+}
+
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => match spec.derived().apps.last() {
+		Ok(home) => home.extension
+			== Err(Null)
+			and home.owners
+				== ["kay@example.com", "lin@example.com"]
+				and home.size
+					== "large"
+					and home.verification
+						== 6
+						and home.schedules
+							== "paused"
+		Err(_) => Bool.False
 	}
 	Err(_) => Bool.False
 }
@@ -481,3 +610,21 @@ expect rejects("\"go\":", "\"zebra\":")
 expect rejects("\"delivery\":\"manual\"", "\"delivery\":\"auto\"")
 expect rejects("\"delivery\":\"manual\"", "\"delivery\":\"manual\",\"cases\":6")
 expect rejects("sha256:98fb0ae8", "sha512:98fb0ae8")
+expect rejects("\"verification\":4", "\"verification\":3")
+expect rejects("\"verification\":4", "\"verification\":101")
+expect rejects("\"verification\":4", "\"verification\":\"4\"")
+expect rejects("\"verification\":4", "\"verification\":4.5")
+expect rejects("\"verification\":4", "\"verification\":-4")
+expect rejects("\"size\":\"standard\"", "\"size\":\"small\"")
+expect rejects("\"schedules\":\"enabled\"", "\"schedules\":\"disabled\"")
+expect rejects(",\"schedules\":\"enabled\"", "")
+expect rejects("\"extension\":null", "\"extension\":\"\"")
+expect rejects("\"extension\":null,", "")
+expect rejects("jldmikbinomhomcbmeppagennfohakni", "jldmikbinomhomcbmeppagennfohakn")
+expect rejects("jldmikbinomhomcbmeppagennfohakni", "qldmikbinomhomcbmeppagennfohakni")
+expect rejects("jldmikbinomhomcbmeppagennfohakni", "JLDMIKBINOMHOMCBMEPPAGENNFOHAKNI")
+expect rejects("\"owners\":[\"lin@example.com\"]", "\"owners\":[]")
+expect rejects("\"owners\":[\"lin@example.com\"]", "\"owners\":\"lin@example.com\"")
+expect rejects("\"owners\":[\"lin@example.com\"]", "\"owners\":[\"lin@elsewhere.com\"]")
+expect rejects("[\"kay@example.com\",\"lin@example.com\"]", "[\"lin@example.com\",\"kay@example.com\"]")
+expect rejects("[\"kay@example.com\",\"lin@example.com\"]", "[\"kay@example.com\",\"kay@example.com\"]")

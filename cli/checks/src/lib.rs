@@ -1278,8 +1278,11 @@ mod tests {
 "forge":{"kind":"gitea","server":"https://git.example.com","org":"tools"},
 "domains":{"people":"example.com","apps":"apps.example.com"},
 "operators":["ada@example.com","grace@example.com"],
-"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic"},
-"home":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"manual"}}}"#;
+"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic",
+"extension":"jldmikbinomhomcbmeppagennfohakni","owners":["lin@example.com"],"size":"standard",
+"verification":4,"schedules":"enabled"},
+"home":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"manual","extension":null,
+"owners":["kay@example.com","lin@example.com"],"size":"large","verification":6,"schedules":"paused"}}}"#;
 
     fn check_spec(spec: &str) -> Output {
         let scratch = Scratch::new();
@@ -1314,7 +1317,10 @@ mod tests {
             result["repositories"],
             json!({"instance": "tools/instance", "app_ci": "tools/app-ci"})
         );
-        assert_eq!(result["required_check"], "day2 / verification");
+        assert_eq!(
+            result["required_check"],
+            "tools/app-ci: day2 / verification (pull_request)"
+        );
         assert_eq!(
             result["sdk_registry"],
             "us-central1-docker.pkg.dev/exampleco-tools/day2"
@@ -1331,6 +1337,16 @@ mod tests {
                     "id": "go",
                     "delivery": "automatic",
                     "sdk": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
+                    "owners": ["lin@example.com"],
+                    "size": "standard",
+                    "verification": 4,
+                    "schedules": "enabled",
+                    "extension": {
+                        "id": "jldmikbinomhomcbmeppagennfohakni",
+                        "update_url": "https://go.apps.example.com/downloads/updates.xml",
+                        "downloads": ["/downloads/go.crx", "/downloads/updates.xml"],
+                        "signing_secret": "go-chrome-extension-signing-key"
+                    },
                     "repository": "tools/go",
                     "hostname": "go.apps.example.com",
                     "namespace": "app-go",
@@ -1344,6 +1360,11 @@ mod tests {
                     "id": "home",
                     "delivery": "manual",
                     "sdk": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
+                    "owners": ["kay@example.com", "lin@example.com"],
+                    "size": "large",
+                    "verification": 6,
+                    "schedules": "paused",
+                    "extension": null,
                     "repository": "tools/home",
                     "hostname": "home.apps.example.com",
                     "namespace": "app-home",
@@ -1431,6 +1452,65 @@ mod tests {
                 r#""delivery":"manual""#,
                 r#""delivery":"manual","repository":"tools/golinks""#,
             ),
+            // Per-app choices: wrong types, out-of-range values and closed tags.
+            (r#""verification":4,"#, r#""verification":"4","#),
+            (r#""verification":4,"#, r#""verification":4.5,"#),
+            (r#""verification":4,"#, r#""verification":-4,"#),
+            (r#""verification":4,"#, r#""verification":3,"#),
+            (r#""verification":4,"#, r#""verification":101,"#),
+            (r#""verification":6,"#, r#""verification":null,"#),
+            (r#""size":"standard""#, r#""size":"small""#),
+            (r#""size":"large""#, r#""size":"Large""#),
+            (r#""schedules":"enabled""#, r#""schedules":"disabled""#),
+            (r#""schedules":"paused""#, r#""schedules":false"#),
+            // Owners: a sorted, unique, non-empty list of people at domains.people.
+            (r#""owners":["lin@example.com"]"#, r#""owners":[]"#),
+            (
+                r#""owners":["lin@example.com"]"#,
+                r#""owners":"lin@example.com""#,
+            ),
+            (r#""owners":["lin@example.com"]"#, r#""owners":[7]"#),
+            (
+                r#""owners":["lin@example.com"]"#,
+                r#""owners":["lin@elsewhere.com"]"#,
+            ),
+            (
+                r#""owners":["lin@example.com"]"#,
+                r#""owners":["Lin@example.com"]"#,
+            ),
+            (
+                r#"["kay@example.com","lin@example.com"]"#,
+                r#"["lin@example.com","kay@example.com"]"#,
+            ),
+            (
+                r#"["kay@example.com","lin@example.com"]"#,
+                r#"["kay@example.com","kay@example.com"]"#,
+            ),
+            // Extension: null or a 32-letter a-p Chrome extension ID.
+            (
+                "jldmikbinomhomcbmeppagennfohakni",
+                "jldmikbinomhomcbmeppagennfohakn",
+            ),
+            (
+                "jldmikbinomhomcbmeppagennfohakni",
+                "jldmikbinomhomcbmeppagennfohaknip",
+            ),
+            (
+                "jldmikbinomhomcbmeppagennfohakni",
+                "qldmikbinomhomcbmeppagennfohakni",
+            ),
+            (
+                "jldmikbinomhomcbmeppagennfohakni",
+                "JLDMIKBINOMHOMCBMEPPAGENNFOHAKNI",
+            ),
+            (r#""extension":null"#, r#""extension":"""#),
+            (r#""extension":null"#, r#""extension":false"#),
+            // Every per-app field is required.
+            (r#""extension":null,"#, ""),
+            (r#","schedules":"enabled""#, ""),
+            (r#""size":"large","#, ""),
+            (r#""owners":["lin@example.com"],"#, ""),
+            (r#""verification":6,"#, ""),
         ];
         for (old, new) in cases {
             assert_eq!(SPEC.matches(old).count(), 1, "ambiguous case {old}");
