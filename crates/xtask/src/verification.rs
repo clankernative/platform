@@ -960,6 +960,7 @@ impl FixtureBuild {
             self.overrides.as_deref(),
             None,
             self.imports.as_ref(),
+            build_native::VerificationProfile::default(),
         )
     }
 }

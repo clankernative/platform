@@ -3,12 +3,25 @@ import Capability
 Build :: [].{
 	Receipt : { artifact : Str }
 
+	Verification : { artifact : Str, seed : Str, examples : U64, generated : U64, checks : List(Str), evidence : Str }
+
+	Verified : { artifact : Str, verification : Verification }
+
 	source! : Str, (Str => Try(Str, Str)) => Try(Receipt, Str)
 	source! = |source, host!| {
 		# Enter the locked compiler adapter. It executes recipe! below in its
 		# own supervisor, including when the source is an isolated CI checkout.
 		raw = Capability.call!("build-source", Json.to_str({ source: source }), host!)?
 		Json.parse(raw).map_err(|_| "invalid build receipt")
+	}
+
+	# The same build, with the requested seed and case count (at least the build's
+	# own two) as its required verification. Its summary is the verified artifact's.
+	checked! : Str, U64, U64, (Str => Try(Str, Str)) => Try(Verified, Str)
+	checked! = |source, seed, cases, host!| {
+		request = { source: source, seed: seed.to_str(), cases: cases }
+		raw = Capability.call!("build-source", Json.to_str(request), host!)?
+		Json.parse(raw).map_err(|_| "invalid verified build receipt")
 	}
 
 	recipe! : (Str => Try(Str, Str)) => Try(Str, Str)

@@ -14,8 +14,11 @@ Check :: [].{
 	run! : Str, U64, U64, (Str => Try(Str, Str)) => Try(Str, Str)
 	run! = |source, seed, count, host!| {
 		_ = ChromeExtension.verify!(source, host!)?
-		built = Build.source!(source, host!)?
-		campaign!({ artifact: built.artifact, output: "", example: "", seed: seed.to_str(), count }, host!)
+		# The build runs this seed and count as its required verification before it
+		# selects the artifact, so that evidence is the check. A second campaign over
+		# the same artifact would repeat the build's own.
+		built = Build.checked!(source, seed, count, host!)?
+		Ok(Json.to_str(built.verification))
 	}
 
 	campaign! : Settings, (Str => Try(Str, Str)) => Try(Str, Str)

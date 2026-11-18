@@ -446,8 +446,25 @@ impl Operations {
                 #[serde(deny_unknown_fields)]
                 struct Input {
                     source: PathBuf,
+                    // `platform check` runs its campaign as the build's required
+                    // verification. Both are present or both are absent.
+                    #[serde(default)]
+                    seed: Option<String>,
+                    #[serde(default)]
+                    cases: Option<u64>,
                 }
                 let parameters: Input = input(&request)?;
+                let verification = match (parameters.seed, parameters.cases) {
+                    (None, None) => None,
+                    (Some(seed), Some(cases)) => {
+                        ensure!(
+                            seed.parse::<u64>().is_ok() && (1..=100).contains(&cases),
+                            "build verification requires a U64 seed and 1..100 cases"
+                        );
+                        Some((seed, cases))
+                    }
+                    _ => anyhow::bail!("build verification requires both a seed and a case count"),
+                };
                 let root = platform()?;
                 fs::create_dir_all(root.join("artifacts/operations"))?;
                 let output = tempfile::Builder::new()
@@ -463,12 +480,17 @@ impl Operations {
                     .arg("build-receipt")
                     .arg(parameters.source.canonicalize()?)
                     .arg(&receipt);
+                if let Some((seed, cases)) = &verification {
+                    builder.arg(seed).arg(cases.to_string());
+                }
                 // Required application verification scales with the operation and
                 // obligation count, not with source size. A 26-operation app such as
                 // People Ops exceeds ten minutes on a developer machine while still
                 // succeeding, so the deadline bounds a hung tool rather than pacing a
-                // legitimate build.
-                let deadline = Duration::from_secs(1800);
+                // legitimate build. It grows with a requested larger campaign: the
+                // default two cases keep thirty minutes.
+                let cases = verification.as_ref().map_or(2, |(_, cases)| *cases);
+                let deadline = Duration::from_secs(1800 * cases.div_ceil(2));
                 if let Some(local) = self.local.as_ref() {
                     process::run_cancellable(
                         &mut builder,

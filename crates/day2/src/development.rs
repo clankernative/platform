@@ -3639,6 +3639,25 @@ pub struct Campaign {
     prepared: bool,
     setup: SetupState,
     errors_checked: bool,
+    passing_properties: PassingProperties,
+}
+
+/// The last live application snapshot whose properties passed in this campaign.
+/// `properties::evaluate` gives the property worker only the artifact and that
+/// snapshot (no clock, actor, observations or effects), so an identical snapshot
+/// cannot fail later in the same campaign. Steps whose drain completed nothing and
+/// error cases, which must leave state unchanged, skip a sandboxed worker start.
+#[derive(Default)]
+struct PassingProperties(Option<Value>);
+
+impl PassingProperties {
+    fn require(&mut self, snapshot: &Value, evaluate: impl FnOnce() -> Result<()>) -> Result<()> {
+        if self.0.as_ref() != Some(snapshot) {
+            evaluate()?;
+            self.0 = Some(snapshot.clone());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3707,6 +3726,47 @@ impl SetupState {
             Self::Pending(remaining)
         };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod passing_properties_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_unchanged_passing_snapshot_skips_property_evaluation() -> Result<()> {
+        let mut passing = PassingProperties::default();
+        let mut evaluations = 0;
+        let empty = json!({"items": []});
+        let created = json!({"items": [{"id": 1}]});
+        for snapshot in [&empty, &empty, &created, &created, &empty] {
+            passing.require(snapshot, || {
+                evaluations += 1;
+                Ok(())
+            })?;
+        }
+        // Each change, including a return to an earlier state, is evaluated.
+        assert_eq!(evaluations, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_property_evaluation_is_never_remembered() {
+        let mut passing = PassingProperties::default();
+        let snapshot = json!({"items": []});
+        assert!(
+            passing
+                .require(&snapshot, || bail!("properties failed: invariant"))
+                .is_err()
+        );
+        let mut evaluated = false;
+        passing
+            .require(&snapshot, || {
+                evaluated = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(evaluated);
     }
 }
 
@@ -3832,6 +3892,7 @@ impl Campaign {
             prepared: false,
             setup: SetupState::Unplanned,
             errors_checked: false,
+            passing_properties: PassingProperties::default(),
         })
     }
 
@@ -3852,7 +3913,7 @@ impl Campaign {
             .to_path_buf();
         match request.action.as_str() {
             "dev-properties" => {
-                properties::require(&self.runtime, &evidence_dir)?;
+                self.require_properties(&evidence_dir)?;
                 if let Some(active) = self.active.as_mut() {
                     let phase = if active.checks.contains("drain") {
                         "properties-after"
@@ -4511,7 +4572,15 @@ impl Campaign {
                                         && self.runtime.inspect()? == before,
                                     "application failure retry changed outcome or state"
                                 );
-                                properties::require(&self.runtime, &evidence_dir)?;
+                                let snapshot = self.runtime.application_snapshot()?;
+                                self.passing_properties.require(snapshot.as_value(), || {
+                                    properties::evaluate(
+                                        self.runtime.artifact(),
+                                        snapshot.as_value(),
+                                    )?
+                                    .require(&evidence_dir)
+                                    .map(drop)
+                                })?;
                                 *self
                                     .evidence
                                     .obligations
@@ -4749,6 +4818,15 @@ impl Campaign {
             _ => anyhow::bail!("unknown development capability: {}", request.action),
         }
         Ok(json!({}))
+    }
+
+    fn require_properties(&mut self, evidence_dir: &Path) -> Result<()> {
+        let snapshot = self.runtime.application_snapshot()?;
+        self.passing_properties.require(snapshot.as_value(), || {
+            properties::evaluate(self.runtime.artifact(), snapshot.as_value())?
+                .require(evidence_dir)
+                .map(drop)
+        })
     }
 
     pub fn is_complete(&self) -> bool {

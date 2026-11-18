@@ -306,6 +306,41 @@ fn check_verifies_the_extension_release_before_building() -> Result<()> {
 }
 
 #[test]
+fn check_is_one_build_whose_required_verification_uses_the_requested_campaign() -> Result<()> {
+    let summary = json!({
+        "artifact": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "seed": "42",
+        "examples": 3,
+        "generated": 136,
+        "checks": ["empty-state-properties", "command-trace-replay"],
+        "evidence": "/platform/artifacts/0000/verification.json",
+    });
+    let mut effects = Vec::new();
+    let receipt = automation::run(
+        &automation::runner()?,
+        &["platform", "check", "fixture-source", "42", "4"],
+        |request| {
+            effects.push(request.action.clone());
+            match request.action.as_str() {
+                "build-source" => {
+                    assert_eq!(
+                        request.decode::<Value>()?,
+                        json!({"source":"fixture-source","seed":"42","cases":4})
+                    );
+                    Ok(json!({"artifact":"/platform/artifacts/0000","verification":summary}))
+                }
+                "chrome-extension-verify" => Ok(json!({"declared":false})),
+                // A second campaign would start with dev-create.
+                action => bail!("unexpected check capability: {action}"),
+            }
+        },
+    )?;
+    assert_eq!(effects, ["chrome-extension-verify", "build-source"]);
+    assert_eq!(receipt, summary);
+    Ok(())
+}
+
+#[test]
 fn bundled_ui_recipe_uses_verified_installation_without_network() -> Result<()> {
     let mut effects = Vec::new();
     automation::run(&automation::runner()?, &["ui-dependency"], |request| {
