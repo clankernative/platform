@@ -68,13 +68,17 @@ hashes are checked before execution and pinned into the CI recipe/builder bindin
 isolated builds receive that same pinned runner. Changes require recompilation.
 This is private platform code, with no `automation/sdk` or app effect callbacks.
 
-Every build runs required verification before publishing and selecting an
-artifact. `check` and `test` then run a larger campaign in a fresh SQLite instance.
+Every build runs required verification in a fresh SQLite instance before
+publishing and selecting an artifact: two cases per obligation by default. `check`
+and `test` run their requested seed and count as that verification (never fewer
+than two cases), instead of a second campaign over the same artifact.
 The native host validates typed command/query inputs, checks actual results,
 duplicate delivery, rollback and replay, completes requested commands, exercises declared
-application failures and evaluates full model property snapshots.
-The receipt points to protected `development.json` evidence with artifact, seed,
-executed traces, counts and failures. The default is 16 cases per obligation;
+application failures and evaluates full model property snapshots. A campaign
+evaluates properties again only when the live snapshot differs from the last one
+that passed; properties see nothing but the artifact and that snapshot.
+The receipt points to the selected artifact's protected `verification.json` evidence
+with artifact, seed, executed traces, counts and failures. The default is 16 cases per obligation;
 requested counts are 1–100 and the complete public-operation campaign is bounded
 to 128 steps. Expected and executed obligations must agree. Zero cases cannot
 produce a verified receipt. Demo examples are an explicit root choice and are

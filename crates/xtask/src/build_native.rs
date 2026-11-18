@@ -8,6 +8,47 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The required application verification that runs before a build selects its
+/// artifact. `platform check` supplies its own seed and case count here, so its
+/// campaign is the build's verification rather than a second campaign afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VerificationProfile {
+    seed: u64,
+    cases: u64,
+}
+
+impl VerificationProfile {
+    /// Every build verifies at least this many cases per obligation.
+    const MINIMUM_CASES: u64 = 2;
+
+    pub(crate) fn requested(seed: u64, cases: u64) -> Result<Self> {
+        ensure!(
+            (1..=100).contains(&cases),
+            "verification requires 1..100 cases per obligation"
+        );
+        Ok(Self {
+            seed,
+            cases: cases.max(Self::MINIMUM_CASES),
+        })
+    }
+}
+
+/// How long each compiler subprocess may run, and how much the build verifies.
+#[derive(Clone, Copy)]
+pub(crate) struct BuildCampaign {
+    pub(crate) budget: BuildCampaignBudget,
+    pub(crate) verification: VerificationProfile,
+}
+
+impl Default for VerificationProfile {
+    fn default() -> Self {
+        Self {
+            seed: day2::development::DEFAULT_SEED,
+            cases: Self::MINIMUM_CASES,
+        }
+    }
+}
+
 struct Prepared {
     roc: PathBuf,
     rust_glue: &'static str,
@@ -639,8 +680,12 @@ pub fn execute(
     isolated_job: Option<&Path>,
     import_context: Option<&BuildImportContext>,
     runner: &Path,
-    budget: BuildCampaignBudget,
+    campaign: BuildCampaign,
 ) -> Result<PathBuf> {
+    let BuildCampaign {
+        budget,
+        verification,
+    } = campaign;
     let mut prepared = None;
     let mut bound = None;
     let mut done = BTreeSet::new();
@@ -941,8 +986,8 @@ pub fn execute(
                     let evidence = day2::development::verify_with_runner_imports(
                         artifact,
                         &stage.join("verification"),
-                        day2::development::DEFAULT_SEED,
-                        2,
+                        verification.seed,
+                        verification.cases,
                         runner,
                         &prepared.import_fixtures,
                     )
@@ -1010,6 +1055,31 @@ pub fn execute(
         "workflow build receipt differs from published artifact"
     );
     Ok(artifact)
+}
+
+#[cfg(test)]
+mod verification_profile_tests {
+    use super::*;
+
+    #[test]
+    fn requested_campaigns_keep_the_build_minimum_and_bounds() -> Result<()> {
+        assert_eq!(
+            VerificationProfile::default(),
+            VerificationProfile {
+                seed: day2::development::DEFAULT_SEED,
+                cases: 2
+            }
+        );
+        assert_eq!(
+            VerificationProfile::requested(42, 4)?,
+            VerificationProfile { seed: 42, cases: 4 }
+        );
+        // A smaller check cannot lower the build's own required verification.
+        assert_eq!(VerificationProfile::requested(42, 1)?.cases, 2);
+        assert!(VerificationProfile::requested(42, 0).is_err());
+        assert!(VerificationProfile::requested(42, 101).is_err());
+        Ok(())
+    }
 }
 
 #[cfg(test)]

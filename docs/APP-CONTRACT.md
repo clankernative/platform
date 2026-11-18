@@ -209,7 +209,8 @@ receipts and background completion, retaining the platform's independent oracles
 It compares executed counts with the exact obligation inventory. Demo examples
 are an explicit list and may be empty; zero generated cases never count as a
 verified build. The normal build runs at least two cases per obligation before
-selecting its artifact. Longer campaigns use the same Roc workflow.
+selecting its artifact. `platform check` passes its seed and larger count to that
+same required verification rather than running a second campaign afterwards.
 
 Storage must bind `model-identities.json`. Ordinary builds are read-only.
 `xtask register-model APP TABLE Models.Type`, `rename-model APP OLD NEW Models.Type`

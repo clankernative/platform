@@ -256,12 +256,15 @@ fn snapshot(
     Ok(())
 }
 
-fn build(root: &Path, app: &Path) -> Result<PathBuf> {
-    build_with_overrides(root, app, None)
-}
-
 fn build_with_overrides(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<PathBuf> {
-    build_recipe(root, app, overrides, None, None)
+    build_recipe(
+        root,
+        app,
+        overrides,
+        None,
+        None,
+        build_native::VerificationProfile::default(),
+    )
 }
 
 struct BuildImportContext {
@@ -275,6 +278,7 @@ fn build_recipe(
     overrides: Option<&Path>,
     isolated_job: Option<&Path>,
     imports: Option<&BuildImportContext>,
+    verification: build_native::VerificationProfile,
 ) -> Result<PathBuf> {
     let budget = BuildCampaignBudget::from_environment()?;
     let runner = if let Some(job) = isolated_job {
@@ -288,7 +292,18 @@ fn build_recipe(
     } else {
         workflows::build(root)?
     };
-    build_native::execute(root, app, overrides, isolated_job, imports, &runner, budget)
+    build_native::execute(
+        root,
+        app,
+        overrides,
+        isolated_job,
+        imports,
+        &runner,
+        build_native::BuildCampaign {
+            budget,
+            verification,
+        },
+    )
 }
 
 fn main() -> Result<()> {
@@ -661,6 +676,7 @@ fn main() -> Result<()> {
                 None,
                 Some(root.parent().context("isolated workspace parent")?),
                 None,
+                build_native::VerificationProfile::default(),
             )?;
         }
         "app-contracts" => {
@@ -702,7 +718,14 @@ fn main() -> Result<()> {
                     Some(BuildImportContext { instance, lock })
                 }
             };
-            build_recipe(&root, &app, None, None, context.as_ref())?;
+            build_recipe(
+                &root,
+                &app,
+                None,
+                None,
+                context.as_ref(),
+                build_native::VerificationProfile::default(),
+            )?;
         }
         "build-delegation" => verification::build_delegation(&root)?,
         "build-credential-selectable" => {
@@ -843,27 +866,54 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&candidate)?);
         }
         "build-receipt" => {
-            let source = PathBuf::from(
-                args.next()
-                    .context("usage: xtask build-receipt SOURCE NEW_RECEIPT")?,
-            );
-            let receipt = PathBuf::from(
-                args.next()
-                    .context("usage: xtask build-receipt SOURCE NEW_RECEIPT")?,
-            );
+            const USAGE: &str = "usage: xtask build-receipt SOURCE NEW_RECEIPT [SEED CASES]";
+            let source = PathBuf::from(args.next().context(USAGE)?);
+            let receipt = PathBuf::from(args.next().context(USAGE)?);
+            // A requested profile replaces the default required verification;
+            // `platform check` reads its result from the receipt's summary.
+            let requested = match (args.next(), args.next()) {
+                (None, None) => None,
+                (Some(seed), Some(cases)) => Some(build_native::VerificationProfile::requested(
+                    seed.parse().context("seed must be a U64")?,
+                    cases.parse().context("case count must be 1..100")?,
+                )?),
+                _ => bail!(USAGE),
+            };
             ensure!(
                 args.next().is_none() && !receipt.exists(),
                 "new build receipt required"
             );
-            let artifact = build(&root, &source)?;
+            let artifact = build_recipe(
+                &root,
+                &source,
+                None,
+                None,
+                None,
+                requested.unwrap_or_default(),
+            )?;
+            let value = if requested.is_some() {
+                let evidence: serde_json::Value =
+                    day2::json::decode_evidence(&fs::read(artifact.join("verification.json"))?)?;
+                serde_json::json!({
+                    "artifact": artifact,
+                    "verification": {
+                        "artifact": evidence["artifact"],
+                        "seed": evidence["seed"],
+                        "examples": evidence["examples"],
+                        "generated": evidence["generated"],
+                        "checks": evidence["checks"],
+                        "evidence": artifact.join("verification.json"),
+                    },
+                })
+            } else {
+                serde_json::json!({ "artifact": artifact })
+            };
             use std::io::Write;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(receipt)?;
-            file.write_all(&serde_json::to_vec(
-                &serde_json::json!({"artifact":artifact}),
-            )?)?;
+            file.write_all(&serde_json::to_vec(&value)?)?;
             file.sync_all()?;
         }
         "cli" => {
