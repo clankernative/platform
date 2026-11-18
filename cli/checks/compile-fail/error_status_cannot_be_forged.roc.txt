@@ -3,6 +3,6 @@ import Output
 import Cli
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |_| {
-	response = Output.new(Output.Outcome.Failed({ code: "unknown_command", exit_code: 0 }, Cli.Format.Json))
+	response = Output.new(Output.Outcome.Failed({ code: "unknown_command", exit_code: 0 }, Cli.Format.Json, Cli.Command.AppDescribe))
 	Stdout.line!(response.body()).map_err(|_| Exit(1))
 }

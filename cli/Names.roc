@@ -8,6 +8,17 @@ Names :: [].{
 		to_str = |App.(value)| value
 	}
 
+	## An app's identity within an instance. The same string is its repository,
+	## hostname label, namespace suffix and bucket component, so it has no
+	## separators: no hyphen/underscore spelling can disagree between them.
+	AppId :: Str.{
+		from_str : Str -> Try(AppId, [InvalidName])
+		from_str = |value| if valid_app_id(value) Ok(AppId.(value)) else Err(InvalidName)
+
+		to_str : AppId -> Str
+		to_str = |AppId.(value)| value
+	}
+
 	Identifier :: Str.{
 		from_str : Str -> Try(Identifier, [InvalidName])
 		from_str = |value| if valid_identifier(value) Ok(Identifier.(value)) else Err(InvalidName)
@@ -91,6 +102,23 @@ valid_identifier = |value| {
 	}
 }
 
+# Derived resources already use instance, day2 and tofu: the instance
+# repository, the SDK registry and the shared OpenTofu state bucket.
+valid_app_id : Str -> Bool
+valid_app_id = |value| match value.to_utf8() {
+	[first, .. as rest] => rest.len()
+		>= 1
+		and rest.len()
+			<= 19
+			and first
+				>= 'a'
+				and first
+					<= 'z'
+					and rest.all(|byte| (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9'))
+						and !["instance", "day2", "tofu"].contains(value)
+	[] => Bool.False
+}
+
 valid_type_part : Str -> Bool
 valid_type_part = |value| match value.to_utf8() {
 	[first, .. as rest] => first
@@ -124,6 +152,10 @@ expect match Names.Identifier.from_str("sqlite_table") {
 	Err(InvalidName) => Bool.True
 	_ => Bool.False
 }
+expect ["go", "home", "inyourface", "a1"].all(|value| Names.AppId.from_str(value).is_ok())
+expect
+	["", "g", "golinks-v2", "rwo_release", "Home", "1app", "instance", "day2", "tofu", "abcdefghijklmnopqrstu"]
+		.all(|value| Names.AppId.from_str(value).is_err())
 expect match Names.Operation.from_str("links..list") {
 	Err(InvalidName) => Bool.True
 	_ => Bool.False

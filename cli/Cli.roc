@@ -9,7 +9,25 @@ Cli :: [].{
 
 	Source := [Demo, Instance(Names.LocalPath), Environment]
 
-	Request := [Help(Format), Version(Format), Describe(Describe)]
+	Request := [Help(Format), Version(Format), Describe(Describe), Check(Check)]
+
+	## The command a response reports, including failures before a request exists.
+	Command := [AppDescribe, InstanceCheck].{
+		name : Command -> Str
+		name = |command| match command {
+			AppDescribe => "app.describe"
+			InstanceCheck => "instance.check"
+		}
+	}
+
+	## day2 instance check DIRECTORY reads exactly DIRECTORY/day2.json.
+	Check :: { directory : Names.LocalPath, format : Format }.{
+		parts : Check -> { directory : Names.LocalPath, format : Format }
+		parts = |request| { directory: request.directory, format: request.format }
+
+		with_format : Check, Format -> Check
+		with_format = |request, format| { ..request, format }
+	}
 
 	## The scanner's optional fields and positionals never escape parsing.
 	Describe :: { app_name : Names.App, source : Source, filter : Filter, format : Format }.{
@@ -70,7 +88,8 @@ Cli :: [].{
 					)
 				}
 				match raw.positionals {
-					[] | ["app", "describe"] => Ok(Request.Help(raw.format))
+					[] | ["app", "describe"] | ["instance", "check"] => Ok(Request.Help(raw.format))
+					["instance", "check", _] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -80,7 +99,22 @@ Cli :: [].{
 			}
 			Run => match raw.positionals {
 				[] => if has_options(raw) Err(Problem.MissingCommand) else Ok(Request.Help(raw.format))
-				["app", "describe"] => Err(Problem.MissingArgument)
+				["app", "describe"] | ["instance", "check"] => Err(Problem.MissingArgument)
+				["instance", "check", value] => {
+					if has_options(raw) {
+						return Err(
+							Problem.ConflictingOptions("instance check accepts only --agent or --json."),
+						)
+					}
+					directory =
+						Names.LocalPath.from_str(value)
+							.map_err(
+								|
+									_,
+								| Problem.InvalidArguments("instance check requires a directory of at most 4096 bytes"),
+							)?
+					Ok(Request.Check(Check.{ directory, format: raw.format }))
+				}
 				["app", "describe", name] => {
 					app_name = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 					source = match raw.source {
@@ -99,6 +133,16 @@ Cli :: [].{
 		}
 	}
 
+	## Agrees with parse: the first positional names the command family. Values
+	## of --instance and --operation are skipped so they cannot select it.
+	requested : List(Str) -> Command
+	requested = |args| match args {
+		["--instance", _, .. as rest] | ["--operation", _, .. as rest] => requested(rest)
+		["instance", ..] => InstanceCheck
+		[arg, .. as rest] if arg.starts_with("-") => requested(rest)
+		_ => AppDescribe
+	}
+
 	output_format : List(Str) -> Format
 	output_format = |args| if args.contains("--json") or args.contains("--agent") Json else Text
 
@@ -106,6 +150,7 @@ Cli :: [].{
 	request_format = |request| match request {
 		Request.Help(format) | Request.Version(format) => format
 		Request.Describe(value) => value.format
+		Request.Check(value) => value.format
 	}
 
 	quote : Str -> Str
@@ -134,6 +179,7 @@ Cli :: [].{
 				}
 				["day2", "app", "describe", value.app_name.to_str()].concat(source).concat(filter)
 			}
+			Request.Check(value) => ["day2", "instance", "check", value.directory.to_str()]
 		}
 		base.concat(
 			match request_format(request) {
@@ -249,3 +295,17 @@ expect match Cli.parse(["--agent", "app", "describe", "links", "--instance=a b.j
 	_ => Bool.False
 }
 expect Cli.quote("a'b") == "'a'\"'\"'b'"
+expect match Cli.parse(["instance", "check", ".", "--agent"]) {
+	Ok(Cli.Request.Check(value)) => value.parts().directory.to_str() == "."
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "check", ".", "--demo"]) {
+	Err(Problem.ConflictingOptions(_)) => Bool.True
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "check"]) {
+	Err(Problem.MissingArgument) => Bool.True
+	_ => Bool.False
+}
+expect Cli.requested(["--agent", "instance", "check", "."]).name() == "instance.check"
+expect Cli.requested(["--operation", "instance", "app", "describe", "links"]).name() == "app.describe"

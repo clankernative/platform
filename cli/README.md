@@ -13,6 +13,7 @@ bazel run //crates/xtask:xtask -- cli
 cd ..
 ./cli/day2 app describe links --demo
 ./cli/day2 app describe reports --instance example-instance/instance.json --agent
+./cli/day2 instance check ../my-instance
 ./cli/day2 platform --help
 ./cli/day2 platform check examples/reports 42 16
 ./cli/day2 platform local-dev examples/reports

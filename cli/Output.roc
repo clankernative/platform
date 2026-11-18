@@ -2,10 +2,18 @@ import Cli
 import Catalog
 import Source
 import Problem
+import Names
+import InstanceSpec
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
-	Outcome := [Help(Cli.Format), Version(Cli.Format), Described(Source), Failed(Problem, Cli.Format)]
+	Outcome := [
+		Help(Cli.Format),
+		Version(Cli.Format),
+		Described(Source),
+		Checked(Cli.Check, Names.LocalPath, InstanceSpec),
+		Failed(Problem, Cli.Format, Cli.Command),
+	]
 
 	version = "0.3.0-spike"
 
@@ -14,13 +22,13 @@ Output :: { outcome : Outcome }.{
 
 	exit_code : Output -> I32
 	exit_code = |response| match response.outcome {
-		Outcome.Failed(problem, _) => problem.exit_code()
+		Outcome.Failed(problem, _, _) => problem.exit_code()
 		_ => 0
 	}
 
 	stream : Output -> [Stdout, Stderr]
 	stream = |response| match response.outcome {
-		Outcome.Failed(_, Cli.Format.Text) => Stderr
+		Outcome.Failed(_, Cli.Format.Text, _) => Stderr
 		_ => Stdout
 	}
 
@@ -31,7 +39,8 @@ Output :: { outcome : Outcome }.{
 			Outcome.Help(_) => Cli.help
 			Outcome.Version(_) => "day2 ${version}"
 			Outcome.Described(loaded) => description_text(loaded)
-			Outcome.Failed(problem, _) => error_text(problem)
+			Outcome.Checked(request, path, spec) => checked_text(request, path, spec)
+			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
 
@@ -52,8 +61,9 @@ Output :: { outcome : Outcome }.{
 
 format : Output.Outcome -> Cli.Format
 format = |outcome| match outcome {
-	Output.Outcome.Help(value) | Output.Outcome.Version(value) | Output.Outcome.Failed(_, value) => value
+	Output.Outcome.Help(value) | Output.Outcome.Version(value) | Output.Outcome.Failed(_, value, _) => value
 	Output.Outcome.Described(loaded) => loaded.request().parts().format
+	Output.Outcome.Checked(request, _, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -106,7 +116,8 @@ demo_actions = |args| match Cli.parse(args) {
 json : Output.Outcome -> Str
 json = |outcome| match outcome {
 	Output.Outcome.Described(loaded) => success_json(loaded)
-	Output.Outcome.Failed(problem, _) => error_json(problem)
+	Output.Outcome.Checked(request, path, spec) => checked_json(request, path, spec)
+	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
 }
@@ -169,14 +180,149 @@ success_json = |loaded| {
 	})
 }
 
-error_json : Problem -> Str
-error_json = |problem| {
+check_actions : Cli.Check -> List(Cli.Action)
+check_actions = |request| {
+	parts = request.parts()
+	[
+		Cli.Action.new(
+			match parts.format {
+				Cli.Format.Json => "Read the same derived names as text."
+				Cli.Format.Text => "Get the same derived names as structured JSON."
+			},
+			Cli.Request.Check(
+				request.with_format(
+					match parts.format {
+						Cli.Format.Json => Cli.Format.Text
+						Cli.Format.Text => Cli.Format.Json
+					},
+				),
+			),
+		),
+	]
+}
+
+checked_json : Cli.Check, Names.LocalPath, InstanceSpec -> Str
+# Keep the wire record concrete, as success_json does for the same compiler reason.
+checked_json = |request, path, spec| {
+	names = spec.derived()
+	null : Try({}, [Null])
+	null = Err(Null)
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: "instance.check",
+		exit_code: 0.I32,
+		context: { spec_path: path.to_str(), spec_validation: "checked" },
+		result: {
+			installation: names.installation,
+			platform_repository: names.platform_repository,
+			platform_commit: names.platform_commit,
+			forge: { kind: names.forge_kind, server: names.forge_server, org: names.forge_org },
+			gcp: { project: names.gcp_project, region: names.gcp_region, zone: names.gcp_zone },
+			domains: { people: names.people_domain, apps: names.apps_domain },
+			operators: names.operators,
+			repositories: { instance: names.instance_repository, app_ci: names.app_ci_repository },
+			required_check: names.required_check,
+			sdk_registry: names.sdk_registry,
+			tofu_state_bucket: names.tofu_state_bucket,
+			apps: names
+				.apps
+				.map(
+					|
+						bound,
+					|
+						{
+							id: bound.id,
+							delivery: bound.delivery,
+							sdk: bound.sdk,
+							repository: bound.repository,
+							hostname: bound.hostname,
+							namespace: bound.namespace,
+							image: bound.image,
+							state_bucket: bound.state_bucket,
+							state_prefix: bound.state_prefix,
+							edge_state_prefix: bound.edge_state_prefix,
+							backup_bucket: bound.backup_bucket,
+						},
+				),
+		},
+		error: null,
+		next_actions: check_actions(request).map(|action| action.dto()),
+	})
+}
+
+checked_text : Cli.Check, Names.LocalPath, InstanceSpec -> Str
+checked_text = |request, path, spec| {
+	names = spec.derived()
+	row = |label, value| "  ${label}${Str.repeat(" ", 22 - label.count_utf8_bytes())}${Output.safe(value)}"
+	apps =
+		Str.join_with(
+			names
+				.apps
+				.map(
+					|
+						bound,
+					|
+						Str.join_with(
+							[
+								"  ${bound.id}  /  ${bound.delivery}  /  ${bound.sdk}",
+								row("  repository", bound.repository),
+								row("  hostname", bound.hostname),
+								row("  namespace", bound.namespace),
+								row("  image", bound.image),
+								row("  state", "${bound.state_bucket} / ${bound.state_prefix}"),
+								row("  edge state", "${names.tofu_state_bucket} / ${bound.edge_state_prefix}"),
+								row("  backups", bound.backup_bucket),
+							],
+							"\n",
+						),
+				),
+			"\n\n",
+		)
+	next =
+		Str.join_with(
+			check_actions(request)
+				.map(|action| action.dto())
+				.map(|action| "  ${Output.safe(action.description)}\n    ${Output.safe(action.command)}"),
+			"\n\n",
+		)
+	Str.join_with(
+		[
+			"DAY2  /  instance ${names.installation}",
+			"",
+			"SPEC",
+			row("File", path.to_str()),
+			row("Platform", "${names.platform_repository} @ ${names.platform_commit}"),
+			row("Forge", "${names.forge_kind} ${names.forge_server} / ${names.forge_org}"),
+			row("GCP", "${names.gcp_project} / ${names.gcp_zone}"),
+			row("Domains", "people ${names.people_domain} / apps ${names.apps_domain}"),
+			row("Operators", Str.join_with(names.operators, ", ")),
+			"",
+			"DERIVED NAMES",
+			row("Instance repository", names.instance_repository),
+			row("App CI repository", names.app_ci_repository),
+			row("Required app check", names.required_check),
+			row("SDK registry", names.sdk_registry),
+			row("OpenTofu state", names.tofu_state_bucket),
+			"",
+			"APPS  /  ${names.apps.len().to_str()}",
+			apps,
+			"",
+			"NEXT",
+			next,
+		],
+		"\n",
+	)
+}
+
+error_json : Problem, Cli.Command -> Str
+error_json = |problem, command| {
 	null : Try({}, [Null])
 	null = Err(Null)
 	Json.to_str({
 		schema_version: 1.U64,
 		ok: Bool.False,
-		command: "app.describe",
+		command: command.name(),
 		exit_code: problem.exit_code(),
 		context: null,
 		result: null,
@@ -198,7 +344,7 @@ info_json = |is_help| {
 		result: {
 			text: if is_help Cli.help else Output.version,
 			version: Output.version,
-			implemented_commands: ["app.describe"],
+			implemented_commands: ["app.describe", "instance.check"],
 			platform_commands: [
 				"platform.build",
 				"platform.check",

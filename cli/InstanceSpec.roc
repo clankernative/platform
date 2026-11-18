@@ -1,0 +1,483 @@
+import Names
+import JsonValue
+import Problem
+import Metadata
+
+## An instance repository's only authored input: DIRECTORY/day2.json.
+## Every object is exact (each field required, unknown fields rejected) and
+## lists are strictly sorted, so one spec has one spelling. Repository,
+## hostname, namespace, image, bucket and state names are derived here and
+## cannot be configured, restated or overridden.
+InstanceSpec :: {
+	installation : Names.Identifier,
+	commit : Str,
+	project : Str,
+	region : Str,
+	zone : Str,
+	server : Str,
+	org : Str,
+	people : Str,
+	domain : Str,
+	operators : List(Str),
+	apps : List(SpecApp),
+}.{
+
+	## The platform's own source. An instance selects a commit, never a fork.
+	platform_repository = "github.com/clankernative/platform"
+
+	## The status app branch protection requires; only the platform posts it.
+	required_check = "day2 / verification"
+
+	App : {
+		id : Str,
+		delivery : Str,
+		sdk : Str,
+		repository : Str,
+		hostname : Str,
+		namespace : Str,
+		image : Str,
+		state_bucket : Str,
+		state_prefix : Str,
+		edge_state_prefix : Str,
+		backup_bucket : Str,
+	}
+
+	Derived : {
+		installation : Str,
+		platform_repository : Str,
+		platform_commit : Str,
+		forge_kind : Str,
+		forge_server : Str,
+		forge_org : Str,
+		gcp_project : Str,
+		gcp_region : Str,
+		gcp_zone : Str,
+		people_domain : Str,
+		apps_domain : Str,
+		operators : List(Str),
+		instance_repository : Str,
+		app_ci_repository : Str,
+		required_check : Str,
+		sdk_registry : Str,
+		tofu_state_bucket : Str,
+		apps : List(App),
+	}
+
+	file_name = "day2.json"
+
+	load! : Names.LocalPath => Try((Names.LocalPath, InstanceSpec), Problem)
+	load! = |directory| {
+		root = Metadata.absolute!(directory)?
+		trimmed = trim_directory(root.to_str())
+		path =
+			Names.LocalPath.from_str("${trimmed}/${file_name}")
+				.map_err(|_| Problem.InvalidContext("spec path exceeds the path budget"))?
+		spec = from_json(Metadata.read!(path)?)?
+		Ok((path, spec))
+	}
+
+	from_json : Str -> Try(InstanceSpec, Problem)
+	from_json = |raw| checked(raw).map_err(|BadJson(detail)| Problem.InvalidSpec(detail))
+
+	derived : InstanceSpec -> Derived
+	derived = |spec| {
+		registry = "${spec.region}-docker.pkg.dev/${spec.project}"
+		tofu_state_bucket = "${spec.project}-tofu-state"
+		{
+			installation: spec.installation.to_str(),
+			platform_repository,
+			platform_commit: spec.commit,
+			forge_kind: "gitea",
+			forge_server: spec.server,
+			forge_org: spec.org,
+			gcp_project: spec.project,
+			gcp_region: spec.region,
+			gcp_zone: spec.zone,
+			people_domain: spec.people,
+			apps_domain: spec.domain,
+			operators: spec.operators,
+			instance_repository: "${spec.org}/instance",
+			app_ci_repository: "${spec.org}/app-ci",
+			required_check,
+			sdk_registry: "${registry}/day2",
+			tofu_state_bucket,
+			apps: spec.apps.map(|bound| derive_app(spec.org, spec.domain, spec.project, registry, bound)),
+		}
+	}
+}
+
+Delivery : [Automatic, Manual, Paused]
+
+SpecApp : { id : Names.AppId, sdk : Str, delivery : Delivery }
+
+derive_app : Str, Str, Str, Str, SpecApp -> InstanceSpec.App
+derive_app = |org, domain, project, registry, bound| {
+	id = bound.id.to_str()
+	{
+		id,
+		delivery: delivery_name(bound.delivery),
+		sdk: bound.sdk,
+		repository: "${org}/${id}",
+		hostname: "${id}.${domain}",
+		namespace: "app-${id}",
+		image: "${registry}/${id}/${id}",
+		state_bucket: "${project}-${id}-state",
+		state_prefix: "day2-app/${id}",
+		edge_state_prefix: "platform/app/${id}",
+		backup_bucket: "${project}-${id}-backups",
+	}
+}
+
+delivery_name : Delivery -> Str
+delivery_name = |delivery| match delivery {
+	Automatic => "automatic"
+	Manual => "manual"
+	Paused => "paused"
+}
+
+trim_directory : Str -> Str
+trim_directory = |value| {
+	if value.ends_with("/.") {
+		trim_directory(value.drop_suffix("/."))
+	} else if value.ends_with("/") and value != "/" {
+		trim_directory(value.drop_suffix("/"))
+	} else {
+		value
+	}
+}
+
+checked : Str -> Try(InstanceSpec, [BadJson(Str)])
+checked = |raw| {
+	root = JsonValue.parse(raw)?
+	exact(
+		root,
+		"day2.json",
+		["kind", "version", "installation", "platform", "gcp", "forge", "domains", "operators", "apps"],
+	)?
+	kind = text(root, "kind")?
+	if kind != "instance" {
+		return Err(BadJson("kind must be instance"))
+	}
+	version = root.get("version")?.u64().map_err(|_| BadJson("version must be 1"))?
+	if version != 1 {
+		return Err(BadJson("version must be 1"))
+	}
+	installation =
+		Names.Identifier.from_str(text(root, "installation")?)
+			.map_err(|_| BadJson("installation must be a lowercase identifier of at most 48 bytes"))?
+	commit = text(root, "platform")?
+	if !(commit.to_utf8().len() == 40 and commit.to_utf8().all(hex)) {
+		return Err(BadJson("platform must be a full 40-character lowercase commit"))
+	}
+	gcp = root.get("gcp")?
+	exact(gcp, "gcp", ["project", "region", "zone"])?
+	project = text(gcp, "project")?
+	if !valid_project(project) {
+		return Err(BadJson("gcp.project must be a 6-30 byte GCP project ID"))
+	}
+	region = text(gcp, "region")?
+	if !valid_region(region) {
+		return Err(BadJson("gcp.region must be a GCP region such as us-central1"))
+	}
+	zone = text(gcp, "zone")?
+	if !valid_zone(zone, region) {
+		return Err(BadJson("gcp.zone must be a zone of gcp.region, such as ${region}-a"))
+	}
+	forge = root.get("forge")?
+	exact(forge, "forge", ["kind", "server", "org"])?
+	forge_kind = text(forge, "kind")?
+	if forge_kind != "gitea" {
+		return Err(BadJson("forge.kind must be gitea"))
+	}
+	server = text(forge, "server")?
+	if !(server.starts_with("https://") and valid_domain(server.drop_prefix("https://"))) {
+		return Err(BadJson("forge.server must be https:// and a lowercase host, with no port or path"))
+	}
+	org = text(forge, "org")?
+	if !valid_org(org) {
+		return Err(BadJson("forge.org must be 2-40 lowercase letters, digits or inner hyphens"))
+	}
+	domains = root.get("domains")?
+	exact(domains, "domains", ["people", "apps"])?
+	people = text(domains, "people")?
+	if !valid_domain(people) {
+		return Err(BadJson("domains.people must be a lowercase DNS name"))
+	}
+	domain = text(domains, "apps")?
+	if !valid_domain(domain) or domain.count_utf8_bytes() > 232 {
+		return Err(BadJson("domains.apps must be a lowercase DNS name of at most 232 bytes"))
+	}
+	operator_nodes = root.get("operators")?.array().map_err(|_| BadJson("operators must be an array"))?
+	if operator_nodes.is_empty() or operator_nodes.len() > 32 {
+		return Err(BadJson("operators must list 1 to 32 people"))
+	}
+	operators = strings(operator_nodes, "operators", [])?
+	for operator in operators {
+		if !valid_email(operator, people) {
+			return Err(BadJson("operators must be lowercase addresses at domains.people"))
+		}
+	}
+	if !ascending(operators) {
+		return Err(BadJson("operators must be sorted and unique"))
+	}
+	app_pairs = root.get("apps")?.object().map_err(|_| BadJson("apps must be an object"))?
+	if app_pairs.is_empty() or app_pairs.len() > 128 {
+		return Err(BadJson("apps must bind 1 to 128 apps"))
+	}
+	if !ascending(app_pairs.map(|pair| pair.0)) {
+		return Err(BadJson("apps must be sorted by id"))
+	}
+	apps = check_apps(app_pairs, [])?
+	Ok(
+		InstanceSpec.{
+			installation,
+			commit,
+			project,
+			region,
+			zone,
+			server,
+			org,
+			people,
+			domain,
+			operators,
+			apps,
+		},
+	)
+}
+
+check_apps : List((Str, JsonValue)), List(SpecApp) -> Try(List(SpecApp), [BadJson(Str)])
+check_apps = |pairs, done| match pairs {
+	[] => Ok(done)
+	[(key, node), .. as rest] => {
+		id =
+			Names.AppId.from_str(key)
+				.map_err(
+					|
+						_,
+					|
+						BadJson(
+							"app id ${
+								Json.to_str(
+									key,
+								)
+							} must be 2-20 lowercase letters or digits starting with a letter; instance, day2 and tofu are reserved",
+						),
+				)?
+		at = "apps.${key}"
+		exact(node, at, ["sdk", "delivery"])?
+		sdk = text(node, "sdk")?
+		if !(sdk.starts_with("sha256:") and sdk.drop_prefix("sha256:").to_utf8().len() == 64)
+			or !sdk.drop_prefix("sha256:").to_utf8().all(hex) {
+			return Err(BadJson("${at}.sdk must be a sha256: release manifest digest"))
+		}
+		delivery = match text(node, "delivery")? {
+			"automatic" => Automatic
+			"manual" => Manual
+			"paused" => Paused
+			_ => return Err(BadJson("${at}.delivery must be automatic, manual or paused"))
+		}
+		check_apps(rest, done.append({ id, sdk, delivery }))
+	}
+}
+
+exact : JsonValue, Str, List(Str) -> Try({}, [BadJson(Str)])
+exact = |node, at, fields| {
+	pairs = node.object().map_err(|_| BadJson("${at} must be an object"))?
+	if pairs.len() != fields.len() or !pairs.all(|pair| fields.contains(pair.0)) {
+		return Err(BadJson("${at} must have exactly the fields ${Str.join_with(fields, ", ")}"))
+	}
+	Ok({})
+}
+
+text : JsonValue, Str -> Try(Str, [BadJson(Str)])
+text = |node, key| node.get(key)?.string().map_err(|_| BadJson("${key} must be a string"))
+
+strings : List(JsonValue), Str, List(Str) -> Try(List(Str), [BadJson(Str)])
+strings = |nodes, at, done| match nodes {
+	[] => Ok(done)
+	[node, .. as rest] => {
+		value = node.string().map_err(|_| BadJson("${at} must contain only strings"))?
+		strings(rest, at, done.append(value))
+	}
+}
+
+ascending : List(Str) -> Bool
+ascending = |values| match values {
+	[first, second, .. as rest] => match Names.order(first, second) {
+		Before => ascending([second].concat(rest))
+		_ => Bool.False
+	}
+	_ => Bool.True
+}
+
+lower : U8 -> Bool
+lower = |byte| byte >= 'a' and byte <= 'z'
+
+digit : U8 -> Bool
+digit = |byte| byte >= '0' and byte <= '9'
+
+hex : U8 -> Bool
+hex = |byte| digit(byte) or (byte >= 'a' and byte <= 'f')
+
+# Lowercase letters/digits with inner hyphens, bounded by length.
+hyphenated : Str, U64, U64 -> Bool
+hyphenated = |value, min, max| {
+	bytes = value.to_utf8()
+	match (bytes.first(), bytes.last()) {
+		(Ok(first), Ok(last)) => bytes.len()
+			>= min
+			and bytes.len()
+				<= max
+				and lower(first)
+					and (lower(last) or digit(last))
+						and bytes.all(|byte| lower(byte) or digit(byte) or byte == '-')
+		_ => Bool.False
+	}
+}
+
+valid_project : Str -> Bool
+valid_project = |value| hyphenated(value, 6, 30)
+
+valid_org : Str -> Bool
+valid_org = |value| hyphenated(value, 2, 40) and !value.contains("--")
+
+# area-locationN, for example us-central1 or northamerica-northeast2.
+valid_region : Str -> Bool
+valid_region = |value| match value.split_on("-") {
+	[area, location] => !area.is_empty()
+		and area.to_utf8().all(lower)
+			and letters_then_digits(location.to_utf8(), Bool.False, Bool.False)
+	_ => Bool.False
+}
+
+letters_then_digits : List(U8), Bool, Bool -> Bool
+letters_then_digits = |bytes, seen_letter, seen_digit| match bytes {
+	[] => seen_letter and seen_digit
+	[byte, .. as rest] => if
+		lower(byte) and !seen_digit
+		letters_then_digits(rest, Bool.True, Bool.False)
+	else if
+		digit(byte) and seen_letter
+		letters_then_digits(rest, Bool.True, Bool.True)
+	else
+		Bool.False
+}
+
+valid_zone : Str, Str -> Bool
+valid_zone = |zone, region| {
+	suffix = zone.drop_prefix("${region}-").to_utf8()
+	zone.starts_with("${region}-") and suffix.len() == 1 and suffix.all(lower)
+}
+
+valid_label : Str -> Bool
+valid_label = |label| {
+	bytes = label.to_utf8()
+	match (bytes.first(), bytes.last()) {
+		(Ok(first), Ok(last)) => bytes.len()
+			<= 63
+			and (lower(first) or digit(first))
+				and (lower(last) or digit(last))
+					and bytes.all(|byte| lower(byte) or digit(byte) or byte == '-')
+		_ => Bool.False
+	}
+}
+
+valid_domain : Str -> Bool
+valid_domain = |value| {
+	labels = value.split_on(".")
+	top = match labels.last() {
+		Ok(label) => match label.to_utf8().first() {
+			Ok(byte) => lower(byte)
+			Err(_) => Bool.False
+		}
+		Err(_) => Bool.False
+	}
+	value.count_utf8_bytes() <= 253 and labels.len() >= 2 and labels.all(valid_label) and top
+}
+
+valid_email : Str, Str -> Bool
+valid_email = |value, domain| match value.split_on("@") {
+	[local, host] => {
+		bytes = local.to_utf8()
+		host
+			== domain
+			and !bytes.is_empty()
+				and bytes.len()
+					<= 64
+					and !local.starts_with(".")
+						and !local.ends_with(".")
+							and bytes.all(|byte| lower(byte) or digit(byte) or [46, 45, 95].contains(byte))
+	}
+	_ => Bool.False
+}
+
+sample =
+	\\{"kind":"instance","version":1,"installation":"exampleco",
+	\\"platform":"fe4320b189b98ed08fccc183db3e70aee76319ee",
+	\\"gcp":{"project":"exampleco-tools","region":"us-central1","zone":"us-central1-a"},
+	\\"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools"},
+	\\"domains":{"people":"example.com","apps":"apps.example.com"},
+	\\"operators":["ada@example.com","grace@example.com"],
+	\\"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic"},
+	\\"home":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"manual"}}}
+
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => {
+		names = spec.derived()
+		first = names.apps.first()
+		names.instance_repository
+			== "tools/instance"
+			and names.app_ci_repository
+				== "tools/app-ci"
+				and names.sdk_registry
+					== "us-central1-docker.pkg.dev/exampleco-tools/day2"
+					and names.tofu_state_bucket
+						== "exampleco-tools-tofu-state"
+						and first
+							== Ok({
+								id: "go",
+								delivery: "automatic",
+								sdk: "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
+								repository: "tools/go",
+								hostname: "go.apps.example.com",
+								namespace: "app-go",
+								image: "us-central1-docker.pkg.dev/exampleco-tools/go/go",
+								state_bucket: "exampleco-tools-go-state",
+								state_prefix: "day2-app/go",
+								edge_state_prefix: "platform/app/go",
+								backup_bucket: "exampleco-tools-go-backups",
+							})
+	}
+	Err(_) => Bool.False
+}
+
+rejects : Str, Str -> Bool
+rejects = |old, new| {
+	edited = sample.replace_first(old, new)
+	edited != sample and InstanceSpec.from_json(edited).is_err()
+}
+
+expect rejects("\"kind\":\"instance\"", "\"kind\":\"app\"")
+expect rejects("\"version\":1", "\"version\":2")
+expect rejects("\"installation\":\"exampleco\"", "\"installation\":\"Example Co\"")
+expect rejects("\"version\":1,", "\"version\":1,\"extra\":true,")
+expect rejects("\"version\":1,", "")
+expect rejects("fe4320b189b98ed08fccc183db3e70aee76319ee", "fe4320b1")
+expect rejects("\"zone\":\"us-central1-a\"", "\"zone\":\"europe-west4-a\"")
+expect rejects("\"region\":\"us-central1\"", "\"region\":\"us_central1\"")
+expect rejects("\"project\":\"exampleco-tools\"", "\"project\":\"exampleco-tools-\"")
+expect rejects("\"kind\":\"gitea\"", "\"kind\":\"github\"")
+expect rejects("https://git.example.com", "https://git.example.com/tools")
+expect rejects("https://git.example.com", "http://git.example.com")
+expect rejects("\"org\":\"tools\"", "\"org\":\"Tools\"")
+expect rejects("\"apps\":\"apps.example.com\"", "\"apps\":\"localhost\"")
+expect rejects("\"ada@example.com\",\"grace@example.com\"", "\"grace@example.com\",\"ada@example.com\"")
+expect rejects("\"ada@example.com\",\"grace@example.com\"", "\"ada@example.com\",\"ada@example.com\"")
+expect rejects("\"ada@example.com\"", "\"ada@elsewhere.com\"")
+expect rejects("\"ada@example.com\",\"grace@example.com\"", "")
+expect rejects("\"go\":", "\"golinks-v2\":")
+expect rejects("\"go\":", "\"instance\":")
+expect rejects("\"go\":", "\"zebra\":")
+expect rejects("\"delivery\":\"manual\"", "\"delivery\":\"auto\"")
+expect rejects("\"delivery\":\"manual\"", "\"delivery\":\"manual\",\"cases\":6")
+expect rejects("sha256:98fb0ae8", "sha512:98fb0ae8")

@@ -1013,7 +1013,7 @@ mod tests {
             let value = envelope(&run(&args, None), 0);
             assert_eq!(
                 value["result"]["implemented_commands"],
-                json!(["app.describe"])
+                json!(["app.describe", "instance.check"])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
             assert_eq!(value["result"]["supports_invocation"], false);
@@ -1270,5 +1270,280 @@ mod tests {
             )["error"]["code"],
             "metadata_too_large"
         );
+    }
+
+    const SPEC: &str = r#"{"kind":"instance","version":1,"installation":"exampleco",
+"platform":"fe4320b189b98ed08fccc183db3e70aee76319ee",
+"gcp":{"project":"exampleco-tools","region":"us-central1","zone":"us-central1-a"},
+"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools"},
+"domains":{"people":"example.com","apps":"apps.example.com"},
+"operators":["ada@example.com","grace@example.com"],
+"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic"},
+"home":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"manual"}}}"#;
+
+    fn check_spec(spec: &str) -> Output {
+        let scratch = Scratch::new();
+        fs::write(scratch.0.join("day2.json"), spec).unwrap();
+        run(
+            &["instance", "check", scratch.0.to_str().unwrap(), "--agent"],
+            None,
+        )
+    }
+
+    #[test]
+    fn instance_spec_derives_every_fixed_name() {
+        let value = envelope(&check_spec(SPEC), 0);
+        assert_eq!(value["command"], "instance.check");
+        assert_eq!(value["context"]["spec_validation"], "checked");
+        assert!(
+            value["context"]["spec_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("/day2.json")
+        );
+        let result = &value["result"];
+        assert_eq!(
+            result["platform_repository"],
+            "github.com/clankernative/platform"
+        );
+        assert_eq!(
+            result["platform_commit"],
+            "fe4320b189b98ed08fccc183db3e70aee76319ee"
+        );
+        assert_eq!(
+            result["repositories"],
+            json!({"instance": "tools/instance", "app_ci": "tools/app-ci"})
+        );
+        assert_eq!(result["required_check"], "day2 / verification");
+        assert_eq!(
+            result["sdk_registry"],
+            "us-central1-docker.pkg.dev/exampleco-tools/day2"
+        );
+        assert_eq!(result["tofu_state_bucket"], "exampleco-tools-tofu-state");
+        assert_eq!(
+            result["operators"],
+            json!(["ada@example.com", "grace@example.com"])
+        );
+        assert_eq!(
+            result["apps"],
+            json!([
+                {
+                    "id": "go",
+                    "delivery": "automatic",
+                    "sdk": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
+                    "repository": "tools/go",
+                    "hostname": "go.apps.example.com",
+                    "namespace": "app-go",
+                    "image": "us-central1-docker.pkg.dev/exampleco-tools/go/go",
+                    "state_bucket": "exampleco-tools-go-state",
+                    "state_prefix": "day2-app/go",
+                    "edge_state_prefix": "platform/app/go",
+                    "backup_bucket": "exampleco-tools-go-backups"
+                },
+                {
+                    "id": "home",
+                    "delivery": "manual",
+                    "sdk": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
+                    "repository": "tools/home",
+                    "hostname": "home.apps.example.com",
+                    "namespace": "app-home",
+                    "image": "us-central1-docker.pkg.dev/exampleco-tools/home/home",
+                    "state_bucket": "exampleco-tools-home-state",
+                    "state_prefix": "day2-app/home",
+                    "edge_state_prefix": "platform/app/home",
+                    "backup_bucket": "exampleco-tools-home-backups"
+                }
+            ])
+        );
+        let argv = value["next_actions"][0]["argv"].as_array().unwrap();
+        assert_eq!(
+            argv[..3],
+            [json!("day2"), json!("instance"), json!("check")]
+        );
+        assert!(!argv.contains(&json!("--agent")));
+    }
+
+    #[test]
+    fn instance_spec_rejects_every_unchecked_shape() {
+        let cases = [
+            (r#""kind":"instance""#, r#""kind":"app""#),
+            (r#""version":1,"#, r#""version":2,"#),
+            (r#""version":1,"#, r#""version":"1","#),
+            (r#""version":1,"#, ""),
+            (r#""version":1,"#, r#""version":1,"extra":true,"#),
+            (
+                r#""installation":"exampleco""#,
+                r#""installation":"Example Co""#,
+            ),
+            ("fe4320b189b98ed08fccc183db3e70aee76319ee", "fe4320b1"),
+            (
+                "fe4320b189b98ed08fccc183db3e70aee76319ee",
+                "FE4320B189B98ED08FCCC183DB3E70AEE76319EE",
+            ),
+            (
+                r#""project":"exampleco-tools""#,
+                r#""project":"exampleco-tools-""#,
+            ),
+            (r#""project":"exampleco-tools""#, r#""project":"Exampleco""#),
+            (r#""region":"us-central1""#, r#""region":"us_central1""#),
+            (r#""zone":"us-central1-a""#, r#""zone":"europe-west4-a""#),
+            (r#""zone":"us-central1-a""#, r#""zone":"us-central1""#),
+            (
+                r#""zone":"us-central1-a""#,
+                r#""zone":"us-central1-a","network":"default""#,
+            ),
+            (r#""kind":"gitea""#, r#""kind":"github""#),
+            ("https://git.example.com", "http://git.example.com"),
+            ("https://git.example.com", "https://git.example.com/tools"),
+            ("https://git.example.com", "https://git.example.com:3000"),
+            (r#""org":"tools""#, r#""org":"Tools""#),
+            (r#""org":"tools""#, r#""org":"-tools""#),
+            (r#""people":"example.com""#, r#""people":"example""#),
+            (r#""apps":"apps.example.com""#, r#""apps":"localhost""#),
+            (
+                r#""apps":"apps.example.com""#,
+                r#""apps":"Apps.Example.com""#,
+            ),
+            (
+                r#""ada@example.com","grace@example.com""#,
+                r#""grace@example.com","ada@example.com""#,
+            ),
+            (
+                r#""ada@example.com","grace@example.com""#,
+                r#""ada@example.com","ada@example.com""#,
+            ),
+            (r#""ada@example.com","grace@example.com""#, ""),
+            (r#""ada@example.com""#, r#""ada@elsewhere.com""#),
+            (r#""ada@example.com""#, r#""Ada@example.com""#),
+            (r#""go":{"#, r#""zebra":{"#),
+            (r#""go":{"#, r#""go-links":{"#),
+            (r#""go":{"#, r#""go_links":{"#),
+            (r#""go":{"#, r#""g":{"#),
+            (r#""go":{"#, r#""instance":{"#),
+            (r#""go":{"#, r#""day2":{"#),
+            (r#""go":{"#, r#""tofu":{"#),
+            (r#""go":{"#, r#""abcdefghijklmnopqrstu":{"#),
+            (r#""go":{"sdk":"sha256:"#, r#""go":{"sdk":"sha512:"#),
+            (r#""go":{"sdk":"sha256:98fb"#, r#""go":{"sdk":"sha256:98FB"#),
+            (r#""delivery":"automatic""#, r#""delivery":"auto""#),
+            (r#""delivery":"manual""#, r#""delivery":"manual","cases":6"#),
+            (
+                r#""delivery":"manual""#,
+                r#""delivery":"manual","repository":"tools/golinks""#,
+            ),
+        ];
+        for (old, new) in cases {
+            assert_eq!(SPEC.matches(old).count(), 1, "ambiguous case {old}");
+            let edited = SPEC.replacen(old, new, 1);
+            let value = envelope(&check_spec(&edited), 5);
+            assert_eq!(value["command"], "instance.check", "{old} -> {new}");
+            assert_eq!(value["error"]["code"], "invalid_spec", "{old} -> {new}");
+        }
+        let empty = SPEC.replacen(
+            &SPEC[SPEC.find(r#""apps":{"go""#).unwrap() + 7..SPEC.len() - 1],
+            "{}",
+            1,
+        );
+        assert_eq!(
+            envelope(&check_spec(&empty), 5)["error"]["code"],
+            "invalid_spec"
+        );
+        let duplicate = SPEC.replacen(r#""home":{"#, r#""go":{"#, 1);
+        assert_eq!(
+            envelope(&check_spec(&duplicate), 5)["error"]["code"],
+            "invalid_spec"
+        );
+    }
+
+    #[test]
+    fn instance_check_reads_only_its_fixed_spec_file() {
+        let scratch = Scratch::new();
+        let directory = scratch.0.to_str().unwrap();
+        let check = |args: &[&str], code: i32| {
+            let value = envelope(&run(args, None), code);
+            assert_eq!(value["command"], "instance.check", "{args:?}");
+            value["error"]["code"].clone()
+        };
+        // Only DIRECTORY/day2.json is read; no other name or path selects a spec.
+        fs::write(scratch.0.join("instance.json"), SPEC).unwrap();
+        assert_eq!(
+            check(&["instance", "check", directory, "--agent"], 3),
+            "metadata_unreadable"
+        );
+        fs::create_dir(scratch.0.join("day2.json")).unwrap();
+        assert_eq!(
+            check(&["instance", "check", directory, "--agent"], 3),
+            "metadata_unreadable"
+        );
+        fs::remove_dir(scratch.0.join("day2.json")).unwrap();
+        fs::write(scratch.0.join("day2.json"), vec![b' '; 1_048_577]).unwrap();
+        assert_eq!(
+            check(&["instance", "check", directory, "--agent"], 5),
+            "metadata_too_large"
+        );
+        fs::write(scratch.0.join("day2.json"), SPEC).unwrap();
+        for args in [
+            vec!["--agent", "instance", "check"],
+            vec!["instance", "check", "--agent"],
+        ] {
+            assert_eq!(check(args.as_slice(), 2), "missing_argument");
+        }
+        for args in [
+            vec!["instance", "check", directory, "--demo", "--agent"],
+            vec![
+                "instance",
+                "check",
+                directory,
+                "--operation",
+                "links.list",
+                "--agent",
+            ],
+            vec![
+                "--instance",
+                "a.json",
+                "instance",
+                "check",
+                directory,
+                "--agent",
+            ],
+        ] {
+            assert_eq!(check(args.as_slice(), 2), "conflicting_options");
+        }
+        // Relative directories and trailing separators name the same file.
+        for relative in [".", "./", "../", "./."] {
+            let directory = if relative == "../" {
+                format!("../{}", scratch.0.file_name().unwrap().to_str().unwrap())
+            } else {
+                relative.to_owned()
+            };
+            let output = Command::new(binary())
+                .args(["instance", "check", &directory, "--agent"])
+                .current_dir(&scratch.0)
+                .env_remove("DAY2_INSTANCE")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let path = envelope(&output, 0)["context"]["spec_path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(
+                path.starts_with('/') && path.ends_with("/day2.json"),
+                "{path}"
+            );
+            assert!(!path.contains("/./") && !path.contains("//"), "{path}");
+        }
+        // Text failures keep stdout empty and explain the field on stderr.
+        fs::write(
+            scratch.0.join("day2.json"),
+            SPEC.replacen(r#""org":"tools""#, r#""org":"Tools""#, 1),
+        )
+        .unwrap();
+        let text = run(&["instance", "check", directory], None);
+        assert_eq!(text.status.code(), Some(5));
+        assert!(text.stdout.is_empty());
+        let stderr = String::from_utf8(text.stderr).unwrap();
+        assert!(stderr.starts_with("DAY2  /  invalid_spec"), "{stderr}");
+        assert!(stderr.contains("forge.org"), "{stderr}");
     }
 }
