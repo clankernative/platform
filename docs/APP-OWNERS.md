@@ -18,8 +18,12 @@ ownership grants no access to arbitrary shared/platform secrets or other apps.
 
 Owners retain the existing admin row behavior. Secret writes are confined to the
 operator-activated app namespace; ownership grants no arbitrary provider or
-installation authority. Owners gain no additional app operation, membership or
-resource grants. Readers,
+installation authority. Being an owner grants no app operation, membership or
+resource access by itself. A policy grants owners an operation or resource by
+naming the [`owners` entry](AUTHORITY.md#the-apps-owners) in its `actors`.
+That entry resolves to the current owners who are individual people, on every
+decision, so the commands below change who may use those operations
+immediately, without a policy apply. Membership still applies. Readers,
 writers, service principals and installation operators do not become owners.
 An operator needs an explicit app owner entry to pass an owner permission check.
 
@@ -80,8 +84,8 @@ resource grants and credential-family selections. Pending desired-file edits
 cannot be activated by an owner mutation. Normal authority revision fencing
 applies to unfinished work, live subscriptions and historical outcomes.
 
-New owners must be individual principals, not group, domain, app or service
-selectors. Managed-client (`client/`) principals and Google service-account
+New owners must be individual principals, not group, domain, owners, app or
+service selectors. Managed-client (`client/`) principals and Google service-account
 identities are refused, including in local development. In an IAP installation,
 new owners must be exact people at its verified hosted domain. Local development
 can use its explicit development actor names. The list is bounded to 512 owners.

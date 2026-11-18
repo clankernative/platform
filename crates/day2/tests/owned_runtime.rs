@@ -1025,3 +1025,134 @@ fn missing_authority_rejects_new_and_already_accepted_invocations() -> Result<()
     assert_eq!(world.changes()?, 1);
     Ok(())
 }
+
+fn refused(result: Result<Outcome>) -> bool {
+    match result {
+        Err(error) => format!("{error:#}").contains("forbidden"),
+        Ok(outcome) => outcome.status != "success" && outcome.error.contains("forbidden"),
+    }
+}
+
+#[test]
+fn the_owners_entry_follows_owner_changes_immediately_and_fences_pending_work() -> Result<()> {
+    use day2::{
+        authority_state::{self, LocalOperator},
+        owners::{self, Change, Operation},
+    };
+    let world = World::new()?;
+    let mut instance = Instance::load(world.runtime.instance_path())?;
+    instance.control = Some(serde_json::from_value(json!({
+        "version":1,"state_directory":world.directory.path().join("control"),
+        "operators":["operator"],"sources":{},"apps":{}
+    }))?);
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&instance)?,
+    )?;
+    let target = world.create("alice", "target")?;
+    // Only the app's owners may edit; Alice and Bob remain writers.
+    world.update_policy(|policy| {
+        policy.operations.get_mut("links.edit").unwrap().actors =
+            std::collections::BTreeSet::from(["owners".into()]);
+    })?;
+    let operator = LocalOperator::assert_local("operator")?;
+    let stamp = || -> Result<day2::authority_state::AuthorityStamp> {
+        Ok(authority_state::current(&rusqlite::Connection::open(world.runtime.db())?)?.stamp)
+    };
+
+    // Alice writes to the app and owns the row, but does not own the app.
+    assert!(refused(world.edit(
+        "alice",
+        "before-owner",
+        &target,
+        1,
+        "Too early"
+    )));
+    // Adding her as an owner admits her on the very next call: no policy apply.
+    owners::change(
+        &world.runtime,
+        &operator,
+        Operation::Add,
+        &Change {
+            owner: "alice".into(),
+            expected: stamp()?,
+            request_id: "add-alice".into(),
+        },
+    )?;
+    let edited = world.edit("alice", "as-owner", &target, 1, "Owner edit")?;
+    assert_eq!(edited.status, "success", "{}", edited.error);
+    assert!(refused(world.edit(
+        "bob",
+        "not-an-owner",
+        &target,
+        2,
+        "Bob edit"
+    )));
+
+    // Work accepted while she was an owner cannot complete after she stops
+    // being one: the owner change is an authority revision, which fences it.
+    world.runtime.accept(
+        "links.edit",
+        "alice",
+        "pending-owner-edit",
+        &json!({"link_id":target,"expected_version":2,"title":"Pending edit"}),
+        100,
+    )?;
+    let pending = world.receipt("pending-owner-edit")?;
+    assert_eq!(pending["status"], "pending");
+    owners::change(
+        &world.runtime,
+        &operator,
+        Operation::Remove,
+        &Change {
+            owner: "alice".into(),
+            expected: stamp()?,
+            request_id: "remove-alice".into(),
+        },
+    )?;
+    let blocked = world.runtime.execute("pending-owner-edit", Fault::None)?;
+    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.error, "authority_policy_changed");
+    assert_eq!(world.receipt("pending-owner-edit")?, pending);
+    assert!(refused(world.edit(
+        "alice",
+        "after-owner",
+        &target,
+        2,
+        "Too late"
+    )));
+
+    // A service account placed among the admins by a full activation, and
+    // admitted as a writer, is still never an owner.
+    let service = "deployer@tools.iam.gserviceaccount.com";
+    let mut instance = Instance::load(world.runtime.instance_path())?;
+    let binding = instance.apps.get_mut("owned").context("owned binding")?;
+    binding.writers.insert(service.into());
+    binding
+        .authority
+        .as_mut()
+        .context("authority policy")?
+        .admins
+        .insert(service.into());
+    fs::write(
+        world.runtime.instance_path(),
+        serde_json::to_vec(&instance)?,
+    )?;
+    authority_state::apply_desired(
+        &world.runtime,
+        &LocalOperator::assert_local("test-operator")?,
+        "service-admin",
+        Some(stamp()?),
+    )?;
+    assert!(refused(world.edit(
+        service,
+        "service-edit",
+        &target,
+        2,
+        "Service edit"
+    )));
+    // The remaining owner still edits, under the same entry.
+    let owner = world.edit("admin", "owner-edit", &target, 2, "Admin edit")?;
+    assert_eq!(owner.status, "success", "{}", owner.error);
+    Ok(())
+}

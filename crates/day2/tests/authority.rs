@@ -570,3 +570,108 @@ fn a_domain_entry_grants_operations_but_never_ownership_or_administration() -> R
     }
     Ok(())
 }
+
+#[test]
+fn the_owners_entry_grants_this_policys_individual_admins_and_nobody_else() -> Result<()> {
+    let (operations, schema) = contracts()?;
+    let service = "deployer@tools.iam.gserviceaccount.com";
+    let mut document = policy_json();
+    document["admins"] = json!(["ada@wonderly.com", "admin", service]);
+    for name in ["links.list", "links.edit"] {
+        document["operations"][name]["actors"] = json!(["owners"]);
+    }
+    document["operations"]["links.create"]["actors"] = json!(["domain:wonderly.com", "owners"]);
+    let policy: Policy = serde_json::from_value(document.clone())?;
+    policy.validate(&operations, &schema)?;
+    policy.validate_domains(Some("wonderly.com"))?;
+    // The entry is not a domain, so it alone needs no verified hosted domain.
+    let mut owners_only = document.clone();
+    owners_only["operations"]["links.create"]["actors"] = json!(["owners"]);
+    let owners_only: Policy = serde_json::from_value(owners_only)?;
+    owners_only.validate(&operations, &schema)?;
+    owners_only.validate_domains(None)?;
+
+    // Owners are admitted because they are owners, and keep the admin row bypass.
+    policy.authorize("links.edit", "ada@wonderly.com")?;
+    policy.authorize("links.edit", "admin")?;
+    assert_eq!(
+        policy.read_scope("links.list", "links", "ada@wonderly.com")?,
+        RowFilter::All
+    );
+    // A service account is never an owner, even listed among the admins.
+    assert!(policy.authorize("links.edit", service).is_err());
+    // Everyone at the domain may create, but only owners may edit or list.
+    policy.authorize("links.create", "newhire@wonderly.com")?;
+    for refused in [
+        "newhire@wonderly.com",
+        "alice",
+        "bob",
+        "owners",
+        "Owners",
+        "domain:wonderly.com",
+    ] {
+        assert!(
+            policy.authorize("links.edit", refused).is_err(),
+            "{refused}"
+        );
+    }
+    assert!(
+        policy
+            .authorize("admin.salaries", "ada@wonderly.com")
+            .is_err()
+    );
+
+    // Another application's policy resolves the entry against its own owners.
+    let mut other = document.clone();
+    other["admins"] = json!(["bob@wonderly.com"]);
+    let other: Policy = serde_json::from_value(other)?;
+    other.validate(&operations, &schema)?;
+    other.authorize("links.edit", "bob@wonderly.com")?;
+    assert!(other.authorize("links.edit", "ada@wonderly.com").is_err());
+    assert!(policy.authorize("links.edit", "bob@wonderly.com").is_err());
+
+    // Owner changes need no operation rewrite: the next decision follows admins.
+    let mut changed = policy.clone();
+    changed.admins.remove("ada@wonderly.com");
+    changed.admins.insert("bob@wonderly.com".into());
+    assert!(changed.authorize("links.edit", "ada@wonderly.com").is_err());
+    changed.authorize("links.edit", "bob@wonderly.com")?;
+    Ok(())
+}
+
+#[test]
+fn the_owners_entry_is_refused_outside_operation_actors_and_when_misspelled() -> Result<()> {
+    let (operations, schema) = contracts()?;
+    let mut admins = policy_json();
+    admins["admins"] = json!(["owners"]);
+    let mut authenticated = policy_json();
+    authenticated["delegations"] = json!({"support":{"authenticated":["owners"],
+        "may_act_as":{"kind":"any_human"},"paths":["request"]}});
+    let mut targets = policy_json();
+    targets["delegations"] = json!({"support":{"authenticated":["support@wonderly.com"],
+        "may_act_as":{"kind":"actors","actors":["owners"]},"paths":["request"]}});
+    let mut refused = vec![
+        ("admins", admins),
+        ("delegation authenticated", authenticated),
+        ("delegation target", targets),
+    ];
+    for spelling in [
+        "owner",
+        "Owners",
+        "OWNERS",
+        " owners",
+        "owners ",
+        "owners:",
+        "owners:ada",
+    ] {
+        let mut malformed = policy_json();
+        malformed["operations"]["links.edit"]["actors"] = json!([spelling]);
+        refused.push((spelling, malformed));
+    }
+    for (name, document) in refused {
+        let policy: Policy = serde_json::from_value(document)?;
+        let error = policy.validate(&operations, &schema).unwrap_err();
+        assert!(error.to_string().contains("owners"), "{name}: {error}");
+    }
+    Ok(())
+}

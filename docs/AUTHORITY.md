@@ -63,8 +63,15 @@ Unknown operations, models, fields, incompatible modes and invalid precondition
 mappings fail validation. Every nominal text model field requires an explicit
 host constraint. Plain text fields may also declare one. The policy is validated
 when loading the runtime and on fresh authorization against its pinned artifact.
-It is company-owned configuration, not an app-supplied request or an app-generated
-grant. The same reusable artifact may have different company policies.
+The company owns who is granted. An application never names a person, a domain
+or an installation identity, and never grants itself anything. Instead, each
+public operation is to declare a closed audience class: `employees`, `owners`
+or `closed`. Internal commands take theirs from the operations and schedules
+that request them. The company binds each class's members: `employees` to
+`domain:<hosted_domain>`, `owners` to the [owners entry](#the-apps-owners)
+and the schedule to its own schedule actor. The same reusable artifact
+therefore still receives different company policies, and every grant in the
+activated document remains the company's.
 
 For example, this entry belongs under `authority.operations`:
 
@@ -172,6 +179,55 @@ The activated document records the hosted domain it was resolved under
 installation. If the identity provider is removed or its domain changes, the
 app's requests are refused with `installation_changed` until authority is
 activated again; domain entries never outlive the verification they rely on.
+
+### The app's owners
+
+An operation's `actors` and a resource grant's `actors` may contain the exact
+entry `owners`. It admits the app's current owners, the policy's `admins`, so an
+operation for owners follows every owner change without being rewritten:
+
+```json
+{"version": 1, "admins": ["ada@example.com"], "operations": {
+  "items.configure": {"actors": ["owners"], "mode": {"kind": "current_state"}, "models": {}}}}
+```
+
+The entry admits an actor only when all of these hold:
+
+- **The actor is one of this policy's `admins`.** The entry is resolved against
+  the app's active authority, read in the same transaction as the decision, and
+  never against another app's owners. An owner added or removed with
+  [`day2 platform owners`](APP-OWNERS.md) is admitted or refused on the next
+  call, with no policy apply.
+- **The actor is an individual person.** That is the rule owner management
+  enforces: not `app:`, `svc:`, a managed `client/` key or a Google service
+  account (`*.gserviceaccount.com`). A service account that a full activation
+  placed in `admins` keeps its owner permissions but is never admitted by
+  `owners`.
+- **The actor passes membership.** `readers` and `writers` remain the outer gate,
+  so an owner who is not a member is still refused. A policy that grants owners
+  should derive membership that covers them, such as `domain:<hosted_domain>`
+  in `writers`.
+
+`owners` is not a principal and takes no argument. It is refused in `admins`, in
+`readers` and `writers`, in delegation rules (`authenticated` and `may_act_as`
+actors), as an `X-Day2-Act-As` target, and in app-delegation and Freetool
+execution resource grants, which name exact people. Look-alikes such as `owner`,
+`Owners`, ` owners` and `owners:x` are refused everywhere, rather than accepted
+as a principal that admits nobody. An actor spelled as the entry is never
+admitted.
+
+A resource grant may name `owners` only when its operation's `actors` also name
+`owners`, since named people never cover future owners, and only while every
+owner it currently admits is a member. Activation drops an uncovered entry.
+Adding an owner who is not a member is refused while such a grant exists;
+removing an owner never is.
+
+An owner change is an authority activation, so it advances the revision like
+any other. Work an owner started stays bound to the stamp it was accepted
+under. After that owner is removed, the work cannot prepare, decide, request a
+child command, dispatch or complete, and a stored outcome is not replayed under
+the new revision. Unfinished work for the app is blocked with
+`authority_policy_changed`, as for every activation.
 
 ## Request Identity And Delegation
 
@@ -355,7 +411,12 @@ Host guards are exercised by HTTP
 and native runtime tests, including other owners, stale versions, retries,
 revocation, forbidden fields/targets and rollback after a later denied effect.
 The authority unit suite also checks malformed policies, write-only grants,
-text byte boundaries and a fixed-seed Unicode property campaign.
+text byte boundaries and a fixed-seed Unicode property campaign. The `owners`
+entry has negative regressions in the authority unit and integration suites
+and in `crates/day2/tests/owned_runtime.rs` against real SQLite: another
+app's owners, a service-account admin, a domain member who is not an owner,
+membership and delegation placement, misspellings, and an owner removed while
+their work is pending.
 
 Properties remain a separate verification facility. A mandatory property
 catalog does not prove adequate coverage, and arbitrary app predicates are not

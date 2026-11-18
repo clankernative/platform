@@ -1660,3 +1660,172 @@ fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> 
     assert!(format!("{error:#}").contains("app delegation"), "{error:#}");
     Ok(())
 }
+
+#[test]
+fn owners_entries_pass_membership_and_stay_within_it_for_resource_grants() -> Result<()> {
+    let artifact = LoadedArtifact::from_contract_for_tests(
+        "owners-test".into(),
+        "/admitted/owners".into(),
+        serde_json::from_value(serde_json::json!({
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"owners-test",
+            "worker_digest":"owners-test","schema_digest":"owners-test",
+            "schema":{"models":{},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+            "operations":[
+                {"name":"items.read","kind":"query","input_type":"input","output_type":""},
+                {"name":"items.write","kind":"command","input_type":"input","output_type":""}],
+            "sources":{},"admission":"local-spike-only"}))?,
+    );
+    let read = artifact.route("items.read")?.clone();
+    let write = artifact.route("items.write")?.clone();
+    let everyone = String::from("domain:wonderly.com");
+    let service = "deployer@tools.iam.gserviceaccount.com";
+    let mut doc = document();
+    doc.hosted_domain = Some("wonderly.com".into());
+    doc.readers.insert(everyone.clone());
+    doc.writers.insert(everyone.clone());
+    // A full activation may list a service among admins; it is still no owner.
+    doc.writers.insert(service.into());
+    let policy = doc.policy.as_mut().unwrap();
+    policy.admins = BTreeSet::from(["ada@wonderly.com".into(), service.into()]);
+    for operation in policy.operations.values_mut() {
+        operation.actors = BTreeSet::from([OWNERS.into()]);
+    }
+    doc.validate(&artifact)?;
+
+    doc.authorize(&write, "ada@wonderly.com")?;
+    doc.authorize(&read, "ada@wonderly.com")?;
+    // Domain membership is the outer gate, not an operation grant.
+    for refused in ["newhire@wonderly.com", service, "alice", "owners"] {
+        assert!(doc.authorize(&write, refused).is_err(), "{refused}");
+        assert!(doc.authorize(&read, refused).is_err(), "{refused}");
+    }
+    // An owner must still pass membership.
+    let mut outsider = doc.clone();
+    outsider
+        .policy
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("partner@example.com".into());
+    outsider.validate(&artifact)?;
+    assert!(outsider.authorize(&write, "partner@example.com").is_err());
+
+    // The entry is never a member itself.
+    for list in ["readers", "writers"] {
+        let mut member = doc.clone();
+        match list {
+            "readers" => member.readers.insert(OWNERS.into()),
+            _ => member.writers.insert(OWNERS.into()),
+        };
+        let error = member.validate(&artifact).unwrap_err();
+        assert!(format!("{error:#}").contains("owners"), "{list}: {error:#}");
+    }
+
+    // A resource grant may name the owners when its operation does, and while
+    // every current owner is a member.
+    let grant = |provider_target: serde_json::Value, actors: &[&str]| {
+        let mut grant = serde_json::json!({
+            "policy":{"id":"reading","revision":1},
+            "resource":{"id":"directory","revision":1},
+            "connection":{"id":"local","revision":1},
+            "actors":actors,
+            "limits":{"max_request_bytes":1024,"max_response_bytes":1024,"max_calls_per_invocation":5},
+            "budgets":[],"expires_at_ms":null
+        });
+        grant
+            .as_object_mut()
+            .unwrap()
+            .extend(provider_target.as_object().unwrap().clone());
+        serde_json::json!({"operations":{"items.read":{"directory":grant}},"budgets":{}})
+    };
+    let notifications = serde_json::json!({
+        "provider":"local_notifications",
+        "target":{"kind":"notification_mailbox","topics":{"kind":"any"}},
+        "actions":["notifications_resolve"]
+    });
+    let mut granted = doc.clone();
+    granted
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.read")
+        .unwrap()
+        .observations
+        .insert("notifications.recipient.v1".into());
+    granted.resources = serde_json::from_value(grant(notifications.clone(), &[OWNERS]))?;
+    granted.validate(&artifact)?;
+    let mut effective = granted.clone();
+    effective.attenuate_resources(&artifact.contract().operations)?;
+    let actors = &effective.resources.operations["items.read"]["directory"].actors;
+    assert_eq!(actors, &BTreeSet::from([OWNERS.into()]));
+    let admins = &effective.policy.as_ref().unwrap().admins;
+    assert!(crate::authority::admits_owners(
+        actors,
+        "ada@wonderly.com",
+        admins
+    ));
+    for refused in ["newhire@wonderly.com", service, "owners"] {
+        assert!(
+            !crate::authority::admits_owners(actors, refused, admins),
+            "{refused}"
+        );
+    }
+
+    // An owner outside membership makes the grant exceed membership, so
+    // activation drops it and validation refuses it.
+    let mut wider = granted.clone();
+    wider
+        .policy
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("partner@example.com".into());
+    let error = wider.validate(&artifact).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("resource_actors_exceed_membership"),
+        "{error:#}"
+    );
+    wider.attenuate_resources(&artifact.contract().operations)?;
+    assert!(wider.resources.operations.is_empty());
+
+    // The operation must name the entry: owners named elsewhere do not cover it.
+    let mut uncovered = granted.clone();
+    uncovered
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.read")
+        .unwrap()
+        .actors = BTreeSet::from(["ada@wonderly.com".into()]);
+    let error = uncovered.validate(&artifact).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("resource_actors_exceed_operation_authority"),
+        "{error:#}"
+    );
+
+    // App delegation carries one named person across an application boundary.
+    let mut delegated = granted.clone();
+    delegated
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.read")
+        .unwrap()
+        .observations
+        .insert("app.query.v1".into());
+    delegated.resources = serde_json::from_value(grant(
+        serde_json::json!({
+            "provider":"local_delegation",
+            "target":{"kind":"app_operation","app":"callee","operation":"callee.list",
+                "schema_digest":format!("sha256:{}", "1".repeat(64))},
+            "actions":["delegate_query"]
+        }),
+        &[OWNERS],
+    ))?;
+    let error = delegated.validate(&artifact).unwrap_err();
+    assert!(format!("{error:#}").contains("app delegation"), "{error:#}");
+    Ok(())
+}
