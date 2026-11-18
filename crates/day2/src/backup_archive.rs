@@ -6,6 +6,7 @@ use crate::{
     authority_state,
 };
 use anyhow::{Result, ensure};
+use day2_capabilities::Digest;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -129,4 +130,33 @@ pub(crate) fn artifact_files(artifact: &LoadedArtifact) -> Result<BTreeSet<PathB
         );
     }
     Ok(files)
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum NativeArchiveMember {
+    File {
+        bytes: u64,
+        sha256: Digest,
+        mode: u32,
+    },
+    Directory {
+        mode: u32,
+    },
+}
+
+// Portable full-capture DATA, distinct from semantic backup metadata. Exact
+// observed permission bits are committed; uid/ino/times remain native identity
+// checks and cannot become portable authority. All names/kinds are closed by
+// the native profile before this record can be compared with approval.
+pub(crate) fn native_archive_commitment(
+    manifest: &Manifest,
+    inventory: &BTreeMap<String, NativeArchiveMember>,
+) -> Result<Digest> {
+    Digest::of(&(
+        "day2-native-restore-archive-v1",
+        "sqlite-current-artifact-only",
+        manifest.security_restore_digest()?,
+        inventory,
+    ))
 }

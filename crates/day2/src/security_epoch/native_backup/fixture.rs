@@ -1,5 +1,5 @@
 //! Normally built artifact regression; controlled SQLite, not native owners.
-use super::tests::{complete, source};
+use super::tests::{complete, source, standalone};
 use super::*;
 
 #[test]
@@ -31,8 +31,8 @@ fn normal_fixture_image_matches_canonical_verifier_and_refuses_substitutions() -
     let path = directory.path().join("controlled.sqlite");
     let mut write = Connection::open(&path)?;
     crate::store::configure_connection(&mut write)?;
-    // Controlled rollback-journal source: WAL standalone export stays refused.
-    write.pragma_update(None, "journal_mode", "DELETE")?;
+    // Controlled real WAL source; this creates metadata, not native owners.
+    write.pragma_update(None, "journal_mode", "WAL")?;
     let tx = write.transaction()?;
     metadata.initialize_in_transaction(&tx)?;
     tx.commit()?;
@@ -50,8 +50,9 @@ fn normal_fixture_image_matches_canonical_verifier_and_refuses_substitutions() -
     let mut tx = read.transaction()?;
     let mut snapshot = MemorySnapshot::new()?;
     complete(&mut snapshot, &mut tx)?;
-    let image = snapshot.finish()?.into_image()?;
+    let content = snapshot.finish()?;
     tx.commit()?;
+    let image = standalone(content)?;
     let manifest = crate::backup_archive::Manifest {
         format: 3,
         scope: metadata.scope().into(),
@@ -96,6 +97,48 @@ fn normal_fixture_image_matches_canonical_verifier_and_refuses_substitutions() -
             }
         }
         assert!(image.verify(&altered, &artifact).is_err());
+    }
+    super::archive::refusal_cuts(&image, &manifest, &artifact)?;
+    // Use the real production historical encoder. Its returned tree/commitment
+    // is DATA, never a manufactured native owner or a completed handoff.
+    for replay in 0..2 {
+        let copied = SnapshotImage {
+            bytes: Zeroizing::new(image.bytes.to_vec()),
+        };
+        let mut writer = super::archive::ArchiveWriter::new(copied, clone_manifest()?, &artifact)?;
+        while writer.step()? != CopyProgress::Complete {}
+        let archive = writer.finish()?;
+        archive.check()?;
+        let source_mode: String = write.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+        ensure!(source_mode == "wal", "backup_fixture_source_changed");
+        let path = archive.directory();
+        let mut names = std::fs::read_dir(path)?
+            .map(|entry| entry.map(|e| e.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        names.sort();
+        ensure!(
+            names == ["app.sqlite", "artifacts", "backup.json"].map(std::ffi::OsString::from),
+            "backup_fixture_root_members"
+        );
+        let reopened = crate::artifact::LoadedArtifact::load(
+            &path.join(archive.manifest().artifact_relative()?),
+        )?;
+        let mut db = Connection::open_with_flags(
+            path.join("app.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        crate::backup_archive::verify_snapshot(archive.manifest(), &reopened, &mut db)?;
+        ensure!(
+            archive.commitment().as_str().starts_with("sha256:"),
+            "backup_fixture_commitment"
+        );
+        // The independent whole-file check must stay permanently refused even
+        // if the changed on-disk bytes are later repaired.
+        let original = std::fs::read(path.join("backup.json"))?;
+        std::fs::write(path.join("backup.json"), b"{}")?;
+        assert!(archive.check().is_err(), "replay{replay}");
+        std::fs::write(path.join("backup.json"), original)?;
+        assert!(archive.check().is_err(), "replay{replay}");
     }
     let mut damaged = SnapshotImage {
         bytes: Zeroizing::new(image.bytes.to_vec()),

@@ -15,7 +15,7 @@ pub(super) fn source(path: &Path) -> Result<Connection> {
     )?)
 }
 
-fn writer(path: &Path) -> Result<Connection> {
+pub(super) fn writer(path: &Path) -> Result<Connection> {
     let db = Connection::open(path)?;
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.execute_batch(
@@ -33,6 +33,22 @@ pub(super) fn complete(snapshot: &mut MemorySnapshot, tx: &mut Transaction<'_>) 
     let mut copying = snapshot.start(tx)?;
     while copying.step()? != CopyProgress::Complete {}
     Ok(())
+}
+
+pub(super) fn standalone(content: SnapshotContent) -> Result<SnapshotImage> {
+    let mut destination = super::standalone::StandaloneSnapshot::new()?;
+    {
+        let mut copying = destination.start(content)?;
+        while copying.step()? != CopyProgress::Complete {}
+    }
+    destination.finish()
+}
+
+fn image_rows(image: &SnapshotImage) -> Result<Vec<Vec<(i64, i64)>>> {
+    image_shape(&image.bytes)?;
+    let mut db = Connection::open_in_memory()?;
+    db.deserialize_read_exact(MAIN_DB, &image.bytes[..], image.bytes.len(), false)?;
+    rows(&db)
 }
 
 fn rows(db: &Connection) -> Result<Vec<Vec<(i64, i64)>>> {
@@ -83,10 +99,12 @@ fn logical_wal_snapshot_preserves_committed_private_history_and_leaves_source_un
         rows(&image.db)? == expected,
         "controlled_snapshot_divergence"
     );
-    // Logical content success is not restorable WAL export. The unchanged
-    // standalone guard refuses the actual pinned library's retained 2/2 image.
-    assert!(image.into_image().is_err());
     tx.commit()?;
+    let image = standalone(image)?;
+    ensure!(
+        image_rows(&image)? == expected,
+        "controlled_standalone_divergence"
+    );
     write.execute_batch("ROLLBACK")?;
     ensure!(rows(&write)? == expected, "controlled_source_changed");
     let mode: String = write.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
@@ -95,7 +113,44 @@ fn logical_wal_snapshot_preserves_committed_private_history_and_leaves_source_un
 }
 
 #[test]
-fn rollback_source_produces_a_real_standalone_image_and_wal_export_refuses() -> Result<()> {
+fn sqlite_destination_engine_converts_wal_without_changing_source_rows_or_mode() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("source.sqlite");
+    let write = writer(&path)?;
+    write.execute_batch(
+        "CREATE TABLE rowid_history(name TEXT PRIMARY KEY,value INTEGER);
+        INSERT INTO rowid_history(rowid,name,value) VALUES(9,'retained',5),(41,'later',8);
+        INSERT INTO public_markers VALUES(1,11);
+        INSERT INTO uncertain_effects VALUES(1,13);
+        INSERT INTO budget_debt VALUES(1,14);",
+    )?;
+    let expected = rows(&write)?;
+    let mut read = source(&path)?;
+    let mut tx = read.transaction()?;
+    let mut memory = MemorySnapshot::new()?;
+    complete(&mut memory, &mut tx)?;
+    let content = memory.finish()?;
+    tx.commit()?;
+    write.execute_batch("BEGIN IMMEDIATE; INSERT INTO public_markers VALUES(2,99)")?;
+    let image = standalone(content)?;
+    let mut destination = Connection::open_in_memory()?;
+    destination.deserialize_read_exact(MAIN_DB, &image.bytes[..], image.bytes.len(), false)?;
+    assert_eq!(rows(&destination)?, expected);
+    let rowids: Vec<i64> = destination
+        .prepare("SELECT rowid FROM rowid_history ORDER BY rowid")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    assert_eq!(rowids, [9, 41]);
+    image_shape(&image.bytes)?;
+    let mode: String = write.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    assert_eq!(mode, "wal");
+    write.execute_batch("ROLLBACK")?;
+    assert_eq!(rows(&write)?, expected);
+    Ok(())
+}
+
+#[test]
+fn rollback_and_wal_sources_produce_real_standalone_images() -> Result<()> {
     for wal in [false, true] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("source.sqlite");
@@ -113,20 +168,15 @@ fn rollback_source_produces_a_real_standalone_image_and_wal_export_refuses() -> 
             rows(&content.db)?[0] == [(1, 11)],
             "controlled_logical_content"
         );
-        let image = content.into_image();
-        if wal {
-            assert!(image.is_err());
-        } else {
-            let image = image?;
-            image_shape(&image.bytes)?;
-            let mut decoded = Connection::open_in_memory()?;
-            decoded.deserialize_read_exact(MAIN_DB, &image.bytes[..], image.bytes.len(), false)?;
-            ensure!(
-                rows(&decoded)?[0] == [(1, 11)],
-                "controlled_standalone_changed"
-            );
-        }
         tx.commit()?;
+        let image = standalone(content)?;
+        image_shape(&image.bytes)?;
+        let mut decoded = Connection::open_in_memory()?;
+        decoded.deserialize_read_exact(MAIN_DB, &image.bytes[..], image.bytes.len(), false)?;
+        ensure!(
+            rows(&decoded)?[0] == [(1, 11)],
+            "controlled_standalone_changed"
+        );
     }
     Ok(())
 }
@@ -433,8 +483,9 @@ fn replay(program: &Program, wrong: bool) -> Result<Run> {
                         panic!("controlled_snapshot_unwind");
                     }
                     complete(&mut snapshot, &mut tx)?;
-                    let image = snapshot.finish()?;
+                    let content = snapshot.finish()?;
                     tx.commit()?;
+                    let image = standalone(content)?;
                     let expected = if wrong {
                         pending.as_ref().unwrap_or(&committed).clone()
                     } else {
@@ -450,7 +501,8 @@ fn replay(program: &Program, wrong: bool) -> Result<Run> {
                     let mut actual_digests = Vec::new();
                     for (image, expected) in &images {
                         expected_digests.push(crate::digest(&serde_json::to_vec(expected)?));
-                        actual_digests.push(crate::digest(&serde_json::to_vec(&rows(&image.db)?)?));
+                        actual_digests
+                            .push(crate::digest(&serde_json::to_vec(&image_rows(image)?)?));
                     }
                     if !images.is_empty() {
                         run.observations.push(Observation {
@@ -503,11 +555,33 @@ fn source_digest() -> String {
     let inputs: &[(&str, &[u8])] = &[
         ("native_backup.rs", include_bytes!("../native_backup.rs")),
         ("native_backup/tests.rs", include_bytes!("tests.rs")),
+        ("native_backup/files.rs", include_bytes!("files.rs")),
+        (
+            "native_backup/standalone.rs",
+            include_bytes!("standalone.rs"),
+        ),
+        (
+            "native_backup/standalone_tests.rs",
+            include_bytes!("standalone_tests.rs"),
+        ),
+        ("native_backup/archive.rs", include_bytes!("archive.rs")),
+        (
+            "backup_archive.rs",
+            include_bytes!("../../backup_archive.rs"),
+        ),
         (
             "restore_staging.rs",
             include_bytes!("../restore_staging.rs"),
         ),
         ("store.rs", include_bytes!("../../store.rs")),
+        (
+            "store/native_storage/keeper.rs",
+            include_bytes!("../../store/native_storage/keeper.rs"),
+        ),
+        (
+            "store/native_storage/opened_files.rs",
+            include_bytes!("../../store/native_storage/opened_files.rs"),
+        ),
         ("oauth/schema.rs", include_bytes!("../../oauth/schema.rs")),
         ("day2/lib.rs", include_bytes!("../../lib.rs")),
         ("day2/Cargo.toml", include_bytes!("../../../Cargo.toml")),
@@ -854,7 +928,6 @@ fn retained_gzip_keeps_complete_payload_and_refuses_truncation_trailing_or_expan
 
 #[test]
 fn component_source_has_no_native_factory_requester_or_raw_source_opener() -> Result<()> {
-    let file = syn::parse_file(include_str!("../native_backup.rs"))?;
     use syn::visit::Visit;
     struct Calls(Vec<String>);
     impl<'ast> Visit<'ast> for Calls {
@@ -872,24 +945,259 @@ fn component_source_has_no_native_factory_requester_or_raw_source_opener() -> Re
             syn::visit::visit_expr_call(self, e);
         }
     }
-    let mut calls = Calls(Vec::new());
-    calls.visit_file(&file);
-    assert!(!calls.0.iter().any(|c| c.ends_with("Runtime::load")
-        || c.contains("enroll_current_thread")
-        || c.contains("NativeBackupAuthorization")
-        || c.ends_with("Connection::open")
-        || c.ends_with("open_with_flags")));
-    assert!(
-        calls
-            .0
+    fn string(value: &syn::Expr, wanted: &str) -> bool {
+        matches!(value,syn::Expr::Lit(lit) if matches!(&lit.lit,syn::Lit::Str(s) if s.value()==wanted))
+    }
+    fn path(value: &syn::Expr, wanted: &str) -> bool {
+        matches!(value,syn::Expr::Path(p) if p.path.segments.iter().map(|s|s.ident.to_string())
+            .collect::<Vec<_>>().join("::")==wanted)
+    }
+    fn flags(value: &syn::Expr, out: &mut Vec<String>) -> bool {
+        match value {
+            syn::Expr::Binary(expr) if matches!(expr.op, syn::BinOp::BitOr(_)) => {
+                flags(&expr.left, out) && flags(&expr.right, out)
+            }
+            syn::Expr::Path(p) => {
+                out.push(
+                    p.path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+    // Keep the implementation selection explicit; no source-text occurrence or
+    // unrelated callback can stand in for the production constructor's call.
+    fn destination(source: &str) -> Result<bool> {
+        let file = syn::parse_file(source)?;
+        let factory = file
+            .items
             .iter()
-            .any(|c| c.ends_with("backup_archive::verify_snapshot"))
+            .find_map(|item| {
+                let syn::Item::Impl(implementation) = item else {
+                    return None;
+                };
+                let syn::Type::Path(ty) = &*implementation.self_ty else {
+                    return None;
+                };
+                if !ty.path.is_ident("StandaloneSnapshot") {
+                    return None;
+                }
+                implementation.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(function) if function.sig.ident == "new" => Some(function),
+                    _ => None,
+                })
+            })
+            .context("actual standalone factory")?;
+        if !factory.sig.inputs.is_empty() || !factory.sig.generics.params.is_empty() {
+            return Ok(false);
+        }
+        struct Factory {
+            events: Vec<bool>,
+            raw: usize,
+        }
+        impl<'ast> Visit<'ast> for Factory {
+            fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
+                if e.method == "create_file" {
+                    let first = e.args.first();
+                    let selected = first.is_some_and(|expr| {
+                        matches!(expr,syn::Expr::Call(call)
+                        if path(&call.func,"Path::new") && call.args.len()==1
+                        && call.args.first().is_some_and(|v|string(v,"app.sqlite")))
+                    });
+                    self.events.push(path(&e.receiver,"tree") && e.args.len()==2 && selected
+                        && matches!(&e.args[1],syn::Expr::Lit(lit) if matches!(&lit.lit,syn::Lit::Bool(value) if !value.value)));
+                }
+                syn::visit::visit_expr_method_call(self, e);
+            }
+            fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
+                if path(
+                    &e.func,
+                    "crate::store::NativeSqliteKeeper::require_creator_main",
+                ) {
+                    self.events.push(
+                        e.args.len() == 2
+                            && matches!(&e.args[0],syn::Expr::Reference(r) if path(&r.expr,"db"))
+                            && matches!(&e.args[1],syn::Expr::Reference(r) if path(&r.expr,"file")),
+                    );
+                }
+                if path(&e.func, "Connection::open_with_flags") {
+                    self.raw += 1;
+                    let selected=e.args.first().is_some_and(|arg|match arg {
+                        syn::Expr::MethodCall(join) if join.method=="join" && join.args.len()==1
+                            && join.args.first().is_some_and(|v|string(v,"app.sqlite"))=> {
+                            matches!(&*join.receiver,syn::Expr::MethodCall(parent) if parent.method=="path"
+                                && parent.args.is_empty() && path(&parent.receiver,"tree"))
+                        }
+                        _=>false,
+                    });
+                    let mut actual = Vec::new();
+                    let exact = e
+                        .args
+                        .iter()
+                        .nth(1)
+                        .is_some_and(|arg| flags(arg, &mut actual));
+                    actual.sort();
+                    self.events.push(
+                        selected
+                            && e.args.len() == 2
+                            && exact
+                            && actual
+                                == [
+                                    "OpenFlags::SQLITE_OPEN_NOFOLLOW",
+                                    "OpenFlags::SQLITE_OPEN_READ_WRITE",
+                                ],
+                    );
+                }
+                syn::visit::visit_expr_call(self, e);
+            }
+        }
+        let mut selected = Factory {
+            events: Vec::new(),
+            raw: 0,
+        };
+        selected.visit_block(&factory.block);
+        Ok(selected.raw == 1 && selected.events == [true, true, true])
+    }
+    fn closed_filesystem(source: &str) -> Result<bool> {
+        struct Opens(bool);
+        impl<'ast> Visit<'ast> for Opens {
+            fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
+                let at = if path(&e.func, "rustix::fs::openat") {
+                    Some(2)
+                } else if path(&e.func, "rustix::fs::open") {
+                    Some(1)
+                } else {
+                    None
+                };
+                if let Some(index) = at {
+                    let mut actual = Vec::new();
+                    let exact = e
+                        .args
+                        .iter()
+                        .nth(index)
+                        .is_some_and(|arg| flags(arg, &mut actual));
+                    let has = |name: &str| actual.iter().any(|value| value == name);
+                    self.0 &= exact
+                        && has("OFlags::NOFOLLOW")
+                        && has("OFlags::CLOEXEC")
+                        && (!has("OFlags::RDONLY") || has("OFlags::NONBLOCK"))
+                        && (!has("OFlags::CREATE")
+                            || (has("OFlags::EXCL") && !has("OFlags::TRUNC")));
+                }
+                syn::visit::visit_expr_call(self, e);
+            }
+        }
+        let file = syn::parse_file(source)?;
+        let mut opens = Opens(true);
+        opens.visit_file(&file);
+        Ok(opens.0)
+    }
+    fn no_database_reopen(source: &str) -> Result<bool> {
+        let file = syn::parse_file(source)?;
+        let mut selected = Vec::new();
+        for item in &file.items {
+            if let syn::Item::Impl(implementation) = item {
+                for item in &implementation.items {
+                    if let syn::ImplItem::Fn(f) = item
+                        && f.sig.ident == "check_file"
+                    {
+                        let mut calls = Calls(Vec::new());
+                        calls.visit_block(&f.block);
+                        selected.push(
+                            calls
+                                .0
+                                .iter()
+                                .filter(|s| s.as_str() == "rustix::fs::statat")
+                                .count()
+                                == 1
+                                && !calls
+                                    .0
+                                    .iter()
+                                    .any(|s| s == "rustix::fs::openat" || s == "rustix::fs::open"),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(selected == [true])
+    }
+    let sources = [
+        include_str!("../native_backup.rs"),
+        include_str!("standalone.rs"),
+        include_str!("files.rs"),
+        include_str!("archive.rs"),
+    ];
+    let validate = |sources: &[&str]| -> Result<bool> {
+        let mut raw = 0;
+        for source in sources {
+            if !closed_filesystem(source)? {
+                return Ok(false);
+            }
+            let file = syn::parse_file(source)?;
+            let mut calls = Calls(Vec::new());
+            calls.visit_file(&file);
+            for call in &calls.0 {
+                if call.ends_with("Connection::open_with_flags") {
+                    raw += 1;
+                    continue;
+                }
+                if call.ends_with("Connection::open")
+                    || call.contains("enroll_current_thread")
+                    || call.ends_with("Runtime::load")
+                    || call.ends_with("LoadedArtifact::load")
+                    || call.contains("NativeBackupAuthorization")
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(raw == 1 && destination(sources[1])? && no_database_reopen(sources[2])?)
+    };
+    assert!(validate(&sources)?);
+    for (from, to) in [
+        ("join(\"app.sqlite\")", "join(\"foreign.sqlite\")"),
+        ("SQLITE_OPEN_NOFOLLOW", "SQLITE_OPEN_CREATE"),
+        ("SQLITE_OPEN_READ_WRITE", "SQLITE_OPEN_READ_ONLY"),
+        (
+            "crate::store::NativeSqliteKeeper::require_creator_main(&db, &file)?;",
+            "",
+        ),
+    ] {
+        let changed = sources[1].replacen(from, to, 1);
+        assert_ne!(changed, sources[1]);
+        let mut bad = sources;
+        bad[1] = &changed;
+        assert!(!validate(&bad)?);
+    }
+    for (from, to) in [
+        ("OFlags::EXCL", "OFlags::TRUNC"),
+        ("OFlags::NOFOLLOW", "OFlags::RDONLY"),
+        ("OFlags::NONBLOCK", "OFlags::RDONLY"),
+    ] {
+        let changed = sources[2].replace(from, to);
+        assert_ne!(changed, sources[2]);
+        let mut bad = sources;
+        bad[2] = &changed;
+        assert!(!validate(&bad)?);
+    }
+    let changed = sources[2].replace("rustix::fs::statat", "rustix::fs::openat");
+    assert_ne!(changed, sources[2]);
+    let mut bad = sources;
+    bad[2] = &changed;
+    assert!(!validate(&bad)?);
+    let changed = sources[3].replace(
+        "image.verify(&manifest, artifact)?;",
+        "image.verify(&manifest, artifact)?; LoadedArtifact::load(Path::new(\"foreign\"))?;",
     );
-    assert!(
-        calls
-            .0
-            .iter()
-            .any(|c| c.ends_with("require_no_runtime_generation_objects"))
-    );
+    assert_ne!(changed, sources[3]);
+    let mut bad = sources;
+    bad[3] = &changed;
+    assert!(!validate(&bad)?);
     Ok(())
 }

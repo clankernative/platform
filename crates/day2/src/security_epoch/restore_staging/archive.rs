@@ -79,18 +79,9 @@ struct SourceFile {
     mode: u32,
 }
 
-#[derive(serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ArchiveMember {
-    File {
-        bytes: u64,
-        sha256: Digest,
-        mode: u32,
-    },
-    Directory {
-        mode: u32,
-    },
-}
+use crate::backup_archive::{
+    NativeArchiveMember as ArchiveMember, native_archive_commitment as full_archive_commitment,
+};
 
 fn file_member(file: &SourceFile) -> ArchiveMember {
     ArchiveMember::File {
@@ -98,22 +89,6 @@ fn file_member(file: &SourceFile) -> ArchiveMember {
         sha256: Digest::new(&file.bytes[..]),
         mode: file.mode,
     }
-}
-
-// Portable full-capture DATA, distinct from semantic backup metadata. Exact
-// observed permission bits are committed; uid/ino/times remain native identity
-// checks and cannot become portable authority. All names/kinds are closed by
-// the native profile before this record can be compared with approval.
-fn full_archive_commitment(
-    manifest: &Manifest,
-    inventory: &BTreeMap<String, ArchiveMember>,
-) -> Result<Digest> {
-    Digest::of(&(
-        "day2-native-restore-archive-v1",
-        "sqlite-current-artifact-only",
-        manifest.security_restore_digest()?,
-        inventory,
-    ))
 }
 
 struct HeldFile {
