@@ -20,6 +20,7 @@ Workflow :: [].{
 		ExtensionPack(Str, Str),
 		ExtensionLocal(Str, Str),
 		ExtensionPolicy(Str),
+		ExtensionFleet(Str, Str),
 		Check(Str, U64, U64),
 		LocalDev(List(Str)),
 		Backup(Str, Str, Str),
@@ -50,6 +51,7 @@ Workflow :: [].{
 		["extension", "pack", source, key] => Ok(ExtensionPack(source, key))
 		["extension", "local", source, output] => Ok(ExtensionLocal(source, output))
 		["extension", "policy", source] => Ok(ExtensionPolicy(source))
+		["extension", "fleet", source, project] => Ok(ExtensionFleet(source, project))
 		["check", source] | ["test", source] => Ok(Check(source, 3_664_912_422, 16))
 		["check", source, seed, count] | ["test", source, seed, count] => {
 			checked_seed = U64.from_str(seed).map_err(|_| "seed must be a U64")?
@@ -122,7 +124,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | ui-lock SOURCE | extension verify|policy SOURCE | extension pack SOURCE SIGNING_KEY_PEM | extension local SOURCE NEW_DIRECTORY | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | restore protected INSTANCE APP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
+			"usage: day2 platform build SOURCE | ui-lock SOURCE | extension verify|policy SOURCE | extension pack SOURCE SIGNING_KEY_PEM | extension fleet SOURCE GCP_PROJECT | extension local SOURCE NEW_DIRECTORY | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | restore protected INSTANCE APP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
 		)
 	}
 
@@ -138,6 +140,7 @@ Workflow :: [].{
 					"extension pack SOURCE SIGNING_KEY_PEM",
 					"extension local SOURCE NEW_DIRECTORY",
 					"extension policy SOURCE",
+					"extension fleet SOURCE GCP_PROJECT",
 					"check SOURCE [SEED CASES]",
 					"local-dev [SOURCE] [OPTIONS]",
 					"backup INSTANCE APP NEW_DIRECTORY",
@@ -166,6 +169,7 @@ Workflow :: [].{
 		ExtensionPack(source, key) => ChromeExtension.pack!(source, key, host!)
 		ExtensionLocal(source, output) => ChromeExtension.local!(source, output, host!)
 		ExtensionPolicy(source) => ChromeExtension.policy!(source, host!)
+		ExtensionFleet(source, project) => ChromeExtension.fleet!(source, project, host!)
 		Check(source, seed, count) => Check.run!(source, seed, count, host!)
 		LocalDev(args) => LocalDev.run!(args, host!)
 		Backup(instance, app_name, output) => Backup.take!(instance, app_name, output, host!)
@@ -222,5 +226,10 @@ expect match Workflow.parse(["extension", "pack", "app", "/dev/fd/63"]) {
 
 expect match Workflow.parse(["extension", "pack", "app"]) {
 	Err(_) => Bool.True
+	_ => Bool.False
+}
+
+expect match Workflow.parse(["extension", "fleet", "app", "exampleco-tools"]) {
+	Ok(ExtensionFleet("app", "exampleco-tools")) => Bool.True
 	_ => Bool.False
 }

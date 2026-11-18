@@ -75,12 +75,52 @@ The app serves both files anonymously at `/downloads/<filename>` (see
 list both exact paths in the app's `app-edge.public_download_paths`.
 
 `day2 platform extension policy APP_DIRECTORY` prints the extension ID, update
-URL and the equivalent `ExtensionSettings` policy. In Google Admin, add the
-extension by ID **from a custom URL** with that update URL and set it to
-**Force install**. After deploying, request both URLs without cookies: expect
-200 with `application/xml` and `application/x-chrome-extension`, and no login
-redirect. Then check `chrome://policy` and `chrome://extensions` on a managed
-test browser before rolling out widely.
+URL, the Google Admin console settings and the equivalent `ExtensionSettings`
+policy. In Google Admin, add the extension by ID **from a custom URL**, set it to
+**Force install**, set **Installation URL** to the update URL and set **Update
+URL** to **Installation URL (see above)**. That last setting overrides the
+update URL inside installed copies, so a browser still holding an older release
+with another `update_url` moves to this one. After deploying, request both URLs
+without cookies: expect 200 with `application/xml` and
+`application/x-chrome-extension`, and no login redirect. Then check
+`chrome://policy` and `chrome://extensions` on a managed test browser before
+rolling out widely.
+
+A person makes browser-policy changes. The Platform never holds a credential
+that can change Google Admin or any other browser policy: such a credential
+could force-install any extension on every managed browser, which is more than
+any one extension's signing key can do. Admin entries change only when an
+extension is added or its URL changes; releases never touch them.
+
+## Fleet uptake
+
+`day2 platform extension fleet APP_DIRECTORY GCP_PROJECT` verifies the release,
+then reads the last 24 hours of the project's load-balancer request logs for its
+downloads with the operator's own gcloud credentials (`roles/logging.viewer`).
+Every managed Chrome update check names the extension, its installed version and
+whether policy installed it, so the report shows what the browsers are actually
+running:
+
+- update checks, those from a policy install, and successful package downloads;
+- client addresses by the version their latest check reported, and how many are
+  on the published release. `0.0.0.0` is a first install in progress. One
+  address can hide several browsers, so counts are lower bounds;
+- responses of 500 or above for either download.
+
+Client addresses never leave the command. Its `problems` list names:
+
+- `no_policy_update_checks`: no policy-installed browser checked in. The Admin
+  entry is missing or names another URL, or browsers cannot reach it.
+- `server_errors`: the edge failed update-manifest or package requests.
+- `clients_ahead_of_release`: browsers report a newer version than this
+  checkout. Run it against the deployed commit; otherwise the served release
+  went backwards.
+
+Chrome checks about every five hours, and a browser reports a new version only
+on the check after it downloads it, so most browsers move within a day. Browsers
+behind one address count as one client: a client that downloads the package and
+then reports the old version again is usually a second browser, not a failed
+install.
 
 ## Local builds
 

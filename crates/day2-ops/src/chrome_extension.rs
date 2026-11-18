@@ -1,22 +1,29 @@
 //! Native file adapter for `day2 platform extension`. Release rules live in
 //! `day2::chrome_extension`; this module reads an app's declared extension and
-//! writes its signed downloads or an unpacked local build.
+//! writes its signed downloads or an unpacked local build. `fleet` also reads
+//! the edge's request logs for the release downloads, read-only.
 use anyhow::{Context, Result, ensure};
 use day2::{
-    chrome_extension::{self as extension, Config, Files},
+    chrome_extension::{self as extension, Config, DownloadRequest, Files},
     public_downloads,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{ErrorKind, Read},
     path::Path,
+    process::Command,
+    time::Duration,
 };
 
 const MAX_CONFIG_BYTES: u64 = 4096;
 const MAX_DEPTH: usize = 16;
 /// macOS Finder metadata is never extension source.
 const IGNORED: &str = ".DS_Store";
+/// A fleet report reads at most this many request log entries and refuses a
+/// window that holds more rather than summarizing part of it.
+const MAX_LOG_ENTRIES: usize = 20_000;
 
 pub fn verify(app: &Path) -> Result<Value> {
     let downloads = downloads(app)?;
@@ -83,6 +90,81 @@ pub fn local(app: &Path, output: &Path) -> Result<Value> {
 
 pub fn policy(app: &Path) -> Result<Value> {
     extension::policy(&required(app)?, &source(app)?)
+}
+
+/// Report how managed browsers are taking up the app's verified release, from
+/// the last day of the GCP project's load-balancer request logs. It reads with
+/// the operator's gcloud credentials and needs no browser-policy access.
+pub fn fleet(app: &Path, project: &str) -> Result<Value> {
+    ensure!(
+        (6..=30).contains(&project.len())
+            && project.starts_with(|first: char| first.is_ascii_lowercase())
+            && !project.ends_with('-')
+            && project
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+        "chrome_extension_fleet_project: expected a GCP project ID"
+    );
+    let config = required(app)?;
+    let release = extension::verify(&config, &source(app)?, &downloads(app)?)?;
+    let directory = release
+        .update_url
+        .strip_suffix(extension::UPDATE_MANIFEST)
+        .context("chrome_extension_fleet: the release has no update manifest URL")?;
+    let output = crate::maintenance::bounded(
+        Command::new(crate::maintenance::on_path("gcloud")?).args([
+            "logging",
+            "read",
+            &format!(
+                "resource.type=\"http_load_balancer\" AND httpRequest.requestUrl:\"{directory}\""
+            ),
+            "--project",
+            project,
+            &format!("--freshness={}h", extension::FLEET_WINDOW_HOURS),
+            &format!("--limit={MAX_LOG_ENTRIES}"),
+            "--format=json(httpRequest.requestUrl,httpRequest.status,httpRequest.remoteIp)",
+        ]),
+        None,
+        Duration::from_secs(300),
+        None,
+    )
+    .context("chrome_extension_fleet_logs: gcloud logging read")?;
+    #[derive(Deserialize)]
+    struct Entry {
+        #[serde(rename = "httpRequest")]
+        request: Option<Request>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request {
+        request_url: Option<String>,
+        status: Option<u16>,
+        remote_ip: Option<String>,
+    }
+    let entries: Vec<Entry> = serde_json::from_str(&output)
+        .context("chrome_extension_fleet_logs: unexpected gcloud output")?;
+    ensure!(
+        entries.len() < MAX_LOG_ENTRIES,
+        "chrome_extension_fleet_log_budget: more than {} requests in {} hours",
+        MAX_LOG_ENTRIES - 1,
+        extension::FLEET_WINDOW_HOURS
+    );
+    // gcloud returns the newest entries first; the summary reads oldest first.
+    let requests = entries
+        .into_iter()
+        .rev()
+        .filter_map(|entry| {
+            let request = entry.request?;
+            Some(DownloadRequest {
+                url: request.request_url?,
+                status: request.status?,
+                client: request.remote_ip.unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_value(extension::fleet(
+        &release, &requests,
+    )?)?)
 }
 
 fn required(app: &Path) -> Result<Config> {

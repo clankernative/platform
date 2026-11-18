@@ -22,4 +22,12 @@ ChromeExtension :: [].{
 
 	policy! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	policy! = |source, host!| Capability.call!("chrome-extension-policy", Json.to_str({ source: source }), host!)
+
+	# Read-only uptake of the verified release from the instance project's edge request logs.
+	fleet! : Str, Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	fleet! = |source, project, host!| Capability.call!(
+		"chrome-extension-fleet",
+		Json.to_str({ source: source, project: project }),
+		host!,
+	)
 }

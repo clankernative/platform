@@ -645,7 +645,7 @@ impl Tools {
     }
 }
 
-fn on_path(name: &str) -> Result<PathBuf> {
+pub(crate) fn on_path(name: &str) -> Result<PathBuf> {
     std::env::var_os("PATH")
         .and_then(|paths| {
             std::env::split_paths(&paths)
@@ -659,7 +659,7 @@ fn on_path(name: &str) -> Result<PathBuf> {
 
 /// Run a trusted tool with a deadline, bounded captured output and interrupt
 /// checks. A child killed by Ctrl-C fails the step, and the session cleans up.
-fn bounded(
+pub(crate) fn bounded(
     command: &mut Command,
     stdin: Option<&[u8]>,
     timeout: Duration,

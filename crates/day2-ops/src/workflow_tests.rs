@@ -213,6 +213,11 @@ fn extension_commands_route_to_their_native_capabilities() -> Result<()> {
             vec!["chrome-extension-local"],
             json!({"source":"app","output":"unpacked"}),
         ),
+        (
+            vec!["extension", "fleet", "app", "exampleco-tools"],
+            vec!["chrome-extension-fleet"],
+            json!({"source":"app","project":"exampleco-tools"}),
+        ),
     ] {
         let mut effects = Vec::new();
         let mut all = vec!["platform"];
