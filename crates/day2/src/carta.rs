@@ -353,15 +353,22 @@ pub fn seed_synthetic(runtime: &Runtime, capture: &SyntheticSnapshot) -> Result<
     )
 }
 
+/// The synthetic provider's issuer. Numeric like a live Carta issuer, so an app
+/// that validates issuer IDs can configure it in disposable verification.
+pub const SYNTHETIC_ISSUER: &str = "9000";
+
+/// Synthetic holders and their numeric Carta stakeholder IDs.
+const SYNTHETIC_HOLDERS: [(&str, &str); 2] = [("alice", "9001"), ("bob", "9002")];
+
 /// A shared, visibly synthetic provider model for disposable verification.
 /// This function only constructs data; installing it always requires an explicit
 /// native setup call. No application operation or ordinary runtime load calls it.
 pub fn synthetic_example() -> SyntheticSnapshot {
-    let issuer_id = "synthetic-issuer-1";
+    let issuer_id = SYNTHETIC_ISSUER;
     let mut records = Vec::new();
-    for name in ["alice", "bob"] {
+    for (name, holder_id) in SYNTHETIC_HOLDERS {
         records.push(Record::Stakeholder(Stakeholder {
-            id: format!("holder-{name}"),
+            id: holder_id.into(),
             issuer_id: issuer_id.into(),
             full_name: format!("Synthetic {name}"),
             email: format!("{name}@example.test"),
@@ -372,12 +379,12 @@ pub fn synthetic_example() -> SyntheticSnapshot {
             address_country: OptionalText::Some("US".into()),
         }));
     }
-    for name in ["alice", "bob"] {
+    for (name, holder_id) in SYNTHETIC_HOLDERS {
         let grant_id = format!("grant-{name}-1");
         records.push(Record::Grant(Box::new(Grant {
             id: grant_id.clone(),
             issuer_id: issuer_id.into(),
-            stakeholder_id: format!("holder-{name}"),
+            stakeholder_id: holder_id.into(),
             equity_incentive_plan_name: "Synthetic equity plan".into(),
             issue_date: "2024-01-01".into(),
             vesting_start_date: "2024-01-01".into(),
@@ -889,7 +896,7 @@ mod tests {
             existing
         );
         let fixture = seed_with_mode(&path, "second", &synthetic_example(), true)?;
-        assert_eq!(fixture.issuer_id, "synthetic-issuer-1");
+        assert_eq!(fixture.issuer_id, SYNTHETIC_ISSUER);
         assert_eq!(synthetic_example().records.len(), 8);
         Ok(())
     }

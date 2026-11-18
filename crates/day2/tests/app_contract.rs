@@ -552,11 +552,11 @@ expect match read_delivery(DELIVERY_JSON) {
 expect match read_records(FIRST_RECORDS) {
     Done(result) => result.value.done and result.value.next == 8 and result.value.records.len() == 8
         and result.value.records.any(|record| match record {
-            Stakeholder(value) => value.id == "holder-alice" and value.employee_id == Some("employee-alice")
+            Stakeholder(value) => value.id == "9001" and value.employee_id == Some("employee-alice")
             _ => Bool.False
         })
         and result.value.records.any(|record| match record {
-            Grant(value) => value.stakeholder_id == "holder-bob"
+            Grant(value) => value.stakeholder_id == "9002"
             _ => Bool.False
         })
         and result.value.records.any(|record| match record {

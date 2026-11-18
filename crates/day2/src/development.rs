@@ -2047,7 +2047,7 @@ fn resource_fixture_for_artifact_with_imports(
         app,
         policy,
         Some(day2_capabilities::resources::TopicScope::Any),
-        Some("synthetic-issuer-1"),
+        Some(crate::carta::SYNTHETIC_ISSUER),
     )?;
     if policy.operations.values().any(|op| {
         op.observations

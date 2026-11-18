@@ -4,7 +4,7 @@ use super::{Observed, Variant, check, fixture, worlds_in_scope};
 use crate::{
     artifact::{Instance, LoadedArtifact},
     capabilities,
-    carta::{Grant, OptionalText, Record, Stakeholder},
+    carta::{Grant, OptionalText, Record, SYNTHETIC_ISSUER, Stakeholder},
     integrations::simulated::{self, CartaWireWorld, World},
     protocol::{Instruction, Request},
     simulation::Simulation,
@@ -18,7 +18,6 @@ use std::{cell::Cell, fs};
 const ACTOR: &str = "alice";
 const INVOCATION: &str = "carta-coverage";
 const ISSUER: &str = "4242";
-const SYNTHETIC_ISSUER: &str = "synthetic-issuer-1";
 /// The reads the coverage gate observes; release has its own demonstration.
 const ACTIONS: [Action; 2] = [Action::CartaSnapshotDelivery, Action::CartaRecords];
 /// Every action the admitted slot grants.
