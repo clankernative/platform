@@ -25,6 +25,13 @@ provider-specific deployment examples under deploy/integrations/, separate from
 the core runtime roots in deploy/gke/stacks/. Instance CI executes the existing
 platform recipes; do not add a second operational SDK or a generic CI abstraction.
 
+An instance repository is data. Its only authored input is `day2.json`, parsed by
+cli/InstanceSpec.roc (see docs/INSTANCE.md). Repository, hostname, namespace, image,
+bucket and state names are derived there, never configured. Add a spec field only
+for a real choice, never to restate or override a derived name. Spec objects are
+exact and its lists are strictly sorted. Nothing the platform renders or runs for an
+instance or app may be shell, Python or JavaScript.
+
 Nothing built on this platform has production users or external API consumers
 yet. Do not add legacy paths, compatibility shims, deprecation periods, dual
 reads or writes, data migrations or staged cutovers for platform APIs, schemas,

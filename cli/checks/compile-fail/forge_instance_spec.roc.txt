@@ -1,0 +1,21 @@
+# Expected diagnostic: cannot use opaque nominal type
+import InstanceSpec
+import Names
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	installation = Names.Identifier.from_str("exampleco").map_err(|_| Exit(2))?
+	spec = InstanceSpec.{
+		installation,
+		commit: "fe4320b189b98ed08fccc183db3e70aee76319ee",
+		project: "exampleco-tools",
+		region: "us-central1",
+		zone: "us-central1-a",
+		server: "https://git.example.com",
+		org: "tools",
+		people: "example.com",
+		domain: "apps.example.com",
+		operators: [],
+		apps: [],
+	}
+	Stdout.line!(spec.derived().instance_repository).map_err(|_| Exit(1))
+}

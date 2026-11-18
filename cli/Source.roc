@@ -1,6 +1,4 @@
 import pf.Env
-import pf.Path
-import pf.OsStr
 import Cli
 import Names
 import Instance
@@ -8,6 +6,7 @@ import Catalog
 import Problem
 import Host
 import JsonValue
+import Metadata
 import "fixtures/links-artifact.json" as demo_artifact : Str
 
 ## A loaded description binds context, the resolved request, and a checked view.
@@ -137,19 +136,10 @@ Context : [Demo, Local({ instance : Instance, instance_path : Names.LocalPath, a
 
 load_local! : Cli.Describe, Names.LocalPath => Try(Source, Problem)
 load_local! = |request, path| {
-	raw_path = path.to_str()
-	instance_path = if raw_path.starts_with("/") path else {
-		cwd = Env.cwd!().map_err(|_| Problem.ContextUnavailable)?
-		cwd_text = OsStr.to_str_try(Path.to_os_str(cwd)).map_err(|_| Problem.ContextUnavailable)?
-		if !cwd_text.starts_with("/") {
-			return Err(Problem.ContextUnavailable)
-		}
-		Names.LocalPath.from_str("${cwd_text}/${raw_path}")
-			.map_err(|_| Problem.InvalidContext("resolved path exceeds the path budget"))?
-	}
+	instance_path = Metadata.absolute!(path)?
 	# Check all original JSON keys, including undisplayed metadata, before asking
 	# the Rust contract for the versioned discovery projection.
-	_ = JsonValue.parse(read_metadata!(instance_path)?).map_err(|BadJson(detail)| Problem.InvalidInstance(detail))?
+	_ = JsonValue.parse(Metadata.read!(instance_path)?).map_err(|BadJson(detail)| Problem.InvalidInstance(detail))?
 	projection =
 		Host.call!(
 			Json.to_str(
@@ -165,7 +155,7 @@ load_local! = |request, path| {
 	artifact_path =
 		Names.LocalPath.from_str("${full_directory}/artifact.json")
 			.map_err(|_| Problem.InvalidContext("artifact path exceeds the path budget"))?
-	raw_catalog = read_metadata!(artifact_path)?
+	raw_catalog = Metadata.read!(artifact_path)?
 	metadata = JsonValue.parse(raw_catalog).map_err(|BadJson(detail)| Problem.InvalidArtifact(detail))?
 	version =
 		metadata
@@ -204,25 +194,4 @@ load_local! = |request, path| {
 			view,
 		},
 	)
-}
-
-# These are local development metadata reads. The stat/read checks do not claim
-# atomic filesystem admission; the resulting content is independently validated.
-read_metadata! : Names.LocalPath => Try(Str, Problem)
-read_metadata! = |path| {
-	text = path.to_str()
-	file_path = Path.utf8(text)
-	regular = Path.is_file!(file_path).map_err(|_| Problem.MetadataUnreadable(text))?
-	if !regular {
-		return Err(Problem.MetadataUnreadable(text))
-	}
-	size = Path.size_in_bytes!(file_path).map_err(|_| Problem.MetadataUnreadable(text))?
-	if size > 1_048_576 {
-		return Err(Problem.MetadataTooLarge)
-	}
-	raw = Path.read_utf8!(file_path).map_err(|_| Problem.MetadataUnreadable(text))?
-	if raw.count_utf8_bytes() > 1_048_576 {
-		return Err(Problem.MetadataTooLarge)
-	}
-	Ok(raw)
 }

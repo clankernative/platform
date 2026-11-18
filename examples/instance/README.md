@@ -1,5 +1,9 @@
 # Private instance template
 
+This copy-and-edit template is being replaced by the typed instance spec,
+`day2.json`. See [instance repositories](../../docs/INSTANCE.md) for the spec,
+its derived names and the roadmap that removes these hand-written files.
+
 Copy this directory **outside** the platform checkout into a private repository.
 Replace reserved example values there. Keep app source in separate private repos.
 Never put real credentials, state, grants, domains or app images in this example.

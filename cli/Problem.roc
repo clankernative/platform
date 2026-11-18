@@ -17,6 +17,7 @@ Problem := [
 	AppNotFound(Str, List(Str)),
 	OperationNotFound(Str, List(Str)),
 	InvalidInstance(Str),
+	InvalidSpec(Str),
 	InvalidArtifact(Str),
 	InvalidCatalog(Str),
 	UnsupportedArtifact(U64),
@@ -38,7 +39,12 @@ Problem := [
 		| InvalidOperationName(_) => 2
 		ContextRequired | InvalidContext(_) | ContextUnavailable | MetadataUnreadable(_) => 3
 		AppNotFound(_, _) | OperationNotFound(_, _) => 4
-		InvalidInstance(_) | InvalidArtifact(_) | InvalidCatalog(_) | UnsupportedArtifact(_) | MetadataTooLarge => 5
+		InvalidInstance(_)
+		| InvalidSpec(_)
+		| InvalidArtifact(_)
+		| InvalidCatalog(_)
+		| UnsupportedArtifact(_)
+		| MetadataTooLarge => 5
 	}
 
 	code : Problem -> Str
@@ -60,6 +66,7 @@ Problem := [
 		AppNotFound(_, _) => "app_not_found"
 		OperationNotFound(_, _) => "operation_not_found"
 		InvalidInstance(_) => "invalid_instance"
+		InvalidSpec(_) => "invalid_spec"
 		InvalidArtifact(_) => "invalid_artifact"
 		InvalidCatalog(_) => "invalid_catalog"
 		UnsupportedArtifact(_) => "unsupported_artifact"
@@ -68,9 +75,9 @@ Problem := [
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This spike implements one command: app describe <app>."
+		UnknownCommand => "This CLI implements app describe <app> and instance check <directory>."
 		MissingCommand => "Describe options require the command app describe <app>."
-		MissingArgument => "An app name is required."
+		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
 		UnknownOption(flag) => "Unknown option: ${Json.to_str(flag)}."
 		MissingOptionValue(flag) => "${flag} needs a nonempty value."
@@ -85,6 +92,7 @@ Problem := [
 		AppNotFound(name, _) => "App ${Json.to_str(name)} is not installed in this source."
 		OperationNotFound(name, _) => "Operation ${Json.to_str(name)} is not in this app's catalog."
 		InvalidInstance(detail) => "Invalid instance metadata: ${detail}"
+		InvalidSpec(detail) => "Invalid instance spec: ${detail}"
 		InvalidArtifact(detail) => "Invalid artifact JSON: ${detail}"
 		InvalidCatalog(detail) => "Invalid operation catalog: ${detail}"
 		UnsupportedArtifact(version) => "Unsupported artifact format ${version.to_str()} for this installed platform."
@@ -104,9 +112,12 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => "Select valid metadata from a supported Day2 artifact, or use --demo."
+		InvalidSpec(
+			_,
+		) => "Fix day2.json: every field is required, unknown fields are rejected, and lists and apps are sorted."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
-		_ => "Run day2 app describe --help for usage and examples."
+		_ => "Run day2 --help for usage and examples."
 	}
 
 	dto : Problem -> Dto

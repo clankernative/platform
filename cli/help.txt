@@ -5,6 +5,7 @@ Detailed text is the default. Use --agent for a single JSON response.
 
 USAGE
   day2 app describe <app> [options]
+  day2 instance check <directory> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -20,9 +21,14 @@ PLATFORM OPERATIONS
   Platform operations return JSON receipts; errors use stderr and a nonzero
   exit code. Local development runs in the foreground until Ctrl-C.
 
-COMMAND
+COMMANDS
   app describe    Inspect an app's operation catalog and typed input contracts.
                   Reads metadata only. Does not invoke operations or sign in.
+  instance check  Validate <directory>/day2.json, the instance repository's only
+                  authored input, and print every name derived from it:
+                  repositories, hostnames, namespaces, images, buckets, state.
+                  Every field is required; unknown fields, unsorted lists and
+                  invalid or reserved app IDs fail. Reads one file only.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
@@ -46,6 +52,7 @@ EXAMPLES
   day2 app describe links --demo --operation links.list
   day2 app describe links --demo --agent
   day2 app describe reports --instance /path/to/instance.json
+  day2 instance check . --agent
   day2 platform local-dev ../reports-app
 
 FOR AGENTS

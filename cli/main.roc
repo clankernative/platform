@@ -11,18 +11,22 @@ import Source
 import Output
 import Problem
 import Host
+import InstanceSpec
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |args| {
 	format = Cli.output_format(args.map(OsStr.display))
+	command = Cli.requested(args.map(OsStr.display))
 	if args.len() > 128 {
 		return emit!(
-			Output.new(Output.Outcome.Failed(Problem.InvalidArguments("at most 128 arguments are supported"), format)),
+			Output.new(
+				Output.Outcome.Failed(Problem.InvalidArguments("at most 128 arguments are supported"), format, command),
+			),
 		)
 	}
 	values = match decode_args(args, [], 0) {
 		Ok(decoded) => decoded
-		Err(problem) => return emit!(Output.new(Output.Outcome.Failed(problem, format)))
+		Err(problem) => return emit!(Output.new(Output.Outcome.Failed(problem, format, command)))
 	}
 	if values.first() == Ok("platform") {
 		outcome = run_platform!(values.drop_first(1))
@@ -42,14 +46,18 @@ main! = |args| {
 	parsed = Cli.parse(values)
 	request = match parsed {
 		Ok(value) => value
-		Err(problem) => return emit!(Output.new(Output.Outcome.Failed(problem, format)))
+		Err(problem) => return emit!(Output.new(Output.Outcome.Failed(problem, format, command)))
 	}
 	outcome = match request {
 		Cli.Request.Help(value) => Output.Outcome.Help(value)
 		Cli.Request.Version(value) => Output.Outcome.Version(value)
 		Cli.Request.Describe(description) => match Source.load!(description) {
 			Ok(loaded) => Output.Outcome.Described(loaded)
-			Err(problem) => Output.Outcome.Failed(problem, description.parts().format)
+			Err(problem) => Output.Outcome.Failed(problem, description.parts().format, Cli.Command.AppDescribe)
+		}
+		Cli.Request.Check(check) => match InstanceSpec.load!(check.parts().directory) {
+			Ok((path, spec)) => Output.Outcome.Checked(check, path, spec)
+			Err(problem) => Output.Outcome.Failed(problem, check.parts().format, Cli.Command.InstanceCheck)
 		}
 	}
 	emit!(Output.new(outcome))
