@@ -99,6 +99,7 @@ run! = |args| match args {
 	["verify-queue-admit"] => Verify.queue_admit!(call!)
 	["qualify-linux"] => Linux.run!(call!)
 	["verify-runtime-image"] => RuntimeImage.run!(call!)
+	["assemble-runtime-pair-release"] => RuntimeImage.assemble_pair!(call!)
 	["strict-linux"] => Linux.strict!(call!)
 	["provision-linux"] => Provision.smoke!(call!)
 	["control-verify"] => Verify.control!(call!)

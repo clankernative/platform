@@ -15,7 +15,7 @@ const MANIFEST: &str = "distribution.json";
 const ARCHIVE: &str = "libhost.a";
 const OPERATOR: &str = "operator.tar.gz";
 const MODE: &str = "DAY2_PRECOMPILED_TOOLING";
-const OPERATOR_FILES: &[&str] = &[
+pub(super) const OPERATOR_FILES: &[&str] = &[
     "cli/day2",
     "cli/day2-host",
     "cli/day2-workflows",
@@ -25,32 +25,32 @@ const OPERATOR_FILES: &[&str] = &[
     "licenses/dependency-inventory.json",
 ];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct File {
-    digest: String,
-    bytes: u64,
+pub(super) struct BlobIdentity {
+    pub(super) digest: String,
+    pub(super) bytes: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Distribution {
-    format: u32,
-    target: String,
-    inputs: String,
-    workflow_sources: String,
-    toolchain: String,
-    worker: File,
-    operator: File,
-    operator_files: BTreeMap<String, File>,
+pub(super) struct Distribution {
+    pub(super) format: u32,
+    pub(super) target: String,
+    pub(super) inputs: String,
+    pub(super) workflow_sources: String,
+    pub(super) toolchain: String,
+    pub(super) worker: BlobIdentity,
+    pub(super) operator: BlobIdentity,
+    pub(super) operator_files: BTreeMap<String, BlobIdentity>,
 }
 
 fn target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-fn identity(bytes: &[u8]) -> File {
-    File {
+fn identity(bytes: &[u8]) -> BlobIdentity {
+    BlobIdentity {
         digest: digest(bytes),
         bytes: bytes.len() as u64,
     }
@@ -66,7 +66,7 @@ fn bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     day2_assets::read_regular(path, limit)
 }
 
-fn verify(path: &Path, expected: &File, limit: u64) -> Result<Vec<u8>> {
+pub(super) fn verify(path: &Path, expected: &BlobIdentity, limit: u64) -> Result<Vec<u8>> {
     day2_assets::hash_part(&expected.digest)?;
     ensure!(
         expected.bytes > 0 && expected.bytes <= limit,

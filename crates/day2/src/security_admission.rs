@@ -65,6 +65,53 @@ pub struct LinuxEvidence {
     pub checks: BTreeSet<String>,
 }
 
+impl LinuxEvidence {
+    /// Decode the same native evidence used by runtime admission and shared SDK
+    /// selection. The caller checks the artifact or published SDK binding.
+    pub fn from_receipt(bytes: &[u8]) -> Result<Self> {
+        let receipt: serde_json::Value = crate::json::decode(bytes)?;
+        ensure!(
+            receipt["format"] == 1
+                && receipt["status"] == "passed"
+                && receipt["scope"] == "linux_sqlite_single_v1",
+            "security_qualification_not_passed"
+        );
+        let field = |name: &str| {
+            let value = receipt[name]
+                .as_str()
+                .context("security_receipt_field_missing")?;
+            day2_assets::hash_part(value)?;
+            Ok::<_, anyhow::Error>(value.to_owned())
+        };
+        let exclusions = receipt["exclusions"]
+            .as_array()
+            .context("security_receipt_exclusions_missing")?;
+        ensure!(
+            exclusions.iter().all(|value| matches!(
+                value.as_str(),
+                Some(
+                    "complete-platform-verification"
+                        | "formatter-qualification"
+                        | "production-identity"
+                        | "hostile-native-code-certification"
+                )
+            )),
+            "security_qualification_has_runtime_exclusions"
+        );
+        let checks = serde_json::from_value(receipt["checks"].clone())?;
+        require_linux_checks(&checks)?;
+        Ok(Self {
+            receipt_digest: digest(bytes),
+            platform_inventory: field("platform_inventory")?,
+            toolchain: field("toolchain")?,
+            runtime_image: field("runtime_image")?,
+            runtime_supervisor: field("runtime_supervisor")?,
+            runtime_sandbox: field("runtime_sandbox")?,
+            checks,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Containment {
@@ -274,49 +321,13 @@ pub fn review_linux(artifact: &LoadedArtifact, receipt_path: &Path) -> Result<Re
         "security_receipt_budget"
     );
     let bytes = fs::read(receipt_path)?;
-    let receipt: serde_json::Value = crate::json::decode(&bytes)?;
-    ensure!(
-        receipt["format"] == 1
-            && receipt["status"] == "passed"
-            && receipt["scope"] == "linux_sqlite_single_v1",
-        "security_qualification_not_passed"
-    );
-    let field = |name: &str| {
-        receipt[name]
-            .as_str()
-            .map(str::to_owned)
-            .context("security_receipt_field_missing")
-    };
-    let exclusions = receipt["exclusions"]
-        .as_array()
-        .context("security_receipt_exclusions_missing")?;
-    ensure!(
-        exclusions.iter().all(|value| matches!(
-            value.as_str(),
-            Some(
-                "complete-platform-verification"
-                    | "formatter-qualification"
-                    | "production-identity"
-                    | "hostile-native-code-certification"
-            )
-        )),
-        "security_qualification_has_runtime_exclusions"
-    );
     let requirements = Requirements {
         version: 1,
         artifact: artifact.id().into(),
         platform_inventory: platform_inventory_digest(artifact)?,
         roc_version: artifact.contract().roc_version.clone(),
         containment: Containment::LinuxQualifiedV1 {
-            evidence: LinuxEvidence {
-                receipt_digest: digest(&bytes),
-                platform_inventory: field("platform_inventory")?,
-                toolchain: field("toolchain")?,
-                runtime_image: field("runtime_image")?,
-                runtime_supervisor: field("runtime_supervisor")?,
-                runtime_sandbox: field("runtime_sandbox")?,
-                checks: serde_json::from_value(receipt["checks"].clone())?,
-            },
+            evidence: LinuxEvidence::from_receipt(&bytes)?,
         },
     };
     requirements.validate(artifact)?;

@@ -1572,7 +1572,7 @@ impl RuntimeSession {
     }
 }
 
-const STRICT_ACTIONS: &[&str] = &[
+pub(super) const STRICT_ACTIONS: &[&str] = &[
     "linux-strict-package",
     "linux-strict-activate",
     "linux-strict-start",

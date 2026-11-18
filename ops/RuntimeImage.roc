@@ -14,4 +14,12 @@ RuntimeImage :: [].{
 		}
 		Capability.call!("runtime-image-receipt", "{}", host!)
 	}
+
+	assemble_pair! : (Str => Try(Str, Str)) => Try(Str, Str)
+	assemble_pair! = |host!| {
+		_ = Capability.call!("runtime-pair-release-source", "{}", host!)?
+		_ = Capability.call!("runtime-pair-release-target", "{}", host!)?
+		_ = Capability.call!("runtime-pair-release-receipt", "{}", host!)?
+		Capability.call!("runtime-pair-release-index", "{}", host!)
+	}
 }
