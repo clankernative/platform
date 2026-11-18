@@ -96,3 +96,16 @@ condition = "AND"
 paths = ['''^fixtures/lifecycle-conformance/model-identities\.json$''']
 regexTarget = "line"
 regexes = ['''^\s*\{ "identity": \{ "key": "[a-f0-9]{32}", "prefix": "chi" \}, "table": "children", "roc_type": "Models\.Child", "retired": false \},?$''']
+
+# These synthetic CRX-signing fixtures also appear in the GitHub queue replay.
+# Main's all-ref history scan sees them even before their feature branch merges.
+# Scope the exception to the three findings in these immutable commit/file pairs.
+[[allowlists]]
+description = "Exact synthetic Chrome extension signing-key history findings"
+targetRules = ["private-key"]
+condition = "AND"
+commits = [
+  "eca88929a9d41ad4dcd6f5231a09148fbefe5a07",
+  "c2830aa324cc5a3356bdc61e733a55579f2de6d8",
+]
+paths = ['^crates/day2/src/chrome_extension_tests\.rs$']
