@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 pub mod backup;
+pub mod chrome_extension;
 pub mod infra;
 pub mod local_dev;
 pub mod maintenance;

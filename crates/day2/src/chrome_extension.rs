@@ -1,0 +1,762 @@
+//! Self-hosted Chrome extensions. An app may declare one Manifest V3 extension in
+//! `.chrome-extension/`. The Platform packs it as a deterministic CRX3 with the
+//! app's signing key and publishes it through `public-downloads/` with a Chrome
+//! update manifest. A person signs each release; CI and `platform check` verify it
+//! against the pinned public identity without any private key.
+//!
+//! These functions are pure. Callers read the source tree, existing downloads and
+//! signing key, and supply randomness for RSA blinding.
+use crate::public_downloads;
+use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ring::{
+    digest::{SHA256, digest},
+    rand::SecureRandom,
+    rsa,
+    signature::{self, UnparsedPublicKey},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
+
+/// App-root directory holding the extension declaration, source and local overlay.
+/// The app build never captures it; only signed release bytes enter the artifact.
+pub const DIRECTORY: &str = ".chrome-extension";
+pub const CONFIG_FILE: &str = "extension.json";
+/// The exact unpacked extension that every release packs.
+pub const SOURCE_DIRECTORY: &str = "src";
+/// Optional files that replace release sources only in a local unpacked build.
+pub const LOCAL_DIRECTORY: &str = "local";
+pub const UPDATE_MANIFEST: &str = "updates.xml";
+pub const MAX_FILES: usize = 512;
+/// A packed release is a single public download, so its sources share that budget.
+pub const MAX_SOURCE_BYTES: u64 = public_downloads::MAX_FILE_BYTES;
+pub const MAX_KEY_BYTES: u64 = 16 * 1024;
+const MAX_PATH_BYTES: usize = 240;
+const SIGNED_DATA_PREFIX: &[u8] = b"CRX3 SignedData\x00";
+const RSA_ALGORITHM: &[u8] = &[
+    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+];
+
+/// Relative path to file bytes, using `/` separators.
+pub type Files = BTreeMap<String, Vec<u8>>;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// The Chrome extension ID derived from the signing key. Changing it creates a
+    /// different extension for every managed browser.
+    pub id: String,
+    /// The CRX filename under `public-downloads/`.
+    pub package: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Release {
+    pub extension_id: String,
+    pub version: String,
+    pub package: String,
+    pub update_url: String,
+    pub codebase: String,
+    pub crx_digest: String,
+}
+
+/// Signed release bytes for `public-downloads/`.
+pub struct Package {
+    pub crx: Vec<u8>,
+    pub update_manifest: Vec<u8>,
+    pub release: Release,
+}
+
+struct Manifest {
+    version: Version,
+    update_url: String,
+    codebase: String,
+    minimum_chrome_version: Option<String>,
+    public_key: Vec<u8>,
+}
+
+/// A Chrome version, compared numerically and published exactly as written.
+#[derive(Clone, Debug)]
+struct Version {
+    parts: [u16; 4],
+    text: String,
+}
+
+pub fn config(bytes: &[u8]) -> Result<Config> {
+    let config: Config = crate::json::decode(bytes).context("chrome_extension_config")?;
+    ensure!(
+        config.id.len() == 32 && config.id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)),
+        "chrome_extension_id: expected 32 characters a-p"
+    );
+    ensure!(
+        config.package.ends_with(".crx")
+            && config.package != UPDATE_MANIFEST
+            && public_downloads::media_type(&config.package).is_ok(),
+        "chrome_extension_package: expected a public download filename ending in .crx"
+    );
+    Ok(config)
+}
+
+/// Chrome's extension ID: the first 128 bits of SHA-256(SubjectPublicKeyInfo),
+/// one lowercase letter a-p per hexadecimal digit.
+pub fn extension_id(public_key: &[u8]) -> String {
+    digest(&SHA256, public_key).as_ref()[..16]
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 15])
+        .map(|nibble| char::from(b'a' + nibble))
+        .collect()
+}
+
+/// Check that the committed release matches the declaration and current sources.
+/// `downloads` is the complete flat `public-downloads/` directory.
+pub fn verify(config: &Config, source: &Files, downloads: &Files) -> Result<Release> {
+    let manifest = manifest(config, source)?;
+    let names = downloads.keys().map(String::as_str).collect::<Vec<_>>();
+    let mut expected = vec![config.package.as_str(), UPDATE_MANIFEST];
+    expected.sort_unstable();
+    ensure!(
+        names == expected,
+        "chrome_extension_downloads: public-downloads/ must contain exactly {} and {}; run `day2 platform extension pack`",
+        config.package,
+        UPDATE_MANIFEST
+    );
+    let crx = &downloads[&config.package];
+    let (public_key, archive) = open(crx)?;
+    ensure!(
+        extension_id(public_key) == config.id && public_key == manifest.public_key,
+        "chrome_extension_identity: the package is not signed by the declared extension key"
+    );
+    ensure!(
+        archive == zip(source)?,
+        "chrome_extension_stale: {} differs from {}/{}; bump the manifest version and run `day2 platform extension pack`",
+        config.package,
+        DIRECTORY,
+        SOURCE_DIRECTORY
+    );
+    ensure!(
+        downloads[UPDATE_MANIFEST] == update_manifest(&config.id, &manifest),
+        "chrome_extension_update_manifest: {} does not describe this release; run `day2 platform extension pack`",
+        UPDATE_MANIFEST
+    );
+    Ok(release(config, &manifest, crx))
+}
+
+/// Refuse release files that no declaration verifies.
+pub fn verify_undeclared(downloads: &Files) -> Result<()> {
+    ensure!(
+        !downloads
+            .keys()
+            .any(|name| name.ends_with(".crx") || name == UPDATE_MANIFEST),
+        "chrome_extension_undeclared: public-downloads/ contains a Chrome extension release without {}/{}",
+        DIRECTORY,
+        CONFIG_FILE
+    );
+    Ok(())
+}
+
+/// Sign the current sources. `downloads` holds the previous release, if any; a
+/// changed extension must have a newer version, and a release never downgrades.
+pub fn pack(
+    config: &Config,
+    source: &Files,
+    downloads: &Files,
+    private_key: &[u8],
+    random: &dyn SecureRandom,
+) -> Result<Package> {
+    let manifest = manifest(config, source)?;
+    let key = signing_key(private_key)?;
+    let public_key = subject_public_key_info(key.public().as_ref());
+    ensure!(
+        extension_id(&public_key) == config.id && public_key == manifest.public_key,
+        "chrome_extension_signing_key: the key does not belong to extension {}",
+        config.id
+    );
+    let archive = zip(source)?;
+    if let Some(previous) = previous(config, downloads)? {
+        ensure!(
+            manifest.version >= previous.0,
+            "chrome_extension_downgrade: version {} is older than the published {}",
+            manifest.version,
+            previous.0
+        );
+        ensure!(
+            manifest.version > previous.0 || archive == previous.1,
+            "chrome_extension_version: the extension changed; increase the manifest version above {}",
+            previous.0
+        );
+    }
+    let signed_header = field(1, &digest(&SHA256, &public_key).as_ref()[..16]);
+    let mut signature = vec![0; key.public().modulus_len()];
+    key.sign(
+        &signature::RSA_PKCS1_SHA256,
+        random,
+        &signed_data(&signed_header, &archive)?,
+        &mut signature,
+    )
+    .map_err(|_| anyhow::anyhow!("chrome_extension_signature"))?;
+    let header = [
+        field(2, &[field(1, &public_key), field(2, &signature)].concat()),
+        field(10_000, &signed_header),
+    ]
+    .concat();
+    let crx = [
+        b"Cr24".as_slice(),
+        &3u32.to_le_bytes(),
+        &u32::try_from(header.len())?.to_le_bytes(),
+        &header,
+        &archive,
+    ]
+    .concat();
+    ensure!(
+        crx.len() as u64 <= public_downloads::MAX_FILE_BYTES,
+        "chrome_extension_package_budget"
+    );
+    let update_manifest = update_manifest(&config.id, &manifest);
+    let release = release(config, &manifest, &crx);
+    let downloads = Files::from([
+        (config.package.clone(), crx.clone()),
+        (UPDATE_MANIFEST.to_owned(), update_manifest.clone()),
+    ]);
+    ensure!(
+        verify(config, source, &downloads)? == release,
+        "chrome_extension_self_check"
+    );
+    Ok(Package {
+        crx,
+        update_manifest,
+        release,
+    })
+}
+
+/// An unpacked build for `chrome://extensions` → Load unpacked. It never checks
+/// for updates and omits permissions only managed installs receive. An overlay
+/// changes the behavior, so that build also drops the release identity and is
+/// named as a local build.
+pub fn local(config: &Config, source: &Files, overlay: &Files) -> Result<Files> {
+    manifest(config, source)?;
+    ensure!(
+        !overlay.contains_key("manifest.json"),
+        "chrome_extension_local_manifest: {}/{} cannot replace manifest.json",
+        DIRECTORY,
+        LOCAL_DIRECTORY
+    );
+    files(overlay)?;
+    let mut value: Map<String, Value> = serde_json::from_slice(&source["manifest.json"])?;
+    value.remove("update_url");
+    // Chrome grants blocking web requests only to policy-installed MV3 extensions.
+    if let Some(Value::Array(permissions)) = value.get_mut("permissions") {
+        permissions.retain(|permission| permission != "webRequestBlocking");
+    }
+    if !overlay.is_empty() {
+        value.remove("key");
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .context("chrome_extension_name")?;
+        value.insert("name".into(), Value::String(format!("{name} (local)")));
+    }
+    let mut output = source.clone();
+    output.extend(overlay.clone());
+    let mut manifest = serde_json::to_vec_pretty(&value)?;
+    manifest.push(b'\n');
+    output.insert("manifest.json".into(), manifest);
+    Ok(output)
+}
+
+/// The Google Admin values and equivalent `ExtensionSettings` policy that
+/// force-install the release on managed Chrome.
+pub fn policy(config: &Config, source: &Files) -> Result<Value> {
+    let manifest = manifest(config, source)?;
+    let mut settings = Map::new();
+    settings.insert(
+        config.id.clone(),
+        json!({
+            "installation_mode": "force_installed",
+            "update_url": manifest.update_url,
+            "override_update_url": true,
+        }),
+    );
+    Ok(json!({
+        "extension_id": config.id,
+        "version": manifest.version.to_string(),
+        "update_url": manifest.update_url,
+        "chrome_policy": { "ExtensionSettings": settings },
+    }))
+}
+
+fn release(config: &Config, manifest: &Manifest, crx: &[u8]) -> Release {
+    Release {
+        extension_id: config.id.clone(),
+        version: manifest.version.to_string(),
+        package: config.package.clone(),
+        update_url: manifest.update_url.clone(),
+        codebase: manifest.codebase.clone(),
+        crx_digest: crate::digest(crx),
+    }
+}
+
+fn manifest(config: &Config, source: &Files) -> Result<Manifest> {
+    files(source)?;
+    let bytes = source.get("manifest.json").with_context(|| {
+        format!(
+            "chrome_extension_manifest: {DIRECTORY}/{SOURCE_DIRECTORY}/manifest.json is missing"
+        )
+    })?;
+    let value: Map<String, Value> =
+        serde_json::from_slice(bytes).context("chrome_extension_manifest: invalid JSON")?;
+    let text = |name: &str| -> Result<&str> {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .with_context(|| format!("chrome_extension_manifest: `{name}` must be a string"))
+    };
+    ensure!(
+        value.get("manifest_version") == Some(&json!(3)),
+        "chrome_extension_manifest: manifest_version must be 3"
+    );
+    text("name")?;
+    let version = Version::parse(text("version")?)?;
+    let public_key = STANDARD
+        .decode(text("key")?)
+        .context("chrome_extension_manifest: `key` must be base64")?;
+    ensure!(
+        public_key.len() <= 1024
+            && subject_public_key_info(rsa_public_key(&public_key)?) == public_key
+            && extension_id(&public_key) == config.id,
+        "chrome_extension_manifest: `key` must be the RSA public key of extension {}",
+        config.id
+    );
+    let update_url = text("update_url")?;
+    let host = update_url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.strip_suffix("/downloads/updates.xml"))
+        .unwrap_or_default();
+    ensure!(
+        !host.is_empty()
+            && host.len() <= 253
+            && !host.starts_with(['.', '-'])
+            && !host.ends_with(['.', '-'])
+            && !host.contains("..")
+            && host.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+            }),
+        "chrome_extension_manifest: update_url must be https://HOST/downloads/updates.xml"
+    );
+    let minimum_chrome_version = match value.get("minimum_chrome_version") {
+        None => None,
+        Some(Value::String(minimum)) => Some(Version::parse(minimum)?.to_string()),
+        Some(_) => bail!("chrome_extension_manifest: minimum_chrome_version must be a string"),
+    };
+    Ok(Manifest {
+        version,
+        update_url: update_url.to_owned(),
+        codebase: format!("https://{host}/downloads/{}", config.package),
+        minimum_chrome_version,
+        public_key,
+    })
+}
+
+fn files(files: &Files) -> Result<()> {
+    ensure!(files.len() <= MAX_FILES, "chrome_extension_file_count");
+    let mut total = 0u64;
+    for (path, bytes) in files {
+        ensure!(
+            path.len() <= MAX_PATH_BYTES
+                && path.split('/').enumerate().all(|(index, part)| {
+                    !part.is_empty()
+                        && !part.starts_with('.')
+                        && (!part.starts_with('_') || (index == 0 && part == "_locales"))
+                        && part.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                        })
+                }),
+            "chrome_extension_path: unsupported extension file path {path:?}"
+        );
+        total += bytes.len() as u64;
+    }
+    ensure!(total <= MAX_SOURCE_BYTES, "chrome_extension_source_budget");
+    let directories = files
+        .keys()
+        .flat_map(|path| {
+            path.match_indices('/')
+                .map(|(index, _)| &path[..index])
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        directories
+            .iter()
+            .all(|directory| !files.contains_key(*directory)),
+        "chrome_extension_path: a file and directory share a name"
+    );
+    Ok(())
+}
+
+fn signing_key(pem: &[u8]) -> Result<rsa::KeyPair> {
+    ensure!(
+        pem.len() as u64 <= MAX_KEY_BYTES,
+        "chrome_extension_signing_key_budget"
+    );
+    let text = std::str::from_utf8(pem).context("chrome_extension_signing_key: expected PEM")?;
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let label = lines
+        .next()
+        .and_then(|line| line.strip_prefix("-----BEGIN "))
+        .and_then(|line| line.strip_suffix("-----"))
+        .context("chrome_extension_signing_key: expected PEM")?;
+    let mut body = String::new();
+    for line in lines.by_ref() {
+        if line == format!("-----END {label}-----") {
+            ensure!(
+                lines.next().is_none(),
+                "chrome_extension_signing_key: one PEM key expected"
+            );
+            let der = STANDARD
+                .decode(&body)
+                .context("chrome_extension_signing_key: base64")?;
+            let key = match label {
+                "PRIVATE KEY" => rsa::KeyPair::from_pkcs8(&der),
+                "RSA PRIVATE KEY" => rsa::KeyPair::from_der(&der),
+                _ => bail!("chrome_extension_signing_key: expected an unencrypted RSA private key"),
+            }
+            .map_err(|error| anyhow::anyhow!("chrome_extension_signing_key: {error}"))?;
+            ensure!(
+                key.public().modulus_len() >= 256,
+                "chrome_extension_signing_key: RSA-2048 or larger required"
+            );
+            return Ok(key);
+        }
+        body.push_str(line);
+    }
+    bail!("chrome_extension_signing_key: unterminated PEM")
+}
+
+/// Previous release: its verified version and archive.
+fn previous(config: &Config, downloads: &Files) -> Result<Option<(Version, Vec<u8>)>> {
+    let (crx, xml) = match (
+        downloads.get(&config.package),
+        downloads.get(UPDATE_MANIFEST),
+    ) {
+        (None, None) => return Ok(None),
+        (Some(crx), Some(xml)) => (crx, xml),
+        _ => bail!(
+            "chrome_extension_previous: public-downloads/ has only half of a release; restore both {} and {} or remove both",
+            config.package,
+            UPDATE_MANIFEST
+        ),
+    };
+    let (public_key, archive) = open(crx)?;
+    ensure!(
+        extension_id(public_key) == config.id,
+        "chrome_extension_previous: the existing package belongs to another extension"
+    );
+    // The XML declaration also has a version attribute; read only updatecheck's.
+    let version = std::str::from_utf8(xml)?
+        .split_once("<updatecheck ")
+        .and_then(|(_, element)| element.split_once(" version=\""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(version, _)| Version::parse(version))
+        .transpose()?
+        .context("chrome_extension_previous: unreadable update manifest version")?;
+    Ok(Some((version, archive.to_vec())))
+}
+
+/// Verify a CRX3 signed by exactly one RSA key and return that key and the archive.
+fn open(crx: &[u8]) -> Result<(&[u8], &[u8])> {
+    ensure!(
+        crx.len() >= 12 && &crx[..4] == b"Cr24" && crx[4..8] == 3u32.to_le_bytes(),
+        "chrome_extension_crx: not a CRX3 package"
+    );
+    let header_length = u32::from_le_bytes(crx[8..12].try_into()?) as usize;
+    let header_end = 12usize
+        .checked_add(header_length)
+        .filter(|end| *end <= crx.len())
+        .context("chrome_extension_crx: truncated header")?;
+    let (header, archive) = (&crx[12..header_end], &crx[header_end..]);
+    let mut proofs = Vec::new();
+    let mut signed_header = None;
+    for (number, value) in fields(header)? {
+        match number {
+            2 => proofs.push(value),
+            10_000 if signed_header.is_none() => signed_header = Some(value),
+            _ => bail!("chrome_extension_crx: unsupported header field {number}"),
+        }
+    }
+    let ([proof], Some(signed_header)) = (proofs.as_slice(), signed_header) else {
+        bail!("chrome_extension_crx: expected one RSA proof and signed header");
+    };
+    let (mut public_key, mut proof_signature) = (None, None);
+    for (number, value) in fields(proof)? {
+        match number {
+            1 if public_key.is_none() => public_key = Some(value),
+            2 if proof_signature.is_none() => proof_signature = Some(value),
+            _ => bail!("chrome_extension_crx: invalid RSA proof"),
+        }
+    }
+    let (Some(public_key), Some(proof_signature)) = (public_key, proof_signature) else {
+        bail!("chrome_extension_crx: incomplete RSA proof");
+    };
+    let mut crx_id = None;
+    for (number, value) in fields(signed_header)? {
+        ensure!(
+            number == 1 && crx_id.is_none(),
+            "chrome_extension_crx: invalid signed header"
+        );
+        crx_id = Some(value);
+    }
+    ensure!(
+        crx_id == Some(&digest(&SHA256, public_key).as_ref()[..16]),
+        "chrome_extension_crx: signed header does not match the signing key"
+    );
+    UnparsedPublicKey::new(
+        &signature::RSA_PKCS1_2048_8192_SHA256,
+        rsa_public_key(public_key)?,
+    )
+    .verify(&signed_data(signed_header, archive)?, proof_signature)
+    .map_err(|_| anyhow::anyhow!("chrome_extension_crx: invalid signature"))?;
+    Ok((public_key, archive))
+}
+
+fn signed_data(signed_header: &[u8], archive: &[u8]) -> Result<Vec<u8>> {
+    Ok([
+        SIGNED_DATA_PREFIX,
+        &u32::try_from(signed_header.len())?.to_le_bytes(),
+        signed_header,
+        archive,
+    ]
+    .concat())
+}
+
+/// Length-delimited protobuf fields; CRX headers use no other wire type.
+fn fields(mut bytes: &[u8]) -> Result<Vec<(u64, &[u8])>> {
+    let mut fields = Vec::new();
+    while !bytes.is_empty() {
+        let key = varint(&mut bytes)?;
+        ensure!(
+            key & 7 == 2,
+            "chrome_extension_crx: unsupported protobuf wire type"
+        );
+        let length = usize::try_from(varint(&mut bytes)?)?;
+        ensure!(
+            length <= bytes.len(),
+            "chrome_extension_crx: truncated protobuf field"
+        );
+        let (value, rest) = bytes.split_at(length);
+        fields.push((key >> 3, value));
+        bytes = rest;
+    }
+    Ok(fields)
+}
+
+fn varint(bytes: &mut &[u8]) -> Result<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let (&byte, rest) = bytes
+            .split_first()
+            .context("chrome_extension_crx: truncated varint")?;
+        *bytes = rest;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    bail!("chrome_extension_crx: varint overflow")
+}
+
+fn field(number: u64, value: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(value.len() + 8);
+    put_varint(&mut bytes, number << 3 | 2);
+    put_varint(&mut bytes, value.len() as u64);
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn put_varint(bytes: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        bytes.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    bytes.push(value as u8);
+}
+
+/// The PKCS#1 RSAPublicKey inside a SubjectPublicKeyInfo for rsaEncryption.
+fn rsa_public_key(spki: &[u8]) -> Result<&[u8]> {
+    let (body, rest) = der(spki, 0x30)?;
+    ensure!(rest.is_empty(), "chrome_extension_public_key");
+    let algorithm = body
+        .strip_prefix(RSA_ALGORITHM)
+        .context("chrome_extension_public_key: RSA required")?;
+    let (bits, rest) = der(algorithm, 0x03)?;
+    ensure!(rest.is_empty(), "chrome_extension_public_key");
+    bits.strip_prefix(&[0])
+        .context("chrome_extension_public_key: invalid bit string")
+}
+
+fn subject_public_key_info(rsa_public_key: &[u8]) -> Vec<u8> {
+    let bits = der_value(0x03, &[&[0], rsa_public_key].concat());
+    der_value(0x30, &[RSA_ALGORITHM, &bits].concat())
+}
+
+fn der(bytes: &[u8], tag: u8) -> Result<(&[u8], &[u8])> {
+    let (&actual, rest) = bytes.split_first().context("chrome_extension_public_key")?;
+    ensure!(actual == tag, "chrome_extension_public_key");
+    let (&first, mut rest) = rest.split_first().context("chrome_extension_public_key")?;
+    let length = if first < 0x80 {
+        usize::from(first)
+    } else {
+        let count = usize::from(first & 0x7f);
+        ensure!(
+            (1..=2).contains(&count) && rest.len() >= count,
+            "chrome_extension_public_key"
+        );
+        let (digits, remaining) = rest.split_at(count);
+        rest = remaining;
+        digits
+            .iter()
+            .fold(0, |length, digit| length << 8 | usize::from(*digit))
+    };
+    ensure!(length <= rest.len(), "chrome_extension_public_key");
+    Ok(rest.split_at(length))
+}
+
+fn der_value(tag: u8, value: &[u8]) -> Vec<u8> {
+    let length = value.len();
+    let mut bytes = vec![tag];
+    match length {
+        0..0x80 => bytes.push(length as u8),
+        0x80..0x100 => bytes.extend([0x81, length as u8]),
+        _ => bytes.extend([0x82, (length >> 8) as u8, length as u8]),
+    }
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+/// A deterministic ZIP archive: sorted stored entries, the DOS epoch timestamp,
+/// mode 0644 and no extra fields, comments or directory entries.
+fn zip(files: &Files) -> Result<Vec<u8>> {
+    const DOS_DATE: u16 = 0x21;
+    const MODE: u32 = 0o100_644 << 16;
+    let mut archive = Vec::new();
+    let mut directory = Vec::new();
+    for (path, bytes) in files {
+        let offset = u32::try_from(archive.len())?;
+        let size = u32::try_from(bytes.len())?;
+        let name_length = u16::try_from(path.len())?;
+        let crc = crc32(bytes);
+        let common = [
+            10u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            DOS_DATE.to_le_bytes(),
+        ]
+        .concat();
+        let sizes = [crc.to_le_bytes(), size.to_le_bytes(), size.to_le_bytes()].concat();
+        archive.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        archive.extend_from_slice(&common);
+        archive.extend_from_slice(&sizes);
+        archive.extend_from_slice(&name_length.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(path.as_bytes());
+        archive.extend_from_slice(bytes);
+        directory.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        directory.extend_from_slice(&0x0314u16.to_le_bytes());
+        directory.extend_from_slice(&common);
+        directory.extend_from_slice(&sizes);
+        directory.extend_from_slice(&name_length.to_le_bytes());
+        directory.extend_from_slice(&[0; 8]);
+        directory.extend_from_slice(&MODE.to_le_bytes());
+        directory.extend_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(path.as_bytes());
+    }
+    let count = u16::try_from(files.len())?;
+    let directory_offset = u32::try_from(archive.len())?;
+    let directory_size = u32::try_from(directory.len())?;
+    archive.extend_from_slice(&directory);
+    archive.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    archive.extend_from_slice(&[0; 4]);
+    archive.extend_from_slice(&count.to_le_bytes());
+    archive.extend_from_slice(&count.to_le_bytes());
+    archive.extend_from_slice(&directory_size.to_le_bytes());
+    archive.extend_from_slice(&directory_offset.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    Ok(archive)
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    !bytes.iter().fold(!0u32, |crc, byte| {
+        (0..8).fold(crc ^ u32::from(*byte), |crc, _| {
+            (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg())
+        })
+    })
+}
+
+fn update_manifest(id: &str, manifest: &Manifest) -> Vec<u8> {
+    let minimum = manifest
+        .minimum_chrome_version
+        .as_ref()
+        .map(|minimum| format!(" prodversionmin=\"{minimum}\""))
+        .unwrap_or_default();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gupdate xmlns=\"http://www.google.com/update2/response\" protocol=\"2.0\">\n  <app appid=\"{id}\">\n    <updatecheck codebase=\"{}\" version=\"{}\"{minimum} />\n  </app>\n</gupdate>\n",
+        manifest.codebase, manifest.version
+    )
+    .into_bytes()
+}
+
+impl Version {
+    /// One to four dot-separated integers 0-65535, without leading zeros, not all zero.
+    fn parse(text: &str) -> Result<Self> {
+        let invalid = || format!("chrome_extension_version: invalid Chrome version {text:?}");
+        let parts = text.split('.').collect::<Vec<_>>();
+        ensure!(
+            (1..=4).contains(&parts.len())
+                && parts.iter().all(|part| {
+                    !part.is_empty()
+                        && part.bytes().all(|byte| byte.is_ascii_digit())
+                        && (*part == "0" || !part.starts_with('0'))
+                }),
+            invalid()
+        );
+        let mut numbers = [0u16; 4];
+        for (slot, part) in numbers.iter_mut().zip(&parts) {
+            *slot = part.parse().with_context(invalid)?;
+        }
+        ensure!(numbers != [0; 4], invalid());
+        Ok(Self {
+            parts: numbers,
+            text: text.to_owned(),
+        })
+    }
+}
+
+impl PartialEq for Version {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts == other.parts
+    }
+}
+
+impl Eq for Version {}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.parts.cmp(&other.parts)
+    }
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+#[cfg(test)]
+#[path = "chrome_extension_tests.rs"]
+mod tests;
