@@ -188,7 +188,10 @@ fn scan(
         if m.is_dir() {
             scan(&file, &path, depth + 1, count, files, dirs)?;
         } else {
-            ensure!(m.is_file() && m.nlink() == 1, "backup_archive_member_kind");
+            ensure!(
+                m.is_file() && m.nlink() == 1 && m.len() <= FILE_LIMIT,
+                "backup_archive_member_kind"
+            );
             files.insert(path);
         }
     }
@@ -335,10 +338,35 @@ impl ArchiveWriter {
             &mut observed,
             &mut dirs,
         )?;
+        // Normal Build retains two diagnostics beside the admitted runtime
+        // members. They are not runtime inputs or verification authority and
+        // never enter the canonical archive. Every other extra file refuses.
+        let diagnostics = BTreeSet::from([
+            PathBuf::from("schema.sql"),
+            PathBuf::from("verification.json"),
+        ]);
         ensure!(
-            observed == selected.keys().cloned().collect(),
+            observed
+                .difference(&diagnostics)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                == selected.keys().cloned().collect(),
             "backup_artifact_extra_or_missing_file"
         );
+        if observed.contains(Path::new("schema.sql")) {
+            let (mut file, identity) = source.open(Path::new("schema.sql"))?;
+            let mut bytes = Zeroizing::new(Vec::new());
+            (&mut file)
+                .take(MANIFEST_LIMIT + 1)
+                .read_to_end(&mut bytes)?;
+            let expected = artifact.contract().schema.ddl()?.join(";\n") + ";\n";
+            ensure!(
+                bytes.len() as u64 <= MANIFEST_LIMIT
+                    && bytes.as_slice() == expected.as_bytes()
+                    && Identity::of(&file.metadata()?) == identity,
+                "backup_artifact_schema_diagnostic_changed"
+            );
+        }
         let required = parents(selected.keys().cloned());
         let mut allowed = required.clone();
         allowed.extend(

@@ -139,6 +139,42 @@ fn normal_fixture_image_matches_canonical_verifier_and_refuses_substitutions() -
         assert!(archive.check().is_err(), "replay{replay}");
         std::fs::write(path.join("backup.json"), original)?;
         assert!(archive.check().is_err(), "replay{replay}");
+        // A normal Build's diagnostic sidecars never become runtime archive
+        // members or authority. Exercise that exact projection from owned DATA.
+        let selected_root = path.join(archive.manifest().artifact_relative()?);
+        let schema = reopened.contract().schema.ddl()?.join(";\n") + ";\n";
+        std::fs::write(selected_root.join("schema.sql"), &schema)?;
+        std::fs::write(
+            selected_root.join("verification.json"),
+            b"not verification evidence",
+        )?;
+        let fresh = || -> Result<super::archive::ArchiveWriter> {
+            super::archive::ArchiveWriter::new(
+                SnapshotImage {
+                    bytes: Zeroizing::new(image.bytes.to_vec()),
+                },
+                clone_manifest()?,
+                &reopened,
+            )
+        };
+        let mut projected = fresh()?;
+        while projected.step()? != CopyProgress::Complete {}
+        let projected = projected.finish()?;
+        projected.check()?;
+        let bundled = projected
+            .directory()
+            .join(projected.manifest().artifact_relative()?);
+        assert!(!bundled.join("schema.sql").exists());
+        assert!(!bundled.join("verification.json").exists());
+        std::fs::write(selected_root.join("schema.sql"), b"foreign schema")?;
+        assert!(fresh().is_err());
+        std::fs::write(selected_root.join("schema.sql"), schema)?;
+        std::fs::write(selected_root.join("foreign-worker"), b"unknown")?;
+        assert!(fresh().is_err());
+        std::fs::remove_file(selected_root.join("foreign-worker"))?;
+        std::fs::remove_file(selected_root.join("verification.json"))?;
+        std::os::unix::fs::symlink("worker", selected_root.join("verification.json"))?;
+        assert!(fresh().is_err());
     }
     let mut damaged = SnapshotImage {
         bytes: Zeroizing::new(image.bytes.to_vec()),

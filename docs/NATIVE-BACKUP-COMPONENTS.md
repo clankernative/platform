@@ -51,7 +51,12 @@ See [SQLite backup](https://www.sqlite.org/c3ref/backup_finish.html) and the
 
 The archive encoder consumes a verified image and matching manifest with an
 already-admitted artifact. It uses that artifact's exact declared file catalog
-and digests; it performs no ordinary worker re-admission in production. Every
+and digests; it performs no ordinary worker re-admission in production.
+The source profile explicitly distinguishes normal Build's two diagnostic files:
+`schema.sql` must equal the admitted schema's generated DDL; `verification.json`
+is unused, bounded regular-file DATA. Neither enters the runtime archive or
+supplies verification authority. The output remains exactly the canonical runtime
+catalog; every other extra input file refuses. Every
 copied input/output byte, complete source/output inventory, path, type, mode and
 creator is checked. Symlinks, aliases, unknown members and unsupported provider,
 companion or runtime-generation graphs refuse rather than being stripped.

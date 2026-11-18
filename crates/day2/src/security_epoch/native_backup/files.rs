@@ -180,7 +180,7 @@ impl PrivateTree {
         )?);
         let m = file.metadata()?;
         ensure!(
-            m.is_file() && m.nlink() == 1 && m.mode() & 0o7777 == u32::from(mode),
+            m.is_file() && m.nlink() == 1 && u64::from(m.mode() & 0o7777) == number(mode)?,
             "backup_file_creator"
         );
         self.check()?;
