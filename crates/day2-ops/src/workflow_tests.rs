@@ -196,6 +196,116 @@ fn ui_lock_command_emits_the_native_source_record() -> Result<()> {
 }
 
 #[test]
+fn extension_commands_route_to_their_native_capabilities() -> Result<()> {
+    for (arguments, expected, input) in [
+        (
+            vec!["extension", "verify", "app"],
+            vec!["chrome-extension-verify"],
+            json!({"source":"app"}),
+        ),
+        (
+            vec!["extension", "policy", "app"],
+            vec!["chrome-extension-policy"],
+            json!({"source":"app"}),
+        ),
+        (
+            vec!["extension", "local", "app", "unpacked"],
+            vec!["chrome-extension-local"],
+            json!({"source":"app","output":"unpacked"}),
+        ),
+    ] {
+        let mut effects = Vec::new();
+        let mut all = vec!["platform"];
+        all.extend(&arguments);
+        let receipt = automation::run(&automation::runner()?, &all, |request| {
+            effects.push(request.action.clone());
+            assert_eq!(request.decode::<Value>()?, input);
+            Ok(json!({"fixture":true}))
+        })?;
+        assert_eq!(effects, expected);
+        assert_eq!(receipt, json!({"fixture":true}));
+    }
+    Ok(())
+}
+
+#[test]
+fn extension_pack_verifies_the_written_release_before_reporting_it() -> Result<()> {
+    let mut effects = Vec::new();
+    let receipt = automation::run(
+        &automation::runner()?,
+        &["platform", "extension", "pack", "app", "/dev/fd/63"],
+        |request| {
+            effects.push(request.action.clone());
+            match request.action.as_str() {
+                "chrome-extension-pack" => {
+                    assert_eq!(
+                        request.decode::<Value>()?,
+                        json!({"source":"app","key":"/dev/fd/63"})
+                    );
+                    Ok(json!({"release":{"version":"2"}}))
+                }
+                "chrome-extension-verify" => Ok(json!({"declared":true})),
+                action => bail!("unexpected effect {action}"),
+            }
+        },
+    )?;
+    assert_eq!(
+        effects,
+        ["chrome-extension-pack", "chrome-extension-verify"]
+    );
+    assert_eq!(receipt, json!({"release":{"version":"2"}}));
+
+    let mut after_failure = Vec::new();
+    assert!(
+        automation::run(
+            &automation::runner()?,
+            &["platform", "extension", "pack", "app", "key.pem"],
+            |request| {
+                after_failure.push(request.action.clone());
+                bail!("chrome_extension_signing_key")
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(after_failure, ["chrome-extension-pack"]);
+    for incomplete in [
+        vec!["platform", "extension", "pack", "app"],
+        vec!["platform", "extension", "local", "app"],
+        vec!["platform", "extension", "sign", "app"],
+    ] {
+        assert!(
+            automation::run(&automation::runner()?, &incomplete, |_| bail!(
+                "invalid extension usage reached native effects"
+            ))
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn check_verifies_the_extension_release_before_building() -> Result<()> {
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &["platform", "check", "app", "42", "1"],
+        |request| {
+            effects.push(request.action.clone());
+            match request.action.as_str() {
+                "chrome-extension-verify" => {
+                    assert_eq!(request.decode::<Value>()?, json!({"source":"app"}));
+                    bail!("chrome_extension_stale")
+                }
+                action => bail!("unexpected effect {action}"),
+            }
+        },
+    );
+    assert!(format!("{:#}", result.unwrap_err()).contains("chrome_extension_stale"));
+    assert_eq!(effects, ["chrome-extension-verify"]);
+    Ok(())
+}
+
+#[test]
 fn bundled_ui_recipe_uses_verified_installation_without_network() -> Result<()> {
     let mut effects = Vec::new();
     automation::run(&automation::runner()?, &["ui-dependency"], |request| {

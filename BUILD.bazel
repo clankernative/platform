@@ -61,6 +61,7 @@ exports_files([
     "ops/Capability.roc",
     "ops/CartaQualification.roc",
     "ops/Check.roc",
+    "ops/ChromeExtension.roc",
     "ops/Ci.roc",
     "ops/Delegation.roc",
     "ops/GkeRelease.roc",
