@@ -231,9 +231,10 @@ pub struct Admission {
 }
 
 impl Admission {
-    // Native caller pins the exact operator-reviewed bytes, not a boolean in
-    // application metadata. Construct only inside the authorized operation.
-    fn review(bytes: &[u8], expected: &str, source: &Manifest) -> Result<Self> {
+    /// Validate the operator-pinned receipt against the exact source manifest.
+    /// The returned evidence is data. Store and deployment authorization are
+    /// checked separately by the operation that uses it.
+    pub fn review(bytes: &[u8], expected: &str, source: &Manifest) -> Result<Self> {
         ensure!(bytes.len() <= 1_048_576, "runtime_pair_receipt_budget");
         day2_assets::hash_part(expected)?;
         ensure!(
@@ -241,29 +242,13 @@ impl Admission {
             "runtime_pair_receipt_changed"
         );
         let receipt: Receipt = crate::json::decode(bytes)?;
-        ensure!(
-            receipt.version == 1 && receipt.checks == Check::required(),
-            "runtime_pair_qualification_incomplete"
-        );
-        day2_assets::hash_part(&receipt.verifier)?;
-        day2_assets::hash_part(&receipt.recipe)?;
-        receipt.source.runtime.require_qualified()?;
-        receipt.target.runtime.require_qualified()?;
-        receipt.source.protocols.require_current()?;
-        receipt.target.protocols.require_current()?;
         ensure!(receipt.source == *source, "runtime_pair_source_changed");
-        ensure!(
-            receipt.source.runtime != receipt.target.runtime,
-            "runtime_pair_requires_new_runtime"
-        );
-        ensure!(
-            receipt.source.protocols == receipt.target.protocols,
-            "runtime_pair_protocol_changed"
-        );
-        Ok(Self {
+        let admission = Self {
             receipt_digest: expected.into(),
             receipt,
-        })
+        };
+        admission.validate_record()?;
+        Ok(admission)
     }
 
     pub(crate) fn validate_record(&self) -> Result<()> {
@@ -279,8 +264,11 @@ impl Admission {
         self.receipt.source.protocols.require_current()?;
         self.receipt.target.protocols.require_current()?;
         ensure!(
-            self.receipt.source.runtime != self.receipt.target.runtime
-                && self.receipt.source.protocols == self.receipt.target.protocols,
+            self.receipt.source.runtime != self.receipt.target.runtime,
+            "runtime_pair_requires_new_runtime"
+        );
+        ensure!(
+            self.receipt.source.protocols == self.receipt.target.protocols,
             "runtime_pair_protocol_changed"
         );
         Ok(())

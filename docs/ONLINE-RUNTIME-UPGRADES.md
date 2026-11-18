@@ -364,6 +364,43 @@ does not produce native/strict/pair qualification or enable installed apps.
 The closed journal protocol is now version 5; both runtimes in a future qualified
 pair must understand the composition fields. Older receipts are refused.
 
+### Shared release index
+
+The release operator assembles a directed index once per supported pair. The
+request selects two existing native-only Linux x86-64 SDK manifests and one
+reviewed pair receipt. Each reference carries the SHA-256 digest and byte count
+used by the instance's digest-addressed release store. The request also pins
+the verifier and recipe that produced the pair receipt.
+
+```console
+build-out/bin/xtask assemble-runtime-pair-release REQUEST BLOB_DIRECTORY NEW_INDEX
+```
+
+The version-1 request contains `profile` (`sqlite_local_v1`), `source_sdk`,
+`target_sdk`, `pair`, `verifier` and `recipe`. Populate the blob directory
+with the two SDK manifests and their referenced native receipts, strict
+supplements, tooling distributions and operator archives. Include the pair
+receipt too. Each filename is the lowercase hex portion of the blob's digest.
+
+The Roc recipe checks both SDK closures before checking the directed pair. It
+requires the native receipts to name the exact SDK image witnesses, toolchain,
+distribution and operator archive. It checks the strict results against the
+same native receipts and validates the pair using the runtime admission
+validator. The command writes the index atomically to a new path and prints its
+digest and size. The instance publisher can retain that index alongside the
+existing blobs after approval. App builds continue to select their compiled SDK
+independently of any runtime transition and reuse it with the existing cache.
+
+To create the pair receipt, the native campaign needs a disposable execution
+scope that can run the handoff before the passing receipt exists. Keep that
+scope separate from ordinary runtime-pair preparation. It needs a fresh
+SQLite volume and a fixture with local credentials, and must bind the measured
+source and target binaries and images before exercising their shared state.
+Issue a passing receipt only after the native campaign observes every required
+case. Installed apps continue to require the completed, pinned receipt.
+
+### Runtime-pair evidence
+
 Publish an operator-owned transition receipt for one exact source and target
 runtime pair. A target runtime's native and strict receipts, or an app rolling
 receipt on the source runtime, are insufficient. The pair must bind:

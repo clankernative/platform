@@ -71,7 +71,7 @@ pub(super) fn native_platform() -> Result<&'static NativePlatform> {
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-fn required_steps() -> BTreeSet<String> {
+pub(super) fn required_steps() -> BTreeSet<String> {
     [
         "linux-capture",
         "linux-build-tooling",

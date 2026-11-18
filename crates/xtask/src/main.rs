@@ -29,6 +29,7 @@ mod provider_conformance;
 mod release_inputs;
 mod roc_packages;
 mod runtime_image;
+mod runtime_pair_release;
 mod tooling;
 mod tooling_distribution;
 mod ui_assembly;
@@ -349,6 +350,7 @@ fn main() -> Result<()> {
         "linux-provision-package",
         "linux-provision-inspect",
         "verify-runtime-image",
+        "assemble-runtime-pair-release",
         "architecture-proof-candidate-inventory",
         "admit-roc-packages",
     ]
@@ -1086,6 +1088,15 @@ fn main() -> Result<()> {
             let output = PathBuf::from(args.next().context(usage)?);
             ensure!(args.next().is_none(), "{usage}");
             runtime_image::execute(&root, &base, &qualified, &app, &artifact, &output)?;
+        }
+        "assemble-runtime-pair-release" => {
+            let usage =
+                "usage: xtask assemble-runtime-pair-release REQUEST BLOB_DIRECTORY NEW_INDEX";
+            let request = PathBuf::from(args.next().context(usage)?);
+            let blobs = PathBuf::from(args.next().context(usage)?);
+            let output = PathBuf::from(args.next().context(usage)?);
+            ensure!(args.next().is_none(), "{usage}");
+            runtime_pair_release::execute(&root, &request, &blobs, &output)?;
         }
         "qualify-linux" => {
             let output = PathBuf::from(
