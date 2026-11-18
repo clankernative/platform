@@ -602,6 +602,12 @@ fn policy_force_installs_from_the_published_update_manifest() -> Result<()> {
             "extension_id": TEST_ID,
             "version": "3.1",
             "update_url": "https://reminders.example.com/downloads/updates.xml",
+            "admin_console": {
+                "add": "Add Chrome app or extension by ID, From a custom URL",
+                "installation_policy": "Force install",
+                "installation_url": "https://reminders.example.com/downloads/updates.xml",
+                "update_url": "Installation URL (see above)"
+            },
             "chrome_policy": {
                 "ExtensionSettings": {
                     TEST_ID: {
@@ -612,6 +618,136 @@ fn policy_force_installs_from_the_published_update_manifest() -> Result<()> {
                 }
             }
         })
+    );
+    Ok(())
+}
+
+const DOWNLOADS: &str = "https://reminders.example.com/downloads/";
+
+/// A Chrome update check as managed Chrome sends it, one `x` per extension.
+fn check_url(checks: &[(&str, &str, bool)]) -> String {
+    let checks = checks
+        .iter()
+        .map(|(id, version, policy)| {
+            let installed_by = if *policy {
+                "%26installedby%3Dpolicy"
+            } else {
+                ""
+            };
+            format!(
+                "&x=id%3D{id}%26v%3D{version}%26installsource%3Dnotfromwebstore{installed_by}%26uc"
+            )
+        })
+        .collect::<String>();
+    format!(
+        "{DOWNLOADS}updates.xml?os=mac&arch=arm64&prod=chromecrx&prodchannel=&prodversion=157.0.8103.79&lang=en-US&acceptformat=crx3,puff{checks}"
+    )
+}
+
+fn request(client: &str, url: impl Into<String>, status: u16) -> DownloadRequest {
+    DownloadRequest {
+        url: url.into(),
+        status,
+        client: client.into(),
+    }
+}
+
+#[test]
+fn fleet_reports_each_clients_latest_version_and_policy_checks() -> Result<()> {
+    let release = pack_with(TEST_KEY, &source("1.1"), &Files::new())?.release;
+    let requests = [
+        request("198.51.100.1", check_url(&[(TEST_ID, "1.0", true)]), 200),
+        request("198.51.100.1", format!("{DOWNLOADS}reminders.crx"), 200),
+        request("198.51.100.1", check_url(&[(TEST_ID, "1.1", true)]), 200),
+        request(
+            "198.51.100.2",
+            check_url(&[(OTHER_ID, "4.0", true), (TEST_ID, "1.0", true)]),
+            200,
+        ),
+        request(
+            "198.51.100.3",
+            check_url(&[(TEST_ID, "0.0.0.0", true)]),
+            200,
+        ),
+        request(
+            "198.51.100.4",
+            check_url(&[(TEST_ID, "1.1", false)]).replace("%3D", "%3d"),
+            200,
+        ),
+        request("198.51.100.5", format!("{DOWNLOADS}updates.xml"), 200),
+        request("198.51.100.6", format!("{DOWNLOADS}reminders.crx"), 304),
+        request(
+            "198.51.100.7",
+            check_url(&[(TEST_ID, "9.0", true)])
+                .replace("reminders.example.com", "other.example.com"),
+            200,
+        ),
+        request("198.51.100.8", format!("{DOWNLOADS}notes.txt"), 500),
+    ];
+    let report = fleet(&release, &requests)?;
+    assert_eq!(
+        report,
+        Fleet {
+            extension_id: TEST_ID.into(),
+            published_version: "1.1".into(),
+            update_url: format!("{DOWNLOADS}updates.xml"),
+            window_hours: FLEET_WINDOW_HOURS,
+            update_checks: 5,
+            policy_update_checks: 4,
+            package_downloads: 1,
+            server_errors: 0,
+            clients_by_version: BTreeMap::from([
+                ("0.0.0.0".into(), 1),
+                ("1.0".into(), 1),
+                ("1.1".into(), 2),
+            ]),
+            clients_on_published: 2,
+            problems: Vec::new(),
+        }
+    );
+    assert!(
+        !serde_json::to_string(&report)?.contains("198.51.100."),
+        "client addresses never appear in the report"
+    );
+    Ok(())
+}
+
+#[test]
+fn fleet_flags_silence_edge_failures_and_browsers_ahead_of_the_release() -> Result<()> {
+    let release = pack_with(TEST_KEY, &source("1.1"), &Files::new())?.release;
+    let silent = fleet(&release, &[])?;
+    assert_eq!(silent.problems, [FleetProblem::NoPolicyUpdateChecks]);
+    assert_eq!(silent.clients_by_version, BTreeMap::new());
+
+    let report = fleet(
+        &release,
+        &[
+            request("a", check_url(&[(TEST_ID, "1.1", true)]), 502),
+            request("b", check_url(&[(TEST_ID, "2.0", true)]), 200),
+            request("c", check_url(&[(TEST_ID, "1.1.0", true)]), 200),
+            request("c", format!("{DOWNLOADS}reminders.crx"), 503),
+        ],
+    )?;
+    assert_eq!(
+        report.problems,
+        [
+            FleetProblem::ServerErrors,
+            FleetProblem::ClientsAheadOfRelease
+        ]
+    );
+    assert_eq!(
+        (
+            report.update_checks,
+            report.server_errors,
+            report.package_downloads,
+            report.clients_on_published,
+        ),
+        (3, 2, 0, 2),
+        "1.1.0 is the published 1.1; a failed download is not an update"
+    );
+    assert_eq!(
+        serde_json::to_value(FleetProblem::ClientsAheadOfRelease)?,
+        json!("clients_ahead_of_release")
     );
     Ok(())
 }

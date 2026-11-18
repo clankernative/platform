@@ -265,7 +265,8 @@ pub fn local(config: &Config, source: &Files, overlay: &Files) -> Result<Files> 
 }
 
 /// The Google Admin values and equivalent `ExtensionSettings` policy that
-/// force-install the release on managed Chrome.
+/// force-install the release on managed Chrome. A person applies them; the
+/// Platform never holds a credential that can change browser policy.
 pub fn policy(config: &Config, source: &Files) -> Result<Value> {
     let manifest = manifest(config, source)?;
     let mut settings = Map::new();
@@ -281,8 +282,153 @@ pub fn policy(config: &Config, source: &Files) -> Result<Value> {
         "extension_id": config.id,
         "version": manifest.version.to_string(),
         "update_url": manifest.update_url,
+        "admin_console": {
+            "add": "Add Chrome app or extension by ID, From a custom URL",
+            "installation_policy": "Force install",
+            "installation_url": manifest.update_url,
+            "update_url": "Installation URL (see above)",
+        },
         "chrome_policy": { "ExtensionSettings": settings },
     }))
+}
+
+/// Hours of edge request logs a fleet report covers. Managed Chrome checks each
+/// policy-installed extension for updates about every five hours.
+pub const FLEET_WINDOW_HOURS: u32 = 24;
+
+/// One request for a release download, as the edge logged it, oldest first.
+/// `client` only groups one address's requests and is never reported.
+#[derive(Clone, Debug)]
+pub struct DownloadRequest {
+    pub url: String,
+    pub status: u16,
+    pub client: String,
+}
+
+/// How managed browsers are taking up the published release.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Fleet {
+    pub extension_id: String,
+    pub published_version: String,
+    pub update_url: String,
+    pub window_hours: u32,
+    /// Update checks that named this extension, and those from a policy install.
+    pub update_checks: u64,
+    pub policy_update_checks: u64,
+    /// Successful package downloads; each one is an install or an update.
+    pub package_downloads: u64,
+    /// Responses of 500 or above for the update manifest or the package.
+    pub server_errors: u64,
+    /// Client addresses by the version their latest update check reported.
+    /// `0.0.0.0` is a browser that has not finished its first install. One
+    /// address can hide several browsers, so these are lower bounds.
+    pub clients_by_version: BTreeMap<String, u64>,
+    pub clients_on_published: u64,
+    pub problems: Vec<FleetProblem>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetProblem {
+    /// No policy-installed browser checked for updates: the Google Admin entry
+    /// is missing or names another URL, or browsers cannot reach it.
+    NoPolicyUpdateChecks,
+    /// The edge failed requests for the update manifest or package.
+    ServerErrors,
+    /// Browsers report a newer version than this release: the checkout is older
+    /// than the deployed release, or the served release went backwards.
+    ClientsAheadOfRelease,
+}
+
+/// Summarize managed-browser update traffic for `release`. `requests` are the
+/// edge's requests under the release's download directory, oldest first.
+pub fn fleet(release: &Release, requests: &[DownloadRequest]) -> Result<Fleet> {
+    let published = Version::parse(&release.version)?;
+    let base = release
+        .update_url
+        .strip_suffix(UPDATE_MANIFEST)
+        .context("chrome_extension_fleet: the release has no update manifest URL")?;
+    let mut fleet = Fleet {
+        extension_id: release.extension_id.clone(),
+        published_version: release.version.clone(),
+        update_url: release.update_url.clone(),
+        window_hours: FLEET_WINDOW_HOURS,
+        update_checks: 0,
+        policy_update_checks: 0,
+        package_downloads: 0,
+        server_errors: 0,
+        clients_by_version: BTreeMap::new(),
+        clients_on_published: 0,
+        problems: Vec::new(),
+    };
+    let mut latest = BTreeMap::<&str, &str>::new();
+    for request in requests {
+        let Some(rest) = request.url.strip_prefix(base) else {
+            continue;
+        };
+        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+        if path != UPDATE_MANIFEST && path != release.package {
+            continue;
+        }
+        if request.status >= 500 {
+            fleet.server_errors += 1;
+        }
+        if path == release.package {
+            fleet.package_downloads += u64::from((200..300).contains(&request.status));
+        } else if let Some(check) = update_check(query, &release.extension_id) {
+            fleet.update_checks += 1;
+            fleet.policy_update_checks += u64::from(check.policy);
+            latest.insert(&request.client, check.version);
+        }
+    }
+    let mut ahead = false;
+    for version in latest.values() {
+        *fleet
+            .clients_by_version
+            .entry((*version).to_owned())
+            .or_insert(0) += 1;
+        if let Ok(reported) = Version::parse(version) {
+            fleet.clients_on_published += u64::from(reported == published);
+            ahead |= reported > published;
+        }
+    }
+    for (problem, present) in [
+        (
+            FleetProblem::NoPolicyUpdateChecks,
+            fleet.policy_update_checks == 0,
+        ),
+        (FleetProblem::ServerErrors, fleet.server_errors > 0),
+        (FleetProblem::ClientsAheadOfRelease, ahead),
+    ] {
+        if present {
+            fleet.problems.push(problem);
+        }
+    }
+    Ok(fleet)
+}
+
+struct UpdateCheck<'a> {
+    version: &'a str,
+    policy: bool,
+}
+
+/// The update check for `id` in a Chrome update request's query. Chrome sends one
+/// percent-encoded `x` parameter per extension that shares the update URL, each
+/// itself a query: `id=…&v=…&installsource=…&installedby=policy&uc`.
+fn update_check<'a>(query: &'a str, id: &str) -> Option<UpdateCheck<'a>> {
+    query
+        .split('&')
+        .filter_map(|parameter| parameter.strip_prefix("x="))
+        .find_map(|encoded| {
+            let fields = encoded
+                .split("%26")
+                .filter_map(|field| field.split_once("%3D").or_else(|| field.split_once("%3d")))
+                .collect::<BTreeMap<_, _>>();
+            (fields.get("id") == Some(&id)).then_some(UpdateCheck {
+                version: fields.get("v")?,
+                policy: fields.get("installedby") == Some(&"policy"),
+            })
+        })
 }
 
 fn release(config: &Config, manifest: &Manifest, crx: &[u8]) -> Release {

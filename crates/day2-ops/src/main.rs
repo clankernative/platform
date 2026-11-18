@@ -431,6 +431,16 @@ impl Operations {
                 let parameters: Input = input(&request)?;
                 chrome_extension::pack(&parameters.source, &parameters.key)
             }
+            "chrome-extension-fleet" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    source: PathBuf,
+                    project: String,
+                }
+                let parameters: Input = input(&request)?;
+                chrome_extension::fleet(&parameters.source, &parameters.project)
+            }
             "chrome-extension-local" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
