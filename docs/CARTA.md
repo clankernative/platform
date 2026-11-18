@@ -206,8 +206,10 @@ synthetic provider models. Its Carta setup runs only when that runtime scope has
 no selected capture, preserving custom worlds seeded by independent tests.
 `carta::synthetic_example()` contains eight records: two synthetic stakeholders,
 two grants and one vesting event and exercise per grant. Its issuer is
-`synthetic-issuer-1`; holders are `holder-alice` and `holder-bob`, with the reserved
-example addresses `alice@example.test` and `bob@example.test`. The shared provider
+`9000` (`carta::SYNTHETIC_ISSUER`); holders are `9001` (alice) and `9002` (bob), with
+the reserved example addresses `alice@example.test` and `bob@example.test`. The IDs
+are numeric like live Carta IDs, so an app that validates issuer and stakeholder IDs
+can configure and assign them. The shared provider
 does not map a verification actor to either employee; the application must do so.
 
 ## Remaining qualification
