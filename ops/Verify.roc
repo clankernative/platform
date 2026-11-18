@@ -76,6 +76,7 @@ Verify :: [].{
 		for fixture in [
 			"credential-metadata",
 			"credential-selectable",
+			"restore-native",
 			"connection-declaration",
 			"oauth-calendar",
 			"oauth-gitlab",

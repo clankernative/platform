@@ -215,6 +215,8 @@ platform_rust_test(
     compile_data = COMPILE_INPUTS + [
         "//:.bazelrc",
         "//:MODULE.bazel",
+        "//:MODULE.bazel.lock",
+        "//build/bazel:toolchain.json",
         "//crates/day2-capabilities:BUILD.bazel",
         "//crates/day2-capabilities:Cargo.toml",
         "//crates/day2-capabilities:src/credentials.rs",

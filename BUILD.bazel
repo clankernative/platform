@@ -17,6 +17,7 @@ exports_files([
     "Cargo.lock",
     "Cargo.toml",
     "MODULE.bazel",
+    "MODULE.bazel.lock",
     "architecture-proofs.json",
     "architecture/clippy.toml",
     "assets/api-docs.css",

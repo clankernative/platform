@@ -280,6 +280,14 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
         "crates/day2/src/oauth/schema.rs" => {
             Some("sha256:9f4251d0cde25134e6292d94677169c1d16ad4d856dc39773a3438dc3ba3af26")
         }
+        // Private mechanical DATA core only. It borrows an exclusive actual
+        // read-only transaction, copies bounded pages to its own fresh RAM DB,
+        // and serializes only owned content with the unchanged standalone guard.
+        // No native owner, requester, callback, source opener or Connection
+        // getter is admitted. Every byte change requires exact source review.
+        "crates/day2/src/security_epoch/native_backup.rs" => {
+            Some("sha256:085a188ddc122a06770e7029833381b2c1fb7fd05aff77d75a956e96a2f13bec")
+        }
         // Closed control construction only, not the large accounting module.
         "crates/day2/src/budget/atomic_control.rs" => {
             Some("sha256:1defd4e183f7aa6a91f27081145b89dc972b75be9f29dd42cad4d021ae83e478")
@@ -8723,6 +8731,7 @@ mod tests {
         for source in [
             "crates/day2/src/store/native_storage.rs",
             "crates/day2/src/budget/atomic_control.rs",
+            "crates/day2/src/security_epoch/native_backup.rs",
         ] {
             let directory = tempfile::tempdir().unwrap();
             fs::create_dir_all(directory.path().join(source).parent().unwrap()).unwrap();

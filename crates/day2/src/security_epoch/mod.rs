@@ -21,6 +21,7 @@ mod identity_protocol;
 pub(crate) mod journal;
 mod kernel;
 mod namespace_protocol;
+mod native_backup;
 mod native_clock;
 mod native_connection_peer;
 pub(crate) mod native_enrollment;
