@@ -1,5 +1,6 @@
 import Capability
 import Build
+import ChromeExtension
 
 Check :: [].{
 	Step : { kind : Str, operation : Str, payload : Str }
@@ -12,6 +13,7 @@ Check :: [].{
 
 	run! : Str, U64, U64, (Str => Try(Str, Str)) => Try(Str, Str)
 	run! = |source, seed, count, host!| {
+		_ = ChromeExtension.verify!(source, host!)?
 		built = Build.source!(source, host!)?
 		campaign!({ artifact: built.artifact, output: "", example: "", seed: seed.to_str(), count }, host!)
 	}

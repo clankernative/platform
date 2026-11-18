@@ -52,6 +52,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
     ),
     ("ops/Check.roc", include_bytes!("../../../ops/Check.roc")),
     (
+        "ops/ChromeExtension.roc",
+        include_bytes!("../../../ops/ChromeExtension.roc"),
+    ),
+    (
         "ops/LocalDev.roc",
         include_bytes!("../../../ops/LocalDev.roc"),
     ),

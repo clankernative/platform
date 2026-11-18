@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
-use day2_ops::{backup, infra, local_dev, maintenance, process, projection};
+use day2_ops::{backup, chrome_extension, infra, local_dev, maintenance, process, projection};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command, time::Duration};
@@ -407,6 +407,39 @@ impl Operations {
                 }
                 let parameters: Input = input(&request)?;
                 day2::build_dependencies::write_lock(&platform()?, &parameters.source)
+            }
+            "chrome-extension-verify" | "chrome-extension-policy" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    source: PathBuf,
+                }
+                let parameters: Input = input(&request)?;
+                if request.action == "chrome-extension-verify" {
+                    chrome_extension::verify(&parameters.source)
+                } else {
+                    chrome_extension::policy(&parameters.source)
+                }
+            }
+            "chrome-extension-pack" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    source: PathBuf,
+                    key: PathBuf,
+                }
+                let parameters: Input = input(&request)?;
+                chrome_extension::pack(&parameters.source, &parameters.key)
+            }
+            "chrome-extension-local" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    source: PathBuf,
+                    output: PathBuf,
+                }
+                let parameters: Input = input(&request)?;
+                chrome_extension::local(&parameters.source, &parameters.output)
             }
             "build-source" => {
                 #[derive(Deserialize)]

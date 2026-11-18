@@ -226,7 +226,9 @@ its recorded world and does not consult a live release journal.
 ## Public release downloads
 
 Apps may opt into anonymous, artifact-pinned release files by placing `.crx`
-and `.xml` files directly under `public-downloads/`. The build rejects other
+and `.xml` files directly under `public-downloads/`. Today these are Chrome
+extension releases, which `day2 platform extension pack` writes and `platform
+check` verifies; see [Chrome extensions](CHROME-EXTENSIONS.md). The build rejects other
 types, subdirectories, symlinks, special files, invalid filenames and excess
 files/bytes (32 files, 2 MiB per file, 16 MiB total). It pins the selected bytes
 and MIME types in `Artifact.public_downloads`, copies them into the immutable
@@ -248,11 +250,12 @@ the request before it reaches the app. That module keeps the default backend
 authenticated and adds an IAP-free backend only for selected exact download
 paths. Do not select a wildcard or disable IAP for the app.
 
-Separate extension sources/release tooling may live in the app-root
-`.chrome-extension/` directory. The app source-capture paths exclude that
-directory; only its published `public-downloads/` outputs enter the runtime
-artifact. This does not add an app build hook, package manager or server-side
-execution capability. Keep signing keys outside the repository.
+An app declares its extension in the app-root `.chrome-extension/` directory
+(`extension.json`, the unpacked `src/`, and an optional `local/` overlay). The
+app source-capture paths exclude that directory; only the signed release in
+`public-downloads/` enters the runtime artifact. This does not add an app build
+hook, package manager or server-side execution capability. Signing keys never
+enter the repository.
 
 ## App creation
 

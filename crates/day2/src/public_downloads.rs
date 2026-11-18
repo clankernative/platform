@@ -14,8 +14,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 pub const SOURCE_DIRECTORY: &str = "public-downloads";
 pub const PREFIX: &str = "/downloads/";
-const MAX_FILES: usize = 32;
-const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_FILES: usize = 32;
+pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 
 pub type Catalog = BTreeMap<String, File>;
@@ -28,7 +28,7 @@ pub struct File {
     pub bytes: u64,
 }
 
-fn media_type(name: &str) -> Result<&'static str> {
+pub(crate) fn media_type(name: &str) -> Result<&'static str> {
     ensure!(
         !name.is_empty()
             && name.len() <= 160
