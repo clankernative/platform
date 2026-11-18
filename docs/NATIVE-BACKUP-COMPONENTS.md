@@ -1,56 +1,99 @@
 # Native backup mechanical components
 
-`security_epoch/native_backup.rs` contains private snapshot and image-verification
-components. It has no production requester, native authorization constructor,
-owner enrollment, destination selection, CLI/HTTP backup route or live factory.
-The separate requester/destination policy remains undecided. Ordinary backup's
-native refusal and native scheduled-backup suspension remain unchanged.
+`security_epoch/native_backup` implements private historical snapshot, standalone
+image and canonical archive components. No production requester, enrolled owner,
+native authorization constructor, destination grant, signing/CLI/HTTP route or
+live supplier is installed. The scheduled requester policy is proposed, not
+adopted. Ordinary native-backup refusal and schedule suspension remain in place.
 
-The memory copier exclusively borrows the actual read-only SQLite transaction,
-pins its main snapshot, bounds the logical image to the existing native restore
-profile, and executes at most sixteen pages per explicit step. The exclusive
-borrow prevents a caller from rolling back and beginning another transaction
-while the copy handle is in use. Busy/Locked, progress changes, abandonment and
-misuse refuse the target permanently; there is no sleep/retry or source journal
-mutation. No Connection or native authority getter is exposed.
+The RAM copier exclusively borrows the real read-only SQLite transaction, pins
+its main snapshot, and copies at most sixteen pages per explicit step. The borrow
+prevents ROLLBACK/BEGIN substitution through that transaction. Size/progress,
+attached-database and unsupported runtime-generation checks remain strict.
+Busy/Locked, abandonment, unwind and misuse permanently refuse the target.
 
-The copy result is an opaque owned memory database, checked for size, integrity
-and reserved schema objects. It is logical historical DATA, with no connection
-or callback getter. Consuming it for image serialization additionally requires
-the unchanged standalone SQLite header. A rollback-journal source can produce
-that image; the pinned SQLite library preserves a WAL source's 2/2 format bytes
-and serialization **refuses** it. No header patch, VACUUM, source journal mutation
-or scratch-file fallback is used. Restorable WAL export is an open mechanical
-gap; these components do not finish the native backup producer or qualify F05/F34.
+## Standalone WAL conversion
 
-Standalone images must match the same canonical manifest/artifact verifier used
-by restore. The unchanged native
-archive graph predicate is shared with existing capture. Image consistency
-neither establishes native source provenance nor verifies an entire published
-archive's files/modes/durability.
+The owned RAM result contains logical historical DATA. Raw serialization of a
+WAL copy still has2/2 format flags and is refused by the existing standalone
+image guard. Every supported source uses one explicit conversion path:
 
-The future native driver must retain its genuine original, parent, physical
-cohort, counter and App exclusion around every actual step, close the source
-transaction before artifact/filesystem/provider work, then retain the actual
-source Connection through publication and close/postcheck it before release.
-The component's memory Connection close is not that source close. No component
-result supplies approval, a current epoch, backup permission or a writer.
+1. Create an explicit0700 private directory and exclusively created0600 file.
+   Retain creator descriptors; accept no caller filename or Connection.
+   Compare SQLite’s actual retained Unix-VFS MAIN descriptor through the existing
+   mechanical store comparison, not merely the pathname. Named creator checks
+   use no-follow metadata lookup: no second database descriptor is opened/closed
+   while SQLite owns POSIX locks.
+2. Consume only the captured RAM content, copying at most sixteen pages per
+   explicit step into that exact file. Use zero busy timeout and no retry.
+3. Ask SQLite itself to leave WAL through `PRAGMA journal_mode=DELETE` on the
+   private copy. Observe memory/destination close, require no sidecars, and read
+   the bounded image through the retained creator descriptor.
+4. Require strict1/1 flags, image size/integrity and canonical consistency.
 
-Tests use real SQLite, explicit controlled source transactions and an independent
-committed/pending model. Generated histories replay twice; divergent or refused
-execution retains the bounded schedule, source identity and closed per-step
-observations under `artifacts/control-slot-replays/native-backup-component-*`.
-The existing CI retention path selects their private `replay.json.gz` files;
-compression preserves the complete bounded JSON, and replay refuses truncation,
-trailing bytes or excessive decompression.
-Rows, native owners, environment and underlying error text are not retained.
-A deliberate wrong oracle, actual abandoned-copy/unwind cuts and missing
-observation cases exercise refusal retention and replay. These are component tests, not
-genuine Controller/Shell or Linux/native qualification.
+No output byte is patched, no VACUUM or row/schema reconstruction occurs, and the
+source database's journal mode stays unchanged. Creator replacement, mode loss,
+in-place changes, incomplete progress and post-completion reuse refuse.
 
-`xtask build-restore-native` normally builds the dedicated F overlay. Full verify
-requires that build and the artifact-dependent canonical-verifier regression;
-FAST explicitly declares its artifact-dependent exclusion. The latter test uses
-normally built F and Reports artifacts with a controlled metadata initializer,
-not a manufactured enrolled owner. See the fixture README for configuration and
-native qualification gaps.
+A read-only page comparison preserves every byte except SQLite's journal flags
+at18/19 and bookkeeping words at24..27,40..43 and92..95. These are constrained
+separately: strict1/1 output flags, equal change-counter/version-valid words, and
+the actual fresh destination's known initial schema cookie0 incremented once by
+SQLite backup completion. Application/user versions, SQLite library version,
+rowids, private/history/debt pages and free pages remain compared. This is a
+preserved-page comparison with a checked header transition, not universal
+whole-file equality or native-source authentication. The canonical manifest,
+artifact, historical authority and supported-graph verifier remains mandatory.
+See [SQLite backup](https://www.sqlite.org/c3ref/backup_finish.html) and the
+[SQLite file header](https://www.sqlite.org/fileformat.html#the_database_header).
+
+## Canonical historical archive
+
+The archive encoder consumes a verified image and matching manifest with an
+already-admitted artifact. It uses that artifact's exact declared file catalog
+and digests; it performs no ordinary worker re-admission in production.
+The source profile explicitly distinguishes normal Build's two diagnostic files:
+`schema.sql` must equal the admitted schema's generated DDL; `verification.json`
+is unused, bounded regular-file DATA. Neither enters the runtime archive or
+supplies verification authority. The output remains exactly the canonical runtime
+catalog; every other extra input file refuses. Every
+copied input/output byte, complete source/output inventory, path, type, mode and
+creator is checked. Symlinks, aliases, unknown members and unsupported provider,
+companion or runtime-generation graphs refuse rather than being stripped.
+
+Encoding and readback progress in bounded64KiB steps with a finite work limit,
+private exclusive output files, no-follow/nonblocking reads, retained identities
+and absorbing refusal. `backup.json` is the last local member. The root contains
+only `app.sqlite`, `backup.json` and the selected bundled artifact. Files and
+directories are synced before a positive historical result. The shared pure
+native inventory/commitment format is the same one used by existing restore
+capture, not a parallel archive format.
+
+The returned path, manifest and commitment are historical DATA/custody. They
+supply neither backup permission nor a native completed-handoff witness, current
+epoch, writer or restore approval. A failed check stays refused after repair.
+No offsite upload or COMPLETE publication is performed by these components.
+
+## Genuine-driver obligations and qualification
+
+The future driver must retain its genuine original, parent, physical cohort,
+counter and App exclusion around constructors, every explicit copy/encoding
+step and final verification. Close the actual source transaction before artifact
+or filesystem work; retain and close/postcheck the real protected source
+Connection before releasing its actual owner. Closing the component's historical
+RAM connection is not that source close. Native signing/transfer/final posts and
+consuming handoff remain separate unsupplied work. Existing five-second originals
+and all resource bounds remain unchanged; no timing fitness is claimed here.
+
+Tests use real SQLite and an independent committed/pending oracle. Generated
+histories reopen standalone output images, replay twice and retain complete,
+bounded gzip counterexamples via the existing CI path. Rows, owners, environment
+and underlying error text are not retained. Header/content mutations, creator
+and alias loss, no-retry Busy, abandonment/unwind and post-completion misuse are
+negative controls. These are portable components, not genuine native owners.
+
+The normal F/Reports fixture case executes the actual archive encoder, reopens
+its produced artifact/database through the canonical verifier and exercises
+irreversible output-tamper refusal twice. Full verification requires the normal
+F Build and this artifact-dependent case; FAST retains its declared exclusion.
+Local component success does not qualify Controller/Shell/F or a live backup.

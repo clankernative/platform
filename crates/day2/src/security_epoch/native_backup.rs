@@ -16,6 +16,10 @@ use super::restore_staging::{
     MAX_BYTES, image_shape, memory_shape, require_no_runtime_generation_objects,
 };
 
+mod archive;
+mod files;
+mod standalone;
+
 const STEP_PAGES: i32 = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,27 +155,6 @@ impl MemorySnapshot {
             db: self.db,
             expected_bytes: self.expected_bytes,
         })
-    }
-}
-
-impl SnapshotContent {
-    fn into_image(mut self) -> Result<SnapshotImage> {
-        // SQLite's memory backup preserves a WAL source's 2/2 format bytes.
-        // MEMORY mode does not convert them. Keep the standalone guard intact:
-        // WAL export is unfinished; no header edits, VACUUM or file fallback.
-        let actual = memory_shape(&self.db, Some(self.expected_bytes))?;
-        let serialized = self.db.serialize(MAIN_DB)?;
-        ensure!(serialized.len() == actual, "backup_snapshot_length");
-        image_shape(&serialized)?;
-        let bytes = Zeroizing::new(serialized.to_vec());
-        drop(serialized);
-        match self.db.close() {
-            Ok(()) => Ok(SnapshotImage { bytes }),
-            Err((db, _)) => {
-                drop(db);
-                anyhow::bail!("backup_snapshot_memory_close")
-            }
-        }
     }
 }
 
