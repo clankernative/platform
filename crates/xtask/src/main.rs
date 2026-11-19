@@ -872,9 +872,9 @@ fn main() -> Result<()> {
             const USAGE: &str = "usage: xtask build-receipt SOURCE NEW_RECEIPT [SEED CASES]";
             let source = PathBuf::from(args.next().context(USAGE)?);
             let receipt = PathBuf::from(args.next().context(USAGE)?);
-            // A requested profile replaces the default required verification;
-            // `platform check` reads its result from the receipt's summary, which
-            // the build returns. The evidence itself can be tens of megabytes.
+            // A requested profile replaces the default required verification.
+            // Either way the receipt carries the build's verification summary;
+            // the evidence itself can be tens of megabytes.
             let requested = match (args.next(), args.next()) {
                 (None, None) => None,
                 (Some(seed), Some(cases)) => Some(build_native::VerificationProfile::requested(
@@ -895,20 +895,12 @@ fn main() -> Result<()> {
                 None,
                 requested.unwrap_or_default(),
             )?;
-            let value = if requested.is_some() {
-                let mut verification = serde_json::to_value(&built.verification)?;
-                verification["evidence"] =
-                    serde_json::json!(built.artifact.join("verification.json"));
-                serde_json::json!({ "artifact": built.artifact, "verification": verification })
-            } else {
-                serde_json::json!({ "artifact": built.artifact })
-            };
             use std::io::Write;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(receipt)?;
-            file.write_all(&serde_json::to_vec(&value)?)?;
+            file.write_all(&serde_json::to_vec(&built)?)?;
             file.sync_all()?;
         }
         "cli" => {

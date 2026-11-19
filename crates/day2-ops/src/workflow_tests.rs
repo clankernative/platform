@@ -1173,7 +1173,11 @@ fn failed_watched_build_recovers_without_pausing_the_working_server() -> Result<
                     if builds == 2 {
                         bail!("invalid edited Roc source")
                     }
-                    Ok(json!({"artifact":"/admitted"}))
+                    Ok(json!({"artifact":"/admitted","verification":{
+                        "artifact":"sha256:0000","seed":"3664912422","examples":1,
+                        "generated":2,"checks":["command-trace-replay"],
+                        "evidence":"/admitted/verification.json",
+                    }}))
                 }
                 "local-open" => Ok(json!({"fresh":true})),
                 "local-wait" => {

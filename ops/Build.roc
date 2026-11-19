@@ -1,11 +1,12 @@
 import Capability
 
 Build :: [].{
-	Receipt : { artifact : Str }
-
+	# What the build's required verification proved, and where the selected
+	# artifact keeps the full evidence.
 	Verification : { artifact : Str, seed : Str, examples : U64, generated : U64, checks : List(Str), evidence : Str }
 
-	Verified : { artifact : Str, verification : Verification }
+	# Every build selects one artifact after its required verification.
+	Receipt : { artifact : Str, verification : Verification }
 
 	source! : Str, (Str => Try(Str, Str)) => Try(Receipt, Str)
 	source! = |source, host!| {
@@ -16,12 +17,12 @@ Build :: [].{
 	}
 
 	# The same build, with the requested seed and case count (at least the build's
-	# own two) as its required verification. Its summary is the verified artifact's.
-	checked! : Str, U64, U64, (Str => Try(Str, Str)) => Try(Verified, Str)
+	# own two) as its required verification.
+	checked! : Str, U64, U64, (Str => Try(Str, Str)) => Try(Receipt, Str)
 	checked! = |source, seed, cases, host!| {
 		request = { source: source, seed: seed.to_str(), cases: cases }
 		raw = Capability.call!("build-source", Json.to_str(request), host!)?
-		Json.parse(raw).map_err(|_| "invalid verified build receipt")
+		Json.parse(raw).map_err(|_| "invalid build receipt")
 	}
 
 	recipe! : (Str => Try(Str, Str)) => Try(Str, Str)

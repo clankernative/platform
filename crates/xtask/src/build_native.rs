@@ -55,7 +55,7 @@ impl Default for VerificationProfile {
 /// receives this summary from the build that produced it instead of reading the
 /// evidence back.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct VerificationSummary {
+struct VerificationSummary {
     artifact: String,
     seed: String,
     examples: usize,
@@ -75,10 +75,33 @@ impl VerificationSummary {
     }
 }
 
-/// The selected artifact and its required verification.
+/// The build receipt: the selected artifact and its required verification.
+/// `platform build` and `platform check` both receive it as ops/Build.roc's
+/// `Receipt`.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Built {
     pub(crate) artifact: PathBuf,
-    pub(crate) verification: VerificationSummary,
+    verification: Verification,
+}
+
+/// The summary, and where the selected artifact keeps the full evidence.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+struct Verification {
+    #[serde(flatten)]
+    summary: VerificationSummary,
+    evidence: PathBuf,
+}
+
+impl Built {
+    fn selected(artifact: PathBuf, summary: VerificationSummary) -> Self {
+        Self {
+            verification: Verification {
+                summary,
+                evidence: artifact.join("verification.json"),
+            },
+            artifact,
+        }
+    }
 }
 
 struct Prepared {
@@ -1029,9 +1052,12 @@ pub fn execute(
                         evidence.verification_complete,
                         "application verification obligations incomplete"
                     );
+                    // Compact: indentation alone more than doubled Home's evidence
+                    // (74 MB pretty, 34 MB compact), and the checked CI artifact
+                    // that carries it has a 128 MiB budget.
                     fs::write(
                         artifact.join("verification.json"),
-                        serde_json::to_vec_pretty(&evidence)?,
+                        serde_json::to_vec(&evidence)?,
                     )?;
                     verified = Some(VerificationSummary::of(&evidence));
                 }
@@ -1088,11 +1114,9 @@ pub fn execute(
         receipt["artifact"].as_str() == artifact.to_str(),
         "workflow build receipt differs from published artifact"
     );
-    Ok(Built {
-        artifact,
-        // build-select requires build-verify, which records the summary.
-        verification: verified.context("workflow omitted required application verification")?,
-    })
+    // build-select requires build-verify, which records the summary.
+    let summary = verified.context("workflow omitted required application verification")?;
+    Ok(Built::selected(artifact, summary))
 }
 
 #[cfg(test)]
@@ -1120,7 +1144,33 @@ mod verification_profile_tests {
     }
 
     #[test]
-    fn the_check_summary_carries_no_traces_or_snapshot() -> Result<()> {
+    fn the_receipt_summarizes_evidence_beyond_any_read_budget() -> Result<()> {
+        // A real trace's shape, with a result big enough that the evidence
+        // exceeds the 4 MiB `decode_evidence` budget #492 read it back through.
+        let trace: day2::protocol::Trace = serde_json::from_value(json!({
+            "format": 2,
+            "artifact": "sha256:artifact",
+            "scope": "localdev/disposable/app",
+            "request": {
+                "operation": "home.current_identity",
+                "input": "{}",
+                "context": {
+                    "invocation_id": "example-80",
+                    "actor": "developer",
+                    "now": 1_700_000_080,
+                    "authentication": "request",
+                    "caller": [],
+                    "authenticated": "",
+                    "delegation_rule": "",
+                },
+                "observations": [],
+            },
+            "outcome": {
+                "status": "success",
+                "result": { "trace-only": "x".repeat(3 << 20) },
+                "error": "",
+            },
+        }))?;
         let evidence = day2::development::Evidence {
             format: 1,
             artifact: "sha256:artifact".into(),
@@ -1129,24 +1179,33 @@ mod verification_profile_tests {
             examples: 3,
             generated: 136,
             checks: vec!["examples".into(), "generated".into()],
-            traces: Vec::new(),
-            // Traces and the snapshot make real evidence tens of megabytes
-            // (Home's is 44 MB at two cases); none of it is the summary's.
-            snapshot: json!({ "items": vec!["snapshot"; 1024] }),
+            traces: vec![trace.clone()],
+            snapshot: json!({ "snapshot-only": true }),
             failure: None,
             obligations: BTreeMap::from([("create".into(), 4)]),
             setup_counts: BTreeMap::new(),
             verification_complete: true,
-            error_traces: Vec::new(),
+            error_traces: vec![trace],
         };
+        ensure!(serde_json::to_vec(&evidence)?.len() > 4 << 20);
+        let receipt = serde_json::to_vec(&Built::selected(
+            PathBuf::from("/platform/artifacts/0000"),
+            VerificationSummary::of(&evidence),
+        ))?;
+        // The receipt fits the ordinary JSON budget and is exactly the shape
+        // ops/Build.roc's `Receipt` decodes.
         assert_eq!(
-            serde_json::to_value(VerificationSummary::of(&evidence))?,
+            day2::json::decode::<Value>(&receipt)?,
             json!({
-                "artifact": "sha256:artifact",
-                "seed": "42",
-                "examples": 3,
-                "generated": 136,
-                "checks": ["examples", "generated"],
+                "artifact": "/platform/artifacts/0000",
+                "verification": {
+                    "artifact": "sha256:artifact",
+                    "seed": "42",
+                    "examples": 3,
+                    "generated": 136,
+                    "checks": ["examples", "generated"],
+                    "evidence": "/platform/artifacts/0000/verification.json",
+                },
             })
         );
         Ok(())
