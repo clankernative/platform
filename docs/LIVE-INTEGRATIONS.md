@@ -82,7 +82,10 @@ grantee domains a `google_workspace_domain` resource names.
 `google_workspace.calendar.v1`, `calendar_events.v1` and `calendar_event.v1`
 read a calendar and one group's role in its ACL, one page of events in a window
 of at most 31 days, and one event, by domain-wide delegation as the resource's
-`calendar_reader` with exactly each action's Calendar scopes. The token flow is
+`calendar_reader` with exactly each action's Calendar scopes. A calendar is in
+play only when its ACL gives the reader its own `writer` or `owner` rule, which
+every Calendar action reads first; visibility through a group, the domain or
+the public is `NotShared`. The token flow is
 the shared `google_auth` module Workspace Directory also uses; the adapter reaches
 Google through a request-level port, and the simulated port answers the same
 requests from `google_workspace.simulated.sqlite`. See
