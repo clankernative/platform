@@ -312,14 +312,11 @@ fn check_verifies_the_extension_release_before_building() -> Result<()> {
 
 #[test]
 fn check_is_one_build_whose_required_verification_uses_the_requested_campaign() -> Result<()> {
-    let summary = json!({
-        "artifact": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "seed": "42",
-        "examples": 3,
-        "generated": 136,
-        "checks": ["empty-state-properties", "command-trace-replay"],
-        "evidence": "/platform/artifacts/0000/verification.json",
-    });
+    let built = build_receipt(
+        "/platform/artifacts/0000",
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "42",
+    );
     let mut effects = Vec::new();
     let receipt = automation::run(
         &automation::runner()?,
@@ -332,7 +329,7 @@ fn check_is_one_build_whose_required_verification_uses_the_requested_campaign() 
                         request.decode::<Value>()?,
                         json!({"source":"fixture-source","seed":"42","cases":4})
                     );
-                    Ok(json!({"artifact":"/platform/artifacts/0000","verification":summary}))
+                    Ok(serde_json::to_value(&built)?)
                 }
                 "chrome-extension-verify" => Ok(json!({"declared":false})),
                 // A second campaign would start with dev-create.
@@ -341,7 +338,7 @@ fn check_is_one_build_whose_required_verification_uses_the_requested_campaign() 
         },
     )?;
     assert_eq!(effects, ["chrome-extension-verify", "build-source"]);
-    assert_eq!(receipt, summary);
+    assert_eq!(receipt, serde_json::to_value(&built.verification)?);
     Ok(())
 }
 
@@ -1173,13 +1170,17 @@ fn failed_watched_build_recovers_without_pausing_the_working_server() -> Result<
                     if builds == 2 {
                         bail!("invalid edited Roc source")
                     }
-                    Ok(json!({"artifact":"/admitted","verification":{
-                        "artifact":"sha256:0000","seed":"3664912422","examples":1,
-                        "generated":2,"checks":["command-trace-replay"],
-                        "evidence":"/admitted/verification.json",
-                    }}))
+                    Ok(serde_json::to_value(build_receipt(
+                        "/admitted",
+                        "sha256:0000",
+                        "3664912422",
+                    ))?)
                 }
-                "local-open" => Ok(json!({"fresh":true})),
+                "local-open" => {
+                    // Only the selected path, not the receipt's verification.
+                    assert_eq!(request.decode::<Value>()?, json!({"artifact":"/admitted"}));
+                    Ok(json!({"fresh":true}))
+                }
                 "local-wait" => {
                     waits += 1;
                     Ok(json!({"changed":waits==1,"stopped":waits==2}))
@@ -1697,4 +1698,23 @@ fn policy_aborted_runtime_retry_only_cleans_its_never_public_candidate() -> Resu
     )));
     assert_eq!(steps.last().map(String::as_str), Some("maintenance-finish"));
     Ok(())
+}
+
+/// A build receipt of the shared type the xtask build writes and `build-source`
+/// decodes, so these tests exercise ops/Build.roc's `Receipt` against it.
+fn build_receipt(artifact: &str, id: &str, seed: &str) -> day2::development::BuildReceipt {
+    day2::development::BuildReceipt {
+        artifact: artifact.into(),
+        verification: day2::development::BuildVerification {
+            artifact: id.into(),
+            seed: seed.into(),
+            examples: 3,
+            generated: 136,
+            checks: vec![
+                "empty-state-properties".into(),
+                "command-trace-replay".into(),
+            ],
+            evidence: std::path::Path::new(artifact).join("verification.json"),
+        },
+    }
 }

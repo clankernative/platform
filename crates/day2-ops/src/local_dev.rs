@@ -54,6 +54,14 @@ struct Config {
     watch: bool,
 }
 
+/// The built artifact `local-open` and `local-migrate` serve: only the path
+/// from the build receipt, never its verification summary.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Selected {
+    artifact: PathBuf,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Current {
@@ -1058,9 +1066,7 @@ impl Session {
             "local-follow" => self.logs(true),
             "local-launch" => self.launch(value),
             "local-prepare" => self.prepare(),
-            "local-open" => self.open(Path::new(
-                value["artifact"].as_str().context("artifact path")?,
-            )),
+            "local-open" => self.open(&serde_json::from_value::<Selected>(value)?.artifact),
             "local-import" => self.import(),
             "local-campaign" => {
                 ensure!(
@@ -1107,9 +1113,7 @@ impl Session {
                 Ok(json!({}))
             }
             "local-snapshot" => self.snapshot(),
-            "local-migrate" => self.migrate(Path::new(
-                value["artifact"].as_str().context("artifact path")?,
-            )),
+            "local-migrate" => self.migrate(&serde_json::from_value::<Selected>(value)?.artifact),
             "local-activate" => self.activate(),
             "local-wait" => self.wait(),
             "local-error" => {

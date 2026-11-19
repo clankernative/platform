@@ -3652,6 +3652,32 @@ pub struct Evidence {
     pub error_traces: Vec<crate::protocol::Trace>,
 }
 
+/// A native build's receipt: the artifact it selected and what that artifact's
+/// required verification proved. The full evidence stays in the artifact's
+/// verification.json, which grows with the app and the campaign (tens of
+/// megabytes for Home), so the receipt summarizes it. The xtask build writes
+/// this, the `build-source` capability decodes it, and ops/Build.roc's `Receipt`
+/// reads it, so all three share this one shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildReceipt {
+    pub artifact: PathBuf,
+    pub verification: BuildVerification,
+}
+
+/// The required verification's summary, without traces or the snapshot, and
+/// where the selected artifact keeps the full evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildVerification {
+    pub artifact: String,
+    pub seed: String,
+    pub examples: usize,
+    pub generated: usize,
+    pub checks: Vec<String>,
+    pub evidence: PathBuf,
+}
+
 /// In-memory capabilities for Check.roc. Native receipts cannot claim omitted
 /// examples, generated cases, replay checks, or incomplete command/property checks.
 pub struct Campaign {

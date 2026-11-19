@@ -49,12 +49,8 @@ impl Default for VerificationProfile {
     }
 }
 
-/// What a build's required verification proved, without its traces. The full
-/// evidence stays in the selected artifact's verification.json, which grows with
-/// the app and the campaign (tens of megabytes for Home), so `platform check`
-/// receives this summary from the build that produced it instead of reading the
-/// evidence back.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+/// What a build's required verification proved, without its traces, recorded
+/// when it passes and before selection decides where the artifact lives.
 struct VerificationSummary {
     artifact: String,
     seed: String,
@@ -73,30 +69,17 @@ impl VerificationSummary {
             checks: evidence.checks.clone(),
         }
     }
-}
 
-/// The build receipt: the selected artifact and its required verification.
-/// `platform build` and `platform check` both receive it as ops/Build.roc's
-/// `Receipt`.
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct Built {
-    pub(crate) artifact: PathBuf,
-    verification: Verification,
-}
-
-/// The summary, and where the selected artifact keeps the full evidence.
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
-struct Verification {
-    #[serde(flatten)]
-    summary: VerificationSummary,
-    evidence: PathBuf,
-}
-
-impl Built {
-    fn selected(artifact: PathBuf, summary: VerificationSummary) -> Self {
-        Self {
-            verification: Verification {
-                summary,
+    /// The receipt for the selected artifact, whose verification.json holds the
+    /// evidence this summarizes.
+    fn selected(self, artifact: PathBuf) -> day2::development::BuildReceipt {
+        day2::development::BuildReceipt {
+            verification: day2::development::BuildVerification {
+                artifact: self.artifact,
+                seed: self.seed,
+                examples: self.examples,
+                generated: self.generated,
+                checks: self.checks,
                 evidence: artifact.join("verification.json"),
             },
             artifact,
@@ -736,7 +719,7 @@ pub fn execute(
     import_context: Option<&BuildImportContext>,
     runner: &Path,
     campaign: BuildCampaign,
-) -> Result<Built> {
+) -> Result<day2::development::BuildReceipt> {
     let BuildCampaign {
         budget,
         verification,
@@ -1116,7 +1099,7 @@ pub fn execute(
     );
     // build-select requires build-verify, which records the summary.
     let summary = verified.context("workflow omitted required application verification")?;
-    Ok(Built::selected(artifact, summary))
+    Ok(summary.selected(artifact))
 }
 
 #[cfg(test)]
@@ -1144,7 +1127,7 @@ mod verification_profile_tests {
     }
 
     #[test]
-    fn the_receipt_summarizes_evidence_beyond_any_read_budget() -> Result<()> {
+    fn the_receipt_summarizes_evidence_over_the_evidence_read_budget() -> Result<()> {
         // A real trace's shape, with a result big enough that the evidence
         // exceeds the 4 MiB `decode_evidence` budget #492 read it back through.
         let trace: day2::protocol::Trace = serde_json::from_value(json!({
@@ -1188,14 +1171,18 @@ mod verification_profile_tests {
             error_traces: vec![trace],
         };
         ensure!(serde_json::to_vec(&evidence)?.len() > 4 << 20);
-        let receipt = serde_json::to_vec(&Built::selected(
-            PathBuf::from("/platform/artifacts/0000"),
-            VerificationSummary::of(&evidence),
-        ))?;
-        // The receipt fits the ordinary JSON budget and is exactly the shape
-        // ops/Build.roc's `Receipt` decodes.
+        let selected =
+            VerificationSummary::of(&evidence).selected(PathBuf::from("/platform/artifacts/0000"));
+        let receipt = serde_json::to_vec(&selected)?;
+        // The receipt fits the ordinary JSON budget that `build-source` decodes
+        // it under. The day2-ops workflow tests feed this same type to
+        // ops/Build.roc's `Receipt`.
         assert_eq!(
-            day2::json::decode::<Value>(&receipt)?,
+            day2::json::decode::<day2::development::BuildReceipt>(&receipt)?,
+            selected
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&receipt)?,
             json!({
                 "artifact": "/platform/artifacts/0000",
                 "verification": {

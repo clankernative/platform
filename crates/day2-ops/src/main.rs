@@ -512,7 +512,9 @@ impl Operations {
                 } else {
                     process::run(&mut builder, &root, &output.join("build.log"), deadline)?;
                 }
-                Ok(serde_json::from_slice(&fs::read(receipt)?)?)
+                let receipt: day2::development::BuildReceipt =
+                    day2::json::decode(&fs::read(receipt)?)?;
+                Ok(serde_json::to_value(receipt)?)
             }
             "dev-create" => {
                 #[derive(Deserialize)]

@@ -281,7 +281,7 @@ fn build_recipe(
     isolated_job: Option<&Path>,
     imports: Option<&BuildImportContext>,
     verification: build_native::VerificationProfile,
-) -> Result<build_native::Built> {
+) -> Result<day2::development::BuildReceipt> {
     let budget = BuildCampaignBudget::from_environment()?;
     let runner = if let Some(job) = isolated_job {
         for (name, expected) in day2::automation::SOURCES {
@@ -875,26 +875,19 @@ fn main() -> Result<()> {
             // A requested profile replaces the default required verification.
             // Either way the receipt carries the build's verification summary;
             // the evidence itself can be tens of megabytes.
-            let requested = match (args.next(), args.next()) {
-                (None, None) => None,
-                (Some(seed), Some(cases)) => Some(build_native::VerificationProfile::requested(
+            let verification = match (args.next(), args.next()) {
+                (None, None) => build_native::VerificationProfile::default(),
+                (Some(seed), Some(cases)) => build_native::VerificationProfile::requested(
                     seed.parse().context("seed must be a U64")?,
                     cases.parse().context("case count must be 1..100")?,
-                )?),
+                )?,
                 _ => bail!(USAGE),
             };
             ensure!(
                 args.next().is_none() && !receipt.exists(),
                 "new build receipt required"
             );
-            let built = build_recipe(
-                &root,
-                &source,
-                None,
-                None,
-                None,
-                requested.unwrap_or_default(),
-            )?;
+            let built = build_recipe(&root, &source, None, None, None, verification)?;
             use std::io::Write;
             let mut file = fs::OpenOptions::new()
                 .write(true)
