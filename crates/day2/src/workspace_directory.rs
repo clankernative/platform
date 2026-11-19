@@ -4,6 +4,7 @@
 //! Provider parsing and capture integrity live here; Home owns all path policy,
 //! ancestry decisions, persistence and retention of what it keeps.
 use anyhow::{Context, Result, ensure};
+#[cfg(test)]
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -29,9 +30,9 @@ pub const USER_READ_SCOPE: &str = "https://www.googleapis.com/auth/admin.directo
 pub const ORG_UNIT_READ_SCOPE: &str =
     "https://www.googleapis.com/auth/admin.directory.orgunit.readonly";
 const DIRECTORY_ORIGIN: &str = "https://admin.googleapis.com";
-const IAM_ORIGIN: &str = "https://iamcredentials.googleapis.com";
-const OAUTH_ORIGIN: &str = "https://oauth2.googleapis.com";
-const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+#[cfg(test)]
+use crate::google_auth::{GOOGLE_TOKEN_ENDPOINT, IamToken, validate_iam_token_shape};
+use crate::google_auth::{IAM_ORIGIN, OAUTH_ORIGIN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureMode {
@@ -520,15 +521,13 @@ fn bounded(value: &str, limit: usize, error: &'static str) -> Result<()> {
     Ok(())
 }
 
-const METADATA_ORIGIN: &str = "http://metadata.google.internal";
-
 /// Native, production-fixed provider adapter. All URLs and methods are built
 /// here; no app field or resource can select an origin, path, or HTTP method.
 pub struct NativeDirectoryPort {
     client: reqwest::blocking::Client,
     directory_origin: reqwest::Url,
     customer_id: String,
-    access_token: String,
+    access_token: crate::google_auth::AccessToken,
 }
 
 impl NativeDirectoryPort {
@@ -548,9 +547,7 @@ impl NativeDirectoryPort {
             &client,
             &plan,
             crate::oauth::effects::wall_time()?,
-            reqwest::Url::parse(METADATA_ORIGIN)?,
-            reqwest::Url::parse(IAM_ORIGIN)?,
-            reqwest::Url::parse(&format!("{OAUTH_ORIGIN}/token"))?,
+            &crate::google_auth::Origins::production()?,
             mode,
         )?;
         Ok(Self {
@@ -599,9 +596,7 @@ impl NativeDirectoryPort {
             &client,
             &plan,
             now,
-            metadata_origin,
-            iam_origin,
-            oauth_endpoint,
+            &crate::google_auth::Origins::fixture(metadata_origin, iam_origin, oauth_endpoint),
             mode,
         )?;
         Ok(Self {
@@ -614,9 +609,11 @@ impl NativeDirectoryPort {
 
     fn get(&self, url: reqwest::Url, max: usize, endpoint: &'static str) -> Result<Vec<u8>> {
         let mut timing = crate::request_timing::provider("workspace_directory", endpoint);
-        let mut authorization =
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.access_token))
-                .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
+        let mut authorization = reqwest::header::HeaderValue::from_str(&format!(
+            "Bearer {}",
+            self.access_token.bearer()
+        ))
+        .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
         authorization.set_sensitive(true);
         let response = self
             .client
@@ -650,189 +647,65 @@ fn bounded_response(response: reqwest::blocking::Response, max: usize) -> Result
     Ok(bytes)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IamToken {
-    access_token: Option<String>,
-    signed_jwt: Option<String>,
-    key_id: Option<String>,
-}
-
-fn validate_iam_token_shape(token: &IamToken, delegated: bool) -> Result<()> {
-    let matches_plan = if delegated {
-        token.access_token.is_none()
-            && token.signed_jwt.is_some()
-            && token.key_id.as_ref().is_some_and(|key| !key.is_empty())
-    } else {
-        token.access_token.is_some() && token.signed_jwt.is_none() && token.key_id.is_none()
-    };
-    ensure!(matches_plan, "workspace_directory_authentication_failed");
-    Ok(())
-}
-
+/// Token acquisition through the shared keyless flow, over this adapter's own
+/// fixed-origin client. Failures keep this provider's two stable codes.
 fn acquire_access_token(
     client: &reqwest::blocking::Client,
     plan: &AuthenticationPlan,
     now: i64,
-    metadata_origin: reqwest::Url,
-    iam_origin: reqwest::Url,
-    oauth_endpoint: reqwest::Url,
+    origins: &crate::google_auth::Origins,
     mode: CaptureMode,
-) -> Result<String> {
-    let metadata_url =
-        metadata_origin.join("/computeMetadata/v1/instance/service-accounts/default/token")?;
-    let mut timing = crate::request_timing::provider("workspace_directory", "metadata_token");
-    let metadata = client
-        .get(metadata_url)
-        .header("Metadata-Flavor", "Google")
-        .send()
-        .map_err(|_| anyhow::anyhow!("workspace_directory_workload_identity_unavailable"))?;
-    timing.status(metadata.status().as_u16());
-    ensure!(
-        metadata.status().is_success()
-            && metadata
-                .headers()
-                .get("Metadata-Flavor")
-                .is_some_and(|value| value == "Google"),
-        "workspace_directory_workload_identity_unavailable"
-    );
-    #[derive(Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    struct MetadataToken {
-        access_token: String,
-        token_type: String,
+) -> Result<crate::google_auth::AccessToken> {
+    struct Wire<'a> {
+        client: &'a reqwest::blocking::Client,
+        origins: &'a crate::google_auth::Origins,
     }
-    let body = bounded_response(metadata, 16 * 1024)?;
-    drop(timing);
-    let token: MetadataToken = crate::json::decode(&body)
-        .map_err(|_| anyhow::anyhow!("workspace_directory_workload_identity_unavailable"))?;
-    ensure!(
-        token.token_type == "Bearer"
-            && !token.access_token.is_empty()
-            && token.access_token.len() <= 8192
-            && token.access_token.bytes().all(|b| b.is_ascii_graphic()),
-        "workspace_directory_workload_identity_unavailable"
-    );
-    let (account, delegated_admin) = match plan {
-        AuthenticationPlan::DirectServiceAccount { service_account } => (service_account, None),
+    impl crate::google_auth::TokenWire for Wire<'_> {
+        fn exchange(
+            &mut self,
+            exchange: &crate::google_auth::Exchange<'_>,
+            max_bytes: usize,
+        ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+            crate::google_auth::send_native(
+                self.client,
+                self.origins,
+                "workspace_directory",
+                exchange,
+                max_bytes,
+            )
+        }
+    }
+    let (service_account, identity) = match plan {
+        AuthenticationPlan::DirectServiceAccount { service_account } => (
+            service_account.as_str(),
+            crate::google_auth::Identity::ServiceAccount,
+        ),
         AuthenticationPlan::DomainWideDelegation {
             service_account,
             delegated_admin,
-        } => (service_account, Some(delegated_admin.as_str())),
+        } => (
+            service_account.as_str(),
+            crate::google_auth::Identity::Delegated(delegated_admin),
+        ),
     };
-    let mut endpoint = iam_origin;
-    endpoint
-        .path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?
-        .clear()
-        .extend(["v1", "projects", "-", "serviceAccounts"])
-        .push(&format!(
-            "{account}:{}",
-            if delegated_admin.is_some() {
-                "signJwt"
-            } else {
-                "generateAccessToken"
-            }
-        ));
     let scopes = plan.scopes(mode);
-    let payload = if let Some(subject) = delegated_admin {
-        let claims = serde_json::json!({"iss":account,"sub":subject,"aud":GOOGLE_TOKEN_ENDPOINT,"iat":now,"exp":now.checked_add(300).ok_or_else(|| anyhow::anyhow!("workspace_directory_authentication_failed"))?,"scope":scopes.join(" ")});
-        serde_json::json!({"payload":serde_json::to_string(&claims)?})
-    } else {
-        serde_json::json!({"scope":scopes,"lifetime":"3600s"})
-    };
-    let mut iam_auth =
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.access_token))
-            .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
-    iam_auth.set_sensitive(true);
-    let request_body = serde_json::to_vec(&payload)?;
-    let mut timing = crate::request_timing::provider(
-        "workspace_directory",
-        if delegated_admin.is_some() {
-            "iam_sign_jwt"
-        } else {
-            "iam_token"
+    crate::google_auth::acquire(
+        &mut Wire { client, origins },
+        &crate::google_auth::TokenRequest {
+            service_account,
+            identity,
+            scopes: &scopes,
         },
-    );
-    let response = client
-        .post(endpoint)
-        .header(reqwest::header::AUTHORIZATION, iam_auth)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(request_body)
-        .send()
-        .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
-    timing.status(response.status().as_u16());
-    let body = bounded_response(response, 16 * 1024)?;
-    drop(timing);
-    let result: IamToken = crate::json::decode(&body)
-        .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
-    validate_iam_token_shape(&result, delegated_admin.is_some())?;
-    let access_token = if let Some(jwt) = result.signed_jwt {
-        ensure!(
-            jwt.len() <= 8192 && jwt.split('.').count() == 3,
-            "workspace_directory_authentication_failed"
-        );
-        let parts: Vec<_> = jwt.split('.').collect();
-        let header: serde_json::Value = crate::json::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[0])?,
-        )?;
-        let claims: serde_json::Value = crate::json::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1])?,
-        )?;
-        ensure!(
-            header["alg"] == "RS256"
-                && header["kid"].as_str() == result.key_id.as_deref()
-                && claims["iss"] == *account
-                && claims["sub"] == delegated_admin.unwrap_or_default()
-                && claims["aud"] == GOOGLE_TOKEN_ENDPOINT
-                && claims["iat"] == now
-                && now.checked_add(300) == claims["exp"].as_i64()
-                && claims["scope"] == scopes.join(" "),
-            "workspace_directory_authentication_failed"
-        );
-        ensure!(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(parts[2])?
-                .len()
-                >= 64,
-            "workspace_directory_authentication_failed"
-        );
-        let mut timing = crate::request_timing::provider("workspace_directory", "oauth_token");
-        let response = client
-            .post(oauth_endpoint)
-            .form(&[
-                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-                ("assertion", jwt.as_str()),
-            ])
-            .send()
-            .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
-        timing.status(response.status().as_u16());
-        let body = bounded_response(response, 16 * 1024)?;
-        drop(timing);
-        #[derive(Deserialize)]
-        struct OAuthToken {
-            access_token: String,
-            token_type: String,
-        }
-        let token: OAuthToken = crate::json::decode(&body)
-            .map_err(|_| anyhow::anyhow!("workspace_directory_authentication_failed"))?;
-        ensure!(
-            token.token_type == "Bearer",
-            "workspace_directory_authentication_failed"
-        );
-        token.access_token
-    } else {
-        result
-            .access_token
-            .ok_or_else(|| anyhow::anyhow!("workspace_directory_authentication_failed"))?
-    };
-    ensure!(
-        !access_token.is_empty()
-            && access_token.len() <= 8192
-            && access_token.bytes().all(|b| b.is_ascii_graphic()),
-        "workspace_directory_authentication_failed"
-    );
-    Ok(access_token)
+        now,
+    )
+    .map_err(|failure| {
+        anyhow::anyhow!(match failure {
+            crate::google_auth::Failure::WorkloadIdentityUnavailable => {
+                "workspace_directory_workload_identity_unavailable"
+            }
+            _ => "workspace_directory_authentication_failed",
+        })
+    })
 }
 
 impl DirectoryReadPort for NativeDirectoryPort {
