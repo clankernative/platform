@@ -1,63 +1,154 @@
-//! A seeded campaign of the share against an independent ordered model, as
-//! the Linear campaign runs (docs/LINEAR-SIMULATION.md): fixed seeds, every
-//! history run twice and compared, and a model that predicts every
-//! permission the world holds after every step. Histories compose meetings
-//! and rejoins, artifact progression, faults (lost replies among them),
-//! duplicate deliveries, forged organizers, another event's artifacts and a
-//! calendar leaving play. Failure bundles hold only a format, the campaign
-//! digest and the seed.
+//! A seeded campaign of the share against an independent ordered model,
+//! modelled on the Linear campaign (docs/LINEAR-SIMULATION.md): fixed seeds,
+//! every history run twice and compared, and a model that predicts every
+//! answer and every permission the world holds after every step. Histories
+//! compose meetings and rejoins, artifact progression, duplicate deliveries,
+//! forged organizers, aliases and unknown groups, another event of the same
+//! owner, a calendar leaving play, restricted sharing, and faults on the
+//! create that the attempt reconciles. A history ends at its first unknown
+//! outcome: its reservation stays held until an operator reconciles it,
+//! which the campaign does not model. Failure bundles hold only a format,
+//! the campaign digest and the seed.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SEEDS: u64 = 6;
-const STEPS: usize = 30;
-const GROUPS: [&str; 3] = [
-    "engineering@synthetic.example",
-    "platform@synthetic.example",
+const STEPS: usize = 40;
+const ENGINEERING: &str = "engineering@synthetic.example";
+const PLATFORM: &str = "platform@synthetic.example";
+/// An alias of engineering, and a group nobody has.
+const ALIAS: &str = "eng-alias@synthetic.example";
+const MISSING: &str = "missing@synthetic.example";
+const GROUPS: [&str; 5] = [
+    ENGINEERING,
+    PLATFORM,
     "empty@synthetic.example",
+    ALIAS,
+    MISSING,
 ];
 
-/// Every artifact the campaign shares, the event it belongs to, and that
-/// event's derived owner.
-const ARTIFACTS: [(&str, &str, &str); 5] = [
-    (
+/// The oracle: every artifact the campaign shares, written out rather than
+/// parsed from its name, with the event it belongs to and that event's
+/// derived owner.
+struct Artifact {
+    name: &'static str,
+    record: &'static str,
+    collection: &'static str,
+    id: &'static str,
+    event: &'static str,
+    owner: &'static str,
+}
+
+const fn artifact(
+    name: &'static str,
+    record: &'static str,
+    collection: &'static str,
+    id: &'static str,
+    event: &'static str,
+    owner: &'static str,
+) -> Artifact {
+    Artifact {
+        name,
+        record,
+        collection,
+        id,
+        event,
+        owner,
+    }
+}
+
+const ADA: &str = "ada@synthetic.example";
+const ARTIFACTS: [Artifact; 6] = [
+    artifact(
         "conferenceRecords/conf-standup-1/recordings/rec-1",
+        "conf-standup-1",
+        "recordings",
+        "rec-1",
         "standup0001",
-        "ada@synthetic.example",
+        ADA,
     ),
-    (
+    artifact(
         "conferenceRecords/conf-standup-1/transcripts/tr-1",
+        "conf-standup-1",
+        "transcripts",
+        "tr-1",
         "standup0001",
-        "ada@synthetic.example",
+        ADA,
     ),
-    (
+    artifact(
         "conferenceRecords/conf-standup-1/smartNotes/note-1",
+        "conf-standup-1",
+        "smartNotes",
+        "note-1",
         "standup0001",
-        "ada@synthetic.example",
+        ADA,
     ),
-    (
+    artifact(
         "conferenceRecords/conf-standup-2/recordings/rec-2",
+        "conf-standup-2",
+        "recordings",
+        "rec-2",
         "standup0001",
-        "ada@synthetic.example",
+        ADA,
     ),
-    (
+    artifact(
+        "conferenceRecords/conf-planning-1/recordings/rec-p",
+        "conf-planning-1",
+        "recordings",
+        "rec-p",
+        "planning0004",
+        ADA,
+    ),
+    artifact(
         "conferenceRecords/conf-review-1/recordings/rec-r",
+        "conf-review-1",
+        "recordings",
+        "rec-r",
         "review0002",
         "grace@synthetic.example",
     ),
 ];
+const EVENTS: [&str; 4] = ["standup0001", "planning0004", "review0002", "forged0001"];
 
 /// The world the model is independent of: the development organization, an
-/// event whose in-domain organizer did not create it, and a recording of the
-/// review that Meet has only started.
+/// event whose in-domain organizer did not create it, a second meeting of
+/// ada's with its own space, an alias of engineering, and a recording of the
+/// review that Meet has only started. Sharing one of ada's artifacts under
+/// the other of her events is refused only by the check that the artifact's
+/// record belongs to the event: as ada, Meet and Drive would both allow it.
 fn organization() -> GoogleWorkspaceWorld {
     let mut world = simulated::google_workspace_development_fixture();
     let calendar = world.calendars.get_mut(CALENDAR).unwrap();
     let mut forged = calendar.events[0].clone();
     forged.id = "forged0001".into();
     forged.creator = Some("grace@synthetic.example".into());
-    calendar.events.push(forged);
+    let mut planning = calendar.events[0].clone();
+    planning.id = "planning0004".into();
+    planning.start = Some(simulated::GoogleTime::at("2026-01-08T09:00:00Z"));
+    planning.end = Some(simulated::GoogleTime::at("2026-01-08T09:30:00Z"));
+    planning.conference_id = Some("pqr-stuv-wxy".into());
+    calendar.events.extend([forged, planning]);
+    world.spaces.insert(
+        "spacePlanning1".into(),
+        simulated::GoogleSpace {
+            meeting_code: "pqr-stuv-wxy".into(),
+            owner: ADA.into(),
+        },
+    );
+    world.conference_records.insert(
+        "conf-planning-1".into(),
+        simulated::GoogleConferenceRecord {
+            space: "spacePlanning1".into(),
+            start_time: "2026-01-08T09:01:00Z".into(),
+            recordings: vec![simulated::GoogleArtifact {
+                id: "rec-p".into(),
+                state: "ENDED".into(),
+                file: None,
+            }],
+            ..Default::default()
+        },
+    );
     world
         .conference_records
         .get_mut("conf-review-1")
@@ -69,27 +160,40 @@ fn organization() -> GoogleWorkspaceWorld {
             file: None,
         });
     world
+        .groups
+        .get_mut(ENGINEERING)
+        .unwrap()
+        .aliases
+        .insert(ALIAS.into());
+    world
 }
 
 /// What the model knows: each artifact's state, whether the calendar is in
-/// play, and every share that has landed.
+/// play, whether sharing is restricted, and every share that has landed.
 struct Model {
     states: BTreeMap<&'static str, &'static str>,
     in_play: bool,
+    restricted: bool,
     shared: BTreeSet<(&'static str, &'static str)>,
 }
 
 impl Model {
     fn new() -> Self {
         Self {
-            states: BTreeMap::from([
-                (ARTIFACTS[0].0, "FILE_GENERATED"),
-                (ARTIFACTS[1].0, "FILE_GENERATED"),
-                (ARTIFACTS[2].0, "ENDED"),
-                (ARTIFACTS[3].0, "STARTED"),
-                (ARTIFACTS[4].0, "STARTED"),
-            ]),
+            states: ARTIFACTS
+                .iter()
+                .zip([
+                    "FILE_GENERATED",
+                    "FILE_GENERATED",
+                    "ENDED",
+                    "STARTED",
+                    "ENDED",
+                    "STARTED",
+                ])
+                .map(|(artifact, state)| (artifact.name, state))
+                .collect(),
             in_play: true,
+            restricted: false,
             shared: BTreeSet::new(),
         }
     }
@@ -98,44 +202,45 @@ impl Model {
     fn share(
         &mut self,
         event: &str,
-        artifact: &'static str,
+        artifact: &Artifact,
         group: &'static str,
         fault: Option<SimulatedFault>,
     ) -> &'static str {
-        let owned_by = ARTIFACTS
-            .iter()
-            .find(|(name, ..)| *name == artifact)
-            .unwrap()
-            .1;
         if !self.in_play {
             return "NotShared";
         }
         if event == "forged0001" {
             return "NoOwner";
         }
-        if owned_by != event {
+        match group {
+            ALIAS => return "GroupNotPrimary",
+            MISSING => return "GroupNotFound",
+            _ => {}
+        }
+        if artifact.event != event {
             return "NotFound";
         }
-        if self.states[artifact] != "FILE_GENERATED" {
+        if self.states[artifact.name] != "FILE_GENERATED" {
             return "NotReady";
         }
-        if self.shared.contains(&(artifact, group)) {
+        let key = (artifact.name, group);
+        if self.shared.contains(&key) {
             return "AlreadyShared";
         }
-        match fault {
-            // Served, so the permission lands; the reply is lost.
-            Some(SimulatedFault::ReplyLost) => {
-                self.shared.insert((artifact, group));
-                "share_outcome_unknown"
-            }
-            // Refused before it was served: nothing lands, nothing is known.
-            Some(SimulatedFault::ServerError) => "share_outcome_unknown",
-            Some(_) => "denied",
-            None => {
-                self.shared.insert((artifact, group));
-                "Shared"
-            }
+        // A served create lands unless sharing is restricted; the attempt
+        // lists again whenever it cannot read the answer.
+        let lands = !self.restricted;
+        let answer = match fault {
+            None if self.restricted => "SharingRefused",
+            None | Some(SimulatedFault::ReplyLost) if lands => "Shared",
+            Some(SimulatedFault::Conflict) if lands => "AlreadyShared",
+            Some(SimulatedFault::Denied) => return "denied",
+            _ => return "share_outcome_unknown",
+        };
+        if lands && answer != "SharingRefused" {
+            self.shared.insert(key);
         }
+        answer
     }
 
     fn advance(&mut self, artifact: &'static str) {
@@ -147,21 +252,38 @@ impl Model {
     }
 }
 
-fn answer(result: &Result<String>) -> String {
-    match result {
-        Ok(json) => {
-            let value: serde_json::Value = serde_json::from_str(json).unwrap();
-            value
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| value.as_object().and_then(|map| map.keys().next().cloned()))
-                .unwrap_or_default()
+/// The world's group permissions as `(file, group, created by)`.
+fn group_permissions(world: &World) -> Vec<(String, String, String)> {
+    let state = world.state().world;
+    let mut found = Vec::new();
+    for (file, item) in &state.drive_files {
+        for permission in item.permissions.iter().filter(|p| p.kind == "group") {
+            found.push((
+                file.clone(),
+                permission.email_address.clone().unwrap_or_default(),
+                permission.created_by.clone().unwrap_or_default(),
+            ));
         }
-        Err(error) => error
-            .to_string()
-            .trim_start_matches("google_workspace_")
-            .to_owned(),
     }
+    found.sort();
+    found
+}
+
+/// The file Meet named for an artifact, looked up by the oracle's record,
+/// collection and ID.
+fn file_of(world: &World, artifact: &Artifact) -> Option<String> {
+    let state = world.state().world;
+    let record = state.conference_records.get(artifact.record)?;
+    let artifacts = match artifact.collection {
+        "recordings" => &record.recordings,
+        "smartNotes" => &record.smart_notes,
+        _ => &record.transcripts,
+    };
+    artifacts
+        .iter()
+        .find(|item| item.id == artifact.id)?
+        .file
+        .clone()
 }
 
 /// The world's group permissions must be exactly the model's shares: each a
@@ -170,51 +292,33 @@ fn answer(result: &Result<String>) -> String {
 /// twice.
 fn check(world: &World, model: &Model) -> Result<()> {
     let state = world.state().world;
-    let file_of = |artifact: &str| -> Option<String> {
-        let (record, collection, id) = crate::google_workspace_meet::parse_artifact_name(artifact)?;
-        let record = &state.conference_records[record];
-        let artifacts = match collection.segment() {
-            "recordings" => &record.recordings,
-            "smartNotes" => &record.smart_notes,
-            _ => &record.transcripts,
-        };
-        artifacts.iter().find(|item| item.id == id)?.file.clone()
-    };
     let mut expected: Vec<(String, String, String)> = model
         .shared
         .iter()
-        .map(|(artifact, group)| {
-            let owner = ARTIFACTS
-                .iter()
-                .find(|(name, ..)| name == artifact)
-                .unwrap()
-                .2;
+        .map(|(name, group)| {
+            let artifact = ARTIFACTS.iter().find(|item| item.name == *name).unwrap();
             (
-                file_of(artifact).unwrap_or_default(),
+                file_of(world, artifact).unwrap_or_default(),
                 (*group).to_owned(),
-                owner.to_owned(),
+                artifact.owner.to_owned(),
             )
         })
         .collect();
     expected.sort();
-    let mut actual = Vec::new();
-    for (file, found) in &state.drive_files {
+    for found in state.drive_files.values() {
         for permission in found.permissions.iter().filter(|p| p.kind == "group") {
-            let group = permission.email_address.clone().unwrap_or_default();
             ensure!(
                 permission.role == "reader"
                     && !permission.deleted
-                    && group.ends_with("@synthetic.example"),
+                    && permission
+                        .email_address
+                        .as_deref()
+                        .is_some_and(|group| group.ends_with("@synthetic.example")),
                 "a permission the platform must never create"
             );
-            actual.push((
-                file.clone(),
-                group,
-                permission.created_by.clone().unwrap_or_default(),
-            ));
         }
     }
-    actual.sort();
+    let actual = group_permissions(world);
     ensure!(
         actual == expected,
         "world {actual:?} differs from model {expected:?}"
@@ -222,8 +326,9 @@ fn check(world: &World, model: &Model) -> Result<()> {
     Ok(())
 }
 
-/// One history: a fixed prefix that witnesses every outcome, then seeded
-/// steps. Each step's observation is its kind and answer.
+/// One history: a fixed prefix that witnesses every definite outcome, then
+/// seeded steps until `STEPS` or the first unknown outcome. Each step's
+/// observation is its kind and answer.
 fn history(seed: u64) -> Result<Vec<String>> {
     let world = World::new(organization());
     let mut model = Model::new();
@@ -238,20 +343,34 @@ fn history(seed: u64) -> Result<Vec<String>> {
     let share = |world: &World,
                  model: &mut Model,
                  event: &'static str,
-                 artifact: &'static str,
+                 artifact: &Artifact,
                  group: &'static str,
                  fault: Option<SimulatedFault>|
      -> Result<String> {
         if let Some(fault) = fault {
             world.fault(simulated::GOOGLE_DRIVE_SHARE_ENDPOINT, fault);
         }
-        let plan = super::share::share(event, artifact, group);
-        let (result, meter) = world.observe(&plan);
+        let before = group_permissions(world);
+        let (result, meter) = world.observe(&super::share::share(event, artifact.name, group));
         let expected = model.share(event, artifact, group, fault);
-        let answered = answer(&result);
+        let answered = super::share::answer(&result);
+        // The world first, whatever the answer: `Shared` only when the group
+        // held nothing on that file before the attempt, and then exactly the
+        // permissions the model predicts.
+        let file = file_of(world, artifact).unwrap_or_default();
+        ensure!(
+            answered != "Shared"
+                || !before
+                    .iter()
+                    .any(|(held, holder, _)| *held == file && holder == group),
+            "Shared for a permission that already existed: {event} {}",
+            artifact.name
+        );
+        check(world, model)?;
         ensure!(
             answered == expected,
-            "share {event} {artifact} {group} {fault:?}: {answered} != {expected}"
+            "share {event} {} {group} {fault:?}: {answered} != {expected}",
+            artifact.name
         );
         ensure!(meter.unknown == (expected == "share_outcome_unknown"));
         // A fault the share never reached stays queued; clear it.
@@ -259,7 +378,6 @@ fn history(seed: u64) -> Result<Vec<String>> {
             state.faults.clear();
             Ok(())
         })?;
-        check(world, model)?;
         Ok(answered)
     };
     let in_play = |world: &World, model: &mut Model, play: bool| -> Result<String> {
@@ -278,50 +396,64 @@ fn history(seed: u64) -> Result<Vec<String>> {
         model.in_play = play;
         Ok(if play { "in_play" } else { "out_of_play" }.into())
     };
-    let [rec1, tr1, _, rec2, recr] = ARTIFACTS.map(|(name, ..)| name);
-    let [eng, platform, _] = GROUPS;
-    // Every outcome once, including a duplicate delivery and a reply lost
-    // after the permission landed, and its retry.
-    observed.push(share(&world, &mut model, "standup0001", rec1, eng, None)?);
-    observed.push(share(&world, &mut model, "standup0001", rec1, eng, None)?);
-    observed.push(share(&world, &mut model, "standup0001", rec2, eng, None)?);
-    observed.push(share(
-        &world,
-        &mut model,
-        "forged0001",
-        rec1,
-        platform,
-        None,
-    )?);
-    observed.push(share(&world, &mut model, "standup0001", recr, eng, None)?);
+    // Restricted sharing trusts only a domain no group is in.
+    let restrict = |world: &World, model: &mut Model, restricted: bool| -> Result<String> {
+        simulated::update_google_workspace(&world.database, SCOPE, |state| {
+            state.world.drive_trusted_domains = if restricted {
+                BTreeSet::from(["other.example".to_owned()])
+            } else {
+                BTreeSet::new()
+            };
+            Ok(())
+        })?;
+        model.restricted = restricted;
+        Ok(if restricted {
+            "restricted"
+        } else {
+            "unrestricted"
+        }
+        .into())
+    };
+    let [rec1, tr1, _, rec2, recp, recr] = &ARTIFACTS;
+    let (standup, planning) = ("standup0001", "planning0004");
+    use SimulatedFault::{Conflict, Denied, ReplyLost};
+    // Every definite outcome once: a duplicate delivery, a foreign artifact
+    // under each of the other events (first one of ada's own other meeting,
+    // which she could share, to a group it is not yet shared with), refused
+    // groups, the calendar out of play, restricted sharing, and a lost reply
+    // and a conflict that the attempt reconciles.
+    for (event, artifact, group, fault) in [
+        (standup, rec1, ENGINEERING, None),
+        (standup, rec1, ENGINEERING, None),
+        (standup, rec2, ENGINEERING, None),
+        ("forged0001", rec1, PLATFORM, None),
+        (planning, rec1, PLATFORM, None),
+        (standup, recr, ENGINEERING, None),
+        (standup, recp, ENGINEERING, None),
+        (standup, tr1, ALIAS, None),
+        (standup, tr1, MISSING, None),
+    ] {
+        observed.push(share(&world, &mut model, event, artifact, group, fault)?);
+    }
     observed.push(in_play(&world, &mut model, false)?);
-    observed.push(share(&world, &mut model, "standup0001", tr1, eng, None)?);
+    observed.push(share(&world, &mut model, standup, tr1, ENGINEERING, None)?);
     observed.push(in_play(&world, &mut model, true)?);
-    let lost = Some(SimulatedFault::ReplyLost);
-    observed.push(share(&world, &mut model, "standup0001", tr1, eng, lost)?);
-    observed.push(share(&world, &mut model, "standup0001", tr1, eng, None)?);
-    let failed = Some(SimulatedFault::ServerError);
-    observed.push(share(
-        &world,
-        &mut model,
-        "standup0001",
-        tr1,
-        platform,
-        failed,
-    )?);
-    let denied = Some(SimulatedFault::Denied);
-    observed.push(share(
-        &world,
-        &mut model,
-        "standup0001",
-        tr1,
-        platform,
-        denied,
-    )?);
+    observed.push(restrict(&world, &mut model, true)?);
+    observed.push(share(&world, &mut model, standup, tr1, ENGINEERING, None)?);
+    observed.push(share(&world, &mut model, standup, rec1, ENGINEERING, None)?);
+    observed.push(restrict(&world, &mut model, false)?);
+    for (artifact, group, fault) in [
+        (tr1, ENGINEERING, Some(ReplyLost)),
+        (tr1, ENGINEERING, None),
+        (tr1, PLATFORM, Some(Conflict)),
+        (rec1, PLATFORM, Some(Denied)),
+    ] {
+        observed.push(share(&world, &mut model, standup, artifact, group, fault)?);
+    }
     while observed.len() < STEPS {
-        match next(10) {
+        match next(12) {
             0 | 1 => {
-                let artifact = ARTIFACTS[next(ARTIFACTS.len())].0;
+                let artifact = ARTIFACTS[next(ARTIFACTS.len())].name;
                 if model.states[artifact] == "FILE_GENERATED" {
                     continue;
                 }
@@ -335,25 +467,37 @@ fn history(seed: u64) -> Result<Vec<String>> {
                 let play = !model.in_play;
                 observed.push(in_play(&world, &mut model, play)?);
             }
+            3 => {
+                let restricted = !model.restricted;
+                observed.push(restrict(&world, &mut model, restricted)?);
+            }
             choice => {
-                let (artifact, event, _) = ARTIFACTS[next(ARTIFACTS.len())];
+                let artifact = &ARTIFACTS[next(ARTIFACTS.len())];
                 let group = GROUPS[next(GROUPS.len())];
-                let event = match choice {
-                    3 => "forged0001",
-                    4 if event == "standup0001" => "review0002",
-                    4 => "standup0001",
-                    _ => event,
+                // Mostly the artifact's own event, sometimes any other.
+                let event = if choice < 6 {
+                    EVENTS[next(EVENTS.len())]
+                } else {
+                    artifact.event
                 };
                 let fault = [
                     None,
                     None,
                     None,
-                    Some(SimulatedFault::ReplyLost),
+                    None,
+                    Some(ReplyLost),
+                    Some(Conflict),
+                    Some(Denied),
                     Some(SimulatedFault::ServerError),
-                    Some(SimulatedFault::Denied),
-                ][next(6)];
+                    Some(SimulatedFault::ConnectionLost),
+                ][next(9)];
                 let answered = share(&world, &mut model, event, artifact, group, fault)?;
                 observed.push(answered.clone());
+                // The effect holds its budget until an operator reconciles
+                // it; nothing more runs on it.
+                if answered == "share_outcome_unknown" {
+                    break;
+                }
                 // A duplicate delivery of what just landed finds it.
                 if answered == "Shared" && next(2) == 0 {
                     observed.push(share(&world, &mut model, event, artifact, group, None)?);
@@ -415,11 +559,18 @@ fn replay_seed(bytes: &[u8]) -> Result<u64> {
 #[test]
 fn seeded_share_histories_match_the_independent_model_and_replay() -> Result<()> {
     let mut seen = BTreeSet::new();
+    let mut complete = 0;
     for seed in 0..SEEDS {
         let observed = checked_history(seed)?;
-        ensure!(observed.len() >= STEPS, "share campaign incomplete");
+        ensure!(
+            observed.len() >= STEPS
+                || observed.last().map(String::as_str) == Some("share_outcome_unknown"),
+            "share campaign incomplete"
+        );
+        complete += usize::from(observed.len() >= STEPS);
         seen.extend(observed.into_iter().filter(|step| !step.contains(' ')));
     }
+    ensure!(complete > 0, "every share history ended early");
     for outcome in [
         "Shared",
         "AlreadyShared",
@@ -427,10 +578,15 @@ fn seeded_share_histories_match_the_independent_model_and_replay() -> Result<()>
         "NoOwner",
         "NotFound",
         "NotShared",
+        "GroupNotPrimary",
+        "GroupNotFound",
+        "SharingRefused",
         "share_outcome_unknown",
         "denied",
         "in_play",
         "out_of_play",
+        "restricted",
+        "unrestricted",
     ] {
         ensure!(
             seen.contains(outcome),

@@ -548,13 +548,22 @@ fn fixture(variant: Variant) -> SimulatedFixture {
             )]),
             suspended: BTreeSet::new(),
             // The event's conference and its recording's progress differ too.
-            spaces: BTreeMap::from([(
-                "spaceCoverage".into(),
-                crate::integrations::simulated::GoogleSpace {
-                    meeting_code: "abc-defg-hij".into(),
-                    owner: "ada@coverage.test".into(),
-                },
-            )]),
+            spaces: BTreeMap::from([
+                (
+                    "spaceCoverage".into(),
+                    crate::integrations::simulated::GoogleSpace {
+                        meeting_code: "abc-defg-hij".into(),
+                        owner: "ada@coverage.test".into(),
+                    },
+                ),
+                (
+                    "spaceCoverageOther".into(),
+                    crate::integrations::simulated::GoogleSpace {
+                        meeting_code: "pqr-stuv-wxy".into(),
+                        owner: "ada@coverage.test".into(),
+                    },
+                ),
+            ]),
             conference_records: BTreeMap::from([(
                 "conf-coverage".into(),
                 crate::integrations::simulated::GoogleConferenceRecord {
@@ -573,20 +582,40 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                     }],
                     ..Default::default()
                 },
-            )]),
-            drive_files: BTreeMap::from([(
-                GOOGLE_COVERAGE_FILE.into(),
-                crate::integrations::simulated::GoogleDriveFile {
-                    name: "Coverage recording".into(),
-                    mime_type: "video/mp4".into(),
-                    owner: "ada@coverage.test".into(),
-                    permissions: vec![
-                        crate::integrations::simulated::GoogleDrivePermission::owner(
-                            "ada@coverage.test",
-                        ),
-                    ],
+            )])
+            .into_iter()
+            .chain([(
+                "conf-other".into(),
+                crate::integrations::simulated::GoogleConferenceRecord {
+                    space: "spaceCoverageOther".into(),
+                    start_time: "2026-01-06T09:01:00Z".into(),
+                    recordings: vec![crate::integrations::simulated::GoogleArtifact {
+                        id: "rec-other".into(),
+                        state: "FILE_GENERATED".into(),
+                        file: Some("1otherRecording".into()),
+                    }],
+                    ..Default::default()
                 },
-            )]),
+            )])
+            .collect(),
+            drive_files: [GOOGLE_COVERAGE_FILE, "1otherRecording"]
+                .into_iter()
+                .map(|file| {
+                    (
+                        file.to_owned(),
+                        crate::integrations::simulated::GoogleDriveFile {
+                            name: "Coverage recording".into(),
+                            mime_type: "video/mp4".into(),
+                            owner: "ada@coverage.test".into(),
+                            permissions: vec![
+                                crate::integrations::simulated::GoogleDrivePermission::owner(
+                                    "ada@coverage.test",
+                                ),
+                            ],
+                        },
+                    )
+                })
+                .collect(),
             meet_record_pages: Vec::new(),
             drive_trusted_domains: BTreeSet::new(),
         },
@@ -599,10 +628,14 @@ const GOOGLE_COVERAGE_CALENDAR: &str = "c_coverage@group.calendar.google.com";
 const GOOGLE_COVERAGE_FILE: &str = "1coverageRecording";
 const GOOGLE_COVERAGE_ARTIFACT: &str = "conferenceRecords/conf-coverage/recordings/rec-coverage";
 const GOOGLE_COVERAGE_GROUP: &str = "coverage-team@coverage.test";
+/// An artifact of another of ada's meetings: ada can read it, so only the
+/// check that an artifact belongs to its event refuses it.
+const GOOGLE_COVERAGE_FOREIGN_ARTIFACT: &str = "conferenceRecords/conf-other/recordings/rec-other";
 
 /// The share's demonstration: run twice, it answered `Shared` and then
-/// `AlreadyShared` with the same permission, and its world gained exactly one
-/// permission, on the file of the event's own artifact: the group as
+/// `AlreadyShared` with the same permission; asked for an artifact of another
+/// of the owner's meetings, it answered `NotFound`. Its world gained exactly
+/// one permission, on the file of the event's own artifact: the group as
 /// `reader`, created as the event's owner. Nothing else in any world changed.
 fn check_workspace_share(
     own: &'static str,
@@ -656,7 +689,8 @@ fn check_workspace_share(
     });
     if observed.changed() == vec![own]
         && !removed
-        && answers.len() == 2
+        && answers.len() == 3
+        && answers[2] == json!("NotFound")
         && shared.as_ref().is_some_and(Value::is_string)
         && shared == again
         && expected == Some(added.clone())
@@ -665,7 +699,8 @@ fn check_workspace_share(
     } else {
         Err(format!(
             "the share must land exactly one group reader permission on its own event's file \
-             and find it again; answers={answers:?} added={added:?} removed={removed}"
+             and find it again, and refuse another event's artifact; answers={answers:?} \
+             added={added:?} removed={removed}"
         ))
     }
 }
@@ -675,6 +710,65 @@ fn check_workspace_share(
 /// (resource binding, limits, reservation, settlement) is covered by
 /// `google_workspace_host_tests`.
 fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed> {
+    observe_google_workspace_through(action, variant, Tamper::None)
+}
+
+/// How a saboteur changes what the adapter sees; `None` is the honest port.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tamper {
+    None,
+    /// Every permission list comes back empty, as if the adapter never
+    /// listed before it created.
+    SkipList,
+    /// The event's records also name another event's record, as if the
+    /// adapter never checked an artifact belongs to its event.
+    ForeignRecord,
+}
+
+/// The simulated port with a saboteur between it and the adapter.
+struct TamperedPort {
+    inner: crate::google_workspace::SimulatedGooglePort,
+    tamper: Tamper,
+}
+
+impl crate::google_workspace::GooglePort for TamperedPort {
+    fn authenticate(
+        &mut self,
+        exchange: &crate::google_auth::Exchange<'_>,
+        max_bytes: usize,
+    ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+        self.inner.authenticate(exchange, max_bytes)
+    }
+
+    fn call(
+        &mut self,
+        request: &crate::google_workspace::ApiRequest,
+        token: &crate::google_auth::AccessToken,
+        max_bytes: usize,
+    ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+        let mut reply = self.inner.call(request, token, max_bytes)?;
+        let mut page: Value = serde_json::from_slice(&reply.body).unwrap_or_default();
+        match (self.tamper, request.endpoint) {
+            (Tamper::SkipList, "drive_permissions") => page = json!({"permissions":[]}),
+            (Tamper::ForeignRecord, "meet_conference_records") => page["conferenceRecords"]
+                .as_array_mut()
+                .into_iter()
+                .for_each(|records| {
+                    records.push(json!({"name":"conferenceRecords/conf-other",
+                        "space":"spaces/spaceCoverage","startTime":"2026-01-05T11:06:00Z"}));
+                }),
+            _ => return Ok(reply),
+        }
+        reply.body = page.to_string().into_bytes();
+        Ok(reply)
+    }
+}
+
+fn observe_google_workspace_through(
+    action: Action,
+    variant: Variant,
+    tamper: Tamper,
+) -> Result<Observed> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
     seed(&database, SCOPE, &fixture(variant))?;
@@ -698,26 +792,37 @@ fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed
             "artifact":GOOGLE_COVERAGE_ARTIFACT,"group_email":GOOGLE_COVERAGE_GROUP}),
         _ => anyhow::bail!("not a Google Workspace read"),
     };
-    let (plan, _) = crate::google_workspace::Plan::authorize(
-        action,
-        &LiveConnection::GoogleWorkspace {
-            service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
-        },
-        &ResourceTarget::GoogleWorkspaceDomain {
-            calendar_reader: GOOGLE_COVERAGE_READER.into(),
-            email_domain: "coverage.test".into(),
-            grantee_domains: vec!["coverage.test".into()],
-        },
-        &request.to_string(),
-        crate::google_workspace::Source::Simulated,
-    )?;
-    let mut port = crate::google_workspace::SimulatedGooglePort::new(&database, SCOPE)?;
-    // The share runs twice, as a duplicate delivery would: both answers are
-    // the result.
-    let runs = if plan.is_write() { 2 } else { 1 };
+    let plan = |request: &Value| {
+        crate::google_workspace::Plan::authorize(
+            action,
+            &LiveConnection::GoogleWorkspace {
+                service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
+            },
+            &ResourceTarget::GoogleWorkspaceDomain {
+                calendar_reader: GOOGLE_COVERAGE_READER.into(),
+                email_domain: "coverage.test".into(),
+                grantee_domains: vec!["coverage.test".into()],
+            },
+            &request.to_string(),
+            crate::google_workspace::Source::Simulated,
+        )
+        .map(|(plan, _)| plan)
+    };
+    let mut plans = vec![plan(&request)?];
+    // The share runs twice, as a duplicate delivery would, and then asks for
+    // an artifact of another of ada's meetings: every answer is the result.
+    if plans[0].is_write() {
+        let mut foreign = request.clone();
+        foreign["artifact"] = json!(GOOGLE_COVERAGE_FOREIGN_ARTIFACT);
+        plans.extend([plan(&request)?, plan(&foreign)?]);
+    }
+    let mut port = TamperedPort {
+        inner: crate::google_workspace::SimulatedGooglePort::new(&database, SCOPE)?,
+        tamper,
+    };
     let mut results = Vec::new();
-    for _ in 0..runs {
-        let (result, _) = crate::google_workspace::observe(&plan, &mut port, 1_700_000_000);
+    for plan in &plans {
+        let (result, _) = crate::google_workspace::observe(plan, &mut port, 1_700_000_000);
         results
             .push(result.map_err(|error| anyhow::anyhow!("{action:?} failed offline: {error}"))?);
     }
@@ -1846,54 +1951,23 @@ fn the_gate_rejects_each_way_a_simulation_can_be_fake() -> Result<()> {
         assert!(check(action, honest).is_ok(), "{action:?} honest read");
     }
 
-    // A share that skips its list and creates again, or that shares an artifact
-    // of another event, has not demonstrated the share: both land a permission
-    // the world must not have.
+    // A share whose adapter never sees the group's permission before it
+    // creates, or never checks the artifact belongs to its event, has not
+    // demonstrated the share: the first answers `Shared` twice, the second
+    // lands a permission on another meeting's file.
     let share = Action::GoogleWorkspaceShareArtifact;
-    let tampered = |edit: fn(&mut Value)| {
-        move |variant| -> Result<Observed> {
-            let mut observed = observe(share, variant)?;
-            let world = Provider::GoogleWorkspace.world().expect("world");
-            let state = observed
-                .after
-                .get(world)
-                .cloned()
-                .flatten()
-                .context("world")?;
-            let mut state: Value = serde_json::from_str(&state)?;
-            edit(&mut state["drive_files"]);
-            observed.after.insert(world, Some(state.to_string()));
-            Ok(observed)
-        }
-    };
-    let duplicated: fn(&mut Value) = |files| {
-        let permissions = files[GOOGLE_COVERAGE_FILE]["permissions"]
-            .as_array_mut()
-            .expect("permissions");
-        let mut again = permissions.last().cloned().expect("a share");
-        again["id"] = json!("duplicate");
-        permissions.push(again);
-    };
-    let elsewhere: fn(&mut Value) = |files| {
-        let shared = files[GOOGLE_COVERAGE_FILE]["permissions"]
-            .as_array_mut()
-            .expect("permissions")
-            .pop()
-            .expect("a share");
-        files["1anotherEventsRecording"] = json!({"name":"Other","mime_type":"video/mp4",
-            "owner":"ada@coverage.test","permissions":[shared]});
-    };
+    let tampered = |tamper| move |variant| observe_google_workspace_through(share, variant, tamper);
     assert!(
         check(share, |variant| observe(share, variant)).is_ok(),
         "honest share"
     );
     assert!(
-        check(share, tampered(duplicated)).is_err(),
-        "a second permission"
+        check(share, tampered(Tamper::SkipList)).is_err(),
+        "a share that never lists"
     );
     assert!(
-        check(share, tampered(elsewhere)).is_err(),
-        "another event's file"
+        check(share, tampered(Tamper::ForeignRecord)).is_err(),
+        "a share of another event's artifact"
     );
     assert!(check(share, constant).is_err(), "a constant share");
 

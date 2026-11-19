@@ -2168,7 +2168,7 @@ fn the_google_meet_simulation_emits_only_documented_fields() -> Result<()> {
     let (result, _) = crate::google_workspace::observe(&share, &mut port, 100);
     assert!(result?.starts_with(r#"{"Shared""#));
     let mut emitted = std::collections::BTreeSet::new();
-    for body in &bodies[9..] {
+    for body in &bodies[12..] {
         keys(&serde_json::from_slice(body)?, "", &mut emitted);
     }
     let listed = documented(&[
@@ -2196,7 +2196,7 @@ fn the_google_meet_simulation_emits_only_documented_fields() -> Result<()> {
     };
     let _ = crate::google_workspace::observe(&share, &mut port, 100);
     let mut emitted = std::collections::BTreeSet::new();
-    keys(&serde_json::from_slice(&bodies[10])?, "", &mut emitted);
+    keys(&serde_json::from_slice(&bodies[13])?, "", &mut emitted);
     let extra: Vec<_> = emitted.difference(&errors).collect();
     assert!(
         extra.is_empty(),
@@ -2253,7 +2253,8 @@ fn share_plan() -> Result<crate::google_workspace::Plan> {
 }
 
 /// The share against the published bases: the reader's exchanges, rule and
-/// event, the owner's exchanges with Meet's and Drive's scopes, then `rest`.
+/// event, the service account's exchanges and the group, the owner's
+/// exchanges with Meet's and Drive's scopes, then `rest`.
 fn share_replies(rest: Vec<(u16, Vec<u8>)>) -> Result<String> {
     let mut replay = GoogleReplay::ok(vec![
         GOOGLE_METADATA_TOKEN.bytes.to_vec(),
@@ -2261,6 +2262,9 @@ fn share_replies(rest: Vec<(u16, Vec<u8>)>) -> Result<String> {
         GOOGLE_OAUTH_TOKEN.bytes.to_vec(),
         GOOGLE_ACL_RULE.bytes.to_vec(),
         GOOGLE_EVENT.bytes.to_vec(),
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        GOOGLE_GENERATE_ACCESS_TOKEN.bytes.to_vec(),
+        GOOGLE_GROUP.bytes.to_vec(),
         GOOGLE_METADATA_TOKEN.bytes.to_vec(),
         google_signed_as(
             "person@example.com",
@@ -2328,10 +2332,27 @@ fn google_share_parses_the_published_responses_and_their_mutations() -> Result<(
             "{name}"
         );
     }
-    // A create that does not echo what was asked is an unknown outcome.
+    // A create that does not echo what was asked is settled by listing
+    // again: a list without the group's grant leaves it unknown, and one
+    // with it is the share.
+    let mut writer: Value = serde_json::from_slice(GOOGLE_DRIVE_CREATED.bytes)?;
+    writer["role"] = json!("writer");
+    let with_group = || -> Result<Vec<u8>> {
+        let mut list = GOOGLE_DRIVE_PERMISSIONS.value()?;
+        list["permissions"][1]["emailAddress"] = json!("team@example.com");
+        Ok(list.to_string().into_bytes())
+    };
+    let mut replies = bases();
+    replies[2] = (200, writer.to_string().into_bytes());
+    replies.push(ok(&GOOGLE_DRIVE_PERMISSIONS));
     assert_eq!(
-        failed(mutated(2, 200, &|created| created["role"] = json!("writer"))).as_deref(),
+        failed(share_replies(replies.clone())).as_deref(),
         Some("google_workspace_share_outcome_unknown")
+    );
+    replies[3] = (200, with_group()?);
+    assert_eq!(
+        share_replies(replies)?,
+        r#"{"Shared":{"permission_id":"12345678901234567890"}}"#
     );
     // Drive's published refusals: a file the owner may not share, and a
     // sharing request Drive will not make.
@@ -2347,10 +2368,11 @@ fn google_share_parses_the_published_responses_and_their_mutations() -> Result<(
             Some("google_workspace_denied")
         );
     }
-    assert_eq!(
-        refused(2, 400, &GOOGLE_DRIVE_INVALID_SHARING)?,
-        r#""SharingRefused""#
-    );
+    // A sharing refusal is believed only once the list shows no grant.
+    let mut replies = bases();
+    replies[2] = (400, GOOGLE_DRIVE_INVALID_SHARING.bytes.to_vec());
+    replies.push(ok(&GOOGLE_DRIVE_PERMISSIONS));
+    assert_eq!(share_replies(replies)?, r#""SharingRefused""#);
     Ok(())
 }
 

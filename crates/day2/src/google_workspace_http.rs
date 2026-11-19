@@ -96,14 +96,14 @@ impl GooglePort for NativeGooglePort {
         let mut timing = crate::request_timing::provider("google_workspace", request.endpoint);
         // A request with a body is the one write, a JSON POST; every other
         // request is a GET.
-        let response = match &request.body {
+        let response = match request.body() {
             Some(body) => self
                 .client
                 .post(url)
                 .header(reqwest::header::AUTHORIZATION, authorization)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.clone())
+                .body(body.to_owned())
                 .send(),
             None => self
                 .client
@@ -444,18 +444,33 @@ mod tests {
     /// requests in order. Returns every request line and every request body.
     fn delegated(
         plan: &crate::google_workspace::Plan,
-        api: Vec<Expected>,
+        mut api: Vec<Expected>,
         owner_scopes: &'static str,
+        group: Option<Expected>,
     ) -> Result<(Result<String>, Vec<String>, Vec<String>)> {
         use base64::Engine;
         use std::{net::TcpListener, thread};
+        // A share resolves its group as the service account itself between
+        // the reader's reads and the owner's.
+        let directory: Vec<String> = group
+            .iter()
+            .flat_map(|(line, ..)| [
+                AUTH[0].to_owned(),
+                "POST /v1/projects/-/serviceAccounts/workspace-reader@synthetic-project.iam.gserviceaccount.com:generateAccessToken HTTP/1.1".to_owned(),
+                line.clone(),
+            ])
+            .collect();
         let expected: Vec<String> = AUTH
             .iter()
             .map(|line| (*line).to_owned())
             .chain(api[..2].iter().map(|(line, ..)| line.clone()))
+            .chain(directory)
             .chain(AUTH.iter().map(|line| (*line).to_owned()))
             .chain(api[2..].iter().map(|(line, ..)| line.clone()))
             .collect();
+        if let Some(group) = group {
+            api.insert(2, group);
+        }
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let origin = format!("http://{}", listener.local_addr()?);
         let count = expected.len();
@@ -478,6 +493,21 @@ mod tests {
                         "200 OK",
                         "Metadata-Flavor: Google\r\n",
                         r#"{"access_token":"workload-token","token_type":"Bearer","expires_in":3600}"#,
+                    )?;
+                } else if first.contains(":generateAccessToken ") {
+                    // Exactly the Directory scope, as the service account.
+                    anyhow::ensure!(
+                        serde_json::from_str::<serde_json::Value>(body)?
+                            == serde_json::json!({"lifetime":"3600s","scope":[
+                                crate::google_workspace::GROUP_READ_SCOPE]}),
+                        "directory token request invalid"
+                    );
+                    subject = "directory";
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        r#"{"accessToken":"token-for-directory","expireTime":"2030-01-01T00:00:00Z"}"#,
                     )?;
                 } else if first.starts_with("POST /v1/projects/") {
                     let (sub, scope) = delegations
@@ -577,6 +607,7 @@ mod tests {
             &plan,
             api,
             "https://www.googleapis.com/auth/meetings.space.readonly",
+            None,
         )?;
         let found: serde_json::Value = serde_json::from_str(&result?)?;
         assert_eq!(found["Found"]["owner"], OWNER);
@@ -591,7 +622,8 @@ mod tests {
         Ok(())
     }
 
-    /// The share: the owner is delegated with Meet's read scope and Drive's,
+    /// The share: the group is resolved as the service account with the
+    /// Directory scope alone, the owner is delegated with Meet's read scope and Drive's,
     /// the artifact is read by its exact name, the file's permissions are
     /// listed, and only then is the one reviewed permission created, with
     /// exactly the reviewed body.
@@ -624,6 +656,11 @@ mod tests {
             &plan,
             api,
             "https://www.googleapis.com/auth/meetings.space.readonly https://www.googleapis.com/auth/drive",
+            Some((
+                "GET /admin/directory/v1/groups/engineering@synthetic.example?fields=id%2Cemail%2Cname&prettyPrint=false HTTP/1.1".into(),
+                "directory",
+                r#"{"id":"g1","email":"engineering@synthetic.example","name":"Engineering"}"#.into(),
+            )),
         )?;
         assert_eq!(result?, r#"{"Shared":{"permission_id":"0987654321"}}"#);
         assert_eq!(

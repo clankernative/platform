@@ -49,7 +49,10 @@ fn an_artifact_is_shared_once_as_its_owner_and_found_again() {
     let world = World::development();
     let plan = standup();
     assert!(plan.is_write());
-    assert_eq!(plan.planned_calls(), 6 + 2 + 2 + 1 + 2 * 2 + 1);
+    // Three delegations' exchanges (reader, service account, owner), the
+    // rule and the event, the group, two record pages, the artifact, two
+    // permission pages, the create and two reconciling pages.
+    assert_eq!(plan.planned_calls(), 8 + 2 + 1 + 2 + 1 + 2 + 1 + 2);
     let (result, meter) = world.observe(&plan);
     let shared = decoded(result);
     let id = shared["Shared"]["permission_id"]
@@ -95,6 +98,29 @@ fn an_artifact_is_shared_once_as_its_owner_and_found_again() {
         drive::share_body(GROUP),
         r#"{"type":"group","role":"reader","emailAddress":"engineering@synthetic.example"}"#
     );
+}
+
+/// The development organization where `eng-alias@` names engineering and
+/// `team@synthetic.example` names a group whose primary address is outside
+/// the grant.
+fn aliased() -> GoogleWorkspaceWorld {
+    let mut world = simulated::google_workspace_development_fixture();
+    world
+        .groups
+        .get_mut(GROUP)
+        .unwrap()
+        .aliases
+        .insert("eng-alias@synthetic.example".into());
+    world.groups.insert(
+        "team@other.example".into(),
+        GoogleGroup {
+            id: "group-team".into(),
+            name: "Team".into(),
+            members: Default::default(),
+            aliases: ["team@synthetic.example".to_owned()].into(),
+        },
+    );
+    world
 }
 
 /// The bound's negative regressions: nothing is created for an event the grant
@@ -147,10 +173,22 @@ fn nothing_is_created_for_an_event_or_artifact_that_cannot_be_shared() {
             "AllDay",
         ),
         (
-            "a group Drive does not know",
+            "a group the Directory does not know",
             simulated::google_workspace_development_fixture(),
             share("standup0001", RECORDING, "unknown@synthetic.example"),
-            "SharingRefused",
+            "GroupNotFound",
+        ),
+        (
+            "an alias of a granted group",
+            aliased(),
+            share("standup0001", RECORDING, "eng-alias@synthetic.example"),
+            "GroupNotPrimary",
+        ),
+        (
+            "an in-grant alias of a group outside the grant",
+            aliased(),
+            share("standup0001", RECORDING, "team@synthetic.example"),
+            "GroupNotPrimary",
         ),
     ] {
         let world = World::new(world);
@@ -202,49 +240,130 @@ fn nothing_is_created_for_an_event_or_artifact_that_cannot_be_shared() {
     assert_eq!(creates(&world), 0);
 }
 
-/// A lost reply after Drive created the permission is an unknown outcome,
-/// never a definite failure; sharing again lists first and finds it.
+/// An outcome's tag, or a failure's code without its prefix.
+pub(super) fn answer(result: &Result<String>) -> String {
+    match result {
+        Ok(json) => {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_object().and_then(|map| map.keys().next().cloned()))
+                .unwrap_or_default()
+        }
+        Err(error) => error
+            .to_string()
+            .trim_start_matches("google_workspace_")
+            .to_owned(),
+    }
+}
+
+/// The simulated port, with the create answered `status`/`body` after serving
+/// it when `serve`, and the second permission list lost when `lose_relist`.
+struct Answering {
+    inner: SimulatedGooglePort,
+    serve: bool,
+    status: u16,
+    body: &'static str,
+    lose_relist: bool,
+    lists: usize,
+}
+
+impl GooglePort for Answering {
+    fn authenticate(
+        &mut self,
+        exchange: &Exchange<'_>,
+        max_bytes: usize,
+    ) -> std::result::Result<Reply, Unreached> {
+        self.inner.authenticate(exchange, max_bytes)
+    }
+
+    fn call(
+        &mut self,
+        request: &ApiRequest,
+        token: &AccessToken,
+        max_bytes: usize,
+    ) -> std::result::Result<Reply, Unreached> {
+        if request.body().is_some() {
+            if self.serve {
+                let _ = self.inner.call(request, token, max_bytes);
+            }
+            return Ok(Reply {
+                status: self.status,
+                metadata_flavor: false,
+                json: true,
+                body: self.body.as_bytes().to_vec(),
+                retry_after_seconds: None,
+            });
+        }
+        if request.endpoint == "drive_permissions" {
+            self.lists += 1;
+            if self.lose_relist && self.lists > 1 {
+                return Err(Unreached::default());
+            }
+        }
+        self.inner.call(request, token, max_bytes)
+    }
+}
+
+/// An answer to the create that is not definite is settled in the same
+/// attempt by listing again: a grant found is known usage, and only a failed
+/// list or a grant still absent is an unknown outcome.
 #[test]
-fn a_lost_reply_is_unknown_and_sharing_again_reconciles() {
-    let world = World::development();
-    world.fault(GOOGLE_DRIVE_SHARE_ENDPOINT, SimulatedFault::ReplyLost);
-    let (result, meter) = world.observe(&standup());
-    assert_eq!(code(&result), "google_workspace_share_outcome_unknown");
-    assert!(meter.unknown);
-    let created = granted(&world, FILE);
-    assert_eq!(created.len(), 1, "the permission landed");
-    let (again, meter) = world.observe(&standup());
-    assert_eq!(
-        decoded(again),
-        serde_json::json!({"AlreadyShared":{"permission_id":created[0].id}})
-    );
-    assert!(!meter.unknown);
-    assert_eq!((creates(&world), granted(&world, FILE).len()), (1, 1));
-    // A 5xx after the create is unknown too; a refusal is definite.
-    for (fault, expected, unknown) in [
-        (SimulatedFault::ServerError, "share_outcome_unknown", true),
+fn the_creates_answers_are_reconciled_inside_the_attempt() {
+    // Faults the world serves: a lost reply after the permission landed, a
+    // conflict after it landed, and answers before anything was served.
+    for (fault, expected, unknown, landed) in [
+        (SimulatedFault::ReplyLost, "Shared", false, 1),
+        (SimulatedFault::Conflict, "AlreadyShared", false, 1),
+        (
+            SimulatedFault::ServerError,
+            "share_outcome_unknown",
+            true,
+            0,
+        ),
         (
             SimulatedFault::ConnectionLost,
             "share_outcome_unknown",
             true,
+            0,
         ),
-        (SimulatedFault::Oversized, "share_outcome_unknown", true),
-        (SimulatedFault::NotJson, "share_outcome_unknown", true),
-        (SimulatedFault::Denied, "denied", false),
-        (SimulatedFault::RateLimitForbidden, "rate_limited", false),
-        (SimulatedFault::RateLimited, "rate_limited", false),
-        (SimulatedFault::BadRequest, "request_refused", false),
+        (SimulatedFault::Oversized, "share_outcome_unknown", true, 0),
+        (SimulatedFault::Gone, "NotFound", false, 0),
+        (SimulatedFault::Denied, "denied", false, 0),
+        (SimulatedFault::RateLimitForbidden, "rate_limited", false, 0),
+        (SimulatedFault::RateLimited, "rate_limited", false, 0),
+        (SimulatedFault::BadRequest, "request_refused", false, 0),
     ] {
         let world = World::development();
         world.fault(GOOGLE_DRIVE_SHARE_ENDPOINT, fault);
         let (result, meter) = world.observe(&standup());
-        assert_eq!(
-            code(&result),
-            format!("google_workspace_{expected}"),
-            "{fault:?}"
-        );
+        assert_eq!(answer(&result), expected, "{fault:?}");
         assert_eq!(meter.unknown, unknown, "{fault:?}");
-        assert_eq!(meter.last.map(|last| last.phase), Some(Phase::Drive));
+        assert_eq!(granted(&world, FILE).len(), landed, "{fault:?}");
+        assert!(meter.calls <= standup().planned_calls());
+    }
+    // A 409 the list cannot confirm, a list that fails after a conflict, and
+    // a sharing refusal that landed anyway or did not.
+    let refusal = r#"{"error":{"code":400,"errors":[{"reason":"invalidSharingRequest"}]}}"#;
+    for (serve, status, body, lose_relist, expected) in [
+        (false, 409, "{}", false, "share_outcome_unknown"),
+        (true, 409, "{}", true, "share_outcome_unknown"),
+        (true, 400, refusal, false, "Shared"),
+        (false, 400, refusal, false, "SharingRefused"),
+    ] {
+        let world = World::development();
+        let mut port = Answering {
+            inner: SimulatedGooglePort::new(&world.database, SCOPE).unwrap(),
+            serve,
+            status,
+            body,
+            lose_relist,
+            lists: 0,
+        };
+        let (result, meter) = observe(&standup(), &mut port, 1_000);
+        assert_eq!(answer(&result), expected, "{serve} {status} {lose_relist}");
+        assert_eq!(meter.unknown, expected == "share_outcome_unknown");
     }
 }
 
@@ -268,7 +387,7 @@ pub(super) fn share_fault_cases() -> Vec<(&'static str, SimulatedFault, &'static
     }
     cases.push((
         GOOGLE_DRIVE_SHARE_ENDPOINT,
-        ReplyLost,
+        ConnectionLost,
         "share_outcome_unknown",
     ));
     cases

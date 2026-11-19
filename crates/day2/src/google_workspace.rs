@@ -184,6 +184,7 @@ pub enum Source {
 /// domain and grantee domains, and the in-grant inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
+    action: Action,
     source: Source,
     service_account: String,
     calendar_reader: String,
@@ -396,6 +397,7 @@ impl Plan {
         };
         Ok((
             Self {
+                action,
                 source,
                 service_account: service_account.clone(),
                 calendar_reader: calendar_reader.clone(),
@@ -417,7 +419,7 @@ impl Plan {
 
     /// Whether the action changes provider state, as the registry declares.
     pub fn is_write(&self) -> bool {
-        matches!(self.read, Read::ShareArtifact { .. })
+        self.action.is_write()
     }
 
     /// Directory reads run as the service account itself; Calendar and Meet
@@ -428,11 +430,13 @@ impl Plan {
 
     /// Authentication exchanges: metadata and IAM, plus the token exchange
     /// when delegated, once for the Calendar reader and, for an event's
-    /// conferences, again for its owner.
+    /// conferences, again for its owner. The share also resolves its group as
+    /// the service account itself.
     fn authentication_calls(&self) -> u64 {
         match self.read {
             Read::Group { .. } | Read::GroupMember { .. } => 2,
-            Read::EventConferences { .. } | Read::ShareArtifact { .. } => 6,
+            Read::EventConferences { .. } => 6,
+            Read::ShareArtifact { .. } => 3 + 2 + 3,
             _ => 3,
         }
     }
@@ -456,11 +460,12 @@ impl Plan {
                         * meet::Collection::ALL.len() as u64
                         * meet::ARTIFACT_PAGE_CEILING
             }
-            // The reader's rule and the event, the record pages, the artifact,
-            // every permission page, the one create, and every permission page
-            // again when Drive answers the create with a conflict.
+            // The reader's rule and the event, the group, the record pages,
+            // the artifact, every permission page, the one create, and every
+            // permission page again to reconcile a create whose answer is not
+            // definite.
             Read::ShareArtifact { .. } => {
-                2 + meet::RECORD_PAGE_CEILING + 1 + 2 * drive::PERMISSION_PAGE_CEILING + 1
+                2 + 1 + meet::RECORD_PAGE_CEILING + 1 + 2 * drive::PERMISSION_PAGE_CEILING + 1
             }
         }
     }
@@ -509,7 +514,8 @@ pub struct ApiRequest {
     pub endpoint: &'static str,
     pub segments: Vec<String>,
     pub query: Vec<(&'static str, String)>,
-    pub body: Option<String>,
+    /// Private, so only the share's own constructor makes a POST.
+    body: Option<String>,
 }
 
 impl ApiRequest {
@@ -540,6 +546,27 @@ impl ApiRequest {
 
     fn drive(endpoint: &'static str, segments: &[&str], query: &[(&'static str, &str)]) -> Self {
         Self::new(Service::Drive, endpoint, &["drive", "v3"], segments, query)
+    }
+
+    /// The one request with a body: give `group` `reader` on `file`.
+    fn drive_share(file: &str, group: &str) -> Self {
+        Self {
+            body: Some(drive::share_body(group)),
+            ..Self::drive(
+                "drive_permission_create",
+                &["files", file, "permissions"],
+                &[
+                    ("supportsAllDrives", "true"),
+                    ("sendNotificationEmail", "false"),
+                    ("fields", drive::CREATED_FIELDS),
+                ],
+            )
+        }
+    }
+
+    /// The JSON body of the one write; every other request has none.
+    pub fn body(&self) -> Option<&str> {
+        self.body.as_deref()
     }
 
     fn directory(
@@ -1038,8 +1065,8 @@ fn group_permission(
 /// Every part is read again here: the event and its owner, the event's
 /// records, the artifact and its file, and the file's permissions. Nothing an
 /// earlier read returned is trusted. A permission is created only after the
-/// list shows none for the group, so running the same share again after an
-/// unknown outcome finds the first permission and creates nothing.
+/// list shows none for the group, and an answer that is not definite is
+/// settled by listing again in the same attempt.
 fn share_artifact(
     plan: &Plan,
     port: &mut dyn GooglePort,
@@ -1067,6 +1094,28 @@ fn share_artifact(
             });
         }
     };
+    // The group Drive will grant is the group's primary address, so resolve
+    // it first, as the service account with the Directory scope alone: only a
+    // group whose primary address is exactly the one asked about, in a
+    // grantee domain, is ever shared with. An alias never is.
+    let directory = token_for(
+        plan,
+        port,
+        meter,
+        google_auth::Identity::ServiceAccount,
+        &[GROUP_READ_SCOPE],
+        now,
+    )
+    .map_err(Failure::from)?;
+    match group_lookup(plan, port, meter, &directory, group) {
+        Ok(GroupOutcome::Found(found)) if found.email == *group => {}
+        Ok(GroupOutcome::Found(_)) | Err(Failure::GroupOutsideGrant) => {
+            return Ok(ShareOutcome::GroupNotPrimary);
+        }
+        Ok(GroupOutcome::NotFound) => return Ok(ShareOutcome::GroupNotFound),
+        Err(failure) => return Err(failure),
+    }
+    drop(directory);
     let token = owner_token(
         plan,
         port,
@@ -1116,51 +1165,67 @@ fn share_artifact(
         Shared::Missing => return Ok(ShareOutcome::NotFound),
         Shared::Absent => {}
     }
-    let mut request = ApiRequest::drive(
-        "drive_permission_create",
-        &["files", &file, "permissions"],
-        &[
-            ("supportsAllDrives", "true"),
-            ("sendNotificationEmail", "false"),
-            ("fields", drive::CREATED_FIELDS),
-        ],
-    );
-    request.body = Some(drive::share_body(group));
+    let request = ApiRequest::drive_share(&file, group);
     meter.send(Phase::Drive, request.request_bytes());
-    // From here the permission may exist whatever the wire says, unless Drive
-    // answers definitely that it did not create one.
-    let unknown = |meter: &mut Meter| {
-        meter.unknown = true;
-        Failure::ShareOutcomeUnknown
+    let answer = meter.receive(port.call(&request, &token, MAX_CALENDAR_RESPONSE_BYTES));
+    // Anything but a definite answer is settled inside this attempt by
+    // listing again, with the pages reserved for it: the group's grant found
+    // now is this attempt's (it was absent a moment ago) and known; only a
+    // failed list, or a grant still absent, leaves the outcome unknown.
+    let reconcile = |port: &mut dyn GooglePort,
+                     meter: &mut Meter,
+                     landed: bool|
+     -> Result<ShareOutcome, Failure> {
+        match group_permission(port, meter, &token, &file, group) {
+            Ok(Shared::Already(permission_id)) => {
+                let permission = drive::Permission { permission_id };
+                Ok(if landed {
+                    ShareOutcome::Shared(permission)
+                } else {
+                    ShareOutcome::AlreadyShared(permission)
+                })
+            }
+            _ => {
+                meter.unknown = true;
+                Err(Failure::ShareOutcomeUnknown)
+            }
+        }
     };
-    let Ok(reply) = meter.receive(port.call(&request, &token, MAX_CALENDAR_RESPONSE_BYTES)) else {
-        return Err(unknown(meter));
+    let Ok(reply) = answer else {
+        return reconcile(port, meter, true);
     };
     match reply.status {
         200 => match accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)
             .and_then(|()| drive::parse_created(&reply.body, group))
         {
             Ok(permission_id) => Ok(ShareOutcome::Shared(drive::Permission { permission_id })),
-            // Something was created, and it is not what was asked.
-            Err(_) => Err(unknown(meter)),
+            Err(_) => reconcile(port, meter, true),
         },
-        // Drive says the permission conflicts with one that exists: read the
-        // list again, which settles it.
-        409 => match group_permission(port, meter, &token, &file, group) {
-            Ok(Shared::Already(permission_id)) => {
-                Ok(ShareOutcome::AlreadyShared(drive::Permission {
-                    permission_id,
-                }))
+        // Drive says the permission conflicts with one that exists.
+        409 => reconcile(port, meter, false),
+        // Google's guide also gives this reason when a share succeeded and
+        // only its notification failed, so it is believed only once the list
+        // shows no grant.
+        400 if drive::sharing_refused(&reply.body) => {
+            match group_permission(port, meter, &token, &file, group) {
+                Ok(Shared::Already(permission_id)) => {
+                    Ok(ShareOutcome::Shared(drive::Permission { permission_id }))
+                }
+                Ok(Shared::Absent) => Ok(ShareOutcome::SharingRefused),
+                _ => {
+                    meter.unknown = true;
+                    Err(Failure::ShareOutcomeUnknown)
+                }
             }
-            _ => Err(unknown(meter)),
-        },
-        400 if drive::sharing_refused(&reply.body) => Ok(ShareOutcome::SharingRefused),
+        }
+        // The file is gone: nothing was created on it.
         404 => Ok(ShareOutcome::NotFound),
         // Definite refusals: nothing was created.
-        400 | 401 | 403 | 429 => Err(accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)
-            .err()
-            .unwrap_or(Failure::ResponseInvalid)),
-        _ => Err(unknown(meter)),
+        400 => Err(Failure::RequestRefused),
+        401 => Err(Failure::AuthenticationFailed),
+        403 => Err(calendar::forbidden(&reply.body)),
+        429 => Err(Failure::RateLimited),
+        _ => reconcile(port, meter, true),
     }
 }
 

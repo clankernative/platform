@@ -40,11 +40,18 @@ pub enum ShareOutcome {
     AlreadyShared(Permission),
     /// The artifact exists but Meet has not generated its file yet.
     NotReady,
-    /// Drive refused the sharing request itself (`invalidSharingRequest`): an
-    /// unknown group, or a change the organization's sharing policy forbids.
+    /// Drive refused the sharing request itself (`invalidSharingRequest`) and
+    /// a fresh list found no permission for the group: a share the
+    /// organization's sharing policy forbids, or a group deleted since it was
+    /// resolved.
     SharingRefused,
     /// The event's records are in more than one space.
     Conflict,
+    /// The Directory knows no group at that address.
+    GroupNotFound,
+    /// The address is not the group's primary address, which is what Drive
+    /// would grant: an alias is never shared with.
+    GroupNotPrimary,
     NoOwner,
     NoMeeting,
     AllDay,

@@ -96,6 +96,10 @@ pub enum SimulatedFault {
     /// takes effect and its caller cannot know it. Google Workspace only;
     /// elsewhere it is a lost connection.
     ReplyLost,
+    /// HTTP 409. In Google Workspace the request is served first and then
+    /// answered as a conflict, as when a concurrent writer made the same
+    /// change; elsewhere a plain 409.
+    Conflict,
     /// HTTP 500. Classified as `Incomplete`, and leaves a write outcome unknown.
     ServerError,
     /// The response never arrives. Dispatched, so a write outcome is unknown.
@@ -1838,6 +1842,10 @@ pub(crate) fn google_workspace_serve(
                 google_reply(&mut state.world, &request)?;
                 return Ok(Err(crate::google_auth::Unreached::default()));
             }
+            if fault == SimulatedFault::Conflict {
+                google_reply(&mut state.world, &request)?;
+                return Ok(Ok(google_error(409, "conflict", "Conflict")));
+            }
             return Ok(google_fault(
                 fault,
                 max,
@@ -1940,6 +1948,7 @@ fn google_fault(
                 }
                 403 => ("PERMISSION_DENIED", None),
                 404 => ("NOT_FOUND", None),
+                409 => ("ALREADY_EXISTS", None),
                 429 => ("RESOURCE_EXHAUSTED", Some("RATE_LIMIT_EXCEEDED")),
                 _ => ("INTERNAL", None),
             };
@@ -1959,6 +1968,7 @@ fn google_fault(
         SimulatedFault::Denied => failed(403, "forbidden", "Forbidden"),
         SimulatedFault::BadRequest => failed(400, "badRequest", "Bad Request"),
         SimulatedFault::Gone => failed(404, "notFound", "Requested entity was not found."),
+        SimulatedFault::Conflict => failed(409, "conflict", "Conflict"),
         SimulatedFault::ServerError => failed(500, "backendError", "Backend Error"),
         SimulatedFault::NotJson => Reply {
             status: 200,
@@ -2318,7 +2328,7 @@ fn google_api_endpoint(request: &crate::google_workspace::ApiRequest) -> &'stati
         (Service::Meet, [.., "smartNotes"]) => GOOGLE_MEET_SMART_NOTES_ENDPOINT,
         (Service::Meet, [.., "transcripts"]) => GOOGLE_MEET_TRANSCRIPTS_ENDPOINT,
         (Service::Meet, _) => GOOGLE_MEET_RECORDS_ENDPOINT,
-        (Service::Drive, _) if request.body.is_some() => GOOGLE_DRIVE_SHARE_ENDPOINT,
+        (Service::Drive, _) if request.body().is_some() => GOOGLE_DRIVE_SHARE_ENDPOINT,
         (Service::Drive, _) => GOOGLE_DRIVE_PERMISSIONS_ENDPOINT,
     }
 }
@@ -2343,7 +2353,7 @@ fn google_drive_reply(
     };
     let page_size = PERMISSION_PAGE_SIZE.to_string();
     let compact = ("prettyPrint", "false");
-    let admitted = match &request.body {
+    let admitted = match request.body() {
         Some(_) => google_query_is(
             request,
             &[
@@ -2393,7 +2403,7 @@ fn google_drive_reply(
         }
         item
     };
-    let Some(body) = &request.body else {
+    let Some(body) = request.body() else {
         let binding = format!("permissions:{file_id}");
         let offset = match google_query(request, "pageToken") {
             None => 0,
@@ -2428,15 +2438,29 @@ fn google_drive_reply(
     let Some(group) = asked else {
         return Ok(google_error(400, "badRequest", "Unreviewed permission"));
     };
-    let known = world.groups.contains_key(&group)
-        || world
-            .groups
-            .values()
-            .any(|candidate| candidate.aliases.contains(&group));
+    // Drive grants the group itself, under its primary address, whichever
+    // address the request named.
+    let Some(group) = world
+        .groups
+        .get_key_value(&group)
+        .or_else(|| {
+            world
+                .groups
+                .iter()
+                .find(|(_, candidate)| candidate.aliases.contains(&group))
+        })
+        .map(|(primary, _)| primary.clone())
+    else {
+        return Ok(google_error(
+            400,
+            "invalidSharingRequest",
+            "Bad Request. User message: \"This sharing request is not allowed.\"",
+        ));
+    };
     let domain = group.rsplit_once('@').map(|(_, domain)| domain.to_owned());
     let trusted = world.drive_trusted_domains.is_empty()
         || domain.is_some_and(|domain| world.drive_trusted_domains.contains(&domain));
-    if !known || !trusted {
+    if !trusted {
         return Ok(google_error(
             400,
             "invalidSharingRequest",
@@ -3072,6 +3096,7 @@ fn fault_response(
         SimulatedFault::BadRequest => http(400),
         SimulatedFault::RateLimitForbidden => http(403),
         SimulatedFault::Gone => http(404),
+        SimulatedFault::Conflict => http(409),
         SimulatedFault::ServerError => http(500),
         SimulatedFault::ConnectionLost | SimulatedFault::ReplyLost => Some(Err(TransportError {
             kind: AdapterError::TransportUnavailable,

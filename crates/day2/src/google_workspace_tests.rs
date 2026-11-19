@@ -861,7 +861,8 @@ fn every_failure_is_produced_through_an_action() {
         SimulatedFault::Gone,
     );
     record(&world, &meet::conferences("standup0001"));
-    // A share whose reply was lost, and a file with too many permissions.
+    // A share whose create was lost before it landed, and a file with too
+    // many permissions.
     let plan = share::share(
         "standup0001",
         "conferenceRecords/conf-standup-1/recordings/rec-1",
@@ -870,7 +871,7 @@ fn every_failure_is_produced_through_an_action() {
     let world = World::development();
     world.fault(
         simulated::GOOGLE_DRIVE_SHARE_ENDPOINT,
-        SimulatedFault::ReplyLost,
+        SimulatedFault::ConnectionLost,
     );
     record(&world, &plan);
     let mut long = simulated::google_workspace_development_fixture();
