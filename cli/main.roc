@@ -59,6 +59,10 @@ main! = |args| {
 			Ok((path, spec)) => Output.Outcome.Checked(check, path, spec)
 			Err(problem) => Output.Outcome.Failed(problem, check.parts().format, Cli.Command.InstanceCheck)
 		}
+		Cli.Request.Render(render) => match InstanceSpec.load!(render.parts().directory) {
+			Ok((path, spec)) => Output.Outcome.Rendered(render, path, spec)
+			Err(problem) => Output.Outcome.Failed(problem, render.parts().format, Cli.Command.InstanceRender)
+		}
 	}
 	emit!(Output.new(outcome))
 }

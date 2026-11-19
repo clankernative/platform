@@ -6,6 +6,7 @@ Detailed text is the default. Use --agent for a single JSON response.
 USAGE
   day2 app describe <app> [options]
   day2 instance check <directory> [--agent]
+  day2 instance render <directory> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -29,6 +30,11 @@ COMMANDS
                   repositories, hostnames, namespaces, images, buckets, state.
                   Every field is required; unknown fields, unsorted lists and
                   invalid or reserved app IDs fail. Reads one file only.
+  instance render Validate <directory>/day2.json the same way and print the
+                  OpenTofu inputs the platform renders from it: the core roots
+                  (project, cluster, tenancy, then app-edge and day2-app per
+                  app) in apply order, each with the state bucket and prefix it
+                  initializes against. Reads one file only; writes nothing.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
@@ -53,6 +59,7 @@ EXAMPLES
   day2 app describe links --demo --agent
   day2 app describe reports --instance /path/to/instance.json
   day2 instance check . --agent
+  day2 instance render . --agent
   day2 platform local-dev ../reports-app
 
 FOR AGENTS

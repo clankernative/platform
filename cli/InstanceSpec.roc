@@ -78,6 +78,7 @@ InstanceSpec :: {
 		required_check : Str,
 		sdk_registry : Str,
 		tofu_state_bucket : Str,
+		platform_state_prefixes : { project : Str, cluster : Str, tenancy : Str },
 		apps : List(App),
 	}
 
@@ -119,6 +120,13 @@ InstanceSpec :: {
 			required_check: "${spec.org}/app-ci: ${required_context}",
 			sdk_registry: "${registry}/day2",
 			tofu_state_bucket,
+			# Where each core platform root's state already lives in tofu_state_bucket.
+			# "foundation" predates the platform/<root> scheme; moving it is a state move.
+			platform_state_prefixes: {
+				project: "foundation",
+				cluster: "platform/cluster",
+				tenancy: "platform/tenancy",
+			},
 			apps: spec.apps.map(|bound| derive_app(spec.org, spec.domain, spec.project, registry, bound)),
 		}
 	}
@@ -576,6 +584,12 @@ expect match InstanceSpec.from_json(sample) {
 									backup_bucket: "exampleco-tools-go-backups",
 								})
 	}
+	Err(_) => Bool.False
+}
+
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => spec.derived().platform_state_prefixes
+		== { project: "foundation", cluster: "platform/cluster", tenancy: "platform/tenancy" }
 	Err(_) => Bool.False
 }
 

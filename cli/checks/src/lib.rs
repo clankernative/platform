@@ -1013,7 +1013,7 @@ mod tests {
             let value = envelope(&run(&args, None), 0);
             assert_eq!(
                 value["result"]["implemented_commands"],
-                json!(["app.describe", "instance.check"])
+                json!(["app.describe", "instance.check", "instance.render"])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
             assert_eq!(value["result"]["supports_invocation"], false);
@@ -1327,6 +1327,10 @@ mod tests {
         );
         assert_eq!(result["tofu_state_bucket"], "exampleco-tools-tofu-state");
         assert_eq!(
+            result["platform_state_prefixes"],
+            json!({"project": "foundation", "cluster": "platform/cluster", "tenancy": "platform/tenancy"})
+        );
+        assert_eq!(
             result["operators"],
             json!(["ada@example.com", "grace@example.com"])
         );
@@ -1538,6 +1542,184 @@ mod tests {
             envelope(&check_spec(&duplicate), 5)["error"]["code"],
             "invalid_spec"
         );
+    }
+
+    #[test]
+    fn instance_render_lists_every_root_backend_in_apply_order() {
+        let scratch = Scratch::new();
+        fs::write(scratch.0.join("day2.json"), SPEC).unwrap();
+        let directory = scratch.0.to_str().unwrap();
+        let value = envelope(&run(&["instance", "render", directory, "--agent"], None), 0);
+        assert_eq!(value["command"], "instance.render");
+        assert_eq!(value["context"]["spec_validation"], "checked");
+        assert_eq!(value["result"]["installation"], "exampleco");
+        let shared = "exampleco-tools-tofu-state";
+        let root = |root: &str, app: Value, stack: &str, bucket: &str, prefix: &str| {
+            json!({"root": root, "app_id": app, "stack": stack,
+                   "backend": {"bucket": bucket, "prefix": prefix}})
+        };
+        assert_eq!(
+            value["result"]["roots"],
+            json!([
+                root(
+                    "project",
+                    Value::Null,
+                    "deploy/gke/stacks/project",
+                    shared,
+                    "foundation"
+                ),
+                root(
+                    "cluster",
+                    Value::Null,
+                    "deploy/gke/stacks/cluster",
+                    shared,
+                    "platform/cluster"
+                ),
+                root(
+                    "tenancy",
+                    Value::Null,
+                    "deploy/gke/stacks/tenancy",
+                    shared,
+                    "platform/tenancy"
+                ),
+                root(
+                    "app-edge",
+                    json!("go"),
+                    "deploy/gke/stacks/app-edge",
+                    shared,
+                    "platform/app/go"
+                ),
+                root(
+                    "app-edge",
+                    json!("home"),
+                    "deploy/gke/stacks/app-edge",
+                    shared,
+                    "platform/app/home"
+                ),
+                root(
+                    "day2-app",
+                    json!("go"),
+                    "deploy/gke/stacks/day2-app",
+                    "exampleco-tools-go-state",
+                    "day2-app/go"
+                ),
+                root(
+                    "day2-app",
+                    json!("home"),
+                    "deploy/gke/stacks/day2-app",
+                    "exampleco-tools-home-state",
+                    "day2-app/home"
+                ),
+            ])
+        );
+        let actions = value["next_actions"].as_array().unwrap();
+        assert_eq!(
+            actions[0]["argv"],
+            json!(["day2", "instance", "render", directory])
+        );
+        assert_eq!(
+            actions[1]["argv"],
+            json!(["day2", "instance", "check", directory, "--agent"])
+        );
+        // Check points at render, so either command reaches the other.
+        let checked = envelope(&check_spec(SPEC), 0);
+        assert_eq!(
+            checked["next_actions"][1]["argv"].as_array().unwrap()[..3],
+            [json!("day2"), json!("instance"), json!("render")]
+        );
+        // Text lists one line per root and keeps stderr empty.
+        let text = run(&["instance", "render", directory], None);
+        assert_eq!(text.status.code(), Some(0));
+        assert!(text.stderr.is_empty());
+        let stdout = String::from_utf8(text.stdout).unwrap();
+        assert!(
+            stdout.starts_with("DAY2  /  instance exampleco  /  OpenTofu inputs"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("STATE BACKENDS  /  7 core roots, in apply order"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("  day2-app/home           exampleco-tools-home-state / day2-app/home"),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn instance_render_names_real_gcs_stacks_and_fits_every_app_id() {
+        let scratch = Scratch::new();
+        fs::write(scratch.0.join("day2.json"), SPEC).unwrap();
+        let directory = scratch.0.to_str().unwrap();
+        let value = envelope(&run(&["instance", "render", directory, "--agent"], None), 0);
+        // Every rendered stack is a platform source directory with a GCS backend.
+        let platform = root().parent().unwrap().to_owned();
+        for entry in value["result"]["roots"].as_array().unwrap() {
+            let stack = entry["stack"].as_str().unwrap();
+            let versions = fs::read_to_string(platform.join(stack).join("versions.tf"))
+                .unwrap_or_else(|error| panic!("{stack}: {error}"));
+            assert!(versions.contains(r#"backend "gcs""#), "{stack}");
+        }
+        // The longest valid app ID (20 bytes) keeps a separated text column.
+        let longest = "h".repeat(20);
+        fs::write(
+            scratch.0.join("day2.json"),
+            SPEC.replacen(r#""home":{"#, &format!(r#""{longest}":{{"#), 1),
+        )
+        .unwrap();
+        let text = run(&["instance", "render", directory], None);
+        assert_eq!(text.status.code(), Some(0), "{text:?}");
+        let stdout = String::from_utf8(text.stdout).unwrap();
+        assert!(
+            stdout.contains(&format!(
+                "  day2-app/{longest}  exampleco-tools-{longest}-state / day2-app/{longest}"
+            )),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn instance_render_fails_exactly_as_check_does() {
+        let scratch = Scratch::new();
+        let directory = scratch.0.to_str().unwrap();
+        let render = |args: &[&str], code: i32| {
+            let value = envelope(&run(args, None), code);
+            assert_eq!(value["command"], "instance.render", "{args:?}");
+            assert!(value["result"].is_null(), "{args:?}");
+            value["error"]["code"].clone()
+        };
+        assert_eq!(
+            render(&["instance", "render", directory, "--agent"], 3),
+            "metadata_unreadable"
+        );
+        fs::write(
+            scratch.0.join("day2.json"),
+            SPEC.replacen(r#""org":"tools""#, r#""org":"Tools""#, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            render(&["instance", "render", directory, "--agent"], 5),
+            "invalid_spec"
+        );
+        for args in [
+            vec!["instance", "render", "--agent"],
+            vec!["--agent", "instance", "render"],
+        ] {
+            assert_eq!(render(args.as_slice(), 2), "missing_argument");
+        }
+        for args in [
+            vec!["instance", "render", directory, "--demo", "--agent"],
+            vec![
+                "instance",
+                "--agent",
+                "render",
+                directory,
+                "--operation",
+                "links.list",
+            ],
+        ] {
+            assert_eq!(render(args.as_slice(), 2), "conflicting_options");
+        }
     }
 
     #[test]
