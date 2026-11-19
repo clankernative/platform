@@ -80,8 +80,8 @@ GoogleWorkspace :: [].{
 		transcripts : List(Document),
 	}
 
-	# Read as `owner`, the event's organizer or, for a group or resource calendar's event, its creator, when that
-	# is a person in the grant's email domain. Records are latest start first.
+	# Read as `owner`, always the event's creator: a person in the grant's email domain who is also the organizer,
+	# or whose event's organizer is a group or resource calendar. Records are latest start first.
 	EventConferences : { owner : Str, meeting_code : Str, records : List(ConferenceRecord) }
 
 	# `NoOwner`: nobody in the grant's email domain owns the event. `NoMeeting`: it has no Meet code. `Conflict`: the
@@ -90,14 +90,18 @@ GoogleWorkspace :: [].{
 
 	Permission : { permission_id : Str }
 
-	# `Shared`: the group was given reader now. `AlreadyShared`: it already held reader or more and nothing was
-	# created. `NotReady`: Meet has not generated the file yet. `SharingRefused`: Drive refused the request itself,
-	# for an unknown group or a sharing policy. The rest mean what they mean for `event_conferences`; `NotFound`
-	# also covers an artifact of another event and a file the owner cannot see.
+	# `Shared`: the group was given reader in this attempt. `AlreadyShared`: it already held reader or more and
+	# nothing was created. `NotReady`: Meet has not generated the file yet. `GroupNotFound`: the Directory knows no
+	# such group. `GroupNotPrimary`: the address is an alias; only a group's primary address is shared with.
+	# `SharingRefused`: Drive refused the request itself, for a sharing policy, and the group holds nothing. The
+	# rest mean what they mean for `event_conferences`; `NotFound` also covers an artifact of another event and a
+	# file the owner cannot see.
 	ShareOutcome : [
 		Shared(Permission),
 		AlreadyShared(Permission),
 		NotReady,
+		GroupNotFound,
+		GroupNotPrimary,
 		SharingRefused,
 		Conflict,
 		NoOwner,
@@ -213,13 +217,23 @@ GoogleWorkspace :: [].{
 		},
 	)
 
-	# Share one artifact of one event with one group as reader, as the event's owner. `artifact` is the exact Meet
-	# name `event_conferences` reports. The share always lists before it creates, so running it again after an
-	# unknown outcome finds the first permission and creates nothing.
-	share_artifact_with : Resource, Str, Str, Str, Str -> Effects(ShareOutcome)
-	share_artifact_with = |resource, calendar_id, event_id, artifact, group_email| Effects.capability(
+	# What to share: `artifact` is the exact Meet name `event_conferences` reports for that event, and
+	# `group_email` is the group's primary address.
+	ShareArtifact : { calendar_id : Str, event_id : Str, artifact : Str, group_email : Str }
+
+	# Share one artifact of one event with one group as reader, as the event's owner. The share lists before it
+	# creates, and an attempt whose create reply is lost lists again, so it never creates twice. An outcome that
+	# stays unknown holds the share's budget until an operator reconciles it; give shares their own budget.
+	share_artifact : Resource, ShareArtifact -> Effects(ShareOutcome)
+	share_artifact = |resource, share| Effects.capability(
 		"google_workspace.share_artifact.v1",
-		Json.to_str({ handle: Resource.token(resource), calendar_id, event_id, artifact, group_email }),
+		Json.to_str({
+			handle: Resource.token(resource),
+			calendar_id: share.calendar_id,
+			event_id: share.event_id,
+			artifact: share.artifact,
+			group_email: share.group_email,
+		}),
 	).and_then(
 		|raw| {
 			parsed : Try(ShareOutcome, _)

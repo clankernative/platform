@@ -1161,8 +1161,8 @@ step : Str -> Str
 step = |raw| raw
 share = |handle| {
     match Tx.evaluate(Resource.decode(handle).program(), []) {
-        Done(decoded) => Ok(GoogleWorkspace.share_artifact_with(decoded.value, "c_team@group.calendar.google.com", "e1",
-            "conferenceRecords/first-1/recordings/rec-1", "team@example.com").program())
+        Done(decoded) => Ok(GoogleWorkspace.share_artifact(decoded.value, { calendar_id: "c_team@group.calendar.google.com",
+            event_id: "e1", artifact: "conferenceRecords/first-1/recordings/rec-1", group_email: "team@example.com" }).program())
         _ => Err(NoResource)
     }
 }
@@ -1196,6 +1196,14 @@ expect outcome(REFUSED_JSON, |value| match value {
     SharingRefused => Bool.True
     _ => Bool.False
 })
+expect outcome(MISSING_GROUP_JSON, |value| match value {
+    GroupNotFound => Bool.True
+    _ => Bool.False
+})
+expect outcome(ALIAS_JSON, |value| match value {
+    GroupNotPrimary => Bool.True
+    _ => Bool.False
+})
 expect outcome(NOT_FOUND_JSON, |value| match value {
     NotFound => Bool.True
     _ => Bool.False
@@ -1221,6 +1229,14 @@ expect outcome(NOT_FOUND_JSON, |value| match value {
         "NOT_FOUND_JSON",
         &serde_json::to_string(&encode(&ShareOutcome::NotFound))?,
     )
+    .replace(
+        "MISSING_GROUP_JSON",
+        &serde_json::to_string(&encode(&ShareOutcome::GroupNotFound))?,
+    )
+    .replace(
+        "ALIAS_JSON",
+        &serde_json::to_string(&encode(&ShareOutcome::GroupNotPrimary))?,
+    )
     .replace("REQUEST", &serde_json::to_string(request)?)
     .replace(
         "CAPABILITY",
@@ -1245,7 +1261,7 @@ expect outcome(NOT_FOUND_JSON, |value| match value {
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (5) tests passed"),
+        output.status.success() && diagnostics.contains("All (7) tests passed"),
         "native Google Workspace share contracts ({}): {diagnostics}",
         output.status
     );
