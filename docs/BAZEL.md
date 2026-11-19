@@ -5,6 +5,11 @@ Bazel is the platform's Rust build executor. Bazelisk selects the version in
 Xcode Command Line Tools on Apple Silicon. Linux images keep their existing
 pinned Debian, linker and runtime-library inputs.
 
+Every Rust tool archive needs a pinned SHA-256: the reviewed rules_rust patch
+refuses to fetch one that has none. A Rust version change replaces the
+`rust.toolchain` `sha256s` table with the `xz_hash` values from that release's
+signed `channel-rust-<version>.toml`, for each supported host.
+
 Cargo manifests and Cargo.lock describe dependency inputs for crate_universe.
 They are also read by dependency governance and the vulnerability audit. They do
 not define a second platform build/test entry point. Compiler profiles live in

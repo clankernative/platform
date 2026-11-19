@@ -203,7 +203,7 @@ static CONSUMER_EVIDENCE_RECORDS: std::sync::atomic::AtomicU8 = std::sync::atomi
 fn next_consumer_evidence_sequence(records: &std::sync::atomic::AtomicU8) -> Option<u8> {
     use std::sync::atomic::Ordering;
     records
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
             (previous < CONSUMER_EVIDENCE_LIMIT).then(|| previous + 1)
         })
         .ok()

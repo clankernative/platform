@@ -14,7 +14,7 @@ provider support. The isolated control-plane builder is currently macOS-only.
 ## Start locally
 
 Install OpenTofu **1.11.5** and Temporal CLI **1.6.1** on PATH. Bazel **9.3.0** is selected by `.bazelversion`; its
-pinned rules_rust toolchain supplies Rust **1.98.1**. From this repository's root:
+pinned rules_rust toolchain supplies Rust **1.100.0**. From this repository's root:
 
 ```console
 bazel run //crates/xtask:xtask -- bootstrap

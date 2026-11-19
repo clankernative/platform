@@ -7638,10 +7638,7 @@ mod tests {
                 _lost: lost,
             })
         });
-        if borrow.to_token_stream().to_string() != expected.to_token_stream().to_string() {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(borrow.to_token_stream().to_string() == expected.to_token_stream().to_string())
     }
 
     #[test]
