@@ -174,13 +174,13 @@ validated inputs.
 
   A rule reported for any other scope is `google_workspace_response_invalid`.
 - **calendar** — after the reader's rule, `GET calendar/v3/calendars/{calendar}?fields=id,summary`, then
-  `GET …/acl?maxResults=250[&pageToken]&fields=items(scope(type,value),role),nextPageToken`
+  `GET …/acl?maxResults=100[&pageToken]&fields=items(scope(type,value),role),nextPageToken`
   until the first rule whose scope is the named group (compared ignoring ASCII
   case, as Google treats addresses). `Found {id, summary, group_role}` with
   `group_role` one of `None`, `FreeBusyReader`, `Reader`, `Writer`, `Owner`,
   `NotShared` or `NotFound`. The ACL is never returned. At most four ACL pages
-  are read. A longer ACL fails with `google_workspace_acl_page_budget` rather
-  than answering from part of it. The group must be in a grantee domain.
+  are read, 400 rules when Google fills each page. A longer ACL fails with
+  `google_workspace_acl_page_budget` rather than answering from part of it. The group must be in a grantee domain.
 - **calendar_events** — after the reader's rule, one page of
   `GET …/events?singleEvents=true&orderBy=startTime&showDeleted=true&maxResults=25&timeMin&timeMax[&pageToken]`
   with the item mask
@@ -249,6 +249,21 @@ encodes to 1,803 bytes. Twenty-five of them with the longest token come to
 the 56 KiB page bound, and with a 4 KiB request, under the 64 KiB observation.
 A test builds that page and passes it through `bounded_observation`. The page
 is still measured against the bound, never assumed to fit.
+
+An ACL page fits one 64 KiB Calendar response the same way. It is never
+journaled, but it must be read whole:
+
+- The largest rule Google can report under the fixed mask (no rule ID),
+  compact, is 315 bytes. That is a `group` scope with a 254-byte address and
+  the `freeBusyReader` role.
+- A page of 100 of them with a 1,024-byte token is 32,654 bytes, half the
+  bound.
+- Google's own maximum of 250 per page could reach 80,054 bytes, so the
+  adapter asks for 100.
+
+Four pages, one reserved call each, cover 400 rules. A test builds the maximal
+page against the response bound, and serves four of them through the
+simulation.
 
 ## Retries and unknown outcomes
 
@@ -400,11 +415,9 @@ What the simulation assumes and only Google can settle:
       adapter refuses that as `response_invalid`, and the simulation cannot
       serve it today. Decide whether to model it and how to report it.
 - [ ] Page tokens: whether `events.list` binds a token to the query that issued
-      it, and short or empty pages that still carry a `nextPageToken`.
-- [ ] `acl.list` page size with `prettyPrint=false`. 250 rules at the
-      longest addresses would exceed the 64 KiB response bound, which fails
-      as `response_too_large`. Check real page sizes and lower the page size
-      if needed.
+      it, and short or empty pages that still carry a `nextPageToken`, on
+      `events.list` and `acl.list`. A short ACL page still spends one of the
+      four, so fewer than 400 rules may be covered.
 - [ ] `conferenceSolution.key.type` values for Meet, add-on and third-party
       conferences, and which of them carry a `hangoutLink`.
 

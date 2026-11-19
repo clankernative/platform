@@ -2073,8 +2073,8 @@ fn google_calendar_reply(
     grant: &GoogleGrant,
 ) -> Result<crate::google_auth::Reply> {
     use crate::google_workspace_calendar::{
-        ACL_FIELDS, CALENDAR_ACL_READ_SCOPE, CALENDAR_FIELDS, CALENDAR_READ_SCOPE, EVENT_FIELDS,
-        EVENT_PAGE_SIZE, EVENTS_FIELDS, EVENTS_QUERY, RULE_FIELDS, rfc3339_seconds,
+        ACL_FIELDS, ACL_PAGE_SIZE, CALENDAR_ACL_READ_SCOPE, CALENDAR_FIELDS, CALENDAR_READ_SCOPE,
+        EVENT_FIELDS, EVENT_PAGE_SIZE, EVENTS_FIELDS, EVENTS_QUERY, RULE_FIELDS, rfc3339_seconds,
     };
     let reply = google_json;
     let error = google_status_error;
@@ -2084,11 +2084,16 @@ fn google_calendar_reply(
         return Ok(error(404, "Not Found"));
     };
     let compact = ("prettyPrint", "false");
+    let acl_page_size = ACL_PAGE_SIZE.to_string();
     let admitted = match rest {
         [] => google_query_is(request, &[("fields", CALENDAR_FIELDS), compact], &[]),
         ["acl"] => google_query_is(
             request,
-            &[("maxResults", "250"), ("fields", ACL_FIELDS), compact],
+            &[
+                ("maxResults", acl_page_size.as_str()),
+                ("fields", ACL_FIELDS),
+                compact,
+            ],
             &["pageToken"],
         ),
         ["acl", _] => google_query_is(request, &[("fields", RULE_FIELDS), compact], &[]),
@@ -2151,7 +2156,7 @@ fn google_calendar_reply(
             if !can_read_acl {
                 return Ok(error(403, "Forbidden"));
             }
-            let size = 250;
+            let size = ACL_PAGE_SIZE as usize;
             let binding = format!("acl:{calendar_id}");
             let offset = match query("pageToken") {
                 None => 0,

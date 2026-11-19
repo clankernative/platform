@@ -10,10 +10,15 @@ pub const CALENDAR_READ_SCOPE: &str = "https://www.googleapis.com/auth/calendar.
 pub const CALENDAR_ACL_READ_SCOPE: &str = "https://www.googleapis.com/auth/calendar.acls.readonly";
 /// One Calendar response: a calendar, an ACL rule or page, or an event page.
 pub const MAX_CALENDAR_RESPONSE_BYTES: usize = 64 * 1024;
-/// ACL entries requested per page, Google's maximum.
-pub const ACL_PAGE_SIZE: u32 = 250;
+/// ACL entries requested per page. The largest rule Google can report under
+/// the fixed mask, compact, is 315 bytes (a 254-byte address and the
+/// `freeBusyReader` role), so a full page with the longest token is 32,654
+/// bytes: half the Calendar response bound. Google's own maximum, 250, could
+/// reach 80,054 bytes. A test proves the page fits.
+pub const ACL_PAGE_SIZE: u32 = 100;
 /// ACL pages read before a calendar's sharing is refused as too large to
-/// answer; the group's entry is never guessed from a partial list.
+/// answer, 400 rules when Google fills each page; the group's entry is never
+/// guessed from a partial list. Each page is one reserved call.
 pub const ACL_PAGE_CEILING: u64 = 4;
 /// Events per page. With every field bounded to characters JSON never escapes,
 /// 25 of the largest admissible events journal within one observation; a test

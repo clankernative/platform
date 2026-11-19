@@ -1201,6 +1201,60 @@ fn the_acl_is_paged_to_its_ceiling_and_never_answered_from_part_of_it() {
     assert!(meter.response_bytes <= plan.response_envelope());
 }
 
+/// Every rule Google can report under the fixed mask is bounded: a scope type,
+/// a value no longer than an address, and a role. A full page of the longest,
+/// compact as requested, fits one Calendar response with half of it to spare,
+/// and the simulation serves the ceiling's worth through the real path.
+#[test]
+fn a_page_of_maximal_acl_entries_fits_the_response_bound() {
+    let domain = "@synthetic.example";
+    let longest = format!(
+        "{}{domain}",
+        "g".repeat(calendar::MAX_ADDRESS_BYTES - domain.len())
+    );
+    let maximal = rule("group", Some(&longest), "freeBusyReader");
+    let token = "t".repeat(calendar::MAX_PAGE_TOKEN_BYTES);
+    let wire =
+        serde_json::json!({"scope":{"type":"group","value":longest},"role":"freeBusyReader"});
+    assert_eq!(wire.to_string().len(), 315);
+    let body = serde_json::json!({
+        "items": vec![wire; ACL_PAGE_SIZE as usize],
+        "nextPageToken": token,
+    })
+    .to_string();
+    assert_eq!(body.len(), 32_654);
+    assert!(2 * body.len() <= MAX_CALENDAR_RESPONSE_BYTES);
+    let reply = Reply {
+        status: 200,
+        metadata_flavor: false,
+        json: true,
+        body: body.clone().into_bytes(),
+        retry_after_seconds: None,
+    };
+    assert_eq!(accept(&reply, MAX_CALENDAR_RESPONSE_BYTES), Ok(()));
+    assert_eq!(
+        calendar::parse_acl_page(body.as_bytes(), "engineering@synthetic.example"),
+        Ok((None, Some(token)))
+    );
+    // Every page the ceiling reads full of them, the group's entry last.
+    let world = World::new(with_calendar(|calendar| {
+        let mut acl = vec![rule("user", Some(READER), "writer")];
+        let rules = ACL_PAGE_CEILING as usize * ACL_PAGE_SIZE as usize;
+        acl.extend(std::iter::repeat_n(maximal, rules - 2));
+        acl.push(rule(
+            "group",
+            Some("engineering@synthetic.example"),
+            "reader",
+        ));
+        calendar.acl = acl;
+    }));
+    let plan = calendar_read("engineering@synthetic.example");
+    let (result, meter) = world.observe(&plan);
+    assert_eq!(decoded(result)["Found"]["group_role"], "Reader");
+    assert_eq!(meter.calls, plan.planned_calls());
+    assert!(meter.response_bytes <= plan.response_envelope());
+}
+
 fn timed(id: &str, start: &str, end: &str) -> GoogleEvent {
     GoogleEvent {
         id: id.into(),

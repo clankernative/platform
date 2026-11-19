@@ -236,7 +236,7 @@ mod tests {
                     r#"{"id":"c_engineering@group.calendar.google.com","summary":"Engineering"}"#.into(),
                 ),
                 (
-                    format!("{CALENDAR}/acl?maxResults=250&fields=items%28scope%28type%2Cvalue%29%2Crole%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                    format!("{CALENDAR}/acl?maxResults=100&fields=items%28scope%28type%2Cvalue%29%2Crole%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
                     r#"{"items":[{"scope":{"type":"group","value":"engineering@synthetic.example"},"role":"reader"}]}"#.into(),
                 ),
             ],
