@@ -165,15 +165,15 @@ pub enum Failure {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct IamToken {
-    pub(crate) access_token: Option<String>,
-    pub(crate) signed_jwt: Option<String>,
-    pub(crate) key_id: Option<String>,
+struct IamToken {
+    access_token: Option<String>,
+    signed_jwt: Option<String>,
+    key_id: Option<String>,
 }
 
 /// The IAM response must match the selected flow, so provider data can never
 /// switch a direct plan to a delegated one or back.
-pub(crate) fn validate_iam_token_shape(token: &IamToken, delegated: bool) -> Result<(), Failure> {
+fn validate_iam_token_shape(token: &IamToken, delegated: bool) -> Result<(), Failure> {
     let matches_plan = if delegated {
         token.access_token.is_none()
             && token.signed_jwt.is_some()

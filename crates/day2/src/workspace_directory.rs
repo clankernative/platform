@@ -7,10 +7,7 @@ use anyhow::{Context, Result, ensure};
 #[cfg(test)]
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::Read,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_ORG_UNITS: usize = 10_000;
 pub const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
@@ -31,7 +28,7 @@ pub const ORG_UNIT_READ_SCOPE: &str =
     "https://www.googleapis.com/auth/admin.directory.orgunit.readonly";
 const DIRECTORY_ORIGIN: &str = "https://admin.googleapis.com";
 #[cfg(test)]
-use crate::google_auth::{GOOGLE_TOKEN_ENDPOINT, IamToken, validate_iam_token_shape};
+use crate::google_auth::GOOGLE_TOKEN_ENDPOINT;
 use crate::google_auth::{IAM_ORIGIN, OAUTH_ORIGIN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -533,14 +530,7 @@ pub struct NativeDirectoryPort {
 impl NativeDirectoryPort {
     pub fn new(plan: AuthenticationPlan, customer_id: &str, mode: CaptureMode) -> Result<Self> {
         let timing = crate::request_timing::span("provider_client");
-        let client = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(20))
-            .https_only(false)
-            .build()
+        let client = crate::google_auth::native_client(false)
             .map_err(|_| anyhow::anyhow!("workspace_directory_transport_unavailable"))?;
         drop(timing);
         let access_token = acquire_access_token(
@@ -623,28 +613,24 @@ impl NativeDirectoryPort {
             .send()
             .map_err(|_| anyhow::anyhow!("workspace_directory_provider_unavailable"))?;
         timing.status(response.status().as_u16());
-        bounded_response(response, max)
+        // A refused status is classified before any of its body is read.
+        ensure!(
+            response.status().is_success(),
+            "workspace_directory_provider_refused"
+        );
+        let reply = crate::google_auth::read_native(response, max).map_err(|unreached| {
+            anyhow::anyhow!(if unreached.too_large {
+                "workspace_directory_response_too_large"
+            } else {
+                "workspace_directory_provider_unavailable"
+            })
+        })?;
+        ensure!(
+            reply.body.len() <= max,
+            "workspace_directory_response_too_large"
+        );
+        Ok(reply.body)
     }
-}
-
-fn bounded_response(response: reqwest::blocking::Response, max: usize) -> Result<Vec<u8>> {
-    ensure!(
-        response.status().is_success(),
-        "workspace_directory_provider_refused"
-    );
-    ensure!(
-        response
-            .content_length()
-            .is_none_or(|size| size <= max as u64),
-        "workspace_directory_response_too_large"
-    );
-    let mut bytes = Vec::new();
-    response
-        .take(max as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("workspace_directory_provider_unavailable"))?;
-    ensure!(bytes.len() <= max, "workspace_directory_response_too_large");
-    Ok(bytes)
 }
 
 /// Token acquisition through the shared keyless flow, over this adapter's own
@@ -804,50 +790,6 @@ impl DirectoryReadPort for SimulatedDirectoryPort {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn iam_response_cannot_change_the_selected_authentication_flow() -> Result<()> {
-        let direct = IamToken {
-            access_token: Some("fixture-access-token".into()),
-            signed_jwt: None,
-            key_id: None,
-        };
-        assert!(validate_iam_token_shape(&direct, false).is_ok());
-        assert!(validate_iam_token_shape(&direct, true).is_err());
-        let delegated = IamToken {
-            access_token: None,
-            signed_jwt: Some("header.claims.signature".into()),
-            key_id: Some("fixture-key".into()),
-        };
-        assert!(validate_iam_token_shape(&delegated, true).is_ok());
-        assert!(validate_iam_token_shape(&delegated, false).is_err());
-        for token in [
-            IamToken {
-                access_token: direct.access_token.clone(),
-                signed_jwt: delegated.signed_jwt.clone(),
-                key_id: delegated.key_id.clone(),
-            },
-            IamToken {
-                access_token: None,
-                signed_jwt: None,
-                key_id: None,
-            },
-            IamToken {
-                access_token: None,
-                signed_jwt: delegated.signed_jwt.clone(),
-                key_id: None,
-            },
-            IamToken {
-                access_token: None,
-                signed_jwt: delegated.signed_jwt.clone(),
-                key_id: Some(String::new()),
-            },
-        ] {
-            assert!(validate_iam_token_shape(&token, true).is_err());
-            assert!(validate_iam_token_shape(&token, false).is_err());
-        }
-        Ok(())
-    }
 
     fn http_request(stream: &mut std::net::TcpStream) -> Result<String> {
         use std::io::Read;

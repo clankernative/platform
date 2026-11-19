@@ -90,7 +90,7 @@ fn run(
 #[test]
 fn iam_response_cannot_change_the_selected_authentication_flow() {
     let direct = IamToken {
-        access_token: Some("token".into()),
+        access_token: Some("fixture-access-token".into()),
         signed_jwt: None,
         key_id: None,
     };
@@ -98,11 +98,36 @@ fn iam_response_cannot_change_the_selected_authentication_flow() {
     assert!(validate_iam_token_shape(&direct, true).is_err());
     let delegated = IamToken {
         access_token: None,
-        signed_jwt: Some("a.b.c".into()),
-        key_id: Some("key".into()),
+        signed_jwt: Some("header.claims.signature".into()),
+        key_id: Some("fixture-key".into()),
     };
     assert!(validate_iam_token_shape(&delegated, true).is_ok());
     assert!(validate_iam_token_shape(&delegated, false).is_err());
+    for token in [
+        IamToken {
+            access_token: direct.access_token.clone(),
+            signed_jwt: delegated.signed_jwt.clone(),
+            key_id: delegated.key_id.clone(),
+        },
+        IamToken {
+            access_token: None,
+            signed_jwt: None,
+            key_id: None,
+        },
+        IamToken {
+            access_token: None,
+            signed_jwt: delegated.signed_jwt.clone(),
+            key_id: None,
+        },
+        IamToken {
+            access_token: None,
+            signed_jwt: delegated.signed_jwt.clone(),
+            key_id: Some(String::new()),
+        },
+    ] {
+        assert!(validate_iam_token_shape(&token, true).is_err());
+        assert!(validate_iam_token_shape(&token, false).is_err());
+    }
 }
 
 #[test]
