@@ -326,9 +326,15 @@ pub(crate) fn owns(runtime: &Runtime, db: &Connection, invocation: &str) -> Resu
 }
 
 pub(crate) fn require_queue(db: &Connection) -> Result<()> {
-    let missing: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations i
-        WHERE i.status='pending' AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)
-        AND NOT EXISTS(SELECT 1 FROM day2_invocation_runtime r WHERE r.invocation=i.id))", [], |row| row.get(0))?;
+    let missing: bool = db.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM day2_invocations i
+        WHERE {} AND NOT EXISTS(SELECT 1 FROM day2_invocation_runtime r WHERE r.invocation=i.id))",
+            crate::authority_state::RUNNABLE_INVOCATION
+        ),
+        [],
+        |row| row.get(0),
+    )?;
     ensure!(!missing, "invocation_runtime_missing");
     Ok(())
 }

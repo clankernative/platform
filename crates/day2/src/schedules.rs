@@ -313,19 +313,18 @@ fn last_offered(connection: &rusqlite::Connection, schedule: &Schedule) -> Resul
 
 /// The occurrence of a run that has not finished, if any.
 ///
-/// A blocked invocation is not one. It stays pending, but blocks are permanent:
-/// the command pump never runs it, and it never runs a business phase again (an
-/// external attempt admitted before the block may only settle evidence). It will
-/// never finish, so counting it as running would stop the schedule for good.
-/// Activation's drained-work check, the command pump and runtime-pair handoff
-/// exclude blocked invocations the same way.
+/// A blocked invocation is not one (see `authority_state::RUNNABLE_INVOCATION`).
+/// It will never finish, so counting it as running would stop the schedule for
+/// good.
 fn in_flight(connection: &rusqlite::Connection, schedule: &Schedule) -> Result<Option<i64>> {
     let prefix = schedule.prefix();
     let identity: Option<String> = connection
         .query_row(
-            "SELECT i.id FROM day2_invocations i WHERE i.id >= ?1 AND i.id < ?2 AND i.status='pending'
-             AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)
-             ORDER BY i.id LIMIT 1",
+            &format!(
+                "SELECT i.id FROM day2_invocations i WHERE i.id >= ?1 AND i.id < ?2 AND {}
+                 ORDER BY i.id LIMIT 1",
+                crate::authority_state::RUNNABLE_INVOCATION
+            ),
             rusqlite::params![prefix, format!("{prefix}~")],
             |row| row.get(0),
         )

@@ -413,12 +413,14 @@ fn runnable_pending(connection: &Connection) -> Result<i64> {
         |row| row.get(0),
     )?;
     let query = if blocks {
-        "SELECT count(*) FROM day2_invocations i WHERE status='pending'
-         AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)"
+        format!(
+            "SELECT count(*) FROM day2_invocations i WHERE {}",
+            crate::authority_state::RUNNABLE_INVOCATION
+        )
     } else {
-        "SELECT count(*) FROM day2_invocations WHERE status='pending'"
+        "SELECT count(*) FROM day2_invocations WHERE status='pending'".to_owned()
     };
-    Ok(connection.query_row(query, [], |row| row.get(0))?)
+    Ok(connection.query_row(&query, [], |row| row.get(0))?)
 }
 
 fn foreign_keys_valid(connection: &Connection) -> Result<()> {

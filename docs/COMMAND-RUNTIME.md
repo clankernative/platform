@@ -159,8 +159,12 @@ no raw SQL callback API. Internal budget savepoints use fixed commands on the
 same connection, with a separate single-command guard that ends before the
 accounting body runs.
 
-Migration/activation requires pending invocations to drain, including commands
+Migration/activation requires runnable invocations to drain, including commands
 whose local decision committed while external delivery remains incomplete.
+Runnable means pending and not blocked by an authority change. Rollout
+completion and abort wait for the same set on the artifact they retire. Blocked
+work never runs again, so it holds neither; it stays pending against the
+artifact that admitted it, which is kept for inspection.
 
 There is no atomic commit across SQLite and an external service. Failure after
 the decision commit retains those committed changes. Applications must model any

@@ -1076,6 +1076,158 @@ fn policy_revision_during_draining_keeps_target_serving_and_fences_old_work() ->
     Ok(())
 }
 
+fn pending_and_blocked(world: &World, id: &str) -> Result<(bool, bool)> {
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    Ok(db.query_row(
+        "SELECT status='pending', EXISTS(SELECT 1 FROM day2_authority_blocks WHERE invocation=?1)
+         FROM day2_invocations WHERE id=?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
+
+fn revoke_alice(world: &World) -> Result<()> {
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.submit")
+            .unwrap()
+            .actors
+            .remove("alice");
+    })
+}
+
+#[test]
+fn blocked_source_work_does_not_hold_rollout_completion() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    world.runtime.accept(
+        "reports.submit",
+        "alice",
+        "source-work",
+        &json!({"title":"x","text":"y"}),
+        100,
+    )?;
+    let replacement = Runtime::load(&candidate, "reports")?;
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Serving,
+        Phase::Draining,
+        &operator,
+    )?;
+    let refused = rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Draining,
+        Phase::Complete,
+        &operator,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("rollout_source_work_pending"),
+        "{refused:#}"
+    );
+    revoke_alice(&world)?;
+    assert_eq!(pending_and_blocked(&world, "source-work")?, (true, true));
+    // Runnable source work beside the blocked row still holds completion.
+    world.runtime.accept(
+        "reports.submit",
+        "bob",
+        "runnable-source-work",
+        &json!({"title":"x","text":"y"}),
+        101,
+    )?;
+    let refused = rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Draining,
+        Phase::Complete,
+        &operator,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("rollout_source_work_pending"),
+        "{refused:#}"
+    );
+    // The pump runs the runnable work (and the children it requests), never
+    // the blocked row.
+    let drained = invocations::drain(&replacement, 16)?;
+    assert!(
+        drained
+            .iter()
+            .any(|invocation| invocation.id == "runnable-source-work")
+    );
+    assert!(
+        drained
+            .iter()
+            .all(|invocation| invocation.id != "source-work")
+    );
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Draining,
+        Phase::Complete,
+        &operator,
+    )?;
+    // The blocked work stays recorded, still pending, against the old artifact.
+    assert_eq!(pending_and_blocked(&world, "source-work")?, (true, true));
+    replacement.initialize()?;
+    Ok(())
+}
+
+#[test]
+fn blocked_target_work_does_not_hold_rollout_abort() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    let replacement = Runtime::load(&candidate, "reports")?;
+    replacement.accept(
+        "reports.submit",
+        "alice",
+        "target-work",
+        &json!({"title":"x","text":"y"}),
+        100,
+    )?;
+    let refused = rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Serving,
+        Phase::Aborted,
+        &operator,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("rollout_target_work_pending"),
+        "{refused:#}"
+    );
+    revoke_alice(&world)?;
+    assert_eq!(pending_and_blocked(&world, "target-work")?, (true, true));
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Serving,
+        Phase::Aborted,
+        &operator,
+    )?;
+    assert_eq!(pending_and_blocked(&world, "target-work")?, (true, true));
+    world.runtime.initialize()?;
+    Ok(())
+}
+
 fn stock_fixture() -> Result<(World, PathBuf, LocalOperator)> {
     let artifact = std::env::var_os("DAY2_TEST_STOCK_LEDGER_ARTIFACT")
         .context("build stock-ledger fixture")?;

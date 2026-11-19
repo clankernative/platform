@@ -913,6 +913,15 @@ pub(crate) fn pin_invocation(
     Ok(())
 }
 
+/// The one SQL condition, over `day2_invocations i`, for work the host may still
+/// run: accepted (`pending`) and not blocked by an authority change. Blocks are
+/// permanent. A blocked invocation stays pending but never runs a business phase
+/// again; an external attempt admitted before the block may only settle evidence.
+/// Every check that selects, counts or waits for runnable work uses this
+/// condition, so blocked work never holds the command pump, the active-work
+/// budget, a schedule, activation, a rollout or a runtime-pair handoff.
+pub(crate) const RUNNABLE_INVOCATION: &str = "(i.status='pending' AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id))";
+
 pub(crate) fn is_blocked(connection: &Connection, id: &str) -> Result<bool> {
     Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM day2_authority_blocks WHERE invocation=?1)",

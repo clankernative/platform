@@ -877,12 +877,14 @@ pub(crate) fn source_pending(db: &Connection, release: &Release) -> Result<u64> 
     // Revoked/restore-fenced work remains recorded under its original owner,
     // but cannot force a retired executable to acquire replacement authority.
     let pending: i64 = db.query_row(
-        "SELECT count(*) FROM day2_invocation_runtime r
-        JOIN day2_invocations i ON i.id=r.invocation
-        LEFT JOIN day2_invocation_authority a ON a.invocation=i.id
-        WHERE r.generation=?1 AND i.status NOT IN ('success','failure')
-        AND (a.invocation IS NULL OR (a.epoch=?2 AND a.revision=?3))
-        AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)",
+        &format!(
+            "SELECT count(*) FROM day2_invocation_runtime r
+            JOIN day2_invocations i ON i.id=r.invocation
+            LEFT JOIN day2_invocation_authority a ON a.invocation=i.id
+            WHERE r.generation=?1 AND {}
+            AND (a.invocation IS NULL OR (a.epoch=?2 AND a.revision=?3))",
+            crate::authority_state::RUNNABLE_INVOCATION
+        ),
         rusqlite::params![
             source,
             release.authority.epoch,
