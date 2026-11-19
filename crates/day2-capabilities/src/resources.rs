@@ -137,16 +137,14 @@ pub enum ResourceTarget {
     WorkspaceDirectory {
         customer_id: String,
     },
-    /// One Google Workspace organization, as `GoogleWorkspace` reaches it.
+    /// What a `GoogleWorkspace` grant may reach in its organization.
     ///
-    /// `email_domain` is the only domain whose people an action may run as;
-    /// `calendar_reader` is the one person Calendar is read as, so the calendars
-    /// shared with that account are the calendars in play; `grantee_domains`
-    /// are the domains a group may belong to in order to be looked up, tested
-    /// for membership or granted access. An application never names a subject.
+    /// `grantee_domains` are the domains a group may belong to in order to be
+    /// looked up or tested for membership. An application never names a
+    /// subject, scope or URL. The fields later actions read (the domain whose
+    /// people may be impersonated, the one Calendar reader) arrive with those
+    /// actions; see docs/GOOGLE-WORKSPACE.md.
     GoogleWorkspaceDomain {
-        email_domain: String,
-        calendar_reader: String,
         /// Strictly sorted and unique, never normalised on the way in.
         grantee_domains: Vec<String>,
     },
@@ -397,17 +395,7 @@ impl ResourceTarget {
                 Ok(())
             }
             Self::WorkspaceDirectory { customer_id } => bounded_text(customer_id, 256),
-            Self::GoogleWorkspaceDomain {
-                email_domain,
-                calendar_reader,
-                grantee_domains,
-            } => {
-                email_domain_text(email_domain)?;
-                ensure!(
-                    google_workspace_address(calendar_reader)
-                        .is_ok_and(|(_, domain)| domain == email_domain),
-                    "invalid_google_workspace_calendar_reader"
-                );
+            Self::GoogleWorkspaceDomain { grantee_domains } => {
                 ensure!(
                     (1..=32).contains(&grantee_domains.len())
                         && grantee_domains.is_sorted_by(|left, right| left < right),
@@ -537,26 +525,15 @@ impl ResourceTarget {
                     customer_id: parent,
                 },
             ) => customer_id == parent,
-            // The same organization and reader; a narrower grant may only drop
-            // grantee domains, never add one.
+            // A narrower grant may only drop grantee domains, never add one.
             (
+                Self::GoogleWorkspaceDomain { grantee_domains },
                 Self::GoogleWorkspaceDomain {
-                    email_domain,
-                    calendar_reader,
-                    grantee_domains,
-                },
-                Self::GoogleWorkspaceDomain {
-                    email_domain: parent_domain,
-                    calendar_reader: parent_reader,
                     grantee_domains: parent_grantees,
                 },
-            ) => {
-                email_domain == parent_domain
-                    && calendar_reader == parent_reader
-                    && grantee_domains
-                        .iter()
-                        .all(|domain| parent_grantees.contains(domain))
-            }
+            ) => grantee_domains
+                .iter()
+                .all(|domain| parent_grantees.contains(domain)),
             (
                 Self::GoogleDirectory {
                     customer_id,

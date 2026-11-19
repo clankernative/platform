@@ -66,25 +66,36 @@ Operator prerequisites, none of which the platform performs:
 
 ## Resource target
 
+Today the target carries only what the Directory reads use:
+
+```json
+{"kind":"google_workspace_domain","grantee_domains":["example.com"]}
+```
+
+- `grantee_domains`: the domains a group may belong to in order to be looked
+  up, tested for membership or granted access. Lowercase ASCII, strictly
+  sorted and unique. A narrower grant may only drop domains.
+
+Each field below arrives with the first action that reads it, so a target
+never carries authority nothing enforces yet:
+
 ```json
 {"kind":"google_workspace_domain","email_domain":"example.com",
  "calendar_reader":"calendar-reader@example.com",
  "grantee_domains":["example.com"]}
 ```
 
-- `email_domain`: the only domain whose people may be impersonated.
-- `calendar_reader`: the one person Calendar is read as. Calendar reads see
-  exactly the calendars shared with this account, and the ACL read requires
-  that it can see them; this is how an operator bounds which calendars are in
-  play, without listing them in configuration.
-- `grantee_domains`: the domains a group may belong to in order to be looked
-  up, tested for membership or granted access. Strictly sorted and unique.
-
-All three are lowercase ASCII and `calendar_reader` must be in `email_domain`.
+- `calendar_reader` (step 2, the Calendar reads): the one person Calendar is
+  read as. Calendar reads see exactly the calendars shared with this account,
+  and the ACL read requires that it can see them; this is how an operator
+  bounds which calendars are in play, without listing them in configuration.
+  It must be in `email_domain`.
+- `email_domain` (step 2, with `calendar_reader`, and step 3, impersonation):
+  the only domain whose people may be impersonated.
 
 ## Who is impersonated
 
-An application never names a subject. Meet and Drive run as **the owner of a
+Planned for step 3. An application never names a subject. Meet and Drive run as **the owner of a
 calendar event**, derived by the adapter from the event it reads as
 `calendar_reader`:
 
@@ -118,8 +129,11 @@ shared with the reader, and only for that meeting.
   `GET …/groups/{group}/hasMember/{member}` (direct or nested). `Member`,
   `NotMember` or `GroupNotFound`. The group is looked up first because a `404`
   from `hasMember` alone cannot say whether the group or the member is missing;
-  a `404` once the group exists is `NotMember`. The member must be in
-  `email_domain` or a grantee domain.
+  a `404` once the group exists is `NotMember`. The member must be in the
+  group's own domain: Google answers a nested membership question only when
+  member and group share a domain (otherwise `400 Invalid Input`), so a
+  question it cannot answer is refused before dispatch. The member key is a
+  user, as the reference defines it.
 - **calendar** — the calendar's `id` and `summary`, and the role one named group
   holds in its ACL (`none`, `free_busy_reader`, `reader`, `writer`, `owner`).
   The ACL is paged inside the action up to a fixed page ceiling and never
@@ -150,7 +164,8 @@ API did not name, and no Drive search. Nothing is ever deleted.
 
 ## Retries and unknown outcomes
 
-Reads are side-effect free. `share_artifact` is reconcilable: it always lists
+Reads are side-effect free. The rest of this section is the planned contract
+for `share_artifact` (step 4). `share_artifact` is reconcilable: it always lists
 before it creates, and a duplicate creation (Google answers `409` or returns the
 existing permission) re-lists. A share whose response was lost is therefore
 safe to run again with the same effect identity, and the second run answers
@@ -170,35 +185,52 @@ strings, receipts or correlation. Failure codes are stable and redacted
 
 ## Simulation
 
-The simulated port answers the same HTTP requests the native port sends —
-metadata, IAM, token exchange, Directory, Calendar, Meet and Drive — from the
-SQLite world, so token handling, URL construction, paging and parsing run on the
-real path in both lanes. The world holds users, groups and nested memberships,
-the delegation client's authorized scopes, calendars and ACLs, events (recurring
-instances, cancellations, reschedules, private and confidential visibility,
-group and resource organizers), Meet spaces and conference records (a rejoin is
-a second record), artifacts that advance `started` → `ended` →
-`file_generated`, Drive files and permissions. Delegation fails as Google does
-for a scope the client is not authorized for and for a subject outside the
-domain.
+The simulated port answers the same HTTP requests the native port sends from
+the provider's world, so token handling, URL construction and parsing run on the
+real path in both lanes.
 
-Scenarios schedule faults per endpoint: `429`, `5xx`, a timeout, a malformed or
-oversized body, and a lost reply after a permission was created. The gates are
-the ones [PROVIDER-REGISTRY.md](PROVIDER-REGISTRY.md#what-this-does-not-do)
-requires: a parity suite, coverage of every action and every adapter error, and
-a saboteur that a broken simulation must fail. A seeded campaign runs histories
-of meetings, recordings, rejoins, faults and duplicate deliveries against an
-independent model: every share lands only on an artifact of the named event, to
-a group in `grantee_domains`, as reader, as the event's owner, and a retried
-share never creates a second permission.
+Today the world serves the metadata server, IAM `generateAccessToken` and
+`signJwt`, the JWT-bearer token exchange and the two Directory routes. It holds
+the service account, whether it has the Directory admin role, the delegation
+client's authorized scopes, users, and groups with nested memberships and
+aliases. Tokens are self-describing and verified by recomputing their tag: a
+forged or workload bearer gets `401`, a token without a route's scope gets
+`403`, and only the service account itself holds the Directory role.
+Delegation fails as Google does for a scope the client is not authorized for
+(`401 unauthorized_client`) and for a subject that is not a person in the
+organization (`400 invalid_grant`). Addresses are matched exactly, never
+normalised. `hasMember` takes a user key and answers a nested question across
+domains with `400 Invalid Input`. Scenarios schedule per-endpoint faults: `400`,
+`403`, `429`, `5xx`, a lost connection, a non-JSON body and an oversized body.
+
+The gates are the ones
+[PROVIDER-REGISTRY.md](PROVIDER-REGISTRY.md#what-this-does-not-do) requires: a
+parity suite, coverage of every action, every failure code produced through an
+action, and saboteurs that a constant or world-mutating simulation must fail.
+Host tests run both actions through admission, reservation and settlement.
+
+Planned, by delivery step:
+
+- Step 2: calendars, ACLs and events (recurring instances, cancellations,
+  reschedules, private and confidential visibility, group and resource
+  organizers).
+- Step 3: Meet spaces and conference records (a rejoin is a second record), and
+  artifacts that advance `started` → `ended` → `file_generated`.
+- Step 4: Drive files and permissions, a lost-reply fault after a permission
+  was created, and a seeded campaign of meetings, recordings, rejoins, faults
+  and duplicate deliveries against an independent model. That model checks
+  that every share lands only on an artifact of the named event, to a group in
+  `grantee_domains`, as reader and as the event's owner, and that a retried
+  share never creates a second permission.
 
 ## Live qualification
 
-`google-workspace-qualify` is an explicit operator recipe in
-`ops/GoogleWorkspaceQualification.roc`, like `carta-qualify`. It runs every
+Planned for step 5; neither the recipe nor the command exists yet.
+`google-workspace-qualify` will be an explicit operator recipe in
+`ops/GoogleWorkspaceQualification.roc`, like `carta-qualify`. It will run every
 read against a profile naming a test calendar and group, and optionally one
-share of a designated test recording, and publishes a receipt of shapes,
-statuses and counts with no provider values. Receipts report
+share of a designated test recording, and publish a receipt of shapes,
+statuses and counts with no provider values. Receipts will report
 `provider_qualified: false` until reviewed.
 
 ## Status
@@ -210,18 +242,20 @@ lowercases what it stores.
 
 A Directory action reserves three or four calls (metadata, IAM, then one call
 per question), 32 KiB of request payload and 16 KiB plus a probe byte for each
-response, and settles what it actually used. A failure keeps the phase,
+response, and settles what it actually used. Its grant must admit that whole
+envelope: `max_request_bytes` of at least 32 KiB and `max_response_bytes` of at
+least 16 KiB, or the action is refused before anything is reserved. The
+simulated or native source is frozen when the capability is authorized. A failure keeps the phase,
 status and `Retry-After` of its final exchange as correlation, never content.
 Codes are `google_workspace_` followed by `workload_identity_unavailable`,
 `authentication_failed`, `denied` (a `403` from the Directory: the service
 account lacks its admin role or the API is off), `rate_limited`, `unavailable`,
-`request_refused`, `response_invalid`, `response_too_large`, `request_budget` or
+`request_refused`, `response_invalid`, `response_too_large` or
 `group_outside_grant`. Malformed application input is
 `google_workspace_request_invalid`, and an address outside the grant is
 refused as a resource authorization; neither reaches the network.
 
-Simulated tokens are self-describing and verified by recomputing their tag, so
-serving a read changes nothing in the world but its request log. The parity
+Serving a read changes nothing in the world but its request log. The parity
 bases follow Google's published response shapes until the qualification recipe
 records real ones (`crates/day2/fixtures/provider-responses/GOOGLE-WORKSPACE-PROVENANCE.md`).
 

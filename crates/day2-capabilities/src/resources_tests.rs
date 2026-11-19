@@ -802,8 +802,6 @@ mod narrowing {
                 customer_id: "C01".into(),
             },
             ResourceKind::GoogleWorkspaceDomain => ResourceTarget::GoogleWorkspaceDomain {
-                email_domain: "example.com".into(),
-                calendar_reader: "calendar@example.com".into(),
                 grantee_domains: vec!["example.com".into(), "groups.example.com".into()],
             },
             ResourceKind::LinearOrganization => ResourceTarget::LinearOrganization {
@@ -965,91 +963,45 @@ mod narrowing {
         }
     }
 
-    /// A Workspace grant narrows only by dropping grantee domains: the
-    /// organization and the calendar reader are the identity of the grant.
+    /// A Workspace grant narrows only by dropping grantee domains.
     #[test]
     fn a_workspace_grant_narrows_only_by_dropping_grantee_domains() {
         let parent = sample(ResourceKind::GoogleWorkspaceDomain);
         parent.validate().unwrap();
         let fewer = ResourceTarget::GoogleWorkspaceDomain {
-            email_domain: "example.com".into(),
-            calendar_reader: "calendar@example.com".into(),
             grantee_domains: vec!["example.com".into()],
         };
+        fewer.validate().unwrap();
         assert!(fewer.is_subset_of(&parent));
         assert!(
             !parent.is_subset_of(&fewer),
             "a grant added a grantee domain"
         );
-        for other in [
-            ResourceTarget::GoogleWorkspaceDomain {
-                email_domain: "other.example".into(),
-                calendar_reader: "calendar@other.example".into(),
-                grantee_domains: vec!["example.com".into()],
-            },
-            ResourceTarget::GoogleWorkspaceDomain {
-                email_domain: "example.com".into(),
-                calendar_reader: "someone@example.com".into(),
-                grantee_domains: vec!["example.com".into()],
-            },
-        ] {
-            other.validate().unwrap();
-            assert!(!other.is_subset_of(&parent), "{other:?}");
-        }
+        let other = ResourceTarget::GoogleWorkspaceDomain {
+            grantee_domains: vec!["other.example".into()],
+        };
+        other.validate().unwrap();
+        assert!(!other.is_subset_of(&parent));
     }
 
     #[test]
     fn a_workspace_target_is_exact_lowercase_and_strictly_sorted() {
-        let target =
-            |domain: &str, reader: &str, grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
-                email_domain: domain.into(),
-                calendar_reader: reader.into(),
-                grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
-            };
-        target(
-            "example.com",
-            "calendar@example.com",
-            &["a.example", "example.com"],
-        )
-        .validate()
-        .unwrap();
+        let target = |grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
+            grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
+        };
+        target(&["a.example", "example.com"]).validate().unwrap();
         for (invalid, code) in [
+            (target(&[]), "invalid_google_workspace_grantee_domains"),
             (
-                target("Example.com", "calendar@example.com", &["example.com"]),
-                "invalid_resource_email_domain",
-            ),
-            (
-                target("example.com", "calendar@other.example", &["example.com"]),
-                "invalid_google_workspace_calendar_reader",
-            ),
-            (
-                target("example.com", "Calendar@example.com", &["example.com"]),
-                "invalid_google_workspace_calendar_reader",
-            ),
-            (
-                target("example.com", "calendar@example.com", &[]),
+                target(&["example.com", "a.example"]),
                 "invalid_google_workspace_grantee_domains",
             ),
             (
-                target(
-                    "example.com",
-                    "calendar@example.com",
-                    &["example.com", "a.example"],
-                ),
+                target(&["example.com", "example.com"]),
                 "invalid_google_workspace_grantee_domains",
             ),
-            (
-                target(
-                    "example.com",
-                    "calendar@example.com",
-                    &["example.com", "example.com"],
-                ),
-                "invalid_google_workspace_grantee_domains",
-            ),
-            (
-                target("example.com", "calendar@example.com", &["Example.com"]),
-                "invalid_resource_email_domain",
-            ),
+            (target(&["Example.com"]), "invalid_resource_email_domain"),
+            (target(&["example"]), "invalid_resource_email_domain"),
         ] {
             assert_eq!(
                 invalid.validate().unwrap_err().to_string(),
@@ -1057,15 +1009,17 @@ mod narrowing {
                 "{invalid:?}"
             );
         }
-        assert!(
-            serde_json::from_value::<ResourceTarget>(json!({
-                "kind":"google_workspace_domain","email_domain":"example.com",
-                "calendar_reader":"calendar@example.com","grantee_domains":["example.com"],
-                "subject":"anyone@example.com"
-            }))
-            .is_err(),
-            "a target cannot carry a subject"
-        );
+        for extra in [
+            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"],
+                "subject":"anyone@example.com"}),
+            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"],
+                "calendar_reader":"calendar@example.com"}),
+        ] {
+            assert!(
+                serde_json::from_value::<ResourceTarget>(extra).is_err(),
+                "a target carries only what this PR reads"
+            );
+        }
         for address in [
             "a@example.com",
             "first.last+tag@example.com",

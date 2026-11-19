@@ -218,6 +218,15 @@ impl Authorized {
         }
     }
 
+    /// The frozen Workspace plan, for tests of what authorization decided.
+    #[cfg(test)]
+    pub(crate) fn google_workspace_plan(&self) -> Option<&crate::google_workspace::Plan> {
+        match &self.action {
+            Action::GoogleWorkspace(plan) => Some(plan),
+            _ => None,
+        }
+    }
+
     pub(crate) fn quote(&self) -> crate::resources::ProviderQuote {
         self.quote
     }
@@ -511,8 +520,9 @@ pub(crate) fn authorized(
                 resource.grant.provider == Provider::GoogleWorkspace,
                 crate::error::Failure::ResourceForbidden
             );
-            // The connection is frozen here, before any reservation: a simulated
-            // host serves the same plan from its world and never reaches Google.
+            // The connection, the in-grant inputs and the source are frozen
+            // here, before any reservation: a plan authorized on a simulated
+            // host is served from its world and can never reach Google.
             let connection = resource
                 .grant
                 .live
@@ -523,12 +533,20 @@ pub(crate) fn authorized(
                 connection,
                 &resource.grant.target,
                 &instruction.data,
+                if runtime.integrations().uses_simulated_providers() {
+                    crate::google_workspace::Source::Simulated
+                } else {
+                    crate::google_workspace::Source::Native
+                },
             )?;
+            // The grant must cover the whole reserved envelope, as Carta and
+            // Workspace Directory require of theirs.
             ensure!(
                 handle == resource.handle
+                    && resource.grant.limits.max_request_bytes
+                        >= crate::google_workspace::MAX_ACTION_REQUEST_BYTES
                     && resource.grant.limits.max_response_bytes
-                        >= crate::google_auth::MAX_EXCHANGE_RESPONSE_BYTES as u64
-                    && instruction.data.len() as u64 <= resource.grant.limits.max_request_bytes,
+                        >= crate::google_workspace::MAX_RESPONSE_BYTES as u64,
                 crate::error::Failure::ResourceForbidden
             );
             resource.planned_calls = plan.planned_calls();
@@ -1062,24 +1080,25 @@ fn workspace_directory_user_path(
     Ok(serde_json::to_string(&observed)?)
 }
 
-/// One Workspace read through the simulated or native port. The source was
-/// frozen at authorization: a simulated host answers from its world only.
+/// One Workspace read through the port its plan selected when it was
+/// authorized: a simulated plan answers from its world only.
 fn google_workspace_observe(
     runtime: &Runtime,
     plan: &crate::google_workspace::Plan,
 ) -> (Result<String>, crate::google_workspace::Meter) {
+    use crate::google_workspace::{GooglePort, Source};
     let now = match runtime.host().now_ms() {
         Ok(now) => now / 1000,
         Err(error) => return (Err(error), Default::default()),
     };
-    let port: Result<Box<dyn crate::google_workspace::GooglePort>> =
-        if runtime.integrations().uses_simulated_providers() {
+    let port: Result<Box<dyn GooglePort>> = match plan.source() {
+        Source::Simulated => {
             crate::google_workspace::SimulatedGooglePort::new(runtime.db(), runtime.scope())
-                .map(|port| Box::new(port) as Box<dyn crate::google_workspace::GooglePort>)
-        } else {
-            crate::google_workspace_http::NativeGooglePort::new()
-                .map(|port| Box::new(port) as Box<dyn crate::google_workspace::GooglePort>)
-        };
+                .map(|port| Box::new(port) as Box<dyn GooglePort>)
+        }
+        Source::Native => crate::google_workspace_http::NativeGooglePort::new()
+            .map(|port| Box::new(port) as Box<dyn GooglePort>),
+    };
     match port {
         Ok(mut port) => crate::google_workspace::observe(plan, port.as_mut(), now),
         Err(_) => (

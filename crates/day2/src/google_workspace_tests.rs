@@ -1,8 +1,9 @@
 use super::*;
 use crate::integrations::simulated::{
     self, GOOGLE_ENDPOINTS, GOOGLE_GROUP_ENDPOINT, GOOGLE_HAS_MEMBER_ENDPOINT,
-    GOOGLE_IAM_TOKEN_ENDPOINT, GOOGLE_METADATA_ENDPOINT, GOOGLE_WORKSPACE_WORLD,
-    GoogleWorkspaceWorld, ScheduledFault, SimulatedFault,
+    GOOGLE_IAM_SIGN_ENDPOINT, GOOGLE_IAM_TOKEN_ENDPOINT, GOOGLE_METADATA_ENDPOINT,
+    GOOGLE_OAUTH_TOKEN_ENDPOINT, GOOGLE_WORKSPACE_WORLD, GoogleGroup, GoogleWorkspaceWorld,
+    ScheduledFault, SimulatedFault,
 };
 use day2_capabilities::integrations::LiveConnection;
 
@@ -29,6 +30,7 @@ fn plan_with(action: Action, connection: &LiveConnection, request: &str) -> Resu
         connection,
         &simulated::google_workspace_development_target(),
         request,
+        Source::Simulated,
     )?;
     ensure!(handle == "h", "handle not carried");
     Ok(plan)
@@ -217,6 +219,26 @@ fn requests_outside_the_grant_or_malformed_are_refused_before_any_exchange() {
         serde_json::json!({"handle":"h","group_email":"engineering@synthetic.example",
             "member_email":"outsider@other.example"}),
     );
+    // Even inside the grant, a member in another domain than the group is a
+    // question Google refuses for nested groups, so it is never asked.
+    let two_domains = ResourceTarget::GoogleWorkspaceDomain {
+        grantee_domains: vec![
+            "groups.synthetic.example".into(),
+            "synthetic.example".into(),
+        ],
+    };
+    let error = Plan::authorize(
+        Action::GoogleWorkspaceGroupMember,
+        &connection(simulated::GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT),
+        &two_domains,
+        r#"{"handle":"h","group_email":"engineering@synthetic.example","member_email":"ada@groups.synthetic.example"}"#,
+        Source::Simulated,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceForbidden)
+    ));
     // A provider action of another kind never reaches this adapter.
     forbidden(
         Action::SlackRead,
@@ -302,10 +324,9 @@ fn an_unseeded_world_is_unavailable_and_never_reaches_a_network() {
     assert!(SimulatedGooglePort::new(&world.database, "installation/other").is_err());
 }
 
-#[test]
-fn every_scheduled_fault_is_classified_per_exchange_without_provider_content() {
+fn directory_fault_cases() -> Vec<(&'static str, SimulatedFault, &'static str)> {
     use SimulatedFault::*;
-    let cases = [
+    vec![
         // The metadata server is the runtime's own identity: any failure there
         // is the workload identity being unavailable.
         (
@@ -351,8 +372,42 @@ fn every_scheduled_fault_is_classified_per_exchange_without_provider_content() {
         (GOOGLE_HAS_MEMBER_ENDPOINT, ConnectionLost, "unavailable"),
         (GOOGLE_HAS_MEMBER_ENDPOINT, NotJson, "response_invalid"),
         (GOOGLE_HAS_MEMBER_ENDPOINT, Oversized, "response_too_large"),
-    ];
-    for (endpoint, fault, expected) in cases {
+        (GOOGLE_GROUP_ENDPOINT, BadRequest, "request_refused"),
+        (GOOGLE_HAS_MEMBER_ENDPOINT, BadRequest, "request_refused"),
+    ]
+}
+
+/// The delegated flow's own endpoints, which no Directory read uses.
+fn delegation_fault_cases() -> Vec<(&'static str, SimulatedFault, google_auth::Failure)> {
+    use SimulatedFault::*;
+    vec![
+        (
+            GOOGLE_IAM_SIGN_ENDPOINT,
+            ServerError,
+            google_auth::Failure::Unavailable,
+        ),
+        (
+            GOOGLE_IAM_SIGN_ENDPOINT,
+            Denied,
+            google_auth::Failure::AuthenticationFailed,
+        ),
+        (
+            GOOGLE_OAUTH_TOKEN_ENDPOINT,
+            RateLimited,
+            google_auth::Failure::RateLimited,
+        ),
+        (
+            GOOGLE_OAUTH_TOKEN_ENDPOINT,
+            NotJson,
+            google_auth::Failure::AuthenticationFailed,
+        ),
+    ]
+}
+
+#[test]
+fn every_scheduled_fault_is_classified_per_exchange_without_provider_content() {
+    use SimulatedFault::*;
+    for (endpoint, fault, expected) in directory_fault_cases() {
         let world = World::development();
         world.fault(endpoint, fault);
         let plan = member_plan("engineering@synthetic.example", "ada@synthetic.example");
@@ -375,14 +430,19 @@ fn every_scheduled_fault_is_classified_per_exchange_without_provider_content() {
         let (retried, _) = world.observe(&plan);
         assert_eq!(retried.unwrap(), r#""Member""#, "{endpoint} {fault:?}");
     }
-    // Every reviewed endpoint in the world is reachable by these actions except
-    // delegation, which no Directory read uses.
+}
+
+#[test]
+fn every_simulated_endpoint_has_a_scheduled_fault_case() {
     for endpoint in GOOGLE_ENDPOINTS {
         assert!(
-            cases.iter().any(|(case, ..)| *case == endpoint)
-                || endpoint.contains("sign_jwt")
-                || endpoint.contains("oauth.token"),
-            "{endpoint}"
+            directory_fault_cases()
+                .iter()
+                .any(|(case, ..)| *case == endpoint)
+                || delegation_fault_cases()
+                    .iter()
+                    .any(|(case, ..)| *case == endpoint),
+            "{endpoint} has no fault case"
         );
     }
 }
@@ -448,7 +508,7 @@ fn reservations_cover_every_exchange_and_its_probe() {
 }
 
 #[test]
-fn directory_statuses_and_the_request_budget_map_to_their_own_codes() {
+fn directory_statuses_map_to_their_own_codes() {
     let reply = |status: u16| Reply {
         status,
         metadata_flavor: false,
@@ -467,11 +527,284 @@ fn directory_statuses_and_the_request_budget_map_to_their_own_codes() {
         assert_eq!(accept(&reply(status), 64), Err(expected), "{status}");
     }
     assert_eq!(accept(&reply(200), 64), Ok(()));
-    let mut meter = Meter::default();
+}
+
+/// Token exchanges answered by the simulated world, outside any action, so the
+/// world's own authentication can be probed directly.
+struct WorldWire(SimulatedGooglePort);
+
+impl google_auth::TokenWire for WorldWire {
+    fn exchange(
+        &mut self,
+        exchange: &Exchange<'_>,
+        max_bytes: usize,
+    ) -> std::result::Result<Reply, Unreached> {
+        self.0.authenticate(exchange, max_bytes)
+    }
+}
+
+impl World {
+    fn wire(&self) -> WorldWire {
+        WorldWire(SimulatedGooglePort::new(&self.database, SCOPE).unwrap())
+    }
+
+    fn token(
+        &self,
+        identity: google_auth::Identity<'_>,
+        scopes: &[&str],
+    ) -> std::result::Result<AccessToken, google_auth::Failure> {
+        google_auth::acquire(
+            &mut self.wire(),
+            &google_auth::TokenRequest {
+                service_account: simulated::GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT,
+                identity,
+                scopes,
+            },
+            1_000,
+        )
+    }
+
+    /// One Directory request with any bearer, as a client could send it.
+    fn directory(&self, segments: &[&str], bearer: &str) -> Reply {
+        simulated::google_workspace_serve(
+            &self.database,
+            SCOPE,
+            simulated::GoogleRequest::Api {
+                request: &ApiRequest::directory("probe", segments, &[]),
+                bearer,
+            },
+            MAX_DIRECTORY_RESPONSE_BYTES,
+        )
+        .unwrap()
+    }
+}
+
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+
+#[test]
+fn the_simulated_directory_refuses_forged_workload_and_underscoped_bearers() {
+    let world = World::development();
+    let group = ["groups", "engineering@synthetic.example"];
+    let has_member = [
+        "groups",
+        "engineering@synthetic.example",
+        "hasMember",
+        "ada@synthetic.example",
+    ];
+    assert_eq!(world.directory(&group, "forged").status, 401);
     assert_eq!(
-        meter.send(Phase::Directory, MAX_ACTION_REQUEST_BYTES as usize + 1),
-        Err(Failure::RequestBudget)
+        world
+            .directory(&group, "simulated.e30.0000000000000000")
+            .status,
+        401
     );
-    // A refused send is not a call and consumes nothing.
-    assert_eq!(meter, Meter::default());
+    // The workload's own token is for IAM only.
+    let metadata = world
+        .wire()
+        .0
+        .authenticate(
+            &Exchange::Metadata,
+            google_auth::MAX_EXCHANGE_RESPONSE_BYTES,
+        )
+        .unwrap();
+    let workload: serde_json::Value = serde_json::from_slice(&metadata.body).unwrap();
+    assert_eq!(
+        world
+            .directory(&group, workload["access_token"].as_str().unwrap())
+            .status,
+        401
+    );
+    // A token minted for groups alone cannot ask about membership.
+    let group_only = world
+        .token(google_auth::Identity::ServiceAccount, &[GROUP_READ_SCOPE])
+        .unwrap();
+    assert_eq!(world.directory(&group, group_only.bearer()).status, 200);
+    assert_eq!(
+        world.directory(&has_member, group_only.bearer()).status,
+        403
+    );
+}
+
+#[test]
+fn delegation_succeeds_only_for_an_authorized_scope_and_a_person_in_the_organization() {
+    let world = World::development();
+    let delegated = world
+        .token(
+            google_auth::Identity::Delegated("ada@synthetic.example"),
+            &[CALENDAR_SCOPE],
+        )
+        .unwrap();
+    let calls = world.state().calls;
+    assert!(calls[1].starts_with(GOOGLE_IAM_SIGN_ENDPOINT));
+    assert_eq!(calls[2], GOOGLE_OAUTH_TOKEN_ENDPOINT);
+    // A delegated person does not hold the service account's Directory role.
+    assert_eq!(
+        world
+            .directory(
+                &["groups", "engineering@synthetic.example"],
+                delegated.bearer()
+            )
+            .status,
+        403
+    );
+    // The client is not authorized for this scope domain-wide.
+    assert_eq!(
+        world
+            .token(
+                google_auth::Identity::Delegated("ada@synthetic.example"),
+                &[GROUP_READ_SCOPE],
+            )
+            .err(),
+        Some(google_auth::Failure::AuthenticationFailed)
+    );
+    // Neither someone outside the organization nor a group can be impersonated.
+    for subject in ["ada@other.example", "engineering@synthetic.example"] {
+        assert_eq!(
+            world
+                .token(google_auth::Identity::Delegated(subject), &[CALENDAR_SCOPE])
+                .err(),
+            Some(google_auth::Failure::AuthenticationFailed),
+            "{subject}"
+        );
+    }
+    // Another service account's assertion is not this world's to exchange.
+    let other = google_auth::acquire(
+        &mut world.wire(),
+        &google_auth::TokenRequest {
+            service_account: "someone-else@synthetic-project.iam.gserviceaccount.com",
+            identity: google_auth::Identity::Delegated("ada@synthetic.example"),
+            scopes: &[CALENDAR_SCOPE],
+        },
+        1_000,
+    );
+    assert_eq!(
+        other.err(),
+        Some(google_auth::Failure::AuthenticationFailed)
+    );
+}
+
+#[test]
+fn delegated_exchange_faults_are_classified_and_consumed() {
+    for (endpoint, fault, expected) in delegation_fault_cases() {
+        let world = World::development();
+        world.fault(endpoint, fault);
+        let delegated = google_auth::Identity::Delegated("ada@synthetic.example");
+        assert_eq!(
+            world.token(delegated, &[CALENDAR_SCOPE]).err(),
+            Some(expected),
+            "{endpoint} {fault:?}"
+        );
+        assert!(world.token(delegated, &[CALENDAR_SCOPE]).is_ok());
+    }
+}
+
+#[test]
+fn the_simulated_membership_check_follows_the_reference() {
+    let mut organization = simulated::google_workspace_development_fixture();
+    organization
+        .users
+        .insert("lin@groups.synthetic.example".into());
+    organization.groups.insert(
+        "partners@synthetic.example".into(),
+        GoogleGroup {
+            id: "group-partners".into(),
+            name: "Partners".into(),
+            members: ["lin@groups.synthetic.example".to_owned()].into(),
+            aliases: Default::default(),
+        },
+    );
+    let world = World::new(organization);
+    let token = world
+        .token(
+            google_auth::Identity::ServiceAccount,
+            &[GROUP_READ_SCOPE, GROUP_MEMBER_READ_SCOPE],
+        )
+        .unwrap();
+    let ask = |group: &str, member: &str| {
+        world.directory(&["groups", group, "hasMember", member], token.bearer())
+    };
+    let answer =
+        |reply: Reply| -> serde_json::Value { serde_json::from_slice(&reply.body).unwrap() };
+    // A direct member in another domain is answered.
+    let direct = ask("partners@synthetic.example", "lin@groups.synthetic.example");
+    assert_eq!(direct.status, 200);
+    assert_eq!(answer(direct)["isMember"], true);
+    // A nested question across domains is invalid input.
+    assert_eq!(
+        ask(
+            "engineering@synthetic.example",
+            "lin@groups.synthetic.example"
+        )
+        .status,
+        400
+    );
+    // The member key is a user, never a group.
+    assert_eq!(
+        ask(
+            "engineering@synthetic.example",
+            "platform@synthetic.example"
+        )
+        .status,
+        404
+    );
+    // Addresses are matched exactly, never normalised.
+    assert_eq!(
+        ask("Engineering@synthetic.example", "ada@synthetic.example").status,
+        404
+    );
+    assert_eq!(
+        ask("engineering@synthetic.example", "Ada@synthetic.example").status,
+        404
+    );
+}
+
+#[test]
+fn every_failure_is_produced_through_an_action() {
+    let mut produced = std::collections::BTreeSet::new();
+    let mut record = |world: &World, plan: &Plan| {
+        let (result, _) = world.observe(plan);
+        produced.insert(code(&result));
+    };
+    let read = group_plan("engineering@synthetic.example");
+    for (endpoint, fault) in [
+        (GOOGLE_METADATA_ENDPOINT, SimulatedFault::ServerError),
+        (GOOGLE_GROUP_ENDPOINT, SimulatedFault::RateLimited),
+        (GOOGLE_GROUP_ENDPOINT, SimulatedFault::ServerError),
+        (GOOGLE_GROUP_ENDPOINT, SimulatedFault::BadRequest),
+        (GOOGLE_GROUP_ENDPOINT, SimulatedFault::NotJson),
+        (GOOGLE_GROUP_ENDPOINT, SimulatedFault::Oversized),
+    ] {
+        let world = World::development();
+        world.fault(endpoint, fault);
+        record(&world, &read);
+    }
+    record(
+        &World::development(),
+        &plan_with(
+            Action::GoogleWorkspaceGroup,
+            &connection("someone-else@synthetic-project.iam.gserviceaccount.com"),
+            r#"{"handle":"h","group_email":"engineering@synthetic.example"}"#,
+        )
+        .unwrap(),
+    );
+    let mut without_role = simulated::google_workspace_development_fixture();
+    without_role.directory_reader = false;
+    record(&World::new(without_role), &read);
+    // An in-grant alias whose group's primary address is elsewhere.
+    let mut aliased = simulated::google_workspace_development_fixture();
+    aliased.groups.insert(
+        "team@other.example".into(),
+        GoogleGroup {
+            id: "group-team".into(),
+            name: "Team".into(),
+            members: Default::default(),
+            aliases: ["team@synthetic.example".to_owned()].into(),
+        },
+    );
+    record(&World::new(aliased), &group_plan("team@synthetic.example"));
+    let expected: std::collections::BTreeSet<_> = Failure::ALL
+        .iter()
+        .map(|failure| failure.code().to_owned())
+        .collect();
+    assert_eq!(produced, expected);
 }

@@ -1994,15 +1994,24 @@ fn provider_resource_fixture(
                     allowed_resources: BTreeSet::from([resource.clone()]),
                     actions,
                     limits: Limits {
-                        max_request_bytes: if *provider == Provider::WorkspaceDirectory {
-                            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
-                        } else {
-                            16_384
+                        max_request_bytes: match provider {
+                            Provider::WorkspaceDirectory => {
+                                crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                            }
+                            // The whole reserved envelope of one action.
+                            Provider::GoogleWorkspace => {
+                                crate::google_workspace::MAX_ACTION_REQUEST_BYTES
+                            }
+                            _ => 16_384,
                         },
-                        max_response_bytes: if *provider == Provider::WorkspaceDirectory {
-                            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
-                        } else {
-                            16_384
+                        max_response_bytes: match provider {
+                            Provider::WorkspaceDirectory => {
+                                crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+                            }
+                            Provider::GoogleWorkspace => {
+                                crate::google_workspace::MAX_RESPONSE_BYTES as u64
+                            }
+                            _ => 16_384,
                         },
                         max_calls_per_invocation: 256,
                     },

@@ -83,6 +83,8 @@ pub enum SimulatedFault {
     RateLimited,
     /// HTTP 403. Classified as `ProviderDenied`.
     Denied,
+    /// HTTP 400: the provider refused the request as malformed.
+    BadRequest,
     /// HTTP 500. Classified as `Incomplete`, and leaves a write outcome unknown.
     ServerError,
     /// The response never arrives. Dispatched, so a write outcome is unknown.
@@ -224,6 +226,10 @@ pub struct GoogleGroup {
     pub name: String,
     /// People or other groups, by primary address. Membership is transitive.
     pub members: BTreeSet<String>,
+    /// Other addresses that also name this group. A lookup by alias answers
+    /// with the primary address, which may be in another domain.
+    #[serde(default)]
+    pub aliases: BTreeSet<String>,
 }
 
 /// One stored object, as the store reports it.
@@ -1173,8 +1179,6 @@ const GOOGLE_DEVELOPMENT_DOMAIN: &str = "synthetic.example";
 /// The disposable grant matching [`google_workspace_development_fixture`].
 pub fn google_workspace_development_target() -> day2_capabilities::resources::ResourceTarget {
     day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
-        email_domain: GOOGLE_DEVELOPMENT_DOMAIN.into(),
-        calendar_reader: format!("calendar-reader@{GOOGLE_DEVELOPMENT_DOMAIN}"),
         grantee_domains: vec![GOOGLE_DEVELOPMENT_DOMAIN.into()],
     }
 }
@@ -1187,6 +1191,7 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
         id: id.into(),
         name: name.into(),
         members: members.iter().cloned().collect(),
+        aliases: BTreeSet::new(),
     };
     GoogleWorkspaceWorld {
         domain: GOOGLE_DEVELOPMENT_DOMAIN.into(),
@@ -1201,10 +1206,7 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
         .map(str::to_owned)
         .collect(),
         directory_reader: true,
-        users: ["ada", "grace", "calendar-reader"]
-            .into_iter()
-            .map(address)
-            .collect(),
+        users: ["ada", "grace"].into_iter().map(address).collect(),
         groups: BTreeMap::from([
             (
                 address("engineering"),
@@ -1622,8 +1624,15 @@ fn google_reply(
             if issued.subject.is_some() || !world.directory_reader {
                 return Ok(error(403, "Not Authorized to access this resource/api"));
             }
-            let key = group.to_ascii_lowercase();
-            let Some(found) = world.groups.get(&key) else {
+            // Keys are matched exactly, never normalised: the adapter sends
+            // lowercase addresses, and normalising here would hide a bug there.
+            // A group key is its primary address or one of its aliases.
+            let Some((key, found)) = world.groups.get_key_value(group).or_else(|| {
+                world
+                    .groups
+                    .iter()
+                    .find(|(_, candidate)| candidate.aliases.contains(group))
+            }) else {
                 return Ok(error(404, "Resource Not Found: groupKey"));
             };
             match member {
@@ -1644,13 +1653,20 @@ fn google_reply(
                     }
                 }
                 Some(member) => {
-                    let member = member.to_ascii_lowercase();
-                    if !world.users.contains(&member) && !world.groups.contains_key(&member) {
+                    // hasMember's memberKey identifies a user, never a group.
+                    if !world.users.contains(member) {
                         return Ok(error(404, "Resource Not Found: memberKey"));
+                    }
+                    let direct = found.members.contains(member);
+                    if !direct
+                        && member.rsplit_once('@').map(|(_, domain)| domain)
+                            != key.rsplit_once('@').map(|(_, domain)| domain)
+                    {
+                        return Ok(error(400, "Invalid Input: memberKey"));
                     }
                     reply(
                         200,
-                        json!({"isMember":google_is_member(world, &key, &member)}),
+                        json!({"isMember":direct || google_is_member(world, key, member)}),
                     )
                 }
             }
@@ -1737,6 +1753,7 @@ fn fault_response(
     match fault {
         SimulatedFault::RateLimited => http(429),
         SimulatedFault::Denied => http(403),
+        SimulatedFault::BadRequest => http(400),
         SimulatedFault::ServerError => http(500),
         SimulatedFault::ConnectionLost => Some(Err(TransportError {
             kind: AdapterError::TransportUnavailable,

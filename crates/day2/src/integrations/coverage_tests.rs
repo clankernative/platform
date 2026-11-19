@@ -482,6 +482,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                     } else {
                         BTreeSet::new()
                     },
+                    aliases: BTreeSet::new(),
                 },
             )]),
         },
@@ -491,7 +492,9 @@ fn fixture(variant: Variant) -> SimulatedFixture {
 const GOOGLE_COVERAGE_ACCOUNT: &str = "coverage-reader@coverage-project.iam.gserviceaccount.com";
 
 /// One Google Workspace read through the real pipeline and the simulated port,
-/// authorized exactly as the host authorizes it.
+/// planned by the same `Plan::authorize` the host calls. Host admission itself
+/// (resource binding, limits, reservation, settlement) is covered by
+/// `google_workspace_host_tests`.
 fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
@@ -511,11 +514,10 @@ fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed
             service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
         },
         &ResourceTarget::GoogleWorkspaceDomain {
-            email_domain: "coverage.test".into(),
-            calendar_reader: "calendar@coverage.test".into(),
             grantee_domains: vec!["coverage.test".into()],
         },
         &request.to_string(),
+        crate::google_workspace::Source::Simulated,
     )?;
     let mut port = crate::google_workspace::SimulatedGooglePort::new(&database, SCOPE)?;
     let (result, _) = crate::google_workspace::observe(&plan, &mut port, 1_700_000_000);
@@ -1208,25 +1210,10 @@ fn check(
         Demonstration::NotificationsAdapter => notifications::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
-        Demonstration::WorkspaceRead => {
-            let first = run(Variant::A)?;
-            let second = run(Variant::B)?;
-            if first.result != second.result
-                && first.changed().is_empty()
-                && second.changed().is_empty()
-            {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{action:?} must reflect {own} without changing any world; results differ={}, changed={:?}/{:?}",
-                    first.result != second.result,
-                    first.changed(),
-                    second.changed()
-                ))
-            }
-        }
         Demonstration::HeldCaptureRelease => carta::check_release(action),
-        Demonstration::AdmittedAdapterRead => {
+        // Both read a provider world through the supplied observer: the answer
+        // must move with that world and no world may change.
+        Demonstration::AdmittedAdapterRead | Demonstration::WorkspaceRead => {
             let first = run(Variant::A)?;
             let second = run(Variant::B)?;
             if first.result != second.result

@@ -884,11 +884,10 @@ fn google_plan(action: Action) -> Result<crate::google_workspace::Plan> {
             service_account: "reader@example-project.iam.gserviceaccount.com".into(),
         },
         &ResourceTarget::GoogleWorkspaceDomain {
-            email_domain: "example.com".into(),
-            calendar_reader: "calendar@example.com".into(),
             grantee_domains: vec!["example.com".into()],
         },
         &request.to_string(),
+        crate::google_workspace::Source::Simulated,
     )?
     .0)
 }
@@ -1031,6 +1030,7 @@ fn the_google_simulation_emits_exactly_the_documented_fields() -> Result<()> {
             id: "group-team".into(),
             name: "Team".into(),
             members: ["person@example.com".to_owned()].into(),
+            aliases: Default::default(),
         },
     )]);
     super::simulated::seed(

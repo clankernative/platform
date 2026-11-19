@@ -23,58 +23,57 @@ pub const GROUP_MEMBER_READ_SCOPE: &str =
 pub const DIRECTORY_ORIGIN: &str = "https://admin.googleapis.com";
 /// One Directory response. A group or a membership answer is a few hundred bytes.
 pub const MAX_DIRECTORY_RESPONSE_BYTES: usize = 16 * 1024;
-/// The posted payload of every exchange of one action together.
+/// The largest single response an action reads: an authentication exchange
+/// or a Directory answer. A grant must admit it.
+pub const MAX_RESPONSE_BYTES: usize =
+    if google_auth::MAX_EXCHANGE_RESPONSE_BYTES > MAX_DIRECTORY_RESPONSE_BYTES {
+        google_auth::MAX_EXCHANGE_RESPONSE_BYTES
+    } else {
+        MAX_DIRECTORY_RESPONSE_BYTES
+    };
+/// The posted payload of every exchange of one action together, reserved whole.
 pub const MAX_ACTION_REQUEST_BYTES: u64 = 32 * 1024;
 /// An application's request: a handle and at most two addresses.
 pub const MAX_INPUT_BYTES: usize = 4 * 1024;
 
-/// Stable, redacted failures. No variant carries a body, URL, header, token or
-/// address, so an observation error can never become a provider data channel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Failure {
-    WorkloadIdentityUnavailable,
-    AuthenticationFailed,
-    /// 403: the service account lacks the admin role, or the API is disabled.
-    Denied,
-    RateLimited,
-    Unavailable,
-    /// 400: Google refused the request as malformed.
-    RequestRefused,
-    ResponseInvalid,
-    ResponseTooLarge,
-    RequestBudget,
-    /// Google answered with a group whose address is outside the grant.
-    GroupOutsideGrant,
+/// One declaration of every failure and its code: `ALL` and `code` are both
+/// generated from it, so a variant cannot exist without a code or be missing
+/// from `ALL`.
+macro_rules! failures {
+    ($($(#[doc = $doc:literal])* $variant:ident => $code:literal),* $(,)?) => {
+        /// Stable, redacted failures. No variant carries a body, URL, header,
+        /// token or address, so an observation error can never become a
+        /// provider data channel.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Failure {
+            $($(#[doc = $doc])* $variant),*
+        }
+
+        impl Failure {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),*];
+
+            pub fn code(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $code),*
+                }
+            }
+        }
+    };
 }
 
-impl Failure {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::WorkloadIdentityUnavailable => "google_workspace_workload_identity_unavailable",
-            Self::AuthenticationFailed => "google_workspace_authentication_failed",
-            Self::Denied => "google_workspace_denied",
-            Self::RateLimited => "google_workspace_rate_limited",
-            Self::Unavailable => "google_workspace_unavailable",
-            Self::RequestRefused => "google_workspace_request_refused",
-            Self::ResponseInvalid => "google_workspace_response_invalid",
-            Self::ResponseTooLarge => "google_workspace_response_too_large",
-            Self::RequestBudget => "google_workspace_request_budget",
-            Self::GroupOutsideGrant => "google_workspace_group_outside_grant",
-        }
-    }
-
-    pub const ALL: [Self; 10] = [
-        Self::WorkloadIdentityUnavailable,
-        Self::AuthenticationFailed,
-        Self::Denied,
-        Self::RateLimited,
-        Self::Unavailable,
-        Self::RequestRefused,
-        Self::ResponseInvalid,
-        Self::ResponseTooLarge,
-        Self::RequestBudget,
-        Self::GroupOutsideGrant,
-    ];
+failures! {
+    WorkloadIdentityUnavailable => "google_workspace_workload_identity_unavailable",
+    AuthenticationFailed => "google_workspace_authentication_failed",
+    /// 403: the service account lacks the admin role, or the API is disabled.
+    Denied => "google_workspace_denied",
+    RateLimited => "google_workspace_rate_limited",
+    Unavailable => "google_workspace_unavailable",
+    /// 400: Google refused the request as malformed.
+    RequestRefused => "google_workspace_request_refused",
+    ResponseInvalid => "google_workspace_response_invalid",
+    ResponseTooLarge => "google_workspace_response_too_large",
+    /// Google answered with a group whose primary address is outside the grant.
+    GroupOutsideGrant => "google_workspace_group_outside_grant",
 }
 
 impl fmt::Display for Failure {
@@ -104,10 +103,22 @@ pub enum Read {
     GroupMember { group: String, member: String },
 }
 
-/// One action, frozen when the capability is authorized: the connection's
-/// service account, the grant's grantee domains and the in-grant inputs.
+/// Where an action's exchanges go. Chosen when the capability is authorized,
+/// so a simulated host can never reach the native port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The provider's committed simulated world.
+    Simulated,
+    /// Google's fixed origins.
+    Native,
+}
+
+/// One action, frozen when the capability is authorized: its source, the
+/// connection's service account, the grant's grantee domains and the in-grant
+/// inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
+    source: Source,
     service_account: String,
     grantee_domains: Vec<String>,
     read: Read,
@@ -138,16 +149,12 @@ impl Plan {
         connection: &LiveConnection,
         target: &ResourceTarget,
         request: &str,
+        source: Source,
     ) -> Result<(Self, String)> {
         let LiveConnection::GoogleWorkspace { service_account } = connection else {
             anyhow::bail!(crate::error::Failure::ResourceForbidden)
         };
-        let ResourceTarget::GoogleWorkspaceDomain {
-            email_domain,
-            calendar_reader: _,
-            grantee_domains,
-        } = target
-        else {
+        let ResourceTarget::GoogleWorkspaceDomain { grantee_domains } = target else {
             anyhow::bail!(crate::error::Failure::ResourceForbidden)
         };
         connection.validate()?;
@@ -157,13 +164,13 @@ impl Plan {
             "google_workspace_request_invalid"
         );
         let invalid = |_| anyhow::anyhow!("google_workspace_request_invalid");
-        let group_domain = |group: &str| -> Result<()> {
+        let group_domain = |group: &str| -> Result<String> {
             let (_, domain) = google_workspace_address(group).map_err(invalid)?;
             ensure!(
                 grantee_domains.iter().any(|granted| granted == domain),
                 crate::error::Failure::ResourceForbidden
             );
-            Ok(())
+            Ok(domain.to_owned())
         };
         let (read, handle) = match action {
             Action::GoogleWorkspaceGroup => {
@@ -180,16 +187,14 @@ impl Plan {
             Action::GoogleWorkspaceGroupMember => {
                 let input: GroupMemberRequest =
                     crate::json::decode(request.as_bytes()).map_err(invalid)?;
-                group_domain(&input.group_email)?;
-                // A membership question is about the organization's own people
-                // or the grantee domains' groups, never an arbitrary outsider.
+                let domain = group_domain(&input.group_email)?;
+                // Google answers a nested membership question only when the
+                // member and the group share a domain (otherwise 400 Invalid
+                // Input), so a question it cannot answer is never asked.
                 let (_, member_domain) =
                     google_workspace_address(&input.member_email).map_err(invalid)?;
                 ensure!(
-                    member_domain == email_domain
-                        || grantee_domains
-                            .iter()
-                            .any(|granted| granted == member_domain),
+                    member_domain == domain,
                     crate::error::Failure::ResourceForbidden
                 );
                 (
@@ -204,6 +209,7 @@ impl Plan {
         };
         Ok((
             Self {
+                source,
                 service_account: service_account.clone(),
                 grantee_domains: grantee_domains.clone(),
                 read,
@@ -214,6 +220,10 @@ impl Plan {
 
     pub fn read(&self) -> &Read {
         &self.read
+    }
+
+    pub fn source(&self) -> Source {
+        self.source
     }
 
     /// Metadata, IAM, then one Directory call per question.
@@ -323,20 +333,16 @@ pub struct Meter {
 }
 
 impl Meter {
-    fn send(&mut self, phase: Phase, request_bytes: usize) -> Result<(), Failure> {
-        let total = self
-            .request_bytes
-            .checked_add(request_bytes as u64)
-            .filter(|total| *total <= MAX_ACTION_REQUEST_BYTES)
-            .ok_or(Failure::RequestBudget)?;
+    /// Request payloads are fixed by the pipeline (a few hundred bytes against
+    /// the reserved `MAX_ACTION_REQUEST_BYTES`), so sending is only counted.
+    fn send(&mut self, phase: Phase, request_bytes: usize) {
         self.calls += 1;
-        self.request_bytes = total;
+        self.request_bytes = self.request_bytes.saturating_add(request_bytes as u64);
         self.last = Some(LastExchange {
             phase,
             http_status: None,
             retry_after_seconds: None,
         });
-        Ok(())
     }
 
     /// Count every byte consumed and keep what the response declared, whether or
@@ -370,7 +376,6 @@ impl Meter {
 struct MeteredWire<'a> {
     port: &'a mut dyn GooglePort,
     meter: &'a mut Meter,
-    over_budget: bool,
 }
 
 impl google_auth::TokenWire for MeteredWire<'_> {
@@ -384,10 +389,7 @@ impl google_auth::TokenWire for MeteredWire<'_> {
             Exchange::Iam { .. } => Phase::Iam,
             Exchange::Token { .. } => Phase::Token,
         };
-        if self.meter.send(phase, exchange.request_bytes()).is_err() {
-            self.over_budget = true;
-            return Err(Unreached::default());
-        }
+        self.meter.send(phase, exchange.request_bytes());
         self.meter
             .receive(self.port.authenticate(exchange, max_bytes))
     }
@@ -400,24 +402,16 @@ fn service_token(
     scopes: &[&str],
     now: i64,
 ) -> Result<AccessToken, Failure> {
-    let mut wire = MeteredWire {
-        port,
-        meter,
-        over_budget: false,
-    };
-    let token = google_auth::acquire(
-        &mut wire,
+    google_auth::acquire(
+        &mut MeteredWire { port, meter },
         &google_auth::TokenRequest {
             service_account: &plan.service_account,
             identity: google_auth::Identity::ServiceAccount,
             scopes,
         },
         now,
-    );
-    if wire.over_budget {
-        return Err(Failure::RequestBudget);
-    }
-    token.map_err(Failure::from)
+    )
+    .map_err(Failure::from)
 }
 
 fn send(
@@ -427,7 +421,7 @@ fn send(
     token: &AccessToken,
     max_bytes: usize,
 ) -> Result<Reply, Failure> {
-    meter.send(Phase::Directory, request.request_bytes())?;
+    meter.send(Phase::Directory, request.request_bytes());
     meter
         .receive(port.call(request, token, max_bytes))
         .map_err(|unreached| {
