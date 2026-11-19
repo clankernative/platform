@@ -10,7 +10,7 @@ use crate::support::commands as support;
 use anyhow::{Context, Result};
 use day2::{
     invocations,
-    schedules::{self, Skipped},
+    schedules::{self, Blocked, Skipped},
     store::{Fault, Runtime},
 };
 use serde_json::{Value, json};
@@ -146,6 +146,8 @@ fn a_running_occurrence_blocks_the_next() -> Result<()> {
         })
     );
     assert!(tick.offered.is_empty());
+    // A run that is merely slow is not blocked.
+    assert_eq!(tick.blocked, None);
     Ok(())
 }
 
@@ -187,6 +189,12 @@ fn an_authority_blocked_occurrence_does_not_stop_the_schedule() -> Result<()> {
 
     let tick = sweep_tick(&world.runtime, MONDAY)?;
     assert_eq!(tick.skipped, None);
+    // The source names the blocked run rather than passing over it silently.
+    let named = Some(Blocked {
+        occurrence_ms: MONDAY - INTERVAL_MS,
+        reason: "authority_policy_changed".into(),
+    });
+    assert_eq!(tick.blocked, named);
     assert_eq!(tick.offered.len(), 1);
     let occurrence = tick.offered[0].0;
     assert_eq!(occurrence, MONDAY - MONDAY.rem_euclid(INTERVAL_MS));
@@ -200,6 +208,7 @@ fn an_authority_blocked_occurrence_does_not_stop_the_schedule() -> Result<()> {
     let next = sweep_tick(&world.runtime, occurrence + INTERVAL_MS)?;
     assert_eq!(next.skipped, None);
     assert_eq!(next.offered.len(), 1);
+    assert_eq!(next.blocked, named, "the blocked run stays blocked");
     Ok(())
 }
 
@@ -220,6 +229,10 @@ fn a_runnable_occurrence_still_holds_the_schedule_beside_a_blocked_one() -> Resu
         })
     );
     assert!(tick.offered.is_empty());
+    assert_eq!(
+        tick.blocked.map(|blocked| blocked.occurrence_ms),
+        Some(MONDAY - 2 * INTERVAL_MS)
+    );
     Ok(())
 }
 

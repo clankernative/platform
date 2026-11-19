@@ -197,6 +197,15 @@ impl Work for NativeWork {
                         if reported.should_report(&tick.schedule, tick.skipped.as_ref()) {
                             eprintln!("schedule_not_offered {} {:?}", tick.schedule, tick.skipped);
                         }
+                        // A blocked occurrence never runs; say so once per occurrence.
+                        if reported.should_report_blocked(&tick.schedule, tick.blocked.as_ref())
+                            && let Some(blocked) = &tick.blocked
+                        {
+                            eprintln!(
+                                "schedule_occurrence_blocked {} {} {}",
+                                tick.schedule, blocked.occurrence_ms, blocked.reason
+                            );
+                        }
                         for (occurrence, outcome) in tick.offered {
                             if outcome.status == "failure" {
                                 eprintln!(
