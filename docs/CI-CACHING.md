@@ -201,8 +201,9 @@ rather than substituting a Linux result. Neither real native campaign is cached.
 
 Linux jobs keep the pinned OCI image, private cgroup without swap, four CPU
 allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Test
-preparation, including Clippy, keeps its existing 8 GiB allowance on the standard
-16 GB Linux runner. Inputs, fixture preparation, joins and runtime shards retain
+preparation, including Clippy, has a 10 GiB allowance on the standard 16 GB Linux
+runner: compiling the `day2` unit-test library peaked at the former 8 GiB ceiling
+on main and was OOM-killed once new provider tests were added. Inputs, fixture preparation, joins and runtime shards retain
 6 GiB. The unchanged `standard` and `test-preparation` purposes check and record
 their fixed ceilings. Moving Clippy preserves the native Roc compiler's separate
 6 GiB ceiling; neither a larger runner nor an admission relaxation is required. Trusted

@@ -42,7 +42,7 @@ impl LinuxContext {
     fn memory_ceiling(self) -> u64 {
         let gib = match self {
             Self::Standard => 6,
-            Self::TestPreparation => 8,
+            Self::TestPreparation => 10,
         };
         gib * 1024_u64 * 1024 * 1024
     }
@@ -3444,17 +3444,17 @@ mod tests {
             preparation,
             "verify-prepare-parts",
             "0::/\n",
-            "8589934592\n",
+            "10737418240\n",
             "0",
         )?;
         for (purpose, job, memory) in [
-            (standard, "verify-shards", "8589934592"),
+            (standard, "verify-shards", "10737418240"),
             (standard, "verify-prepare-parts", "6442450945"),
-            (preparation, "verify-prepare-parts", "8589934593"),
+            (preparation, "verify-prepare-parts", "10737418241"),
             (preparation, "verify-shards", "6442450944"),
             (standard, "unknown", "6442450944"),
             (standard, "verification-diagnostics", "6442450944"),
-            (standard, "verify", "8589934592"),
+            (standard, "verify", "10737418240"),
             (preparation, "verify", "6442450944"),
         ] {
             assert!(validate_linux_context(purpose, job, "0::/", memory, "0").is_err());
@@ -3476,7 +3476,7 @@ mod tests {
                 preparation,
                 "verify-prepare-parts",
                 "0::/",
-                "8589934592",
+                "10737418240",
                 swap,
             );
             assert!(result.is_err());
@@ -3528,7 +3528,7 @@ mod tests {
     fn linux_context_swap_refusal_reports_bounded_current_quotas() {
         for (purpose, memory, swap) in [
             (LinuxContext::Standard, "4096\n", "max\n"),
-            (LinuxContext::TestPreparation, "8589934592\n", "1048576\n"),
+            (LinuxContext::TestPreparation, "10737418240\n", "1048576\n"),
         ] {
             let error =
                 validate_linux_context(purpose, "verify-prepare-parts", "0::/", memory, swap)
@@ -3559,9 +3559,9 @@ mod tests {
     #[test]
     fn only_test_preparation_uses_existing_runner_memory_headroom() {
         let preparation = ci_job("verify-prepare-parts");
-        assert!(preparation.contains("--memory=${{ matrix.part == 'tests' && '8g' || '6g' }}"));
+        assert!(preparation.contains("--memory=${{ matrix.part == 'tests' && '10g' || '6g' }}"));
         assert!(
-            preparation.contains("--memory-swap=${{ matrix.part == 'tests' && '8g' || '6g' }}")
+            preparation.contains("--memory-swap=${{ matrix.part == 'tests' && '10g' || '6g' }}")
         );
         assert!(preparation.contains(
             "verify-linux-context ${{ matrix.part == 'tests' && 'test-preparation' || 'standard' }}"
