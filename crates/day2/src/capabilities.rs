@@ -86,6 +86,12 @@ struct WorkspaceDirectoryUserPathRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct InternalToolsLibraryRequest {
+    handle: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Recipient {
     actor: String,
     #[serde(rename = "handle")]
@@ -173,6 +179,8 @@ enum Action {
         capture_id: String,
     },
     People(crate::people_providers::Action),
+    /// A complete app-library read, made as the host's workload.
+    InternalToolsLibrary(crate::internal_tools::ReadPlan),
     WorkspaceDirectoryUserPath(crate::workspace_directory::CaptureInput),
     /// A fresh complete hierarchy staged for this invocation only.
     WorkspaceDirectoryDelivery {
@@ -503,6 +511,37 @@ pub(crate) fn authorized(
                     }
                 }
             }
+        }
+        "internal_tools.app_library.v1" => {
+            let input: InternalToolsLibraryRequest = serde_json::from_str(&instruction.data)?;
+            let (
+                ResourceTarget::InternalToolsLibrary { app_domain },
+                Some(connection @ LiveConnection::InternalTools { .. }),
+            ) = (&resource.grant.target, resource.grant.live.as_ref())
+            else {
+                anyhow::bail!(crate::error::Failure::ResourceForbidden)
+            };
+            ensure!(
+                resource.grant.provider == Provider::InternalTools
+                    && input.handle == resource.handle
+                    && resource.grant.limits.max_response_bytes
+                        >= crate::internal_tools::MAX_READ_RESPONSE_BYTES
+                    && resource.grant.limits.max_request_bytes
+                        >= crate::internal_tools::MAX_READ_REQUEST_BYTES
+                    && instruction.data.len() as u64
+                        <= crate::internal_tools::MAX_READ_REQUEST_BYTES,
+                crate::error::Failure::ResourceForbidden
+            );
+            let plan = crate::internal_tools::ReadPlan::authorize(
+                connection,
+                app_domain,
+                request.context.now,
+            )?;
+            // Always a provider read: there is no host cache to reuse.
+            resource.planned_calls = crate::internal_tools::PLANNED_CALLS;
+            quote.request_bytes = crate::internal_tools::MAX_READ_REQUEST_BYTES;
+            quote.response_bytes = crate::internal_tools::MAX_READ_RESPONSE_BYTES;
+            Action::InternalToolsLibrary(plan)
         }
         "google_directory.snapshot.v1"
         | "google_directory.record.v1"
@@ -941,6 +980,43 @@ impl ProviderResult {
         }
     }
 
+    /// A library read settles what it actually sent and read, including a
+    /// failed read; a read-only exchange leaves no unknown outcome.
+    fn internal_tools_metered(result: Result<String>, meter: crate::internal_tools::Meter) -> Self {
+        use crate::integrations::{ExchangeCorrelation, ExchangePhase};
+        use crate::internal_tools::Phase;
+        // Only a failure's final exchange is kept: it names the phase, page and
+        // status that stopped the read without any provider content.
+        let correlation = match (&result, meter.last) {
+            (Err(_), Some(last)) => vec![ExchangeCorrelation {
+                phase: match last.phase {
+                    Phase::Signing => ExchangePhase::InternalToolsSigning,
+                    Phase::ServiceToken => ExchangePhase::InternalToolsServiceToken,
+                    Phase::Library => ExchangePhase::InternalToolsLibrary,
+                },
+                http_status: last.http_status,
+                request_id: None,
+                statement_handle: None,
+                page: (last.phase == Phase::Library).then_some(last.page),
+                retry_after_seconds: None,
+            }],
+            _ => Vec::new(),
+        };
+        Self {
+            result,
+            correlation,
+            pending: false,
+            usage: crate::resources::ProviderUsage {
+                calls: meter.calls,
+                request_bytes: meter.request_bytes,
+                response_bytes: meter.response_bytes,
+                cost_microunits: 0,
+                known: true,
+                dispatched: meter.calls > 0,
+            },
+        }
+    }
+
     fn live(runtime: &Runtime, call: &crate::integrations::PreparedCall, attempt: &str) -> Self {
         let outcome = runtime.integrations().execute(call, attempt);
         Self {
@@ -957,6 +1033,32 @@ impl ProviderResult {
             },
         }
     }
+}
+
+/// One complete library read through the lane the host is running: the
+/// committed simulated world, or the connection's origin over HTTPS.
+fn internal_tools_library(
+    runtime: &Runtime,
+    plan: &crate::internal_tools::ReadPlan,
+) -> (Result<String>, crate::internal_tools::Meter) {
+    use crate::internal_tools::{LibraryPort, NativeLibraryPort, SimulatedLibraryPort};
+    let port: Result<Box<dyn LibraryPort>> = if runtime.integrations().uses_simulated_providers() {
+        SimulatedLibraryPort::new(runtime.db(), runtime.scope(), plan)
+            .map(|port| Box::new(port) as Box<dyn LibraryPort>)
+    } else {
+        NativeLibraryPort::new(plan)
+            .map(|port| Box::new(port) as Box<dyn LibraryPort>)
+            .map_err(anyhow::Error::from)
+    };
+    let mut port = match port {
+        Ok(port) => port,
+        Err(error) => return (Err(error), Default::default()),
+    };
+    let (library, meter) = crate::internal_tools::collect(plan, port.as_mut());
+    (
+        library.and_then(|library| Ok(serde_json::to_string(&library)?)),
+        meter,
+    )
 }
 
 fn workspace_directory_user_path(
@@ -1204,6 +1306,10 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
         }
         Action::Freetool(request) => {
             return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
+        }
+        Action::InternalToolsLibrary(plan) => {
+            let (result, meter) = internal_tools_library(runtime, &plan);
+            return ProviderResult::internal_tools_metered(result, meter);
         }
         Action::WorkspaceDirectoryUserPath(input) => {
             return ProviderResult::workspace_directory_user_path(

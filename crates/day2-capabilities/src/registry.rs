@@ -170,6 +170,16 @@ providers! {
             WorkspaceDirectoryDeliveryPage => "workspace_directory.page.v2" (read, data),
         },
     },
+    // The internal-tools control plane's app library: which tools are
+    // registered and where each launches. Read as the host's own workload
+    // through IAP, never on a person's behalf.
+    InternalTools {
+        kind: InternalToolsLibrary,
+        world: "internal_tools.simulated.sqlite",
+        actions: {
+            InternalToolsAppLibrary => "internal_tools.app_library.v1" (read, data),
+        },
+    },
     // App-to-app delegation. The "provider" is another application in this same
     // instance, which is why it has no connection and no credential: there is
     // nothing to reach. It is a provider anyway because everything a delegated

@@ -112,6 +112,7 @@ fn fixture() -> SimulatedFixture {
             max_input_tokens: 100_000,
         },
         workspace_directory: Default::default(),
+        internal_tools: Default::default(),
         carta: None,
     }
 }

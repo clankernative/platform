@@ -455,6 +455,7 @@ fn the_simulation_emits_no_field_the_provider_does_not() -> Result<()> {
                 max_input_tokens: 10,
             },
             workspace_directory: Default::default(),
+            internal_tools: Default::default(),
             carta: None,
         },
     )?;

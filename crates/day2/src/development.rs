@@ -1143,15 +1143,18 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                 observations: crate::capabilities::READS
                     .iter()
                     .copied()
-                    // Directory fixtures require a declared read dependency.
-                    // The other pre-existing local read defaults are unchanged.
+                    // Directory and internal-tools fixtures require a declared
+                    // read dependency. The other pre-existing local read
+                    // defaults are unchanged.
                     .filter(|name| {
                         !day2_capabilities::resources::Action::ALL
                             .iter()
                             .any(|action| {
-                                action.provider()
-                                    == day2_capabilities::resources::Provider::WorkspaceDirectory
-                                    && action.capability() == *name
+                                matches!(
+                                    action.provider(),
+                                    day2_capabilities::resources::Provider::WorkspaceDirectory
+                                        | day2_capabilities::resources::Provider::InternalTools
+                                ) && action.capability() == *name
                             })
                     })
                     .chain(
@@ -1895,6 +1898,14 @@ fn provider_resource_fixture(
             ],
         ),
         (
+            "internal_tools",
+            Provider::InternalTools,
+            ResourceTarget::InternalToolsLibrary {
+                app_domain: SYNTHETIC_APP_DOMAIN.into(),
+            },
+            vec![Action::InternalToolsAppLibrary],
+        ),
+        (
             "linear",
             Provider::SyntheticLinear,
             ResourceTarget::LinearOrganization {
@@ -1946,12 +1957,16 @@ fn provider_resource_fixture(
             catalog.connections.insert(
                 (*name).into(),
                 ConnectionDefinition {
-                    live: (*provider == Provider::WorkspaceDirectory).then(|| {
-                        day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
-                            service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
-                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
-                        }
-                    }),
+                    live: match provider {
+                        Provider::WorkspaceDirectory => Some(
+                            day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+                                service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                                auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                            },
+                        ),
+                        Provider::InternalTools => Some(synthetic_internal_tools_connection()),
+                        _ => None,
+                    },
                     revision: 1,
                     provider: *provider,
                 },
@@ -1971,15 +1986,23 @@ fn provider_resource_fixture(
                     allowed_resources: BTreeSet::from([resource.clone()]),
                     actions,
                     limits: Limits {
-                        max_request_bytes: if *provider == Provider::WorkspaceDirectory {
-                            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
-                        } else {
-                            16_384
+                        max_request_bytes: match provider {
+                            Provider::WorkspaceDirectory => {
+                                crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                            }
+                            Provider::InternalTools => {
+                                crate::internal_tools::MAX_READ_REQUEST_BYTES
+                            }
+                            _ => 16_384,
                         },
-                        max_response_bytes: if *provider == Provider::WorkspaceDirectory {
-                            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
-                        } else {
-                            16_384
+                        max_response_bytes: match provider {
+                            Provider::WorkspaceDirectory => {
+                                crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+                            }
+                            Provider::InternalTools => {
+                                crate::internal_tools::MAX_READ_RESPONSE_BYTES
+                            }
+                            _ => 16_384,
                         },
                         max_calls_per_invocation: 256,
                     },
@@ -2157,6 +2180,15 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.policies.extend(directory.policies);
         catalog.budgets.extend(directory.budgets);
         attachments.extend(directory_attachments);
+    }
+    if reads_provider(policy, Provider::InternalTools) {
+        let (tools, tools_attachments) =
+            provider_resource_fixture(app, policy, &[Provider::InternalTools])?;
+        catalog.connections.extend(tools.connections);
+        catalog.resources.extend(tools.resources);
+        catalog.policies.extend(tools.policies);
+        catalog.budgets.extend(tools.budgets);
+        attachments.extend(tools_attachments);
     }
     if crate::people_providers::uses_synthetic_fixture(artifact) {
         let (people, people_attachments) = people_resource_fixture(app, policy)?;
@@ -3594,8 +3626,78 @@ fn disposable_provider_worlds(actor: &str) -> crate::integrations::simulated::Si
                 {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
                 {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
         },
+        internal_tools: synthetic_internal_tools_world(),
         // Disposable campaigns read the explicitly seeded synthetic Carta store.
         carta: None,
+    }
+}
+
+/// The synthetic parent domain local development and verification launch
+/// internal tools under. `.test` is reserved, so no URL built here resolves.
+pub const SYNTHETIC_APP_DOMAIN: &str = "wonderly.test";
+
+/// The disposable internal-tools connection paired with
+/// `synthetic_internal_tools_world`. It names no real control plane.
+pub fn synthetic_internal_tools_connection() -> day2_capabilities::integrations::LiveConnection {
+    day2_capabilities::integrations::LiveConnection::InternalTools {
+        service_account: "home-reader@synthetic-project.iam.gserviceaccount.com".into(),
+        origin: "https://it.wonderly.test".into(),
+        iap_audience: "https://it.wonderly.test/*".into(),
+        target_app_id: "it".into(),
+    }
+}
+
+/// A realistic synthetic app library. Entries carry the control plane's other
+/// fields, which the adapter must ignore; one has no subdomain and is skipped.
+pub fn synthetic_internal_tools_world() -> crate::integrations::simulated::InternalToolsWorld {
+    let day2_capabilities::integrations::LiveConnection::InternalTools {
+        service_account,
+        origin,
+        iap_audience,
+        target_app_id,
+    } = synthetic_internal_tools_connection()
+    else {
+        unreachable!("the synthetic connection is an internal-tools connection")
+    };
+    let entry = |app_id: &str, name: &str, subdomain: &str| {
+        json!({
+            "id": format!("synthetic-{app_id}"),
+            "displayName": name,
+            "appId": app_id,
+            "subdomain": subdomain,
+            "repositorySlug": format!("wonderlydotcom/{app_id}"),
+            "customFields": {},
+            "catalogAppPath": format!("apps/{app_id}"),
+            "owners": [{"email": "owner@synthetic.example", "role": "owner"}],
+            "viewerCanManageOwners": false,
+            "viewerCanRemoveOwners": false,
+            "needsNewOwner": false,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+        })
+    };
+    crate::integrations::simulated::InternalToolsWorld {
+        service_account,
+        origin,
+        iap_audience,
+        target_app_id,
+        service_token: "synthetic-service-token".into(),
+        apps: vec![
+            entry("quoty", "Quoty", "quoty"),
+            entry("onsites", "Onsites", "onsites"),
+            entry("camp", "CAMP", "camp"),
+            entry("equity", "Equity", "equity"),
+            entry("freetool", "Freetool", "freetool"),
+            entry("golinks", "Golinks", "go"),
+            entry("langfuse", "Langfuse", "langfuse"),
+            entry("sessions", "Sessions", "sessions"),
+            entry("ci-status", "CI Status", "ci-status"),
+            entry("home", "Home", "home"),
+            entry("it", "Internal Tools", "it"),
+            entry("people-ops", "People Ops", "people-ops"),
+            // Registered but not yet deployed: nowhere to launch.
+            entry("drafts", "Drafts", ""),
+        ],
     }
 }
 

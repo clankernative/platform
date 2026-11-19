@@ -70,6 +70,12 @@ independent of operation names. Admission checks capability names and rejects
 writes and duplicates. Production grants remain operator-owned. See
 [Directory reads](../docs/LIVE-INTEGRATIONS.md#workspace-directory-hierarchy-reads).
 
+Chain `.observes("internal_tools.app_library.v1")` the same way to read the
+internal-tools app library with `InternalTools.app_library(context)` (resource
+slot `internal_tools`). Verification and local development bind a synthetic
+control plane with the `wonderly.test` app domain. See
+[internal-tools reads](../docs/LIVE-INTEGRATIONS.md#internal-tools-app-library-reads).
+
 All SDK execution values describe pure computation. Rust interprets database and
 command requests, enforces current company policy, and owns auditing and effects.
 Company-specific source, CI, identity and secret providers are host capabilities,

@@ -50,6 +50,7 @@ pub mod input_shape;
 pub mod instance_catalog;
 pub mod integration_host;
 pub mod integrations;
+pub mod internal_tools;
 pub mod invocations;
 pub mod journal;
 pub mod json;

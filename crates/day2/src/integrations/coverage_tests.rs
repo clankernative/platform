@@ -28,7 +28,8 @@
 //! against two different worlds has not demonstrated a world at all.
 //!
 //! Scope: this covers transport simulations and the Workspace Directory and
-//! admitted Carta native capture/read pipeline, the admitted local mailbox,
+//! admitted Carta native capture/read pipeline, the admitted internal-tools
+//! library read, the admitted local mailbox,
 //! delegation's admitted-resource offline handler and the scoped synthetic Linear
 //! and operator-alert handlers plus the admitted synthetic Google Directory
 //! handler. Any future pending actions require explicit reviewed debt below.
@@ -64,6 +65,8 @@ mod carta;
 mod delegation;
 #[path = "google_directory_coverage_tests.rs"]
 mod google_directory;
+#[path = "internal_tools_coverage_tests.rs"]
+mod internal_tools;
 #[path = "linear_coverage_tests.rs"]
 mod linear;
 #[path = "notifications_coverage_tests.rs"]
@@ -178,6 +181,9 @@ fn demonstration(action: Action) -> Demonstration {
         // The live capture pipeline against Carta's own wire world, then a
         // local read of the capture the application holds.
         Action::CartaSnapshotDelivery | Action::CartaRecords => Demonstration::AdmittedAdapterRead,
+        // The complete library read, through an admitted handle, against the
+        // control plane's own world.
+        Action::InternalToolsAppLibrary => Demonstration::AdmittedAdapterRead,
         Action::CartaRelease => Demonstration::HeldCaptureRelease,
         Action::FreetoolFingerprint
         | Action::FreetoolStatus
@@ -430,6 +436,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                     "orgUnitPath":directory_path,"parentOrgUnitId":"root","parentOrgUnitPath":"/"}
             ]}),
         },
+        internal_tools: crate::development::synthetic_internal_tools_world(),
         // The stakeholder and grant plan differ, so both the capture identity and
         // the first record move with the world.
         carta: Some(crate::integrations::simulated::CartaWireWorld {
@@ -746,6 +753,9 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
     }
     if action.provider() == Provider::SyntheticGoogleDirectory {
         return google_directory::observe(action, variant);
+    }
+    if action.provider() == Provider::InternalTools {
+        return internal_tools::observe(action, variant);
     }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");

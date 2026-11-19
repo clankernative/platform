@@ -61,6 +61,7 @@ pub const DELEGATION_WORLD: &str = world_of(Provider::LocalDelegation);
 /// Shared with explicitly seeded synthetic captures: one provider, one world
 /// file. The wire world occupies its own `simulated_provider` table.
 pub const CARTA_WORLD: &str = world_of(Provider::Carta);
+pub const INTERNAL_TOOLS_WORLD: &str = world_of(Provider::InternalTools);
 
 const fn world_of(provider: Provider) -> &'static str {
     match provider.world() {
@@ -176,6 +177,23 @@ pub struct WorkspaceDirectoryWorld {
     pub customer_id: String,
     pub users: BTreeMap<String, Value>,
     pub hierarchy: Value,
+}
+
+/// The internal-tools control plane as one connection reaches it. The four
+/// identity fields are compared on every exchange, so a read through another
+/// connection fails closed. `apps` are verbatim `AppLibraryEntryDto` bodies,
+/// extra fields included, sliced into `PagedResultDto` pages the way the
+/// control plane slices them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InternalToolsWorld {
+    pub service_account: String,
+    pub origin: String,
+    pub iap_audience: String,
+    pub target_app_id: String,
+    /// What the token endpoint issues; library pages must present it.
+    pub service_token: String,
+    pub apps: Vec<Value>,
 }
 
 /// Carta issuer API wire bodies committed by the offline provider. Pages are
@@ -441,6 +459,8 @@ pub struct SimulatedFixture {
     pub snowflake: SnowflakeWorld,
     pub openai: OpenAiWorld,
     pub workspace_directory: WorkspaceDirectoryWorld,
+    #[serde(default)]
+    pub internal_tools: InternalToolsWorld,
     /// Absent leaves the Carta world unseeded, so an explicitly synthetic
     /// Carta store stays the only Carta state a campaign has.
     #[serde(default)]
@@ -646,6 +666,12 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
     if let Some(carta) = &fixture.carta {
         seed_world(database, scope, CARTA_WORLD, carta)?;
     }
+    seed_world(
+        database,
+        scope,
+        INTERNAL_TOOLS_WORLD,
+        &fixture.internal_tools,
+    )?;
     seed_world(
         database,
         scope,
@@ -1097,6 +1123,228 @@ pub(crate) fn carta_read(
         }
         Err(_) => Err(Failure::Unavailable.into()),
     }
+}
+
+pub const INTERNAL_TOOLS_SIGN_ENDPOINT: &str = "internal_tools.iam.sign_jwt";
+pub const INTERNAL_TOOLS_TOKEN_ENDPOINT: &str = "internal_tools.service_tokens";
+pub const INTERNAL_TOOLS_LIBRARY_ENDPOINT: &str = "internal_tools.app_library";
+
+/// The credential the simulated signer issues, bound to the account and
+/// audience it was signed for.
+pub fn internal_tools_credential(service_account: &str, audience: &str) -> String {
+    format!(
+        "simulated-iap.{}",
+        &crate::digest(&serde_json::to_vec(&(service_account, audience)).unwrap_or_default())
+            [7..39]
+    )
+}
+
+fn internal_tools_identity(
+    world: &InternalToolsWorld,
+    plan: &crate::internal_tools::ReadPlan,
+) -> bool {
+    world.service_account == plan.service_account()
+        && world.origin == plan.origin()
+        && world.iap_audience == plan.iap_audience()
+        && world.target_app_id == plan.target_app_id()
+}
+
+/// Validate that this scope's world answers this connection, without a request.
+pub(crate) fn internal_tools_check(
+    database: &Path,
+    scope: &str,
+    plan: &crate::internal_tools::ReadPlan,
+) -> Result<()> {
+    let path = database.with_file_name(INTERNAL_TOOLS_WORLD);
+    ensure!(path.is_file(), "simulated_provider_unconfigured");
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let state: World<InternalToolsWorld> = read_world(&connection, scope)?;
+    ensure!(
+        internal_tools_identity(&state.world, plan),
+        crate::internal_tools::Failure::ConnectionMismatch
+    );
+    Ok(())
+}
+
+/// The simulated IAM signer. Records the exchange and consumes a scheduled
+/// fault; any fault or identity mismatch leaves the read without a credential.
+pub(crate) fn internal_tools_sign(
+    database: &Path,
+    scope: &str,
+    plan: &crate::internal_tools::ReadPlan,
+) -> std::result::Result<String, crate::internal_tools::Failure> {
+    use crate::internal_tools::Failure;
+    let path = database.with_file_name(INTERNAL_TOOLS_WORLD);
+    with_world::<InternalToolsWorld, _, _>(&path, scope, |state| {
+        if !internal_tools_identity(&state.world, plan) {
+            return Ok(Err(Failure::ConnectionMismatch));
+        }
+        ensure!(state.calls.len() < MAX_MESSAGES, "simulated_call_budget");
+        state.calls.push(format!(
+            "{INTERNAL_TOOLS_SIGN_ENDPOINT}:{}",
+            plan.service_account()
+        ));
+        if take_fault_named(state, INTERNAL_TOOLS_SIGN_ENDPOINT).is_some() {
+            return Ok(Err(Failure::CredentialUnavailable));
+        }
+        Ok(Ok(internal_tools_credential(
+            plan.service_account(),
+            plan.iap_audience(),
+        )))
+    })
+    .unwrap_or(Err(Failure::Unavailable))
+}
+
+pub(crate) enum InternalToolsRead<'a> {
+    ServiceToken {
+        bearer: &'a str,
+        body: &'a [u8],
+    },
+    Page {
+        bearer: &'a str,
+        service_token: &'a str,
+        query: &'a str,
+    },
+}
+
+/// Serve one control-plane exchange from the world, recording it and consuming
+/// a scheduled fault. Statuses are provider-shaped; the pipeline classifies
+/// them. An unconfigured or broken world is an unreachable provider.
+pub(crate) fn internal_tools_read(
+    database: &Path,
+    scope: &str,
+    plan: &crate::internal_tools::ReadPlan,
+    read: InternalToolsRead<'_>,
+    max: usize,
+) -> std::result::Result<crate::internal_tools::Reply, crate::internal_tools::TransportFailure> {
+    use crate::internal_tools::{Failure, PAGE_SIZE, Reply, SERVICE_SCOPE, TransportFailure};
+    let status = |status: u16| Reply {
+        status,
+        json: true,
+        body: json!({"title":"simulated"}).to_string().into_bytes(),
+    };
+    let path = database.with_file_name(INTERNAL_TOOLS_WORLD);
+    let served = with_world::<InternalToolsWorld, _, _>(&path, scope, |state| {
+        if !internal_tools_identity(&state.world, plan) {
+            return Ok(Err(Failure::ConnectionMismatch.into()));
+        }
+        ensure!(state.calls.len() < MAX_MESSAGES, "simulated_call_budget");
+        let endpoint = match &read {
+            InternalToolsRead::ServiceToken { .. } => INTERNAL_TOOLS_TOKEN_ENDPOINT,
+            InternalToolsRead::Page { .. } => INTERNAL_TOOLS_LIBRARY_ENDPOINT,
+        };
+        state.calls.push(match &read {
+            InternalToolsRead::ServiceToken { .. } => endpoint.to_owned(),
+            InternalToolsRead::Page { query, .. } => format!("{endpoint}:{query}"),
+        });
+        if let Some(fault) = take_fault_named(state, endpoint) {
+            return Ok(match fault_response(fault, max as u64) {
+                None => Err(Failure::Unavailable.into()),
+                Some(Err(error)) => Err(TransportFailure {
+                    failure: Failure::Unavailable,
+                    response_bytes: error.response_bytes,
+                    http_status: error.http_status,
+                }),
+                Some(Ok(response)) => Ok(Reply {
+                    status: response.status,
+                    json: response.json_content_type,
+                    body: response.body,
+                }),
+            });
+        }
+        let credential =
+            internal_tools_credential(&state.world.service_account, &state.world.iap_audience);
+        let reply = match read {
+            // IAP refuses an absent or foreign credential before the app sees it.
+            InternalToolsRead::ServiceToken { bearer, .. }
+            | InternalToolsRead::Page { bearer, .. }
+                if bearer != credential =>
+            {
+                status(401)
+            }
+            InternalToolsRead::ServiceToken { body, .. } => {
+                let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+                if request.get("target_app_id").and_then(Value::as_str)
+                    != Some(state.world.target_app_id.as_str())
+                {
+                    status(404)
+                } else if request.get("scopes") != Some(&json!([SERVICE_SCOPE]))
+                    || request.as_object().is_none_or(|fields| fields.len() != 2)
+                {
+                    status(403)
+                } else {
+                    Reply {
+                        status: 200,
+                        json: true,
+                        body: json!({"token_type":"Bearer","expires_in":300,
+                            "service_token":state.world.service_token})
+                        .to_string()
+                        .into_bytes(),
+                    }
+                }
+            }
+            InternalToolsRead::Page {
+                service_token,
+                query,
+                ..
+            } => {
+                let pairs: Vec<(String, u64)> = url::form_urlencoded::parse(query.as_bytes())
+                    .into_owned()
+                    .filter_map(|(name, value)| Some((name, value.parse().ok()?)))
+                    .collect();
+                match pairs.as_slice() {
+                    _ if service_token != state.world.service_token => status(403),
+                    [(page_name, page), (size_name, size)]
+                        if page_name == "Page" && size_name == "PageSize" =>
+                    {
+                        // Pagination.fromQuery: page at least 1, size clamped to 1..=100.
+                        let page = (*page).max(1) as usize;
+                        let size = (*size).clamp(1, PAGE_SIZE as u64) as usize;
+                        let total = state.world.apps.len();
+                        let pages = total.div_ceil(size).max(1);
+                        let items: Vec<_> = state
+                            .world
+                            .apps
+                            .iter()
+                            .skip((page - 1).saturating_mul(size))
+                            .take(size)
+                            .cloned()
+                            .collect();
+                        Reply {
+                            status: 200,
+                            json: true,
+                            body: json!({"items":items,"page":page,"pageSize":size,
+                                "hasNextPage":page < pages})
+                            .to_string()
+                            .into_bytes(),
+                        }
+                    }
+                    _ => status(400),
+                }
+            }
+        };
+        Ok(Ok(reply))
+    });
+    match served {
+        Ok(reply) => {
+            let mut reply = reply?;
+            // The wire never delivers more than the reader asked for plus the
+            // probe byte that makes an oversized response observable.
+            reply.body.truncate(max.saturating_add(1));
+            Ok(reply)
+        }
+        Err(_) => Err(Failure::Unavailable.into()),
+    }
+}
+
+/// Scenario changes affect later control-plane requests through the same world.
+pub fn update_internal_tools<T>(
+    database: &Path,
+    scope: &str,
+    act: impl FnOnce(&mut World<InternalToolsWorld>) -> Result<T>,
+) -> Result<T> {
+    with_world(&database.with_file_name(INTERNAL_TOOLS_WORLD), scope, act)
 }
 
 /// Scenario changes affect later Carta requests through the same world.

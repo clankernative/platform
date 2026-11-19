@@ -206,6 +206,10 @@ pub(crate) enum ExchangePhase {
     CartaToken,
     CartaStakeholders,
     CartaOptionGrants,
+    /// The workload metadata token and IAM `signJwt` for the IAP credential.
+    InternalToolsSigning,
+    InternalToolsServiceToken,
+    InternalToolsLibrary,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

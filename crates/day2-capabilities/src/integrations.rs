@@ -82,6 +82,18 @@ pub enum LiveConnection {
         service_account: String,
         auth: WorkspaceDirectoryAuth,
     },
+    /// The internal-tools control plane, reached through Google IAP as the
+    /// host's own workload. IAM Credentials signs the IAP credential for
+    /// `service_account` without a key, so nothing is mounted. `iap_audience`
+    /// must lie under `origin`, so the signed credential is presented only to
+    /// the host it is scoped to. `target_app_id` is the control plane's own
+    /// catalog entry, named in the service-token exchange.
+    InternalTools {
+        service_account: String,
+        origin: String,
+        iap_audience: String,
+        target_app_id: String,
+    },
     /// Carta's issuer API through OAuth client credentials. `client_id` is an
     /// identifier reviewed with the profile; only the client secret is mounted.
     /// The environment selects one of the adapter's fixed origin pairs, so no
@@ -145,7 +157,7 @@ impl LiveConnection {
             | Self::Carta { credential_ref, .. }
             | Self::OpenAi { credential_ref, .. }
             | Self::FreetoolExecutor { credential_ref, .. } => Some(credential_ref),
-            Self::WorkspaceDirectory { .. } => None,
+            Self::WorkspaceDirectory { .. } | Self::InternalTools { .. } => None,
         }
     }
 
@@ -167,7 +179,8 @@ impl LiveConnection {
             | Self::GitHubActions { .. }
             | Self::Carta { .. }
             | Self::FreetoolExecutor { .. }
-            | Self::WorkspaceDirectory { .. } => None,
+            | Self::WorkspaceDirectory { .. }
+            | Self::InternalTools { .. } => None,
         }
     }
 
@@ -183,6 +196,12 @@ impl LiveConnection {
     pub fn credential_refs(&self) -> Vec<&VersionRef> {
         match self {
             Self::WorkspaceDirectory { .. } => vec![],
+            Self::InternalTools {
+                service_account: _,
+                origin: _,
+                iap_audience: _,
+                target_app_id: _,
+            } => vec![],
             Self::FreetoolExecutor {
                 credential_ref,
                 endpoint: _,
@@ -371,6 +390,36 @@ impl LiveConnection {
                 if let WorkspaceDirectoryAuth::DomainWideDelegation { delegated_admin } = auth {
                     workspace_email(delegated_admin)?;
                 }
+                Ok(())
+            }
+            Self::InternalTools {
+                service_account,
+                origin,
+                iap_audience,
+                target_app_id,
+            } => {
+                workspace_service_account(service_account)?;
+                ensure!(
+                    origin.strip_prefix("https://").is_some_and(dns_name),
+                    "invalid_internal_tools_origin"
+                );
+                // A path under the origin, as IAP accepts it: exact or `/*`.
+                let path = iap_audience
+                    .strip_prefix(origin.as_str())
+                    .unwrap_or_default();
+                ensure!(
+                    path.starts_with('/')
+                        && path.len() <= 1024
+                        && !path.contains("//")
+                        && path
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"/-._*".contains(&b)),
+                    "invalid_internal_tools_iap_audience"
+                );
+                ensure!(
+                    dns_label(target_app_id),
+                    "invalid_internal_tools_target_app"
+                );
                 Ok(())
             }
             Self::Carta {
@@ -579,6 +628,22 @@ impl OpenAiText {
             .ok_or_else(|| anyhow::anyhow!("model_cost_overflow"))?;
         u64::try_from(nanos.div_ceil(1000)).map_err(|_| anyhow::anyhow!("model_cost_overflow"))
     }
+}
+
+/// One lowercase DNS label: what the internal-tools control plane accepts as an
+/// app ID or subdomain, so it can only ever extend a host, never replace one.
+pub fn dns_label(value: &str) -> bool {
+    (1..=63).contains(&value.len())
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A lowercase host name of at least two labels, with no port or path.
+pub fn dns_name(value: &str) -> bool {
+    value.len() <= 253 && value.split('.').count() >= 2 && value.split('.').all(dns_label)
 }
 
 fn workspace_service_account(value: &str) -> Result<()> {

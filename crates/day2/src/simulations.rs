@@ -47,6 +47,7 @@ simulated!(Delegation => LocalDelegation, "delegation.simulated.sqlite");
 simulated!(Carta => Carta, "carta.synthetic.sqlite");
 simulated!(GoogleDirectory => SyntheticGoogleDirectory, "google_directory.synthetic.sqlite");
 simulated!(WorkspaceDirectory => WorkspaceDirectory, "workspace_directory.simulated.sqlite");
+simulated!(InternalTools => InternalTools, "internal_tools.simulated.sqlite");
 simulated!(Linear => SyntheticLinear, "linear.synthetic.sqlite");
 simulated!(OperatorAlerts => SyntheticOperatorAlerts, "operator_alerts.synthetic.sqlite");
 // The three adapters admitted live-first. Their worlds are served by
@@ -73,6 +74,7 @@ pub const fn simulation(provider: Provider) -> &'static str {
         Provider::Carta => Carta::WORLD,
         Provider::SyntheticGoogleDirectory => GoogleDirectory::WORLD,
         Provider::WorkspaceDirectory => WorkspaceDirectory::WORLD,
+        Provider::InternalTools => InternalTools::WORLD,
         Provider::SyntheticLinear => Linear::WORLD,
         Provider::SyntheticOperatorAlerts => OperatorAlerts::WORLD,
         Provider::SlackWebhook => SlackWebhook::WORLD,
@@ -136,7 +138,8 @@ pub const fn supply(provider: Provider) -> Supply {
         | Provider::LinearWork
         | Provider::GitHubActions
         | Provider::GiteaActions
-        | Provider::WorkspaceDirectory => Supply::SimulatedFixture,
+        | Provider::WorkspaceDirectory
+        | Provider::InternalTools => Supply::SimulatedFixture,
     }
 }
 

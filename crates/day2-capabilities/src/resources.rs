@@ -137,6 +137,12 @@ pub enum ResourceTarget {
     WorkspaceDirectory {
         customer_id: String,
     },
+    /// The internal-tools app library. `app_domain` is the parent domain every
+    /// listed tool launches under, so a launch URL is built from a validated
+    /// subdomain and this reviewed domain, never from a provider-supplied URL.
+    InternalToolsLibrary {
+        app_domain: String,
+    },
     LinearOrganization {
         organization_id: String,
         email_domain: String,
@@ -285,6 +291,7 @@ impl ResourceTarget {
             Self::CartaIssuer { .. } => ResourceKind::CartaIssuer,
             Self::GoogleDirectory { .. } => ResourceKind::GoogleDirectory,
             Self::WorkspaceDirectory { .. } => ResourceKind::WorkspaceDirectory,
+            Self::InternalToolsLibrary { .. } => ResourceKind::InternalToolsLibrary,
             Self::LinearOrganization { .. } => ResourceKind::LinearOrganization,
             Self::LinearIssueSource { .. } => ResourceKind::LinearIssueSource,
             Self::GitHubRepository { .. } => ResourceKind::GitHubRepository,
@@ -383,6 +390,13 @@ impl ResourceTarget {
                 Ok(())
             }
             Self::WorkspaceDirectory { customer_id } => bounded_text(customer_id, 256),
+            Self::InternalToolsLibrary { app_domain } => {
+                ensure!(
+                    crate::integrations::dns_name(app_domain),
+                    "invalid_internal_tools_app_domain"
+                );
+                Ok(())
+            }
             Self::GoogleDirectory {
                 customer_id,
                 email_domain,
@@ -502,6 +516,10 @@ impl ResourceTarget {
                     customer_id: parent,
                 },
             ) => customer_id == parent,
+            (
+                Self::InternalToolsLibrary { app_domain },
+                Self::InternalToolsLibrary { app_domain: parent },
+            ) => app_domain == parent,
             (
                 Self::GoogleDirectory {
                     customer_id,
@@ -938,6 +956,7 @@ fn validate_connection(
         | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. }))
         | (Provider::Carta, Some(value @ LiveConnection::Carta { .. }))
         | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. }))
+        | (Provider::InternalTools, Some(value @ LiveConnection::InternalTools { .. }))
         | (Provider::FreetoolExecutor, Some(value @ LiveConnection::FreetoolExecutor { .. })) => value.validate(),
         (
             Provider::LocalNotifications

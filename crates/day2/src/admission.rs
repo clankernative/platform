@@ -124,6 +124,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "96b618ebeabaacab43bb9c41c631ed3a1ea60492e81bf3ee8014df3b2591e819",
     ),
     (
+        "InternalTools.roc",
+        "",
+        "574e1a2f0ebbf81098783625b5df60fd2d7ff8de6527d1efb4d5bed2b0526465",
+    ),
+    (
         "Linear.roc",
         "",
         "f8695efa1f64c52898737f7369afead1fe4d298547fad77cbdca722623fae729",

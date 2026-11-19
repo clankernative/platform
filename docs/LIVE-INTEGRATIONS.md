@@ -74,6 +74,73 @@ Applications own membership-cache validity, ancestry decisions, persistence and 
 
 Authorization freezes the provider source before reserving provider traffic: a simulated host never falls through to the network. Live and simulated adapters run the same parser and validation. The simulator records requests and consumes scheduled endpoint faults in its SQLite world. The Directory regression campaign checks provider faults, recovery, content-identity changes, a user-path read that never touches the hierarchy, and identical replay; real HTTP fixtures separately check the native authentication and request paths.
 
+## Internal-tools app library reads
+
+`InternalTools.app_library(context)` / `app_library_with(resource)`
+(`internal_tools.app_library.v1`) reads which tools the internal-tools control
+plane has registered and where each launches. It returns only
+`{app_id, name, url}` per tool and `captured_at`; owners, repository, custom
+fields and every other control-plane field are dropped by the parser and never
+decoded. Tools are sorted by name (case-insensitive) then `app_id`, one per
+`app_id`; a tool without a subdomain is skipped. `url` is
+`https://<subdomain>.<app_domain>/`, where `app_domain` is the activated
+`internal_tools_library` resource's and the subdomain is validated as one
+lowercase DNS label. A malformed app ID, name or subdomain fails the read rather
+than being dropped. Nothing is cached: every call is a provider read, so an app
+should call it when a person asks, not on every page load.
+
+The `internal_tools` connection names the control-plane `origin` (https, host
+only), the `iap_audience` (a path under that origin, such as `/*`), the
+`service_account` whose IAP credential is signed, and the control plane's own
+`target_app_id`. Nothing in the app request selects any of them; the request
+carries only the resource handle. A read is one fixed plan:
+
+1. Sign a Google service-account JWT for `iap_audience` keylessly through IAM
+   Credentials (`crate::iap_workload::Signer`, authorized by the workload's GKE
+   metadata token). No key is mounted.
+2. `POST {origin}/api/internal-tools/service-tokens` with
+   `{"target_app_id":…,"scopes":["control-plane.app-library.read"]}` and the
+   JWT as `Authorization: Bearer`. The returned `service_token` is held in
+   memory for this read only, never cached, journaled or recorded.
+3. `GET {origin}/api/app-library?Page=N&PageSize=100` with the JWT and the
+   service token in `X-Internal-Tools-Service`, following `hasNextPage`. A
+   page that is not the requested page or size, or a short page that claims
+   more, fails as `internal_tools_pagination_invalid`.
+
+At most 1,000 tools (10 pages) are read; a further page fails the read as
+`internal_tools_app_budget` and is never requested. Each page is bounded at
+1 MiB and all pages together at 3 MiB; the service-token response at 16 KiB.
+The read reserves 13 calls, 8 KiB of requests and the whole response envelope,
+and settles what it consumed, including failed and truncated exchanges.
+Signing is charged at its reviewed bound (two calls, 4 KiB of requests and
+28 KiB of responses), because the reused signer does not report byte counts.
+The 64-KiB observation journal still applies, so a library whose projection
+exceeds it fails with `provider_result_journal_budget` rather than being
+truncated; that is roughly 700 tools with typical names.
+
+Failures are stable codes: `internal_tools_credential_unavailable` (signing),
+`internal_tools_service_token_refused` (400/401/403/404 at the token endpoint,
+for example a missing `service_callers` grant), `internal_tools_authentication_failed`
+(401 from the library), `internal_tools_scope_denied` (403 from the library),
+`internal_tools_rate_limited`, `internal_tools_unavailable`,
+`internal_tools_response_invalid`, `internal_tools_response_too_large`,
+`internal_tools_pagination_invalid` and `internal_tools_app_budget`. A failure
+keeps only its last exchange's phase, page and HTTP status as correlation.
+
+The simulated control plane (`internal_tools.simulated.sqlite`) serves verbatim
+`AppLibraryEntryDto` bodies in the control plane's own pages, checks the
+presented IAP credential, target app, scope and service token, and compares the
+connection's service account, origin, audience and target app on every exchange,
+failing closed with `internal_tools_connection_mismatch`. Verification and local
+development bind a synthetic connection to `https://it.wonderly.test` with app
+domain `wonderly.test` for any operation that declares the read; an operation
+without the declaration receives no internal-tools authority.
+
+Live use requires the control plane to admit the host workload: register its
+service account as a source app and grant it `control-plane.app-library.read`
+in the control plane's `service_callers`. The adapter has not been qualified
+against the live control plane.
+
 ## Carta issuer captures
 
 A resource on a live `carta` connection makes `carta.snapshot.v2` collect one

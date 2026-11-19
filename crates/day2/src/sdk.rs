@@ -85,6 +85,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "InternalTools.roc",
+        source: "contracts/InternalTools.roc",
+        app_export: true,
+    },
+    Module {
         file: "Linear.roc",
         source: "contracts/Linear.roc",
         app_export: true,

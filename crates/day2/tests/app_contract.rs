@@ -490,6 +490,100 @@ expect match read_user_path(USER_PATH_JSON) {
 }
 
 #[test]
+fn native_internal_tools_library_decodes_through_public_sdk() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    fs::create_dir(stage.join("app"))?;
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    // The host's own result type, exactly as the capability serializes it.
+    let library = serde_json::to_string(&day2::internal_tools::Library {
+        apps: vec![
+            day2::internal_tools::App {
+                app_id: "onsites".into(),
+                name: "Onsites".into(),
+                url: "https://onsites.wonderly.test/".into(),
+            },
+            day2::internal_tools::App {
+                app_id: "quoty".into(),
+                name: "Quoty".into(),
+                url: "https://quoty.wonderly.test/".into(),
+            },
+        ],
+        captured_at: 300,
+    })?;
+    let source = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.InternalTools
+import pf.Resource
+import pf.Observe
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+answer = |program, raw| {
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+read_library = |raw| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}").and_then(InternalTools.app_library_with).program(),
+    raw,
+)
+requested_action = |resource_json| {
+    program = Resource.decode(resource_json).and_then(InternalTools.app_library_with).program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => request.instruction.model == LIBRARY_CAPABILITY
+            and request.instruction.data == "{\"handle\":\"fixture-handle\"}"
+        _ => Bool.False
+    }
+}
+expect requested_action("{\"token\":\"fixture-handle\"}")
+expect match read_library(LIBRARY_JSON) {
+    Done(result) => result.consumed == 1 and result.value.captured_at == 300
+        and result.value.apps.len() == 2
+        and result.value.apps.any(|tool| tool.app_id == "quoty" and tool.name == "Quoty" and tool.url == "https://quoty.wonderly.test/")
+    _ => Bool.False
+}
+expect match read_library("{\"apps\":[{\"app_id\":\"quoty\"}],\"captured_at\":1}") {
+    Done(_) => Bool.False
+    _ => Bool.True
+}
+"#
+    .replace("LIBRARY_JSON", &serde_json::to_string(&library)?)
+    .replace(
+        "LIBRARY_CAPABILITY",
+        &serde_json::to_string(
+            &day2_capabilities::registry::Action::InternalToolsAppLibrary.capability(),
+        )?,
+    );
+    fs::write(stage.join("app/main.roc"), source)?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .arg("test")
+        .arg(stage.join("app/main.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (3) tests passed"),
+        "native internal-tools contract ({}): {diagnostics}",
+        output.status
+    );
+    Ok(())
+}
+
+#[test]
 fn native_carta_delivery_decodes_through_public_sdk() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

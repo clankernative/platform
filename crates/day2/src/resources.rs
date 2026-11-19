@@ -803,6 +803,10 @@ pub(crate) fn reserve_in(
             service_account,
             ..
         }) => format!("workspace_directory/{service_account}"),
+        // The control plane's own rate limits follow its origin.
+        Some(day2_capabilities::integrations::LiveConnection::InternalTools { origin, .. }) => {
+            format!("internal_tools/{origin}")
+        }
         // One OAuth client in one deployment: Carta's rate limits follow the
         // client, so every issuer read through it shares the pool.
         Some(day2_capabilities::integrations::LiveConnection::Carta {

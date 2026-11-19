@@ -495,6 +495,12 @@ mod connections {
                 service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
                 auth: crate::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
             }),
+            Provider::InternalTools => Some(LiveConnection::InternalTools {
+                service_account: "home-reader@company.iam.gserviceaccount.com".into(),
+                origin: "https://it.example.com".into(),
+                iap_audience: "https://it.example.com/*".into(),
+                target_app_id: "it".into(),
+            }),
             Provider::Slack => Some(LiveConnection::Slack {
                 credential_ref: reference("slack_token"),
                 signing_secret_ref: None,
@@ -764,6 +770,100 @@ mod carta_modes {
     }
 }
 
+/// The internal-tools profile binds the IAP credential to the control plane it
+/// is scoped for, and the app domain to one reviewed parent domain.
+mod internal_tools_profile {
+    use super::*;
+    use crate::integrations::LiveConnection;
+
+    fn live() -> LiveConnection {
+        LiveConnection::InternalTools {
+            service_account: "home-reader@company.iam.gserviceaccount.com".into(),
+            origin: "https://it.example.com".into(),
+            iap_audience: "https://it.example.com/*".into(),
+            target_app_id: "it".into(),
+        }
+    }
+
+    #[test]
+    fn the_iap_audience_must_lie_under_the_reviewed_origin() {
+        assert!(validate_connection(Provider::InternalTools, Some(&live())).is_ok());
+        let with = |edit: fn(&mut LiveConnection)| {
+            let mut connection = live();
+            edit(&mut connection);
+            validate_connection(Provider::InternalTools, Some(&connection))
+        };
+        for edit in [
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools { origin, .. } = c {
+                    *origin = "http://it.example.com".into();
+                }
+            },
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools { origin, .. } = c {
+                    *origin = "https://it.example.com/api".into();
+                }
+            },
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools { origin, .. } = c {
+                    *origin = "https://it.example.com:8443".into();
+                }
+            },
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools { iap_audience, .. } = c {
+                    *iap_audience = "https://other.example.com/*".into();
+                }
+            },
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools { iap_audience, .. } = c {
+                    *iap_audience = "https://it.example.com.evil.test/*".into();
+                }
+            },
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools { iap_audience, .. } = c {
+                    *iap_audience = "https://it.example.com/?next=x".into();
+                }
+            },
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools { target_app_id, .. } = c {
+                    *target_app_id = "it/../other".into();
+                }
+            },
+            |c: &mut LiveConnection| {
+                if let LiveConnection::InternalTools {
+                    service_account, ..
+                } = c
+                {
+                    *service_account = "person@example.com".into();
+                }
+            },
+        ] {
+            assert!(with(edit).is_err());
+        }
+        assert!(validate_connection(Provider::InternalTools, None).is_err());
+    }
+
+    #[test]
+    fn the_app_domain_is_a_host_and_narrowing_keeps_it_exact() {
+        let target = |domain: &str| ResourceTarget::InternalToolsLibrary {
+            app_domain: domain.into(),
+        };
+        assert!(target("wonderly.info").validate().is_ok());
+        for domain in [
+            "localhost",
+            "Wonderly.info",
+            "wonderly.info/",
+            "wonderly.info:443",
+            "evil.test/wonderly.info",
+            "-a.test",
+        ] {
+            assert!(target(domain).validate().is_err(), "{domain} accepted");
+        }
+        assert!(target("wonderly.info").is_subset_of(&target("wonderly.info")));
+        assert!(!target("evil.test").is_subset_of(&target("wonderly.info")));
+    }
+}
+
 /// Grant narrowing, which decides whether a resource handle may be used at all.
 ///
 /// `ResourceTarget::is_subset_of` matches on pairs and ends in `_ => false`, so
@@ -797,6 +897,9 @@ mod narrowing {
             },
             ResourceKind::WorkspaceDirectory => ResourceTarget::WorkspaceDirectory {
                 customer_id: "C01".into(),
+            },
+            ResourceKind::InternalToolsLibrary => ResourceTarget::InternalToolsLibrary {
+                app_domain: "example.com".into(),
             },
             ResourceKind::LinearOrganization => ResourceTarget::LinearOrganization {
                 organization_id: "org-1".into(),
