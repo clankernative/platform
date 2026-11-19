@@ -1143,15 +1143,18 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                 observations: crate::capabilities::READS
                     .iter()
                     .copied()
-                    // Directory fixtures require a declared read dependency.
-                    // The other pre-existing local read defaults are unchanged.
+                    // Directory and Google Workspace fixtures require a declared
+                    // read dependency. The other pre-existing local read defaults
+                    // are unchanged.
                     .filter(|name| {
                         !day2_capabilities::resources::Action::ALL
                             .iter()
                             .any(|action| {
-                                action.provider()
-                                    == day2_capabilities::resources::Provider::WorkspaceDirectory
-                                    && action.capability() == *name
+                                matches!(
+                                    action.provider(),
+                                    day2_capabilities::resources::Provider::WorkspaceDirectory
+                                        | day2_capabilities::resources::Provider::GoogleWorkspace
+                                ) && action.capability() == *name
                             })
                     })
                     .chain(
@@ -1895,6 +1898,15 @@ fn provider_resource_fixture(
             ],
         ),
         (
+            "google_workspace",
+            Provider::GoogleWorkspace,
+            crate::integrations::simulated::google_workspace_development_target(),
+            vec![
+                Action::GoogleWorkspaceGroup,
+                Action::GoogleWorkspaceGroupMember,
+            ],
+        ),
+        (
             "linear",
             Provider::SyntheticLinear,
             ResourceTarget::LinearOrganization {
@@ -1946,12 +1958,23 @@ fn provider_resource_fixture(
             catalog.connections.insert(
                 (*name).into(),
                 ConnectionDefinition {
-                    live: (*provider == Provider::WorkspaceDirectory).then(|| {
-                        day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
-                            service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
-                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
-                        }
-                    }),
+                    live: match provider {
+                        Provider::WorkspaceDirectory => Some(
+                            day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+                                service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                                auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                            },
+                        ),
+                        // The service account the seeded world's IAM recognizes.
+                        Provider::GoogleWorkspace => Some(
+                            day2_capabilities::integrations::LiveConnection::GoogleWorkspace {
+                                service_account:
+                                    crate::integrations::simulated::GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT
+                                        .into(),
+                            },
+                        ),
+                        _ => None,
+                    },
                     revision: 1,
                     provider: *provider,
                 },
@@ -2149,14 +2172,16 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.budgets.extend(work.budgets);
         attachments.extend(work_attachments);
     }
-    if reads_provider(policy, Provider::WorkspaceDirectory) {
-        let (directory, directory_attachments) =
-            provider_resource_fixture(app, policy, &[Provider::WorkspaceDirectory])?;
-        catalog.connections.extend(directory.connections);
-        catalog.resources.extend(directory.resources);
-        catalog.policies.extend(directory.policies);
-        catalog.budgets.extend(directory.budgets);
-        attachments.extend(directory_attachments);
+    for provider in [Provider::WorkspaceDirectory, Provider::GoogleWorkspace] {
+        if reads_provider(policy, provider) {
+            let (directory, directory_attachments) =
+                provider_resource_fixture(app, policy, &[provider])?;
+            catalog.connections.extend(directory.connections);
+            catalog.resources.extend(directory.resources);
+            catalog.policies.extend(directory.policies);
+            catalog.budgets.extend(directory.budgets);
+            attachments.extend(directory_attachments);
+        }
     }
     if crate::people_providers::uses_synthetic_fixture(artifact) {
         let (people, people_attachments) = people_resource_fixture(app, policy)?;
@@ -3596,6 +3621,7 @@ fn disposable_provider_worlds(actor: &str) -> crate::integrations::simulated::Si
         },
         // Disposable campaigns read the explicitly seeded synthetic Carta store.
         carta: None,
+        google_workspace: crate::integrations::simulated::google_workspace_development_fixture(),
     }
 }
 

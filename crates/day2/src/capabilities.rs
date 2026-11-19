@@ -173,6 +173,8 @@ enum Action {
         capture_id: String,
     },
     People(crate::people_providers::Action),
+    /// One Google Workspace read, frozen with its in-grant inputs.
+    GoogleWorkspace(crate::google_workspace::Plan),
     WorkspaceDirectoryUserPath(crate::workspace_directory::CaptureInput),
     /// A fresh complete hierarchy staged for this invocation only.
     WorkspaceDirectoryDelivery {
@@ -503,6 +505,36 @@ pub(crate) fn authorized(
                     }
                 }
             }
+        }
+        "google_workspace.group.v1" | "google_workspace.group_member.v1" => {
+            ensure!(
+                resource.grant.provider == Provider::GoogleWorkspace,
+                crate::error::Failure::ResourceForbidden
+            );
+            // The connection is frozen here, before any reservation: a simulated
+            // host serves the same plan from its world and never reaches Google.
+            let connection = resource
+                .grant
+                .live
+                .as_ref()
+                .ok_or(crate::error::Failure::ResourceForbidden)?;
+            let (plan, handle) = crate::google_workspace::Plan::authorize(
+                resource_action,
+                connection,
+                &resource.grant.target,
+                &instruction.data,
+            )?;
+            ensure!(
+                handle == resource.handle
+                    && resource.grant.limits.max_response_bytes
+                        >= crate::google_auth::MAX_EXCHANGE_RESPONSE_BYTES as u64
+                    && instruction.data.len() as u64 <= resource.grant.limits.max_request_bytes,
+                crate::error::Failure::ResourceForbidden
+            );
+            resource.planned_calls = plan.planned_calls();
+            quote.request_bytes = crate::google_workspace::MAX_ACTION_REQUEST_BYTES;
+            quote.response_bytes = plan.response_envelope();
+            Action::GoogleWorkspace(plan)
         }
         "google_directory.snapshot.v1"
         | "google_directory.record.v1"
@@ -905,6 +937,46 @@ impl ProviderResult {
         }
     }
 
+    /// A Workspace read settles what it actually sent and read, including a
+    /// failed action; a read leaves no unknown outcome. A failure keeps only its
+    /// final exchange's phase and status, never provider content.
+    fn google_workspace_metered(
+        result: Result<String>,
+        meter: crate::google_workspace::Meter,
+    ) -> Self {
+        use crate::google_workspace::Phase;
+        use crate::integrations::{ExchangeCorrelation, ExchangePhase};
+        let correlation = match (&result, meter.last) {
+            (Err(_), Some(last)) => vec![ExchangeCorrelation {
+                phase: match last.phase {
+                    Phase::Metadata => ExchangePhase::GoogleWorkspaceMetadata,
+                    Phase::Iam => ExchangePhase::GoogleWorkspaceIam,
+                    Phase::Token => ExchangePhase::GoogleWorkspaceToken,
+                    Phase::Directory => ExchangePhase::GoogleWorkspaceDirectory,
+                },
+                http_status: last.http_status,
+                request_id: None,
+                statement_handle: None,
+                page: None,
+                retry_after_seconds: last.retry_after_seconds,
+            }],
+            _ => Vec::new(),
+        };
+        Self {
+            result,
+            correlation,
+            pending: false,
+            usage: crate::resources::ProviderUsage {
+                calls: meter.calls,
+                request_bytes: meter.request_bytes,
+                response_bytes: meter.response_bytes,
+                cost_microunits: 0,
+                known: true,
+                dispatched: meter.calls > 0,
+            },
+        }
+    }
+
     /// A live capture settles what it actually sent and read, including a
     /// failed collection; a read-only exchange leaves no unknown outcome.
     fn carta_metered(result: Result<String>, meter: crate::carta_live::Meter) -> Self {
@@ -988,6 +1060,33 @@ fn workspace_directory_user_path(
         };
     let observed = crate::workspace_directory::collect_user_path(input.clone(), port.as_mut())?;
     Ok(serde_json::to_string(&observed)?)
+}
+
+/// One Workspace read through the simulated or native port. The source was
+/// frozen at authorization: a simulated host answers from its world only.
+fn google_workspace_observe(
+    runtime: &Runtime,
+    plan: &crate::google_workspace::Plan,
+) -> (Result<String>, crate::google_workspace::Meter) {
+    let now = match runtime.host().now_ms() {
+        Ok(now) => now / 1000,
+        Err(error) => return (Err(error), Default::default()),
+    };
+    let port: Result<Box<dyn crate::google_workspace::GooglePort>> =
+        if runtime.integrations().uses_simulated_providers() {
+            crate::google_workspace::SimulatedGooglePort::new(runtime.db(), runtime.scope())
+                .map(|port| Box::new(port) as Box<dyn crate::google_workspace::GooglePort>)
+        } else {
+            crate::google_workspace_http::NativeGooglePort::new()
+                .map(|port| Box::new(port) as Box<dyn crate::google_workspace::GooglePort>)
+        };
+    match port {
+        Ok(mut port) => crate::google_workspace::observe(plan, port.as_mut(), now),
+        Err(_) => (
+            Err(crate::google_workspace::Failure::Unavailable.into()),
+            Default::default(),
+        ),
+    }
 }
 
 /// Collect directly from the provider port, then stage the validated pages in
@@ -1260,6 +1359,10 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
             };
         }
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
+        Action::GoogleWorkspace(plan) => {
+            let (result, meter) = google_workspace_observe(runtime, &plan);
+            return ProviderResult::google_workspace_metered(result, meter);
+        }
         Action::CartaDelivery {
             plan: Some(plan),
             authority,

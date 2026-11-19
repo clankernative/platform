@@ -455,6 +455,7 @@ fn the_simulation_emits_no_field_the_provider_does_not() -> Result<()> {
                 max_input_tokens: 10,
             },
             workspace_directory: Default::default(),
+            google_workspace: Default::default(),
             carta: None,
         },
     )?;
@@ -799,6 +800,298 @@ fn carta_bases_are_reconstructions_until_a_playground_recording_lands() {
             "a Carta base's origin must say what it is: {}",
             base.origin
         );
+        assert!(!base.bytes.is_empty());
+    }
+}
+
+/// Google Workspace has no live recording yet: these bases follow the response
+/// shapes in Google's published references, with illustrative values. See
+/// `GOOGLE-WORKSPACE-PROVENANCE.md`.
+const GOOGLE_METADATA_TOKEN: RecordedBase = RecordedBase::from_repository(
+    "the metadata server returns access_token, expires_in and token_type for the default service account",
+    "https://cloud.google.com/compute/docs/access/authenticate-workloads",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.metadata_token.json"),
+);
+
+const GOOGLE_GENERATE_ACCESS_TOKEN: RecordedBase = RecordedBase::from_repository(
+    "generateAccessToken returns accessToken and expireTime and nothing that names a delegated flow",
+    "https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.generate_access_token.json"),
+);
+
+const GOOGLE_GROUP: RecordedBase = RecordedBase::from_repository(
+    "groups.get with the fields=id,email,name mask returns exactly the group's id, primary email and name",
+    "https://developers.google.com/workspace/admin/directory/reference/rest/v1/groups/get",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.groups.get.json"),
+);
+
+const GOOGLE_HAS_MEMBER: RecordedBase = RecordedBase::from_repository(
+    "members.hasMember returns a single isMember boolean for direct or nested membership",
+    "https://developers.google.com/workspace/admin/directory/reference/rest/v1/members/hasMember",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.groups.has_member.json"),
+);
+
+/// Replays bodies to the Google pipeline in request order and keeps every reply
+/// a delegate port served, so the simulation's own bodies can be compared too.
+struct GoogleReplay {
+    bodies: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl GoogleReplay {
+    fn reply(&mut self, metadata: bool) -> crate::google_auth::Reply {
+        crate::google_auth::Reply {
+            status: 200,
+            metadata_flavor: metadata,
+            json: true,
+            body: self
+                .bodies
+                .pop_front()
+                .expect("no unplanned Google request"),
+            retry_after_seconds: None,
+        }
+    }
+}
+
+impl crate::google_workspace::GooglePort for GoogleReplay {
+    fn authenticate(
+        &mut self,
+        exchange: &crate::google_auth::Exchange<'_>,
+        _max_bytes: usize,
+    ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+        Ok(self.reply(matches!(exchange, crate::google_auth::Exchange::Metadata)))
+    }
+
+    fn call(
+        &mut self,
+        _request: &crate::google_workspace::ApiRequest,
+        _token: &crate::google_auth::AccessToken,
+        _max_bytes: usize,
+    ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+        Ok(self.reply(false))
+    }
+}
+
+fn google_plan(action: Action) -> Result<crate::google_workspace::Plan> {
+    let request = match action {
+        Action::GoogleWorkspaceGroup => json!({"handle":"h","group_email":"team@example.com"}),
+        _ => {
+            json!({"handle":"h","group_email":"team@example.com","member_email":"person@example.com"})
+        }
+    };
+    Ok(crate::google_workspace::Plan::authorize(
+        action,
+        &LiveConnection::GoogleWorkspace {
+            service_account: "reader@example-project.iam.gserviceaccount.com".into(),
+        },
+        &ResourceTarget::GoogleWorkspaceDomain {
+            email_domain: "example.com".into(),
+            calendar_reader: "calendar@example.com".into(),
+            grantee_domains: vec!["example.com".into()],
+        },
+        &request.to_string(),
+    )?
+    .0)
+}
+
+fn google_against(action: Action, bodies: Vec<Vec<u8>>) -> Result<String> {
+    let mut replay = GoogleReplay {
+        bodies: bodies.into(),
+    };
+    let (result, _) = crate::google_workspace::observe(&google_plan(action)?, &mut replay, 100);
+    result
+}
+
+fn google_bases() -> Vec<Vec<u8>> {
+    [
+        &GOOGLE_METADATA_TOKEN,
+        &GOOGLE_GENERATE_ACCESS_TOKEN,
+        &GOOGLE_GROUP,
+        &GOOGLE_HAS_MEMBER,
+    ]
+    .iter()
+    .map(|base| base.bytes.to_vec())
+    .collect()
+}
+
+#[test]
+fn google_workspace_parses_the_published_provider_responses() -> Result<()> {
+    let bases = google_bases();
+    assert_eq!(
+        google_against(Action::GoogleWorkspaceGroup, bases[..3].to_vec())?,
+        r#"{"Found":{"email":"team@example.com","id":"03ep43zb2k3mixc","name":"Team"}}"#
+    );
+    assert_eq!(
+        google_against(Action::GoogleWorkspaceGroupMember, bases)?,
+        r#""Member""#
+    );
+    Ok(())
+}
+
+/// Each mutation of a Google base names the failure it must produce.
+#[test]
+fn mutating_the_google_responses_is_rejected_in_the_named_way() -> Result<()> {
+    type Mutation = fn(&mut [Value; 4]);
+    let cases: [(&str, Mutation, &str); 6] = [
+        (
+            "a workload token that is not a bearer",
+            |bases| bases[0]["token_type"] = json!("mac"),
+            "google_workspace_workload_identity_unavailable",
+        ),
+        (
+            "a delegated flow's answer to a direct request",
+            |bases| bases[1] = json!({"keyId":"k","signedJwt":"a.b.c"}),
+            "google_workspace_authentication_failed",
+        ),
+        (
+            "a group whose primary address left the grant",
+            |bases| bases[2]["email"] = json!("team@elsewhere.example"),
+            "google_workspace_group_outside_grant",
+        ),
+        (
+            "a group without an id",
+            |bases| {
+                bases[2].as_object_mut().expect("object").remove("id");
+            },
+            "google_workspace_response_invalid",
+        ),
+        (
+            "a membership answer that is not a boolean",
+            |bases| bases[3]["isMember"] = json!("true"),
+            "google_workspace_response_invalid",
+        ),
+        (
+            "an access token with whitespace",
+            |bases| bases[1]["accessToken"] = json!("not a token"),
+            "google_workspace_authentication_failed",
+        ),
+    ];
+    for (name, mutate, expect) in cases {
+        let mut bases = [
+            GOOGLE_METADATA_TOKEN.value()?,
+            GOOGLE_GENERATE_ACCESS_TOKEN.value()?,
+            GOOGLE_GROUP.value()?,
+            GOOGLE_HAS_MEMBER.value()?,
+        ];
+        mutate(&mut bases);
+        let outcome = google_against(
+            Action::GoogleWorkspaceGroupMember,
+            bases
+                .iter()
+                .map(|base| base.to_string().into_bytes())
+                .collect(),
+        );
+        assert_eq!(
+            outcome.err().map(|error| error.to_string()).as_deref(),
+            Some(expect),
+            "mutation was not rejected as expected: {name}"
+        );
+    }
+    Ok(())
+}
+
+/// The simulated world answers with exactly the fields Google documents, in
+/// every exchange a membership read makes.
+#[test]
+fn the_google_simulation_emits_exactly_the_documented_fields() -> Result<()> {
+    struct Recording<'a> {
+        inner: crate::google_workspace::SimulatedGooglePort,
+        bodies: &'a mut Vec<Vec<u8>>,
+    }
+    impl crate::google_workspace::GooglePort for Recording<'_> {
+        fn authenticate(
+            &mut self,
+            exchange: &crate::google_auth::Exchange<'_>,
+            max_bytes: usize,
+        ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+            let reply = self.inner.authenticate(exchange, max_bytes)?;
+            self.bodies.push(reply.body.clone());
+            Ok(reply)
+        }
+
+        fn call(
+            &mut self,
+            request: &crate::google_workspace::ApiRequest,
+            token: &crate::google_auth::AccessToken,
+            max_bytes: usize,
+        ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+            let reply = self.inner.call(request, token, max_bytes)?;
+            self.bodies.push(reply.body.clone());
+            Ok(reply)
+        }
+    }
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("app.sqlite");
+    let mut world = super::simulated::google_workspace_development_fixture();
+    world.domain = "example.com".into();
+    world.service_account = "reader@example-project.iam.gserviceaccount.com".into();
+    world.users = ["person@example.com".to_owned()].into();
+    world.groups = BTreeMap::from([(
+        "team@example.com".to_owned(),
+        super::simulated::GoogleGroup {
+            id: "group-team".into(),
+            name: "Team".into(),
+            members: ["person@example.com".to_owned()].into(),
+        },
+    )]);
+    super::simulated::seed(
+        &database,
+        "parity/app",
+        &super::simulated::SimulatedFixture {
+            slack: super::simulated::SlackWorld {
+                workspace_id: "TPARITY".into(),
+                ..Default::default()
+            },
+            snowflake: super::simulated::SnowflakeWorld {
+                account: "parity".into(),
+                ..Default::default()
+            },
+            openai: super::simulated::OpenAiWorld {
+                project_id: "proj_parity".into(),
+                model: "model-parity".into(),
+                max_input_tokens: 1,
+                ..Default::default()
+            },
+            google_workspace: world,
+            ..Default::default()
+        },
+    )?;
+    let mut bodies = Vec::new();
+    let mut port = Recording {
+        inner: crate::google_workspace::SimulatedGooglePort::new(&database, "parity/app")?,
+        bodies: &mut bodies,
+    };
+    let (result, _) = crate::google_workspace::observe(
+        &google_plan(Action::GoogleWorkspaceGroupMember)?,
+        &mut port,
+        100,
+    );
+    assert_eq!(result?, r#""Member""#);
+    let keys = |bytes: &[u8]| -> Result<Vec<String>> {
+        let value: Value = serde_json::from_slice(bytes)?;
+        Ok(value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("object"))?
+            .keys()
+            .cloned()
+            .collect())
+    };
+    assert_eq!(bodies.len(), 4);
+    for (simulated, base) in bodies.iter().zip(google_bases()) {
+        assert_eq!(keys(simulated)?, keys(&base)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn google_bases_cite_the_published_reference_they_follow() {
+    for base in [
+        &GOOGLE_METADATA_TOKEN,
+        &GOOGLE_GENERATE_ACCESS_TOKEN,
+        &GOOGLE_GROUP,
+        &GOOGLE_HAS_MEMBER,
+    ] {
+        assert!(base.claim.len() > 20, "claim is not a real sentence");
+        assert!(base.origin.starts_with("https://"));
         assert!(!base.bytes.is_empty());
     }
 }

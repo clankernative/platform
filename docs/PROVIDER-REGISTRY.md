@@ -89,6 +89,11 @@ SQLite worlds against an independent seeded oracle; see
 [OPERATOR-ALERTS-SIMULATION.md](OPERATOR-ALERTS-SIMULATION.md) for the precise
 coverage and replay limits. This does not establish live-provider conformance.
 
+`GoogleWorkspace` is served at a request-level port: the native port's metadata,
+IAM, token and Directory requests are answered by its own world, so its token
+flow, routes and parser run in the offline lane; see
+[GOOGLE-WORKSPACE.md](GOOGLE-WORKSPACE.md).
+
 Every provider now has a simulation. `Slack`, `Snowflake` and `OpenAi` — the three
 admitted live-first — are served by `integrations::simulated` at the transport seam,
 so the offline lane and the live lane differ only in the socket.

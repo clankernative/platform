@@ -38,6 +38,8 @@ mod error;
 mod execution;
 mod freetool_executor;
 pub mod google_auth;
+pub mod google_workspace;
+pub mod google_workspace_http;
 mod host;
 pub mod host_inputs;
 mod host_loop;

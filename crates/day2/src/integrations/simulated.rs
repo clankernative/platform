@@ -20,12 +20,13 @@ use super::{
 };
 use crate::integrations::transport::{Method, WireRequest};
 use anyhow::{Context, Result, bail, ensure};
+use base64::Engine as _;
 use day2_capabilities::{integrations::LiveConnection, resources::Provider};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -61,6 +62,7 @@ pub const DELEGATION_WORLD: &str = world_of(Provider::LocalDelegation);
 /// Shared with explicitly seeded synthetic captures: one provider, one world
 /// file. The wire world occupies its own `simulated_provider` table.
 pub const CARTA_WORLD: &str = world_of(Provider::Carta);
+pub const GOOGLE_WORKSPACE_WORLD: &str = world_of(Provider::GoogleWorkspace);
 
 const fn world_of(provider: Provider) -> &'static str {
     match provider.world() {
@@ -191,6 +193,37 @@ pub struct CartaWireWorld {
     pub token: Value,
     pub stakeholder_pages: Vec<Value>,
     pub grant_pages: Vec<Value>,
+}
+
+/// One Google Workspace organization, answering the requests the native port
+/// sends: workload metadata, IAM, the token endpoint and the Directory routes.
+/// Later actions add calendars, conferences and Drive files beside these fields
+/// without restructuring them; every request is served from this one world.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleWorkspaceWorld {
+    /// The organization's primary domain. Its people are `users`.
+    pub domain: String,
+    /// The one service account this world's IAM mints tokens for. Any other is
+    /// refused, as Google refuses a caller without token-creator on it.
+    pub service_account: String,
+    /// The scopes the service account's client is authorized for, domain-wide.
+    pub delegated_scopes: BTreeSet<String>,
+    /// The service account holds an admin role that reads groups and members.
+    pub directory_reader: bool,
+    /// People, by primary address. Only these can be a delegated subject.
+    pub users: BTreeSet<String>,
+    /// Groups, by primary address.
+    pub groups: BTreeMap<String, GoogleGroup>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleGroup {
+    pub id: String,
+    pub name: String,
+    /// People or other groups, by primary address. Membership is transitive.
+    pub members: BTreeSet<String>,
 }
 
 /// One stored object, as the store reports it.
@@ -445,6 +478,10 @@ pub struct SimulatedFixture {
     /// Carta store stays the only Carta state a campaign has.
     #[serde(default)]
     pub carta: Option<CartaWireWorld>,
+    /// Absent seeds an empty organization: every request then fails as Google
+    /// fails for an unknown account, never falling through to the network.
+    #[serde(default)]
+    pub google_workspace: GoogleWorkspaceWorld,
 }
 
 /// What another application answers, for a campaign that is not running it.
@@ -651,6 +688,12 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
         scope,
         crate::simulations::simulation(Provider::WorkspaceDirectory),
         &fixture.workspace_directory,
+    )?;
+    seed_world(
+        database,
+        scope,
+        GOOGLE_WORKSPACE_WORLD,
+        &fixture.google_workspace,
     )?;
     // The executor simulation is deterministic from its sealed request and needs
     // no scenario payload. Provision its declared database through the same
@@ -1119,6 +1162,509 @@ pub fn update_workspace_directory<T>(
         scope,
         act,
     )
+}
+
+/// The service account and organization disposable campaigns use. Synthetic:
+/// no such account or domain exists, and nothing here reaches Google.
+pub const GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT: &str =
+    "workspace-reader@synthetic-project.iam.gserviceaccount.com";
+const GOOGLE_DEVELOPMENT_DOMAIN: &str = "synthetic.example";
+
+/// The disposable grant matching [`google_workspace_development_fixture`].
+pub fn google_workspace_development_target() -> day2_capabilities::resources::ResourceTarget {
+    day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
+        email_domain: GOOGLE_DEVELOPMENT_DOMAIN.into(),
+        calendar_reader: format!("calendar-reader@{GOOGLE_DEVELOPMENT_DOMAIN}"),
+        grantee_domains: vec![GOOGLE_DEVELOPMENT_DOMAIN.into()],
+    }
+}
+
+/// A small organization with nested groups, for local development and
+/// verification campaigns that declare Google Workspace reads.
+pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
+    let address = |local: &str| format!("{local}@{GOOGLE_DEVELOPMENT_DOMAIN}");
+    let group = |id: &str, name: &str, members: &[String]| GoogleGroup {
+        id: id.into(),
+        name: name.into(),
+        members: members.iter().cloned().collect(),
+    };
+    GoogleWorkspaceWorld {
+        domain: GOOGLE_DEVELOPMENT_DOMAIN.into(),
+        service_account: GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT.into(),
+        delegated_scopes: [
+            "https://www.googleapis.com/auth/calendar.acls.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/meetings.space.readonly",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        directory_reader: true,
+        users: ["ada", "grace", "calendar-reader"]
+            .into_iter()
+            .map(address)
+            .collect(),
+        groups: BTreeMap::from([
+            (
+                address("engineering"),
+                group(
+                    "group-engineering",
+                    "Engineering",
+                    &[address("ada"), address("platform")],
+                ),
+            ),
+            (
+                address("platform"),
+                group("group-platform", "Platform", &[address("grace")]),
+            ),
+            (address("empty"), group("group-empty", "Empty", &[])),
+        ]),
+    }
+}
+
+/// Validate that the Google Workspace world is seeded for this scope, without a
+/// request. A simulated host never falls through to the network.
+pub(crate) fn google_workspace_check(database: &Path, scope: &str) -> Result<()> {
+    let path = database.with_file_name(GOOGLE_WORKSPACE_WORLD);
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| anyhow::anyhow!("simulated_provider_unconfigured"))?;
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='simulated_provider')",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(exists, "simulated_provider_unconfigured");
+    let _: World<GoogleWorkspaceWorld> = read_world(&connection, scope)?;
+    Ok(())
+}
+
+pub const GOOGLE_METADATA_ENDPOINT: &str = "google_workspace.metadata";
+pub const GOOGLE_IAM_TOKEN_ENDPOINT: &str = "google_workspace.iam.generate_access_token";
+pub const GOOGLE_IAM_SIGN_ENDPOINT: &str = "google_workspace.iam.sign_jwt";
+pub const GOOGLE_OAUTH_TOKEN_ENDPOINT: &str = "google_workspace.oauth.token";
+pub const GOOGLE_GROUP_ENDPOINT: &str = "google_workspace.directory.groups.get";
+pub const GOOGLE_HAS_MEMBER_ENDPOINT: &str = "google_workspace.directory.groups.has_member";
+/// Every endpoint a scenario can schedule a fault against.
+pub const GOOGLE_ENDPOINTS: [&str; 6] = [
+    GOOGLE_METADATA_ENDPOINT,
+    GOOGLE_IAM_TOKEN_ENDPOINT,
+    GOOGLE_IAM_SIGN_ENDPOINT,
+    GOOGLE_OAUTH_TOKEN_ENDPOINT,
+    GOOGLE_GROUP_ENDPOINT,
+    GOOGLE_HAS_MEMBER_ENDPOINT,
+];
+/// The key the simulated IAM signs with. Its "signature" is derived from the
+/// signed bytes, so the token endpoint can tell its own assertions from others.
+const GOOGLE_KEY_ID: &str = "simulated-key-1";
+
+pub(crate) enum GoogleRequest<'a> {
+    Auth(&'a crate::google_auth::Exchange<'a>),
+    Api {
+        request: &'a crate::google_workspace::ApiRequest,
+        bearer: &'a str,
+    },
+}
+
+fn google_signature(payload: &[u8]) -> Vec<u8> {
+    let digest = crate::digest(payload);
+    let mut signature = digest.as_bytes().to_vec();
+    signature.extend_from_slice(digest.as_bytes());
+    signature
+}
+
+/// Serve one Google exchange from the world, recording it and consuming a
+/// scheduled fault. Statuses and bodies are Google-shaped; the shared pipeline
+/// classifies them. An unconfigured or broken world is an unreachable provider.
+pub(crate) fn google_workspace_serve(
+    database: &Path,
+    scope: &str,
+    request: GoogleRequest<'_>,
+    max: usize,
+) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+    use crate::google_auth::{Exchange, IamMethod, Reply, Unreached};
+    let path = database.with_file_name(GOOGLE_WORKSPACE_WORLD);
+    let served = with_world::<GoogleWorkspaceWorld, _, _>(&path, scope, |state| {
+        ensure!(state.calls.len() < MAX_MESSAGES, "simulated_call_budget");
+        let endpoint = match &request {
+            GoogleRequest::Auth(Exchange::Metadata) => GOOGLE_METADATA_ENDPOINT,
+            GoogleRequest::Auth(Exchange::Iam {
+                method: IamMethod::GenerateAccessToken,
+                ..
+            }) => GOOGLE_IAM_TOKEN_ENDPOINT,
+            GoogleRequest::Auth(Exchange::Iam {
+                method: IamMethod::SignJwt,
+                ..
+            }) => GOOGLE_IAM_SIGN_ENDPOINT,
+            GoogleRequest::Auth(Exchange::Token { .. }) => GOOGLE_OAUTH_TOKEN_ENDPOINT,
+            GoogleRequest::Api { request, .. } => match request.segments.get(5).map(String::as_str)
+            {
+                Some("hasMember") => GOOGLE_HAS_MEMBER_ENDPOINT,
+                _ => GOOGLE_GROUP_ENDPOINT,
+            },
+        };
+        state.calls.push(match &request {
+            GoogleRequest::Auth(Exchange::Iam {
+                service_account, ..
+            }) => {
+                format!("{endpoint}:{service_account}")
+            }
+            GoogleRequest::Api { request, .. } => format!(
+                "{endpoint}:{}?{}",
+                request.segments.join("/"),
+                request.query_string().unwrap_or_default()
+            ),
+            GoogleRequest::Auth(_) => endpoint.to_owned(),
+        });
+        if let Some(fault) = take_fault_named(state, endpoint) {
+            return Ok(match fault_response(fault, max as u64) {
+                None => Err(Unreached::default()),
+                Some(Err(error)) => Err(Unreached {
+                    response_bytes: error.response_bytes,
+                    http_status: error.http_status,
+                    retry_after_seconds: None,
+                    too_large: false,
+                }),
+                Some(Ok(response)) => Ok(Reply {
+                    status: response.status,
+                    metadata_flavor: false,
+                    json: response.json_content_type,
+                    body: response.body,
+                    retry_after_seconds: (fault == SimulatedFault::RateLimited).then_some(30),
+                }),
+            });
+        }
+        Ok(Ok(google_reply(&state.world, &request)?))
+    });
+    match served {
+        Ok(reply) => {
+            let mut reply = reply?;
+            // The wire never delivers more than the reader asked for plus the
+            // probe byte that makes an oversized response observable.
+            reply.body.truncate(max.saturating_add(1));
+            Ok(reply)
+        }
+        Err(_) => Err(Unreached::default()),
+    }
+}
+
+/// What a simulated token may do. Tokens are self-describing and verified by
+/// recomputing their tag, so serving a read leaves the world unchanged.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoogleGrant {
+    workload: bool,
+    /// The delegated person, or the service account itself when absent.
+    subject: Option<String>,
+    scopes: BTreeSet<String>,
+}
+
+fn google_token(world: &GoogleWorkspaceWorld, grant: &GoogleGrant) -> Result<String> {
+    let payload =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(grant)?);
+    let tag = crate::digest(&serde_json::to_vec(&(
+        "google-workspace-simulated-token",
+        &world.service_account,
+        &payload,
+    ))?);
+    Ok(format!("simulated.{payload}.{}", &tag[7..]))
+}
+
+fn google_grant(world: &GoogleWorkspaceWorld, token: &str) -> Option<GoogleGrant> {
+    let payload = token.strip_prefix("simulated.")?.split('.').next()?;
+    let grant: GoogleGrant = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?,
+    )
+    .ok()?;
+    (google_token(world, &grant).ok()?.as_str() == token).then_some(grant)
+}
+
+/// Whether `member` belongs to `group`, directly or through member groups.
+fn google_is_member(world: &GoogleWorkspaceWorld, group: &str, member: &str) -> bool {
+    let mut pending = vec![group.to_owned()];
+    let mut seen = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        let Some(group) = world.groups.get(&current) else {
+            continue;
+        };
+        if group.members.contains(member) {
+            return true;
+        }
+        pending.extend(
+            group
+                .members
+                .iter()
+                .filter(|candidate| world.groups.contains_key(*candidate))
+                .cloned(),
+        );
+    }
+    false
+}
+
+fn google_reply(
+    world: &GoogleWorkspaceWorld,
+    request: &GoogleRequest<'_>,
+) -> Result<crate::google_auth::Reply> {
+    use crate::google_auth::{Exchange, IamMethod, Reply};
+    let reply = |status: u16, body: Value| Reply {
+        status,
+        metadata_flavor: false,
+        json: true,
+        body: body.to_string().into_bytes(),
+        retry_after_seconds: None,
+    };
+    let error = |status: u16, message: &str| {
+        reply(
+            status,
+            json!({"error":{"code":status,"message":message,"status":"SIMULATED"}}),
+        )
+    };
+    Ok(match request {
+        GoogleRequest::Auth(Exchange::Metadata) => {
+            let token = google_token(
+                world,
+                &GoogleGrant {
+                    workload: true,
+                    subject: None,
+                    scopes: BTreeSet::new(),
+                },
+            )?;
+            Reply {
+                metadata_flavor: true,
+                ..reply(
+                    200,
+                    json!({"access_token":token,"expires_in":3599,"token_type":"Bearer"}),
+                )
+            }
+        }
+        GoogleRequest::Auth(Exchange::Iam {
+            service_account,
+            method,
+            bearer,
+            body,
+        }) => {
+            if !google_grant(world, bearer.bearer()).is_some_and(|grant| grant.workload) {
+                return Ok(error(
+                    401,
+                    "Request had invalid authentication credentials.",
+                ));
+            }
+            if *service_account != world.service_account {
+                return Ok(error(
+                    403,
+                    "Permission 'iam.serviceAccounts.getAccessToken' denied",
+                ));
+            }
+            let Ok(body) = serde_json::from_slice::<Value>(body) else {
+                return Ok(error(400, "Invalid JSON payload received."));
+            };
+            match method {
+                IamMethod::GenerateAccessToken => {
+                    let scopes: Option<BTreeSet<String>> = body["scope"].as_array().map(|scopes| {
+                        scopes
+                            .iter()
+                            .filter_map(|scope| scope.as_str().map(str::to_owned))
+                            .collect()
+                    });
+                    match scopes {
+                        Some(scopes) if !scopes.is_empty() => {
+                            let token = google_token(
+                                world,
+                                &GoogleGrant {
+                                    workload: false,
+                                    subject: None,
+                                    scopes,
+                                },
+                            )?;
+                            reply(
+                                200,
+                                json!({"accessToken":token,"expireTime":"2030-01-01T00:00:00Z"}),
+                            )
+                        }
+                        _ => error(400, "Scope required."),
+                    }
+                }
+                IamMethod::SignJwt => {
+                    let Some(payload) = body["payload"].as_str() else {
+                        return Ok(error(400, "Payload required."));
+                    };
+                    let encode = |bytes: &[u8]| {
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+                    };
+                    let header = encode(
+                        json!({"alg":"RS256","kid":GOOGLE_KEY_ID,"typ":"JWT"})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    let signed = format!("{header}.{}", encode(payload.as_bytes()));
+                    let signature = encode(&google_signature(signed.as_bytes()));
+                    reply(
+                        200,
+                        json!({"keyId":GOOGLE_KEY_ID,"signedJwt":format!("{signed}.{signature}")}),
+                    )
+                }
+            }
+        }
+        GoogleRequest::Auth(Exchange::Token { form }) => {
+            let pairs: BTreeMap<String, String> = url::form_urlencoded::parse(form.as_bytes())
+                .into_owned()
+                .collect();
+            if pairs.get("grant_type").map(String::as_str)
+                != Some("urn:ietf:params:oauth:grant-type:jwt-bearer")
+            {
+                return Ok(reply(400, json!({"error":"unsupported_grant_type"})));
+            }
+            let invalid_grant = reply(400, json!({"error":"invalid_grant"}));
+            let Some(jwt) = pairs.get("assertion") else {
+                return Ok(invalid_grant);
+            };
+            let parts: Vec<_> = jwt.split('.').collect();
+            let decoded = |part: &str| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(part)
+                    .ok()
+            };
+            let (Some(signed), Some(signature), Some(claims)) = (
+                jwt.rsplit_once('.').map(|(signed, _)| signed),
+                parts.get(2).and_then(|part| decoded(part)),
+                parts
+                    .get(1)
+                    .and_then(|part| decoded(part))
+                    .and_then(|claims| serde_json::from_slice::<Value>(&claims).ok()),
+            ) else {
+                return Ok(invalid_grant);
+            };
+            if parts.len() != 3 || signature != google_signature(signed.as_bytes()) {
+                return Ok(invalid_grant);
+            }
+            let lifetime = claims["exp"].as_i64().zip(claims["iat"].as_i64());
+            if claims["iss"] != world.service_account.as_str()
+                || claims["aud"] != crate::google_auth::GOOGLE_TOKEN_ENDPOINT
+                || !lifetime.is_some_and(|(exp, iat)| exp > iat && exp - iat <= 3600)
+            {
+                return Ok(invalid_grant);
+            }
+            let scopes: BTreeSet<String> = claims["scope"]
+                .as_str()
+                .unwrap_or_default()
+                .split(' ')
+                .filter(|scope| !scope.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if scopes.is_empty() || !scopes.is_subset(&world.delegated_scopes) {
+                return Ok(reply(
+                    401,
+                    json!({"error":"unauthorized_client","error_description":"Client is unauthorized to retrieve access tokens using this method, or client not authorized for any of the scopes requested."}),
+                ));
+            }
+            let Some(subject) = claims["sub"]
+                .as_str()
+                .filter(|sub| world.users.contains(*sub))
+            else {
+                return Ok(reply(
+                    400,
+                    json!({"error":"invalid_grant","error_description":"Invalid email or User ID"}),
+                ));
+            };
+            let token = google_token(
+                world,
+                &GoogleGrant {
+                    workload: false,
+                    subject: Some(subject.to_owned()),
+                    scopes,
+                },
+            )?;
+            reply(
+                200,
+                json!({"access_token":token,"expires_in":3599,"token_type":"Bearer"}),
+            )
+        }
+        GoogleRequest::Api { request, bearer } => {
+            let Some(issued) = google_grant(world, bearer).filter(|grant| !grant.workload) else {
+                return Ok(error(
+                    401,
+                    "Request had invalid authentication credentials.",
+                ));
+            };
+            let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
+            let (required, group, member) = match segments.as_slice() {
+                ["admin", "directory", "v1", "groups", group] => {
+                    (crate::google_workspace::GROUP_READ_SCOPE, *group, None)
+                }
+                [
+                    "admin",
+                    "directory",
+                    "v1",
+                    "groups",
+                    group,
+                    "hasMember",
+                    member,
+                ] => (
+                    crate::google_workspace::GROUP_MEMBER_READ_SCOPE,
+                    *group,
+                    Some(*member),
+                ),
+                _ => return Ok(error(404, "Not Found")),
+            };
+            if !issued.scopes.contains(required) {
+                return Ok(error(
+                    403,
+                    "Request had insufficient authentication scopes.",
+                ));
+            }
+            // Only the service account itself holds the Directory role here.
+            if issued.subject.is_some() || !world.directory_reader {
+                return Ok(error(403, "Not Authorized to access this resource/api"));
+            }
+            let key = group.to_ascii_lowercase();
+            let Some(found) = world.groups.get(&key) else {
+                return Ok(error(404, "Resource Not Found: groupKey"));
+            };
+            match member {
+                None => {
+                    let fields = request
+                        .query
+                        .iter()
+                        .find(|(name, _)| *name == "fields")
+                        .map(|(_, value)| value.as_str());
+                    if fields == Some("id,email,name") {
+                        reply(200, json!({"id":found.id,"email":key,"name":found.name}))
+                    } else {
+                        reply(
+                            200,
+                            json!({"kind":"admin#directory#group","id":found.id,"etag":"\"simulated\"",
+                                "email":key,"name":found.name,"directMembersCount":found.members.len().to_string()}),
+                        )
+                    }
+                }
+                Some(member) => {
+                    let member = member.to_ascii_lowercase();
+                    if !world.users.contains(&member) && !world.groups.contains_key(&member) {
+                        return Ok(error(404, "Resource Not Found: memberKey"));
+                    }
+                    reply(
+                        200,
+                        json!({"isMember":google_is_member(world, &key, &member)}),
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// Scenario changes affect later Google requests through the same world.
+pub fn update_google_workspace<T>(
+    database: &Path,
+    scope: &str,
+    act: impl FnOnce(&mut World<GoogleWorkspaceWorld>) -> Result<T>,
+) -> Result<T> {
+    with_world(&database.with_file_name(GOOGLE_WORKSPACE_WORLD), scope, act)
 }
 
 fn write_world<W: Serialize>(

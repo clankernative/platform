@@ -74,6 +74,16 @@ Applications own membership-cache validity, ancestry decisions, persistence and 
 
 Authorization freezes the provider source before reserving provider traffic: a simulated host never falls through to the network. Live and simulated adapters run the same parser and validation. The simulator records requests and consumes scheduled endpoint faults in its SQLite world. The Directory regression campaign checks provider faults, recovery, content-identity changes, a user-path read that never touches the hierarchy, and identical replay; real HTTP fixtures separately check the native authentication and request paths.
 
+## Google Workspace organization reads
+
+`google_workspace.group.v1` and `google_workspace.group_member.v1` read a group
+and test direct or nested membership as a keyless service account, inside the
+grantee domains a `google_workspace_domain` resource names. The token flow is the
+shared `google_auth` module Workspace Directory also uses; the adapter reaches
+Google through a request-level port, and the simulated port answers the same
+requests from `google_workspace.simulated.sqlite`. See
+[Google Workspace](GOOGLE-WORKSPACE.md) for the contract, bounds and codes.
+
 ## Carta issuer captures
 
 A resource on a live `carta` connection makes `carta.snapshot.v2` collect one

@@ -115,6 +115,11 @@ enum Demonstration {
     HeldCaptureRelease,
     /// Exercises the executor service's own deterministic manifest/receipt world.
     FreetoolExecutorWorld,
+    /// The Google Workspace request pipeline (token flow, routes, parser) answered
+    /// by the provider's own world. The answer must move with that world and the
+    /// read must change no world, through the supplied observer so the saboteurs
+    /// below reach the same gate.
+    WorkspaceRead,
     /// Real scoped synthetic Linear capability admission and committed world.
     LinearAdapter,
     /// Real scoped operator-alert capability admission and committed world.
@@ -184,6 +189,9 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::FreetoolResultPage
         | Action::FreetoolRegister
         | Action::FreetoolExecute => Demonstration::FreetoolExecutorWorld,
+        Action::GoogleWorkspaceGroup | Action::GoogleWorkspaceGroupMember => {
+            Demonstration::WorkspaceRead
+        }
     }
 }
 
@@ -451,7 +459,73 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                 "lastModifiedDatetime":{"value":"2026-01-01T00:00:00Z"}}]}),
             ],
         }),
+        // The group's name and its membership differ, so a group read and a
+        // membership read can only answer from the world they were given.
+        google_workspace: crate::integrations::simulated::GoogleWorkspaceWorld {
+            domain: "coverage.test".into(),
+            service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
+            delegated_scopes: BTreeSet::new(),
+            directory_reader: true,
+            users: BTreeSet::from(["ada@coverage.test".into()]),
+            groups: BTreeMap::from([(
+                "coverage-team@coverage.test".into(),
+                crate::integrations::simulated::GoogleGroup {
+                    id: "group-coverage".into(),
+                    name: if variant == Variant::A {
+                        "Alpha team"
+                    } else {
+                        "Beta team"
+                    }
+                    .into(),
+                    members: if variant == Variant::A {
+                        BTreeSet::from(["ada@coverage.test".into()])
+                    } else {
+                        BTreeSet::new()
+                    },
+                },
+            )]),
+        },
     }
+}
+
+const GOOGLE_COVERAGE_ACCOUNT: &str = "coverage-reader@coverage-project.iam.gserviceaccount.com";
+
+/// One Google Workspace read through the real pipeline and the simulated port,
+/// authorized exactly as the host authorizes it.
+fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("app.sqlite");
+    seed(&database, SCOPE, &fixture(variant))?;
+    let before = worlds(&database)?;
+    let request = match action {
+        Action::GoogleWorkspaceGroup => {
+            json!({"handle":"coverage","group_email":"coverage-team@coverage.test"})
+        }
+        Action::GoogleWorkspaceGroupMember => json!({"handle":"coverage",
+            "group_email":"coverage-team@coverage.test","member_email":"ada@coverage.test"}),
+        _ => anyhow::bail!("not a Google Workspace read"),
+    };
+    let (plan, _) = crate::google_workspace::Plan::authorize(
+        action,
+        &LiveConnection::GoogleWorkspace {
+            service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
+        },
+        &ResourceTarget::GoogleWorkspaceDomain {
+            email_domain: "coverage.test".into(),
+            calendar_reader: "calendar@coverage.test".into(),
+            grantee_domains: vec!["coverage.test".into()],
+        },
+        &request.to_string(),
+    )?;
+    let mut port = crate::google_workspace::SimulatedGooglePort::new(&database, SCOPE)?;
+    let (result, _) = crate::google_workspace::observe(&plan, &mut port, 1_700_000_000);
+    let result = result.map_err(|error| anyhow::anyhow!("{action:?} failed offline: {error}"))?;
+    let after = worlds(&database)?;
+    Ok(Observed {
+        result,
+        before,
+        after,
+    })
 }
 
 const CARTA_ISSUER: &str = "4242";
@@ -746,6 +820,9 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
     }
     if action.provider() == Provider::SyntheticGoogleDirectory {
         return google_directory::observe(action, variant);
+    }
+    if action.provider() == Provider::GoogleWorkspace {
+        return observe_google_workspace(action, variant);
     }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
@@ -1131,6 +1208,23 @@ fn check(
         Demonstration::NotificationsAdapter => notifications::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
+        Demonstration::WorkspaceRead => {
+            let first = run(Variant::A)?;
+            let second = run(Variant::B)?;
+            if first.result != second.result
+                && first.changed().is_empty()
+                && second.changed().is_empty()
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{action:?} must reflect {own} without changing any world; results differ={}, changed={:?}/{:?}",
+                    first.result != second.result,
+                    first.changed(),
+                    second.changed()
+                ))
+            }
+        }
         Demonstration::HeldCaptureRelease => carta::check_release(action),
         Demonstration::AdmittedAdapterRead => {
             let first = run(Variant::A)?;
@@ -1538,6 +1632,30 @@ fn the_gate_rejects_each_way_a_simulation_can_be_fake() -> Result<()> {
         check(Action::SlackPost, misattributed).is_err(),
         "a write landing in another provider's world must be rejected"
     );
+
+    // A Workspace read that answers a constant, or that changes a world to
+    // answer, has not demonstrated a read of its own world.
+    for action in [
+        Action::GoogleWorkspaceGroup,
+        Action::GoogleWorkspaceGroupMember,
+    ] {
+        assert!(check(action, constant).is_err(), "{action:?} constant");
+        let mutating = |variant| {
+            let mut after = empty();
+            after.insert(
+                Provider::GoogleWorkspace.world().expect("world"),
+                Some(format!("{variant:?}")),
+            );
+            Ok(Observed {
+                result: format!("{variant:?}"),
+                before: empty(),
+                after,
+            })
+        };
+        assert!(check(action, mutating).is_err(), "{action:?} mutating read");
+        let honest = |variant| observe(action, variant);
+        assert!(check(action, honest).is_ok(), "{action:?} honest read");
+    }
 
     // And the gate must still pass a simulation that genuinely demonstrates its
     // world, or the checks above would be satisfied by a gate that fails always.

@@ -206,6 +206,12 @@ pub(crate) enum ExchangePhase {
     CartaToken,
     CartaStakeholders,
     CartaOptionGrants,
+    /// Google Workspace's workload metadata, IAM and token exchanges, and the
+    /// Directory read an action makes with the minted token.
+    GoogleWorkspaceMetadata,
+    GoogleWorkspaceIam,
+    GoogleWorkspaceToken,
+    GoogleWorkspaceDirectory,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
