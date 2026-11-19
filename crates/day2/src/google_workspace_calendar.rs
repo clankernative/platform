@@ -1,49 +1,69 @@
-//! Calendar reads for `GoogleWorkspace`: input validation, request shapes and
-//! the strict parsing of Google's calendar, ACL and event responses into the
-//! typed values an application receives. The pipeline in `google_workspace`
-//! decides order, identity, bounds and classification.
+//! Calendar reads for `GoogleWorkspace`: input validation, the reviewed request
+//! constants, and the strict parsing of Google's calendar, ACL and event
+//! responses into the closed values an application receives. The pipeline in
+//! `google_workspace` decides order, identity, bounds and classification.
+use crate::carta::OptionalText;
 use crate::google_workspace::Failure;
 use serde::{Deserialize, Serialize};
 
 pub const CALENDAR_READ_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
 pub const CALENDAR_ACL_READ_SCOPE: &str = "https://www.googleapis.com/auth/calendar.acls.readonly";
-/// One Calendar response: a calendar, an ACL page or an event page.
+/// One Calendar response: a calendar, an ACL rule or page, or an event page.
 pub const MAX_CALENDAR_RESPONSE_BYTES: usize = 64 * 1024;
 /// ACL entries requested per page, Google's maximum.
 pub const ACL_PAGE_SIZE: u32 = 250;
 /// ACL pages read before a calendar's sharing is refused as too large to
 /// answer; the group's entry is never guessed from a partial list.
 pub const ACL_PAGE_CEILING: u64 = 4;
-/// Events per page. Every field is bounded below, so a full page of the
-/// largest admissible events journals within one 64 KiB observation.
+/// Events per page. With every field bounded to characters JSON never escapes,
+/// 25 of the largest admissible events journal within one observation; a test
+/// proves it against `resources::bounded_observation`.
 pub const EVENT_PAGE_SIZE: u32 = 25;
 /// The longest window an events read may name.
 pub const MAX_WINDOW_SECONDS: i64 = 31 * 86_400;
-const MAX_ID_BYTES: usize = 1024;
-const MAX_PAGE_TOKEN_BYTES: usize = 1024;
+pub(crate) const MAX_ID_BYTES: usize = 1024;
+pub(crate) const MAX_PAGE_TOKEN_BYTES: usize = 1024;
 const MAX_SUMMARY_BYTES: usize = 1024;
-const MAX_ADDRESS_BYTES: usize = 254;
-/// The event fields read, as Google's partial-response mask.
-pub const EVENT_FIELDS: &str = "id,originalStartTime,start,end,status,visibility,creator/email,\
-    organizer/email,conferenceData/conferenceId,hangoutLink";
+pub(crate) const MAX_ADDRESS_BYTES: usize = 254;
 
-/// An optional value in the SDK's tag encoding: `"None"` or `{"Some": value}`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Text {
-    None,
-    Some(String),
+macro_rules! event_fields {
+    () => {
+        "id,originalStartTime,start,end,status,visibility,creator/email,organizer/email,\
+         conferenceData(conferenceId,conferenceSolution/key/type),hangoutLink"
+    };
+}
+/// The event fields read, as Google's partial-response mask.
+pub const EVENT_FIELDS: &str = event_fields!();
+/// The events list mask: the event fields of every item and the continuation.
+pub const EVENTS_FIELDS: &str = concat!("items(", event_fields!(), "),nextPageToken");
+pub const CALENDAR_FIELDS: &str = "id,summary";
+pub const ACL_FIELDS: &str = "items(scope(type,value),role),nextPageToken";
+pub const RULE_FIELDS: &str = "scope(type,value),role";
+/// The events list query, fixed except for the window and continuation.
+pub const EVENTS_QUERY: [(&str, &str); 4] = [
+    ("singleEvents", "true"),
+    ("orderBy", "startTime"),
+    ("showDeleted", "true"),
+    ("maxResults", "25"),
+];
+/// Google's 403 reasons that mean a rate or quota was reached, not that access
+/// was refused.
+pub const RATE_REASONS: [&str; 4] = [
+    "rateLimitExceeded",
+    "userRateLimitExceeded",
+    "quotaExceeded",
+    "dailyLimitExceeded",
+];
+
+fn optional(value: Option<String>) -> OptionalText {
+    value.map_or(OptionalText::None, OptionalText::Some)
 }
 
-impl Text {
-    fn of(value: Option<String>) -> Self {
-        value.map_or(Self::None, Self::Some)
-    }
-
-    pub fn into_option(self) -> Option<String> {
-        match self {
-            Self::None => None,
-            Self::Some(value) => Some(value),
-        }
+/// The value of an optional an application supplied.
+pub fn optional_value(text: OptionalText) -> Option<String> {
+    match text {
+        OptionalText::None => None,
+        OptionalText::Some(value) => Some(value),
     }
 }
 
@@ -84,10 +104,13 @@ pub fn event_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-/// An opaque page token, carried verbatim in a query parameter.
+/// An opaque page token, carried verbatim in a query parameter. Printable and
+/// without the two characters JSON escapes, so a journaled token is its size.
 pub fn page_token(value: &str) -> bool {
     (1..=MAX_PAGE_TOKEN_BYTES).contains(&value.len())
-        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'"' && byte != b'\\')
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -225,26 +248,34 @@ pub struct Calendar {
     pub group_role: GroupRole,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `NotShared`: the calendar exists for the reader, but not through an
+/// explicit `writer` or `owner` rule for the reader itself. `NotFound`: the
+/// reader cannot see a calendar with that ID at all.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub enum CalendarOutcome {
     Found(Calendar),
+    NotShared,
     NotFound,
 }
 
-impl CalendarOutcome {
-    pub fn encode(&self) -> String {
-        match self {
-            Self::Found(calendar) => serde_json::json!({ "Found": calendar }).to_string(),
-            Self::NotFound => serde_json::json!("NotFound").to_string(),
-        }
-    }
+/// An event's start and end, RFC 3339 with an offset, as Google reports them.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Times {
+    pub start: String,
+    pub end: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+/// The status together with the times it implies: only a cancelled event may
+/// lack them, since Google may report a cancelled exception of a recurring
+/// series by its `originalStartTime` alone. Flat rather than a nested
+/// `Cancelled([Timed(Times), Untimed])`: the pinned Roc compiler cannot derive
+/// a decoder for a union that carries `Times` both directly and nested.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub enum EventStatus {
-    Confirmed,
-    Tentative,
-    Cancelled,
+    Confirmed(Times),
+    Tentative(Times),
+    Cancelled(Times),
+    CancelledUntimed,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -255,64 +286,109 @@ pub enum Visibility {
     Confidential,
 }
 
-/// A timed event as an application receives it. `start` and `end` are absent
-/// only on a cancelled event, which Google may report without its times.
+/// A timed event as an application receives it.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Event {
     pub id: String,
     pub status: EventStatus,
     pub visibility: Visibility,
-    pub start: Text,
-    pub end: Text,
-    pub original_start: Text,
-    pub organizer: Text,
-    pub creator: Text,
-    pub meeting_code: Text,
+    pub original_start: OptionalText,
+    pub organizer: OptionalText,
+    pub creator: OptionalText,
+    pub meeting_code: OptionalText,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct EventsPage {
     pub events: Vec<Event>,
-    pub next_page_token: Text,
+    pub next_page_token: OptionalText,
     /// All-day events on this page, which carry no time and are omitted.
     pub all_day_omitted: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub enum EventsOutcome {
     Found(EventsPage),
+    NotShared,
     NotFound,
 }
 
-impl EventsOutcome {
-    pub fn encode(&self) -> String {
-        match self {
-            Self::Found(page) => serde_json::json!({ "Found": page }).to_string(),
-            Self::NotFound => serde_json::json!("NotFound").to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub enum EventOutcome {
     Found(Event),
-    /// The event exists but is all-day, so it has no time to report.
+    /// The event exists but is all-day, so it has no time to report. A
+    /// cancelled instance of an all-day series is all-day too.
     AllDay,
+    NotShared,
     NotFound,
 }
 
-impl EventOutcome {
-    pub fn encode(&self) -> String {
-        match self {
-            Self::Found(event) => serde_json::json!({ "Found": event }).to_string(),
-            Self::AllDay => serde_json::json!("AllDay").to_string(),
-            Self::NotFound => serde_json::json!("NotFound").to_string(),
+/// Whether the reader's own ACL rule, read by its id `user:{reader}`, holds
+/// `writer` or `owner`. A lesser role is not shared. The rule must be the one
+/// asked for: any other scope is a response the adapter cannot trust, so a
+/// group, domain or default rule never counts, however much it grants.
+pub fn parse_reader_rule(body: &[u8], reader: &str) -> Result<bool, Failure> {
+    #[derive(Deserialize)]
+    struct Scope {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        value: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Rule {
+        scope: Scope,
+        role: String,
+    }
+    let rule: Rule = crate::json::decode(body).map_err(|_| Failure::ResponseInvalid)?;
+    let role = GroupRole::from_google(&rule.role)?;
+    let asked = rule.scope.kind == "user"
+        && rule
+            .scope
+            .value
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(reader));
+    if !asked {
+        return Err(Failure::ResponseInvalid);
+    }
+    Ok(matches!(role, GroupRole::Writer | GroupRole::Owner))
+}
+
+/// Classify a `403` by Google's error reasons: a rate or quota reason is
+/// `RateLimited`, any other reason is `Denied`, and a body without reasons is
+/// `ResponseInvalid`. No reason string ever leaves this function.
+pub fn forbidden(body: &[u8]) -> Failure {
+    #[derive(Deserialize)]
+    struct Reason {
+        reason: String,
+    }
+    #[derive(Deserialize)]
+    struct Detail {
+        errors: Vec<Reason>,
+    }
+    #[derive(Deserialize)]
+    struct Envelope {
+        error: Detail,
+    }
+    match crate::json::decode::<Envelope>(body) {
+        Ok(envelope) if !envelope.error.errors.is_empty() => {
+            if envelope
+                .error
+                .errors
+                .iter()
+                .any(|error| RATE_REASONS.contains(&error.reason.as_str()))
+            {
+                Failure::RateLimited
+            } else {
+                Failure::Denied
+            }
         }
+        _ => Failure::ResponseInvalid,
     }
 }
 
-/// The calendar's id and summary. The id must be the calendar that was asked for.
-pub fn parse_calendar(body: &[u8], expected: &str) -> Result<(String, String), Failure> {
+/// The calendar's summary. The id must be the calendar that was asked for.
+pub fn parse_calendar(body: &[u8], expected: &str) -> Result<String, Failure> {
     #[derive(Deserialize)]
     struct CalendarDto {
         id: String,
@@ -326,7 +402,7 @@ pub fn parse_calendar(body: &[u8], expected: &str) -> Result<(String, String), F
     {
         return Err(Failure::ResponseInvalid);
     }
-    Ok((expected.to_owned(), calendar.summary))
+    Ok(calendar.summary)
 }
 
 /// One ACL page: the named group's role if this page has its entry, and the
@@ -392,9 +468,21 @@ struct PersonDto {
 }
 
 #[derive(Deserialize)]
+struct SolutionKeyDto {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SolutionDto {
+    key: Option<SolutionKeyDto>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConferenceDto {
     conference_id: Option<String>,
+    conference_solution: Option<SolutionDto>,
 }
 
 #[derive(Deserialize)]
@@ -418,16 +506,25 @@ enum Parsed {
     AllDay,
 }
 
-fn address(person: Option<PersonDto>) -> Result<Text, Failure> {
+/// An address as reported, from an email character set with nothing JSON
+/// escapes: letters, digits, `.` `_` `%` `+` `-` `'` and one `@`. Bounded this
+/// way, an event's journaled size is its byte size plus its own quotes.
+fn email(value: &str) -> bool {
+    (3..=MAX_ADDRESS_BYTES).contains(&value.len())
+        && value.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && !domain.is_empty()
+                && !domain.contains('@')
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._%+-'@".contains(&byte))
+        })
+}
+
+fn address(person: Option<PersonDto>) -> Result<OptionalText, Failure> {
     match person.and_then(|person| person.email) {
-        None => Ok(Text::None),
-        Some(email)
-            if (3..=MAX_ADDRESS_BYTES).contains(&email.len())
-                && email.contains('@')
-                && email.bytes().all(|byte| byte.is_ascii_graphic()) =>
-        {
-            Ok(Text::Some(email))
-        }
+        None => Ok(OptionalText::None),
+        Some(value) if email(&value) => Ok(OptionalText::Some(value)),
         Some(_) => Err(Failure::ResponseInvalid),
     }
 }
@@ -454,16 +551,28 @@ fn all_day(time: &Option<TimeDto>) -> bool {
     )
 }
 
+/// The Meet code: `conferenceData.conferenceId` when its conference solution is
+/// Google Meet, else the path of a `https://meet.google.com/{code}` link; in
+/// Meet's shape either way.
+fn meet_code(conference: Option<ConferenceDto>, link: Option<&str>) -> Option<String> {
+    conference
+        .filter(|conference| {
+            conference
+                .conference_solution
+                .as_ref()
+                .and_then(|solution| solution.key.as_ref())
+                .and_then(|key| key.kind.as_deref())
+                == Some("hangoutsMeet")
+        })
+        .and_then(|conference| conference.conference_id)
+        .filter(|code| meeting_code(code))
+        .or_else(|| link.and_then(hangout_code))
+}
+
 fn event(dto: EventDto) -> Result<Parsed, Failure> {
     if !event_id(&dto.id) {
         return Err(Failure::ResponseInvalid);
     }
-    let status = match dto.status.as_deref() {
-        Some("confirmed") => EventStatus::Confirmed,
-        Some("tentative") => EventStatus::Tentative,
-        Some("cancelled") => EventStatus::Cancelled,
-        _ => return Err(Failure::ResponseInvalid),
-    };
     let visibility = match dto.visibility.as_deref() {
         None | Some("default") => Visibility::Default,
         Some("public") => Visibility::Public,
@@ -471,46 +580,48 @@ fn event(dto: EventDto) -> Result<Parsed, Failure> {
         Some("confidential") => Visibility::Confidential,
         Some(_) => return Err(Failure::ResponseInvalid),
     };
-    if all_day(&dto.start) {
-        return Ok(Parsed::AllDay);
+    // All-day: a date start, or, for a cancelled exception reported without
+    // times, a date original start. Either way there is no time to report.
+    if all_day(&dto.start) || (dto.start.is_none() && all_day(&dto.original_start_time)) {
+        return match dto.status.as_deref() {
+            Some("confirmed" | "tentative" | "cancelled") => Ok(Parsed::AllDay),
+            _ => Err(Failure::ResponseInvalid),
+        };
     }
-    let start = timed(dto.start)?;
-    let end = timed(dto.end)?;
-    // Only a cancelled event may be reported without its times.
-    if status != EventStatus::Cancelled && (start.is_none() || end.is_none()) {
-        return Err(Failure::ResponseInvalid);
-    }
-    if let (Some(start), Some(end)) = (&start, &end)
-        && rfc3339_seconds(start) > rfc3339_seconds(end)
-    {
-        return Err(Failure::ResponseInvalid);
-    }
+    let times = match (timed(dto.start)?, timed(dto.end)?) {
+        (Some(start), Some(end)) if rfc3339_seconds(&start) <= rfc3339_seconds(&end) => {
+            Some(Times { start, end })
+        }
+        (None, None) => None,
+        _ => return Err(Failure::ResponseInvalid),
+    };
+    let status = match (dto.status.as_deref(), times) {
+        (Some("confirmed"), Some(times)) => EventStatus::Confirmed(times),
+        (Some("tentative"), Some(times)) => EventStatus::Tentative(times),
+        (Some("cancelled"), Some(times)) => EventStatus::Cancelled(times),
+        (Some("cancelled"), None) => EventStatus::CancelledUntimed,
+        _ => return Err(Failure::ResponseInvalid),
+    };
     let original_start = if all_day(&dto.original_start_time) {
         None
     } else {
         timed(dto.original_start_time)?
     };
-    let meeting_code = dto
-        .conference_data
-        .and_then(|conference| conference.conference_id)
-        .filter(|code| meeting_code(code))
-        .or_else(|| dto.hangout_link.as_deref().and_then(hangout_code));
     Ok(Parsed::Timed(Event {
         id: dto.id,
         status,
         visibility,
-        start: Text::of(start),
-        end: Text::of(end),
-        original_start: Text::of(original_start),
+        original_start: optional(original_start),
         organizer: address(dto.organizer)?,
         creator: address(dto.creator)?,
-        meeting_code: Text::of(meeting_code),
+        meeting_code: optional(meet_code(dto.conference_data, dto.hangout_link.as_deref())),
     }))
 }
 
-/// One events page. A page larger than the requested size, an invalid
-/// continuation, or a page that would not journal within one observation is
-/// refused rather than truncated.
+/// One events page. A page larger than the requested size or an invalid
+/// continuation is refused rather than truncated. Every field is bounded, so a
+/// full page always journals within one observation; the size is still
+/// checked, never assumed.
 pub fn parse_events_page(body: &[u8]) -> Result<EventsPage, Failure> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -538,10 +649,10 @@ pub fn parse_events_page(body: &[u8]) -> Result<EventsPage, Failure> {
     }
     let page = EventsPage {
         events,
-        next_page_token: Text::of(page.next_page_token),
+        next_page_token: optional(page.next_page_token),
         all_day_omitted,
     };
-    let encoded = EventsOutcome::Found(page.clone()).encode();
+    let encoded = crate::google_workspace::encode(&EventsOutcome::Found(page.clone()));
     match crate::capture_delivery::journal_bytes(&encoded) {
         Ok(bytes) if bytes <= crate::capture_delivery::MAX_PAGE_JOURNAL_BYTES => Ok(page),
         _ => Err(Failure::ResponseTooLarge),

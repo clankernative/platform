@@ -23,21 +23,24 @@ GoogleWorkspace :: [].{
 
 	Calendar : { id : Str, summary : Str, group_role : GroupRole }
 
-	# A calendar the grant's Calendar reader cannot see is `NotFound`, as Google answers it.
-	CalendarOutcome : [Found(Calendar), NotFound]
+	# Every Calendar read is bounded by the reader's own ACL rule: `NotShared` when the calendar exists for the
+	# reader but not through an explicit `writer` or `owner` rule for it (a group, domain or default rule never
+	# counts); `NotFound` when the reader cannot see a calendar with that ID at all.
+	CalendarOutcome : [Found(Calendar), NotShared, NotFound]
 
-	EventStatus : [Confirmed, Tentative, Cancelled]
+	# RFC 3339 with an offset, as Google reports them.
+	Times : { start : Str, end : Str }
+
+	# Only a cancelled event may lack its times: Google may report a cancelled exception by id alone.
+	EventStatus : [Confirmed(Times), Tentative(Times), Cancelled(Times), CancelledUntimed]
 
 	Visibility : [Default, Public, Private, Confidential]
 
-	# Times are RFC 3339 with an offset, as Google reports them. `start` and `end` are `None` only on a
-	# cancelled event, which Google may report by id alone. `meeting_code` is a Meet `xxx-xxxx-xxx` code.
+	# A timed event. `original_start` is set on a recurring instance; `meeting_code` is a Meet `xxx-xxxx-xxx` code.
 	Event : {
 		id : Str,
 		status : EventStatus,
 		visibility : Visibility,
-		start : OptionalText,
-		end : OptionalText,
 		original_start : OptionalText,
 		organizer : OptionalText,
 		creator : OptionalText,
@@ -45,12 +48,13 @@ GoogleWorkspace :: [].{
 	}
 
 	# One page of single events overlapping the window, ordered by start, cancelled ones included. All-day
-	# events carry no time and are omitted; `all_day_omitted` counts them. Persist `next_page_token`.
+	# events, including cancelled instances of an all-day series, carry no time and are omitted;
+	# `all_day_omitted` counts them. Persist `next_page_token`.
 	EventsPage : { events : List(Event), next_page_token : OptionalText, all_day_omitted : U64 }
 
-	EventsOutcome : [Found(EventsPage), NotFound]
+	EventsOutcome : [Found(EventsPage), NotShared, NotFound]
 
-	EventOutcome : [Found(Event), AllDay, NotFound]
+	EventOutcome : [Found(Event), AllDay, NotShared, NotFound]
 
 	group : Context, Str -> Observe(GroupOutcome)
 	group = |context, group_email| Resource.bind(context, "google_workspace").and_then(

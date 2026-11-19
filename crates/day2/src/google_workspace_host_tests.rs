@@ -343,7 +343,7 @@ fn a_read_reserves_its_envelope_and_settles_exactly_what_it_measured() -> Result
     let iam = crate::google_auth::direct_body(&[crate::google_workspace::GROUP_READ_SCOPE])?;
     assert_eq!(
         read.usage.request_bytes,
-        (iam.len() + "fields=id%2Cemail%2Cname".len()) as u64
+        (iam.len() + "fields=id%2Cemail%2Cname&prettyPrint=false".len()) as u64
     );
     assert!(
         read.usage.response_bytes > 0 && read.usage.response_bytes < read.reserved.response_bytes
@@ -518,13 +518,14 @@ fn calendar_reads_are_delegated_reserved_and_settled_like_any_read() -> Result<(
             r#"{{"Found":{{"group_role":"Reader","id":"{GOOGLE_DEVELOPMENT_CALENDAR}","summary":"Engineering"}}}}"#
         ))
     );
-    // Metadata, signJwt, the token exchange, the calendar and one ACL page,
-    // against a reservation of every ACL page the ceiling allows.
-    assert_eq!(read.usage.calls, 5);
+    // Metadata, signJwt, the token exchange, the reader's own rule, the
+    // calendar and one ACL page, against a reservation of every ACL page the
+    // ceiling allows.
+    assert_eq!(read.usage.calls, 6);
     assert!(read.usage.known && read.usage.request_bytes > 0);
     assert!(read.usage.response_bytes < read.reserved.response_bytes);
     let settled = budget(&runtime)?;
-    assert_eq!(settled["calls"], (5, 0));
+    assert_eq!(settled["calls"], (6, 0));
     assert_eq!(
         settled["bytes"],
         (
@@ -546,7 +547,7 @@ fn calendar_reads_are_delegated_reserved_and_settled_like_any_read() -> Result<(
     )?;
     assert_eq!(page["Found"]["events"].as_array().map(Vec::len), Some(2));
     assert_eq!(page["Found"]["all_day_omitted"], 1);
-    assert_eq!(events.usage.calls, 4);
+    assert_eq!(events.usage.calls, 5);
     let event = admitted(
         &runtime,
         "lookup",
@@ -560,7 +561,7 @@ fn calendar_reads_are_delegated_reserved_and_settled_like_any_read() -> Result<(
             .as_deref()
             .is_ok_and(|result| result.starts_with(r#"{"Found""#))
     );
-    assert_eq!(budget(&runtime)?["calls"], (13, 0));
+    assert_eq!(budget(&runtime)?["calls"], (16, 0));
     // A Workspace Directory grant cannot carry a Calendar action either.
     let refused = authorize(
         &runtime,
@@ -575,7 +576,7 @@ fn calendar_reads_are_delegated_reserved_and_settled_like_any_read() -> Result<(
         refused.downcast_ref::<crate::error::Failure>(),
         Some(crate::error::Failure::ResourceForbidden)
     ));
-    // The plan is frozen with the simulated source and the grant's reader.
+    // The plan is frozen with the simulated source.
     let (.., authorized, _) = authorize(&runtime, "lookup", "calendar-source", CALENDAR, calendar)?;
     assert_eq!(
         authorized
@@ -584,10 +585,52 @@ fn calendar_reads_are_delegated_reserved_and_settled_like_any_read() -> Result<(
             .source(),
         crate::google_workspace::Source::Simulated
     );
+    Ok(())
+}
+
+/// The delegated subject is the grant's reader and no one else: a calendar
+/// only the reader has a rule on is found, and one only another person owns is
+/// not. Delegating as anyone else would answer the other way round.
+#[test]
+fn calendar_reads_are_delegated_as_the_grants_reader() -> Result<()> {
+    use crate::integrations::simulated::{GoogleAclRule, GoogleCalendar};
+    const READERS_ONLY: &str = "c_readers-only@group.calendar.google.com";
+    const ADAS_OWN: &str = "c_adas-own@group.calendar.google.com";
+    let (_directory, runtime) = runtime(Setup::default())?;
+    let rule = |person: &str, role: &str| GoogleAclRule {
+        scope_type: "user".into(),
+        scope_value: Some(person.into()),
+        role: role.into(),
+    };
+    crate::integrations::simulated::update_google_workspace(runtime.db(), SCOPE, |state| {
+        for (id, owner) in [
+            (READERS_ONLY, GOOGLE_DEVELOPMENT_CALENDAR_READER),
+            (ADAS_OWN, "ada@synthetic.example"),
+        ] {
+            state.world.calendars.insert(
+                id.into(),
+                GoogleCalendar {
+                    summary: "Synthetic".into(),
+                    acl: vec![rule(owner, "owner")],
+                    events: Vec::new(),
+                },
+            );
+        }
+        Ok(())
+    })?;
+    let read = |invocation: &str, id: &'static str| -> Result<Result<String, String>> {
+        Ok(admitted(&runtime, "lookup", invocation, CALENDAR, |handle| {
+            json!({"handle":handle,"calendar_id":id,"group_email":"engineering@synthetic.example"})
+        })?
+        .result)
+    };
     assert_eq!(
-        GOOGLE_DEVELOPMENT_CALENDAR_READER,
-        "calendar-reader@synthetic.example"
+        read("readers-only", READERS_ONLY)?,
+        Ok(format!(
+            r#"{{"Found":{{"group_role":"None","id":"{READERS_ONLY}","summary":"Synthetic"}}}}"#
+        ))
     );
+    assert_eq!(read("adas-own", ADAS_OWN)?, Ok(r#""NotFound""#.into()));
     Ok(())
 }
 
@@ -611,8 +654,28 @@ fn a_failed_calendar_read_correlates_its_calendar_phase() -> Result<()> {
         json!([{"phase":"google_workspace_calendar","http_status":500,"request_id":null,
             "statement_handle":null}])
     );
-    assert_eq!(failed.usage.calls, 5);
-    assert_eq!(budget(&runtime)?["calls"], (5, 0));
+    assert_eq!(failed.usage.calls, 6);
+    assert_eq!(budget(&runtime)?["calls"], (6, 0));
+    // A 403 rate limit is classified by its reason, and only its status is
+    // kept: the reason never reaches the code or the correlation.
+    crate::integrations::simulated::schedule_faults(
+        runtime.db(),
+        SCOPE,
+        crate::integrations::simulated::GOOGLE_WORKSPACE_WORLD,
+        vec![ScheduledFault {
+            endpoint: crate::integrations::simulated::GOOGLE_ACL_RULE_ENDPOINT.into(),
+            remaining: 1,
+            fault: SimulatedFault::RateLimitForbidden,
+        }],
+    )?;
+    let limited = admitted(&runtime, "lookup", "rule-rate-limited", CALENDAR, calendar)?;
+    assert_eq!(limited.result, Err("google_workspace_rate_limited".into()));
+    assert_eq!(
+        serde_json::to_value(&limited.correlation)?,
+        json!([{"phase":"google_workspace_calendar","http_status":403,"request_id":null,
+            "statement_handle":null}])
+    );
+    assert_eq!(limited.usage.calls, 4);
     Ok(())
 }
 

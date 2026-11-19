@@ -85,6 +85,9 @@ pub enum SimulatedFault {
     Denied,
     /// HTTP 400: the provider refused the request as malformed.
     BadRequest,
+    /// HTTP 403 for a rate or quota limit, as Google reports
+    /// `rateLimitExceeded` with a 403 rather than a 429.
+    RateLimitForbidden,
     /// HTTP 500. Classified as `Incomplete`, and leaves a write outcome unknown.
     ServerError,
     /// The response never arrives. Dispatched, so a write outcome is unknown.
@@ -217,8 +220,9 @@ pub struct GoogleWorkspaceWorld {
     pub users: BTreeSet<String>,
     /// Groups, by primary address.
     pub groups: BTreeMap<String, GoogleGroup>,
-    /// Calendars, by ID. Who can see one is its ACL, as in Google: a calendar
-    /// with no `user` entry for the delegated subject is not found.
+    /// Calendars, by ID. Who can see one is its ACL, as in Google: any rule
+    /// that applies to the delegated subject (its own, a group's, its
+    /// domain's or the default) with `reader` or more; otherwise not found.
     #[serde(default)]
     pub calendars: BTreeMap<String, GoogleCalendar>,
 }
@@ -312,6 +316,9 @@ pub struct GoogleEvent {
     pub creator: Option<String>,
     #[serde(default)]
     pub conference_id: Option<String>,
+    /// The conference solution's key type: `hangoutsMeet` for Google Meet.
+    #[serde(default)]
+    pub conference_type: Option<String>,
     #[serde(default)]
     pub hangout_link: Option<String>,
 }
@@ -340,10 +347,11 @@ impl GoogleEvent {
             }
         }
         if let Some(conference) = &self.conference_id {
-            item.insert(
-                "conferenceData".into(),
-                json!({ "conferenceId": conference }),
-            );
+            let mut data = json!({ "conferenceId": conference });
+            if let Some(kind) = &self.conference_type {
+                data["conferenceSolution"] = json!({"key":{"type":kind}});
+            }
+            item.insert("conferenceData".into(), data);
         }
         if let Some(link) = &self.hangout_link {
             item.insert("hangoutLink".into(), json!(link));
@@ -1404,6 +1412,7 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
                         organizer: Some(address("ada")),
                         creator: Some(address("ada")),
                         conference_id: Some("abc-defg-hij".into()),
+                        conference_type: Some("hangoutsMeet".into()),
                         ..GoogleEvent::default()
                     },
                     GoogleEvent {
@@ -1456,10 +1465,11 @@ pub const GOOGLE_GROUP_ENDPOINT: &str = "google_workspace.directory.groups.get";
 pub const GOOGLE_HAS_MEMBER_ENDPOINT: &str = "google_workspace.directory.groups.has_member";
 pub const GOOGLE_CALENDAR_ENDPOINT: &str = "google_workspace.calendar.calendars.get";
 pub const GOOGLE_ACL_ENDPOINT: &str = "google_workspace.calendar.acl.list";
+pub const GOOGLE_ACL_RULE_ENDPOINT: &str = "google_workspace.calendar.acl.get";
 pub const GOOGLE_EVENTS_ENDPOINT: &str = "google_workspace.calendar.events.list";
 pub const GOOGLE_EVENT_ENDPOINT: &str = "google_workspace.calendar.events.get";
 /// Every endpoint a scenario can schedule a fault against.
-pub const GOOGLE_ENDPOINTS: [&str; 10] = [
+pub const GOOGLE_ENDPOINTS: [&str; 11] = [
     GOOGLE_METADATA_ENDPOINT,
     GOOGLE_IAM_TOKEN_ENDPOINT,
     GOOGLE_IAM_SIGN_ENDPOINT,
@@ -1468,6 +1478,7 @@ pub const GOOGLE_ENDPOINTS: [&str; 10] = [
     GOOGLE_HAS_MEMBER_ENDPOINT,
     GOOGLE_CALENDAR_ENDPOINT,
     GOOGLE_ACL_ENDPOINT,
+    GOOGLE_ACL_RULE_ENDPOINT,
     GOOGLE_EVENTS_ENDPOINT,
     GOOGLE_EVENT_ENDPOINT,
 ];
@@ -1499,7 +1510,7 @@ pub(crate) fn google_workspace_serve(
     request: GoogleRequest<'_>,
     max: usize,
 ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
-    use crate::google_auth::{Exchange, IamMethod, Reply, Unreached};
+    use crate::google_auth::{Exchange, IamMethod, Unreached};
     let path = database.with_file_name(GOOGLE_WORKSPACE_WORLD);
     let served = with_world::<GoogleWorkspaceWorld, _, _>(&path, scope, |state| {
         ensure!(state.calls.len() < MAX_MESSAGES, "simulated_call_budget");
@@ -1530,22 +1541,7 @@ pub(crate) fn google_workspace_serve(
             GoogleRequest::Auth(_) => endpoint.to_owned(),
         });
         if let Some(fault) = take_fault_named(state, endpoint) {
-            return Ok(match fault_response(fault, max as u64) {
-                None => Err(Unreached::default()),
-                Some(Err(error)) => Err(Unreached {
-                    response_bytes: error.response_bytes,
-                    http_status: error.http_status,
-                    retry_after_seconds: None,
-                    too_large: false,
-                }),
-                Some(Ok(response)) => Ok(Reply {
-                    status: response.status,
-                    metadata_flavor: false,
-                    json: response.json_content_type,
-                    body: response.body,
-                    retry_after_seconds: (fault == SimulatedFault::RateLimited).then_some(30),
-                }),
-            });
+            return Ok(google_fault(fault, max));
         }
         Ok(Ok(google_reply(&state.world, &request)?))
     });
@@ -1559,6 +1555,107 @@ pub(crate) fn google_workspace_serve(
         }
         Err(_) => Err(Unreached::default()),
     }
+}
+
+/// A JSON reply, as Google sends one.
+fn google_json(status: u16, body: Value) -> crate::google_auth::Reply {
+    crate::google_auth::Reply {
+        status,
+        metadata_flavor: false,
+        json: true,
+        body: body.to_string().into_bytes(),
+        retry_after_seconds: None,
+    }
+}
+
+/// Google's error envelope, with the one reason its APIs put in `errors[]`.
+fn google_error(status: u16, reason: &str, message: &str) -> crate::google_auth::Reply {
+    google_json(
+        status,
+        json!({"error":{"code":status,"message":message,
+            "errors":[{"domain":"global","reason":reason,"message":message}]}}),
+    )
+}
+
+/// The reason Google gives with each status this world answers.
+fn google_status_error(status: u16, message: &str) -> crate::google_auth::Reply {
+    let reason = match status {
+        400 => "invalid",
+        401 => "authError",
+        403 => "forbidden",
+        404 => "notFound",
+        429 => "rateLimitExceeded",
+        _ => "backendError",
+    };
+    google_error(status, reason, message)
+}
+
+/// One query parameter of a request.
+fn google_query<'a>(
+    request: &'a crate::google_workspace::ApiRequest,
+    name: &str,
+) -> Option<&'a str> {
+    request
+        .query
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// Whether a request carries exactly the reviewed query: every `fixed` pair
+/// with its value, any of the `free` names, and nothing else, each at most
+/// once. Any other parameter or mask is refused, so the simulation cannot
+/// serve a request the reviewed constants do not describe.
+fn google_query_is(
+    request: &crate::google_workspace::ApiRequest,
+    fixed: &[(&str, &str)],
+    free: &[&str],
+) -> bool {
+    let names: BTreeSet<&str> = request.query.iter().map(|(name, _)| *name).collect();
+    names.len() == request.query.len()
+        && fixed
+            .iter()
+            .all(|(name, value)| google_query(request, name) == Some(*value))
+        && request
+            .query
+            .iter()
+            .all(|(name, _)| fixed.iter().any(|(fixed, _)| fixed == name) || free.contains(name))
+}
+
+/// A scheduled fault as Google would deliver it.
+fn google_fault(
+    fault: SimulatedFault,
+    max: usize,
+) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+    use crate::google_auth::{Reply, Unreached};
+    Ok(match fault {
+        SimulatedFault::RateLimited => Reply {
+            retry_after_seconds: Some(30),
+            ..google_error(429, "rateLimitExceeded", "Rate Limit Exceeded")
+        },
+        SimulatedFault::RateLimitForbidden => {
+            google_error(403, "rateLimitExceeded", "Rate Limit Exceeded")
+        }
+        SimulatedFault::Denied => google_error(403, "forbidden", "Forbidden"),
+        SimulatedFault::BadRequest => google_error(400, "badRequest", "Bad Request"),
+        SimulatedFault::ServerError => google_error(500, "backendError", "Backend Error"),
+        SimulatedFault::NotJson => Reply {
+            status: 200,
+            metadata_flavor: false,
+            json: false,
+            body: b"not json".to_vec(),
+            retry_after_seconds: None,
+        },
+        SimulatedFault::Oversized => Reply {
+            body: vec![b'x'; max + 1],
+            ..google_json(200, json!({}))
+        },
+        SimulatedFault::ConnectionLost
+        | SimulatedFault::Rejected
+        | SimulatedFault::Partitioned
+        | SimulatedFault::TokenOverrun
+        | SimulatedFault::Refused => return Err(Unreached::default()),
+    })
 }
 
 /// What a simulated token may do. Tokens are self-describing and verified by
@@ -1624,19 +1721,8 @@ fn google_reply(
     request: &GoogleRequest<'_>,
 ) -> Result<crate::google_auth::Reply> {
     use crate::google_auth::{Exchange, IamMethod, Reply};
-    let reply = |status: u16, body: Value| Reply {
-        status,
-        metadata_flavor: false,
-        json: true,
-        body: body.to_string().into_bytes(),
-        retry_after_seconds: None,
-    };
-    let error = |status: u16, message: &str| {
-        reply(
-            status,
-            json!({"error":{"code":status,"message":message,"status":"SIMULATED"}}),
-        )
-    };
+    let reply = google_json;
+    let error = google_status_error;
     Ok(match request {
         GoogleRequest::Auth(Exchange::Metadata) => {
             let token = google_token(
@@ -1827,9 +1913,24 @@ fn google_reply(
                 ),
                 _ => return Ok(error(404, "Not Found")),
             };
+            // The reviewed queries only: the group read's mask, and nothing but
+            // compact output for a membership read.
+            let admitted = if member.is_none() {
+                google_query_is(
+                    request,
+                    &[("fields", "id,email,name"), ("prettyPrint", "false")],
+                    &[],
+                )
+            } else {
+                google_query_is(request, &[("prettyPrint", "false")], &[])
+            };
+            if !admitted {
+                return Ok(error(400, "Unreviewed query"));
+            }
             if !issued.scopes.contains(required) {
-                return Ok(error(
+                return Ok(google_error(
                     403,
+                    "insufficientPermissions",
                     "Request had insufficient authentication scopes.",
                 ));
             }
@@ -1849,22 +1950,7 @@ fn google_reply(
                 return Ok(error(404, "Resource Not Found: groupKey"));
             };
             match member {
-                None => {
-                    let fields = request
-                        .query
-                        .iter()
-                        .find(|(name, _)| *name == "fields")
-                        .map(|(_, value)| value.as_str());
-                    if fields == Some("id,email,name") {
-                        reply(200, json!({"id":found.id,"email":key,"name":found.name}))
-                    } else {
-                        reply(
-                            200,
-                            json!({"kind":"admin#directory#group","id":found.id,"etag":"\"simulated\"",
-                                "email":key,"name":found.name,"directMembersCount":found.members.len().to_string()}),
-                        )
-                    }
-                }
+                None => reply(200, json!({"id":found.id,"email":key,"name":found.name})),
                 Some(member) => {
                     // hasMember's memberKey identifies a user, never a group.
                     if !world.users.contains(member) {
@@ -1895,6 +1981,7 @@ fn google_api_endpoint(request: &crate::google_workspace::ApiRequest) -> &'stati
         (Service::Directory, [.., "hasMember", _]) => GOOGLE_HAS_MEMBER_ENDPOINT,
         (Service::Directory, _) => GOOGLE_GROUP_ENDPOINT,
         (Service::Calendar, [.., "acl"]) => GOOGLE_ACL_ENDPOINT,
+        (Service::Calendar, [.., "acl", _]) => GOOGLE_ACL_RULE_ENDPOINT,
         (Service::Calendar, [.., "events"]) => GOOGLE_EVENTS_ENDPOINT,
         (Service::Calendar, [.., "events", _]) => GOOGLE_EVENT_ENDPOINT,
         (Service::Calendar, _) => GOOGLE_CALENDAR_ENDPOINT,
@@ -1927,55 +2014,110 @@ fn google_page_offset(world: &GoogleWorkspaceWorld, binding: &str, token: &str) 
         .then_some(offset)
 }
 
-/// Serve one Calendar route as the token's delegated subject. Who can see a
-/// calendar is its ACL: no `user` entry for the subject (or only free/busy
-/// access) is `404`, and listing the ACL needs `writer` or `owner`. IDs and
-/// addresses are matched exactly.
+/// The rank of a Calendar ACL role.
+fn google_role_rank(role: &str) -> u8 {
+    match role {
+        "freeBusyReader" => 1,
+        "reader" => 2,
+        "writer" => 3,
+        "owner" => 4,
+        _ => 0,
+    }
+}
+
+/// The highest role any rule gives `subject`, as Google resolves it: the
+/// subject's own `user` rule, a `group` rule for a group it belongs to
+/// (directly or nested), a `domain` rule for its domain (how organization-wide
+/// sharing appears), and the `default` rule.
+fn google_effective_role(
+    world: &GoogleWorkspaceWorld,
+    calendar: &GoogleCalendar,
+    subject: &str,
+) -> u8 {
+    let domain = subject.rsplit_once('@').map(|(_, domain)| domain);
+    calendar
+        .acl
+        .iter()
+        .filter(
+            |rule| match (rule.scope_type.as_str(), rule.scope_value.as_deref()) {
+                ("user", Some(value)) => value == subject,
+                ("group", Some(value)) => google_is_member(world, value, subject),
+                ("domain", Some(value)) => Some(value) == domain,
+                ("default", None) => true,
+                _ => false,
+            },
+        )
+        .map(|rule| google_role_rank(&rule.role))
+        .max()
+        .unwrap_or(0)
+}
+
+/// An ACL rule as Google reports it under the scope/role mask.
+fn google_rule(rule: &GoogleAclRule) -> Value {
+    let mut scope = json!({ "type": rule.scope_type });
+    if let Some(value) = &rule.scope_value {
+        scope["value"] = json!(value);
+    }
+    json!({"scope":scope,"role":rule.role})
+}
+
+/// Serve one Calendar route as the token's delegated subject. Visibility
+/// follows Google: any rule that applies to the subject with `reader` or more
+/// shows a calendar and its events, and reading the ACL, a rule or the whole
+/// list, needs `writer` or `owner`. A calendar the subject cannot see is
+/// `404`. IDs and addresses are matched exactly, and every route admits only
+/// its reviewed query.
 fn google_calendar_reply(
     world: &GoogleWorkspaceWorld,
     request: &crate::google_workspace::ApiRequest,
     grant: &GoogleGrant,
 ) -> Result<crate::google_auth::Reply> {
     use crate::google_workspace_calendar::{
-        CALENDAR_ACL_READ_SCOPE, CALENDAR_READ_SCOPE, rfc3339_seconds,
+        ACL_FIELDS, CALENDAR_ACL_READ_SCOPE, CALENDAR_FIELDS, CALENDAR_READ_SCOPE, EVENT_FIELDS,
+        EVENT_PAGE_SIZE, EVENTS_FIELDS, EVENTS_QUERY, RULE_FIELDS, rfc3339_seconds,
     };
-    let reply = |status: u16, body: Value| crate::google_auth::Reply {
-        status,
-        metadata_flavor: false,
-        json: true,
-        body: body.to_string().into_bytes(),
-        retry_after_seconds: None,
-    };
-    let error = |status: u16, message: &str| {
-        reply(
-            status,
-            json!({"error":{"code":status,"message":message,"status":"SIMULATED"}}),
-        )
-    };
-    let query = |name: &str| {
-        request
-            .query
-            .iter()
-            .find(|(key, _)| *key == name)
-            .map(|(_, value)| value.as_str())
-    };
+    let reply = google_json;
+    let error = google_status_error;
+    let query = |name: &str| google_query(request, name);
     let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
     let ["calendar", "v3", "calendars", calendar_id, rest @ ..] = segments.as_slice() else {
         return Ok(error(404, "Not Found"));
     };
-    let required = match rest {
-        [] | ["events"] | ["events", _] => CALENDAR_READ_SCOPE,
-        ["acl"] => CALENDAR_ACL_READ_SCOPE,
+    let compact = ("prettyPrint", "false");
+    let admitted = match rest {
+        [] => google_query_is(request, &[("fields", CALENDAR_FIELDS), compact], &[]),
+        ["acl"] => google_query_is(
+            request,
+            &[("maxResults", "250"), ("fields", ACL_FIELDS), compact],
+            &["pageToken"],
+        ),
+        ["acl", _] => google_query_is(request, &[("fields", RULE_FIELDS), compact], &[]),
+        ["events"] => {
+            let mut fixed = EVENTS_QUERY.to_vec();
+            fixed.extend([("fields", EVENTS_FIELDS), compact]);
+            google_query_is(request, &fixed, &["timeMin", "timeMax", "pageToken"])
+                && query("timeMin").is_some()
+                && query("timeMax").is_some()
+        }
+        ["events", _] => google_query_is(request, &[("fields", EVENT_FIELDS), compact], &[]),
         _ => return Ok(error(404, "Not Found")),
     };
+    if !admitted {
+        return Ok(error(400, "Unreviewed query"));
+    }
+    let required = match rest {
+        ["acl"] | ["acl", _] => CALENDAR_ACL_READ_SCOPE,
+        _ => CALENDAR_READ_SCOPE,
+    };
     if !grant.scopes.contains(required) {
-        return Ok(error(
+        return Ok(google_error(
             403,
+            "insufficientPermissions",
             "Request had insufficient authentication scopes.",
         ));
     }
     // The service account itself has no calendars: only a delegated person's
-    // sharing is visible.
+    // sharing applies.
     let not_found = error(404, "Not Found");
     let Some(subject) = grant.subject.as_deref() else {
         return Ok(not_found);
@@ -1983,43 +2125,33 @@ fn google_calendar_reply(
     let Some(calendar) = world.calendars.get(*calendar_id) else {
         return Ok(not_found);
     };
-    let Some(role) = calendar
-        .acl
-        .iter()
-        .find(|rule| rule.scope_type == "user" && rule.scope_value.as_deref() == Some(subject))
-        .map(|rule| rule.role.as_str())
-        .filter(|role| matches!(*role, "reader" | "writer" | "owner"))
-    else {
+    let role = google_effective_role(world, calendar, subject);
+    if role < google_role_rank("reader") {
         return Ok(not_found);
-    };
-    let page_size = |default: usize, maximum: usize| -> Option<usize> {
-        match query("maxResults") {
-            None => Some(default),
-            Some(value) => value
-                .parse::<usize>()
-                .ok()
-                .filter(|size| (1..=maximum).contains(size)),
-        }
-    };
+    }
+    let can_read_acl = role >= google_role_rank("writer");
     Ok(match rest {
-        [] => {
-            if query("fields") == Some("id,summary") {
-                reply(200, json!({"id":calendar_id,"summary":calendar.summary}))
-            } else {
-                reply(
-                    200,
-                    json!({"kind":"calendar#calendar","etag":"\"simulated\"","id":calendar_id,
-                        "summary":calendar.summary,"timeZone":"UTC"}),
-                )
+        [] => reply(200, json!({"id":calendar_id,"summary":calendar.summary})),
+        ["acl", rule_id] => {
+            if !can_read_acl {
+                return Ok(error(403, "Forbidden"));
+            }
+            match calendar.acl.iter().find(|rule| {
+                *rule_id
+                    == match &rule.scope_value {
+                        Some(value) => format!("{}:{value}", rule.scope_type),
+                        None => rule.scope_type.clone(),
+                    }
+            }) {
+                Some(rule) => reply(200, google_rule(rule)),
+                None => not_found,
             }
         }
         ["acl"] => {
-            if !matches!(role, "writer" | "owner") {
+            if !can_read_acl {
                 return Ok(error(403, "Forbidden"));
             }
-            let Some(size) = page_size(100, 250) else {
-                return Ok(error(400, "Invalid Value"));
-            };
+            let size = 250;
             let binding = format!("acl:{calendar_id}");
             let offset = match query("pageToken") {
                 None => 0,
@@ -2028,25 +2160,12 @@ fn google_calendar_reply(
                     None => return Ok(error(400, "Invalid page token value")),
                 },
             };
-            let minimal = query("fields") == Some("items(scope(type,value),role),nextPageToken");
             let items: Vec<Value> = calendar
                 .acl
                 .iter()
                 .skip(offset)
                 .take(size)
-                .map(|rule| {
-                    let mut scope = json!({ "type": rule.scope_type });
-                    if let Some(value) = &rule.scope_value {
-                        scope["value"] = json!(value);
-                    }
-                    if minimal {
-                        json!({"scope":scope,"role":rule.role})
-                    } else {
-                        json!({"kind":"calendar#aclRule","etag":"\"simulated\"",
-                            "id":format!("{}:{}", rule.scope_type, rule.scope_value.as_deref().unwrap_or("default")),
-                            "scope":scope,"role":rule.role})
-                    }
-                })
+                .map(google_rule)
                 .collect();
             let mut body = json!({ "items": items });
             if offset + size < calendar.acl.len() {
@@ -2055,24 +2174,13 @@ fn google_calendar_reply(
             reply(200, body)
         }
         ["events"] => {
-            // The adapter reads expanded single events only; the master of a
-            // recurring series is not modelled.
-            if query("singleEvents") != Some("true") {
-                return Ok(error(400, "Only single events are simulated"));
-            }
-            let bound = |name: &str| match query(name) {
-                None => Ok(None),
-                Some(value) => rfc3339_seconds(value).map(Some).ok_or(()),
-            };
-            let (Ok(time_min), Ok(time_max)) = (bound("timeMin"), bound("timeMax")) else {
+            let bound = |name: &str| query(name).and_then(rfc3339_seconds);
+            let (Some(time_min), Some(time_max)) = (bound("timeMin"), bound("timeMax")) else {
                 return Ok(error(400, "Bad Request"));
             };
-            let Some(size) = page_size(250, 2500) else {
-                return Ok(error(400, "Invalid Value"));
-            };
-            let show_deleted = query("showDeleted") == Some("true");
+            let size = EVENT_PAGE_SIZE as usize;
             let binding = format!(
-                "events:{calendar_id}:{}:{}:{show_deleted}",
+                "events:{calendar_id}:{}:{}",
                 query("timeMin").unwrap_or_default(),
                 query("timeMax").unwrap_or_default()
             );
@@ -2084,15 +2192,13 @@ fn google_calendar_reply(
                 },
             };
             // An event overlaps the window: it ends after timeMin and starts
-            // before timeMax, ordered by start.
+            // before timeMax, ordered by start; cancelled events are shown.
             let mut selected: Vec<(i64, &GoogleEvent)> = calendar
                 .events
                 .iter()
-                .filter(|event| show_deleted || event.status != "cancelled")
                 .filter_map(|event| {
                     let (start, end) = event.span()?;
-                    (time_min.is_none_or(|min| end > min) && time_max.is_none_or(|max| start < max))
-                        .then_some((start, event))
+                    (end > time_min && start < time_max).then_some((start, event))
                 })
                 .collect();
             selected.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.id.cmp(&right.1.id)));
@@ -2196,6 +2302,7 @@ fn fault_response(
         SimulatedFault::RateLimited => http(429),
         SimulatedFault::Denied => http(403),
         SimulatedFault::BadRequest => http(400),
+        SimulatedFault::RateLimitForbidden => http(403),
         SimulatedFault::ServerError => http(500),
         SimulatedFault::ConnectionLost => Some(Err(TransportError {
             kind: AdapterError::TransportUnavailable,

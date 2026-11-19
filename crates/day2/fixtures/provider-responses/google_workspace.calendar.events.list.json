@@ -18,7 +18,12 @@
         "email": "person@example.com"
       },
       "conferenceData": {
-        "conferenceId": "abc-defg-hij"
+        "conferenceId": "abc-defg-hij",
+        "conferenceSolution": {
+          "key": {
+            "type": "hangoutsMeet"
+          }
+        }
       },
       "hangoutLink": "https://meet.google.com/abc-defg-hij"
     },

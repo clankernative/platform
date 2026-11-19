@@ -514,6 +514,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                         )),
                         organizer: Some("ada@coverage.test".into()),
                         conference_id: Some("abc-defg-hij".into()),
+                        conference_type: Some("hangoutsMeet".into()),
                         ..Default::default()
                     }],
                 },

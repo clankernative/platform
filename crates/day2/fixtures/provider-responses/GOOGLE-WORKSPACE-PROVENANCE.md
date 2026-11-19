@@ -26,6 +26,17 @@ adapter or its simulation.
 - `google_workspace.oauth_token.json`: the JWT-bearer grant at Google's token
   endpoint,
   https://developers.google.com/identity/protocols/oauth2/service-account#httprest
+- `google_workspace.calendar.acl.get.json`: Calendar `acl.get` for the rule ID
+  `user:{email}` with the adapter's `fields=scope(type,value),role` mask, the
+  reader's own rule every Calendar action reads first,
+  https://developers.google.com/workspace/calendar/api/v3/reference/acl/get
+- `google_workspace.calendar.error.rate_limit.json` and
+  `google_workspace.calendar.error.forbidden.json`: Google's error envelope for
+  a `403`, with `errors[].reason`. The rate limit follows the Calendar errors
+  guide's `rateLimitExceeded` example. The refusal's `forbidden` reason is
+  illustrative: the reason Google gives a reader without access is a live
+  qualification item,
+  https://developers.google.com/workspace/calendar/api/guides/errors
 - `google_workspace.calendars.get.json`: Calendar `calendars.get` with the
   adapter's `fields=id,summary` mask,
   https://developers.google.com/workspace/calendar/api/v3/reference/calendars/get
@@ -35,7 +46,7 @@ adapter or its simulation.
   https://developers.google.com/workspace/calendar/api/v3/reference/acl/list
 - `google_workspace.calendar.events.list.json`: Calendar `events.list` with
   `singleEvents=true` and the adapter's item mask: a timed event with
-  `conferenceData`, a private recurring instance with `originalStartTime` whose
+  `conferenceData` and its `conferenceSolution.key.type`, a private recurring instance with `originalStartTime` whose
   organizer is a group calendar, a cancelled instance reported with only `id`,
   `status` and `originalStartTime` (the fields Google guarantees for cancelled
   exceptions), and an all-day event,
