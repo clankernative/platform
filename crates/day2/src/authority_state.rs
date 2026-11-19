@@ -294,9 +294,12 @@ impl AuthorityDocument {
                             .any(|actor| actor.starts_with(DOMAIN_PREFIX)),
                     "a {DOMAIN_PREFIX} entry cannot be granted app delegation"
                 );
-                // Delegation carries one named person's request across an
-                // application boundary, and Freetool execution grants match
-                // exact credential managers; a set of owners is neither.
+                // App delegation carries one named person's request across an
+                // application boundary, and a set of owners is not one person.
+                // Freetool execution grants already accept `domain:` and use the
+                // same owner-resolving handle gates; refusing `owners` there is a
+                // deliberate over-restriction until a follow-up allows it with
+                // its own Freetool test.
                 ensure!(
                     !matches!(
                         grant.provider,

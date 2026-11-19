@@ -133,6 +133,18 @@ pub struct Change<'a> {
 }
 
 impl Policy {
+    /// [`admits`], plus the [`OWNERS`] entry: an actor who is one of this
+    /// policy's own `admins` and an [`individual`] person.
+    ///
+    /// It is a method so the owners always come from the policy that is making
+    /// the decision. The caller passes the app's active document, read in the
+    /// decision's own transaction, so the entry follows owner changes
+    /// immediately and never resolves against another application's owners.
+    pub(crate) fn admits_owners(&self, entries: &BTreeSet<String>, actor: &str) -> bool {
+        admits(entries, actor)
+            || (entries.contains(OWNERS) && self.admins.contains(actor) && individual(actor))
+    }
+
     fn owned_fields(&self) -> Result<BTreeMap<&str, &str>> {
         let mut fields = BTreeMap::new();
         for operation in self.operations.values() {
@@ -385,7 +397,7 @@ impl Policy {
         ensure!(
             self.operations
                 .get(operation)
-                .is_some_and(|policy| admits_owners(&policy.actors, actor, &self.admins)),
+                .is_some_and(|policy| self.admits_owners(&policy.actors, actor)),
             crate::error::Failure::Forbidden
         );
         Ok(())
@@ -586,7 +598,7 @@ pub const DOMAIN_PREFIX: &str = "domain:";
 /// `owners` may appear in an operation's `actors` and in a non-delegation
 /// resource grant's `actors`, and nowhere else. It admits exactly the policy's
 /// current `admins` that are [`individual`] people, read from the app's active
-/// authority when the decision is made (see [`admits_owners`]), so an owner
+/// authority when the decision is made (see [`Policy::admits_owners`]), so an owner
 /// change takes effect on the next call without rewriting operation grants.
 /// It takes no argument and has no prefix because it always means the owners
 /// of the application whose policy names it, never another application's. Like
@@ -721,21 +733,6 @@ pub(crate) fn admits(entries: &BTreeSet<String>, actor: &str) -> bool {
             || actor.split_once('@').is_some_and(|(_, domain)| {
                 in_domain(actor, domain) && entries.contains(&format!("{DOMAIN_PREFIX}{domain}"))
             }))
-}
-
-/// [`admits`], plus the [`OWNERS`] entry: an actor who is one of `admins` and
-/// an [`individual`] person.
-///
-/// `admins` must be the active policy's own administrators, read in the same
-/// transaction as the decision, so the entry follows owner changes immediately
-/// and never resolves against another application's owners.
-pub(crate) fn admits_owners(
-    entries: &BTreeSet<String>,
-    actor: &str,
-    admins: &BTreeSet<String>,
-) -> bool {
-    admits(entries, actor)
-        || (entries.contains(OWNERS) && admins.contains(actor) && individual(actor))
 }
 
 /// Whether `entries` admit everyone `entry` admits: a principal as [`admits`]
@@ -936,6 +933,17 @@ mod owners_tests {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
 
+    /// A policy whose only meaningful part is its administrators.
+    fn admins(values: &[&str]) -> Policy {
+        Policy {
+            version: 1,
+            admins: set(values),
+            operations: BTreeMap::new(),
+            constraints: BTreeMap::new(),
+            delegations: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn the_owners_entry_and_its_look_alikes_are_never_principals() {
         for reserved in [
@@ -959,7 +967,7 @@ mod owners_tests {
             assert!(!individual(reserved), "{reserved:?}");
             // Spelled as the entry, an actor is never admitted, even by it.
             assert!(
-                !admits_owners(&set(&["owners"]), reserved, &set(&[reserved])),
+                !admins(&[reserved]).admits_owners(&set(&["owners"]), reserved),
                 "{reserved:?}"
             );
             assert!(!admits(&set(&[reserved]), reserved), "{reserved:?}");
@@ -983,7 +991,7 @@ mod owners_tests {
         let entries = set(&["owners"]);
         let service = "deployer@tools.iam.gserviceaccount.com";
         let client = format!("client/client_keys/{}", "a".repeat(64));
-        let admins = set(&[
+        let policy = admins(&[
             "ada@wonderly.com",
             "admin",
             service,
@@ -991,8 +999,8 @@ mod owners_tests {
             "svc:gateway",
             client.as_str(),
         ]);
-        assert!(admits_owners(&entries, "ada@wonderly.com", &admins));
-        assert!(admits_owners(&entries, "admin", &admins));
+        assert!(policy.admits_owners(&entries, "ada@wonderly.com"));
+        assert!(policy.admits_owners(&entries, "admin"));
         for refused in [
             service,
             "app:peer",
@@ -1002,31 +1010,20 @@ mod owners_tests {
             "domain:wonderly.com",
             "owners",
         ] {
-            assert!(!admits_owners(&entries, refused, &admins), "{refused}");
+            assert!(!policy.admits_owners(&entries, refused), "{refused}");
         }
         // Another application's owners are another set of admins.
-        let other_app = set(&["bob@wonderly.com"]);
-        assert!(!admits_owners(&entries, "ada@wonderly.com", &other_app));
-        assert!(admits_owners(&entries, "bob@wonderly.com", &other_app));
+        let other_app = admins(&["bob@wonderly.com"]);
+        assert!(!other_app.admits_owners(&entries, "ada@wonderly.com"));
+        assert!(other_app.admits_owners(&entries, "bob@wonderly.com"));
         // Without the entry, admins gain no operation grant at all.
-        assert!(!admits_owners(
-            &set(&["alice"]),
-            "ada@wonderly.com",
-            &admins
-        ));
-        assert!(!admits_owners(
-            &BTreeSet::new(),
-            "ada@wonderly.com",
-            &admins
-        ));
+        assert!(!policy.admits_owners(&set(&["alice"]), "ada@wonderly.com"));
+        assert!(!policy.admits_owners(&BTreeSet::new(), "ada@wonderly.com"));
         // The entry composes with names and domains; each admits independently.
         let mixed = set(&["owners", "alice", "domain:wonderly.com"]);
-        assert!(admits_owners(&mixed, "alice", &BTreeSet::new()));
-        assert!(admits_owners(
-            &mixed,
-            "newhire@wonderly.com",
-            &BTreeSet::new()
-        ));
+        let nobody = admins(&[]);
+        assert!(nobody.admits_owners(&mixed, "alice"));
+        assert!(nobody.admits_owners(&mixed, "newhire@wonderly.com"));
     }
 
     #[test]

@@ -382,11 +382,9 @@ fn load(
         .ok_or(Failure::ResourceForbidden)?;
     ensure!(narrower(&claims.grant, grant), Failure::ResourceForbidden);
     ensure!(
-        crate::authority::admits_owners(
-            &claims.grant.actors,
-            &request.context.actor,
-            &active.policy()?.admins
-        ),
+        active
+            .policy()?
+            .admits_owners(&claims.grant.actors, &request.context.actor),
         Failure::ResourceForbidden
     );
     ensure!(
@@ -427,11 +425,9 @@ pub(crate) fn host_operation(
             .ok_or(Failure::ResourceForbidden)?
             .clone();
         ensure!(
-            crate::authority::admits_owners(
-                &grant.actors,
-                &request.context.actor,
-                &active.policy()?.admins
-            ),
+            active
+                .policy()?
+                .admits_owners(&grant.actors, &request.context.actor),
             Failure::ResourceForbidden
         );
         ensure!(

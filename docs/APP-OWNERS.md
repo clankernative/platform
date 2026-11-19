@@ -80,7 +80,9 @@ claim that its owner list is still current; inspect again for current state.
 The existing native writer transaction checks the current stamp and atomically
 updates only policy admins, appends authority history and records its retry
 receipt. It preserves enabled state, artifact identity, memberships, operations,
-resource grants and credential-family selections. Pending desired-file edits
+stored resource grants and credential-family selections. A stored grant or
+operation that names [`owners`](AUTHORITY.md#the-apps-owners) is unchanged, but
+who it admits changes with the owner list. Pending desired-file edits
 cannot be activated by an owner mutation. Normal authority revision fencing
 applies to unfinished work, live subscriptions and historical outcomes.
 
@@ -90,7 +92,10 @@ identities are refused, including in local development. In an IAP installation,
 new owners must be exact people at its verified hosted domain. Local development
 can use its explicit development actor names. The list is bounded to 512 owners.
 Adding an existing owner, removing an absent owner, mutating a disabled app and
-removing the final owner are refused. Deliberate installation recovery can still
+removing the final owner are refused. While any resource grant names `owners`,
+adding an owner who is not a member is also refused, because the grant would
+then admit someone outside membership. That refusal currently surfaces as
+`resource_actors_exceed_membership`. Deliberate installation recovery can still
 use the separately reviewed full authority activation path.
 
 The commands apply immediately to active authority and deliberately do not edit

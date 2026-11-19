@@ -64,14 +64,20 @@ mappings fail validation. Every nominal text model field requires an explicit
 host constraint. Plain text fields may also declare one. The policy is validated
 when loading the runtime and on fresh authorization against its pinned artifact.
 The company owns who is granted. An application never names a person, a domain
-or an installation identity, and never grants itself anything. Instead, each
-public operation is to declare a closed audience class: `employees`, `owners`
-or `closed`. Internal commands take theirs from the operations and schedules
-that request them. The company binds each class's members: `employees` to
-`domain:<hosted_domain>`, `owners` to the [owners entry](#the-apps-owners)
-and the schedule to its own schedule actor. The same reusable artifact
-therefore still receives different company policies, and every grant in the
-activated document remains the company's.
+or an installation identity, and never grants itself anything. Today the
+company writes every grant in the policy itself.
+
+Planned: application-declared audiences ([#501](https://github.com/clankernative/platform/pull/501)
+adds the SDK declaration; a later change renders policies from it). Under that
+plan, each public operation declares a closed audience class: `employees`,
+`owners` or `closed`. Internal commands take theirs from the operations and
+schedules that request them. The company still binds each class's members:
+`employees` to `domain:<hosted_domain>`, `owners` to the
+[owners entry](#the-apps-owners) and the schedule to its own schedule actor.
+The same reusable artifact therefore still receives different company
+policies, and every grant in the activated document remains the company's.
+None of this exists in the SDK or the authority contract until those changes
+land.
 
 For example, this entry belongs under `authority.operations`:
 
@@ -211,7 +217,12 @@ The entry admits an actor only when all of these hold:
 `owners` is not a principal and takes no argument. It is refused in `admins`, in
 `readers` and `writers`, in delegation rules (`authenticated` and `may_act_as`
 actors), as an `X-Day2-Act-As` target, and in app-delegation and Freetool
-execution resource grants, which name exact people. Look-alikes such as `owner`,
+execution resource grants. App delegation carries one named person's request
+across an application boundary, and a set of owners is not one person. The
+Freetool execution refusal is a deliberate over-restriction, not a technical
+limit: those grants already accept `domain:` and are enforced by the same
+handle gates that resolve `owners`. Allowing `owners` there is left to a
+follow-up with its own Freetool test. Look-alikes such as `owner`,
 `Owners`, ` owners` and `owners:x` are refused everywhere, rather than accepted
 as a principal that admits nobody. An actor spelled as the entry is never
 admitted.

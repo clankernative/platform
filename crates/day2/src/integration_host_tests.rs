@@ -94,12 +94,41 @@ struct Fixture {
     live: LiveConnection,
 }
 
+/// The verified people domain of the owners fixture.
+const PEOPLE: &str = "example.com";
+/// An owner of the owners fixture's app.
+const OWNER: &str = "ada@example.com";
+/// A second owner, so the first can be removed.
+const OTHER_OWNER: &str = "cy@example.com";
+/// A person at the people domain who is not an owner.
+const MEMBER: &str = "bob@example.com";
+
+/// Who the fixture's operation and its resource grant admit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grantees {
+    /// The named actors `alice` and `bob`, for both.
+    Named,
+    /// Everyone at [`PEOPLE`] may run the operation through `domain:`, but the
+    /// resource grant names only the app's `owners`.
+    Owners,
+}
+
 impl Fixture {
     fn new(
         action: Action,
         max_calls: u64,
         budget_calls: u64,
         provider: Arc<Provider>,
+    ) -> Result<Self> {
+        Self::with_grantees(action, max_calls, budget_calls, provider, Grantees::Named)
+    }
+
+    fn with_grantees(
+        action: Action,
+        max_calls: u64,
+        budget_calls: u64,
+        provider: Arc<Provider>,
+        grantees: Grantees,
     ) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("instance.json");
@@ -170,21 +199,41 @@ impl Fixture {
             Action::SlackPost => "slack",
             _ => "open_ai",
         };
-        let policy = json!({"version":1,"admins":[],"operations":{"run":{"actors":["alice","bob"],
+        let domain = format!("domain:{PEOPLE}");
+        let (admins, actors, writers, grant_actors) = match grantees {
+            Grantees::Named => (
+                json!([]),
+                json!(["alice", "bob"]),
+                json!(["alice", "bob"]),
+                json!(["alice", "bob"]),
+            ),
+            Grantees::Owners => (
+                json!([OWNER, OTHER_OWNER]),
+                json!([domain, crate::authority::OWNERS]),
+                json!([domain]),
+                json!([crate::authority::OWNERS]),
+            ),
+        };
+        let policy = json!({"version":1,"admins":admins,"operations":{"run":{"actors":actors,
             "mode":{"kind":"current_state"},"models":{},"observations":[],"effects":[action.capability()]}}});
         let limits = json!({"max_request_bytes":16_384,"max_response_bytes":16_384,"max_calls_per_invocation":max_calls});
         let catalog = json!({"version":1,"connections":{"connection":{"revision":1,"provider":provider_name,"live":live}},
             "resources":{"resource":{"revision":1,"connection":{"id":"connection","revision":1},"target":target}},
-            "policies":{"policy":{"revision":1,"owner":"it","actors":["alice","bob"],"allowed_apps":["app"],"max_duration_seconds":null,
+            "policies":{"policy":{"revision":1,"owner":"it","actors":grant_actors,"allowed_apps":["app"],"max_duration_seconds":null,
                 "slots":{"resource":{"kind":target.kind(),"allowed_resources":[{"id":"resource","revision":1}],"actions":[action],"limits":limits,
                     "budgets":[{"id":"budget","revision":1}]}}}},
             "budgets":{"budget":{"revision":1,"scope":"app","period_seconds":3600,
                 "limits":{"calls":budget_calls,"bytes":1_000_000,"cost_microunits":300,"concurrency":1}}}});
-        let instance = json!({"installation":"integrationco","environment":"test","resources":catalog,
+        let mut instance = json!({"installation":"integrationco","environment":"test","resources":catalog,
             "control":{"version":1,"state_directory":directory.path().join("control"),"operators":["it"],
                 "sources":{"repo":{"kind":"local_git","repository":directory.path().join("repo")}},"apps":{"app":{"source":"repo"}}},
-            "apps":{"app":{"artifact":artifact_directory,"readers":[],"writers":["alice","bob"],"authority":policy,
+            "apps":{"app":{"artifact":artifact_directory,"readers":[],"writers":writers,"authority":policy,
                 "resource_policies":[{"policy":{"id":"policy","revision":1},"operation":"run","bindings":{"resource":{"id":"resource","revision":1}}}]}}});
+        // `domain:` names only the people an installation's edge verifies.
+        let hosted_domain = (grantees == Grantees::Owners).then(|| PEOPLE.to_owned());
+        if let Some(domain) = &hosted_domain {
+            instance["identity"] = json!({"scheme":"google_iap","hosted_domain":domain});
+        }
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(
             json!({"format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test",
@@ -206,7 +255,7 @@ impl Fixture {
             app: "app".into(),
             db: state.join("app.sqlite"),
             scope: "integrationco/test/app".into(),
-            hosted_domain: None,
+            hosted_domain,
             artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
                 "host-test".into(),
                 artifact_directory,
@@ -559,6 +608,65 @@ fn host_live_foreign_handles_and_caller_resource_overrides_never_reach_http() ->
         "unexpected admission rejection: {error:#}"
     );
     assert_eq!(provider.count(), 0);
+    assert_eq!(fixture.ledger()?.outstanding_attempts, 0);
+    Ok(())
+}
+
+#[test]
+fn an_owners_resource_grant_admits_only_current_owners_at_bind_and_load() -> Result<()> {
+    let forbidden = crate::error::Failure::ResourceForbidden.to_string();
+    let provider = Provider::new(vec![Ok(model_response(3, 4))]);
+    let fixture = Fixture::with_grantees(
+        Action::OpenAiGenerate,
+        10,
+        10,
+        provider.clone(),
+        Grantees::Owners,
+    )?;
+
+    // A domain member may run the operation, but the resource grant names only
+    // the owners, so binding the resource is refused.
+    let refused = fixture
+        .accept("member-call", MEMBER)
+        .err()
+        .context("a member who is not an owner bound the owners' resource")?;
+    assert!(format!("{refused:#}").contains(&forbidden), "{refused:#}");
+
+    // An owner binds, and the handle passes the load gate through dispatch.
+    let (request, token) = fixture.accept("owner-call", OWNER)?;
+    fixture.complete(&fixture.intent(request, &token, 0)?)?;
+    assert_eq!(provider.count(), 1);
+
+    // A handle issued while she was an owner no longer loads after she is
+    // removed, and she can no longer bind a new one.
+    let (pending, pending_token) = fixture.accept("owner-pending", OWNER)?;
+    let stamp = authority_state::current(&open(fixture.runtime.db())?)?.stamp;
+    crate::owners::change(
+        &fixture.runtime,
+        &authority_state::LocalOperator::assert_local("it")?,
+        crate::owners::Operation::Remove,
+        &crate::owners::Change {
+            owner: OWNER.into(),
+            expected: stamp,
+            request_id: "remove-owner".into(),
+        },
+    )?;
+    assert!(
+        execution::admit_dispatch(
+            &fixture.runtime,
+            &fixture.intent(pending, &pending_token, 0)?
+        )
+        .is_err()
+    );
+    let refused = fixture
+        .accept("former-owner-call", OWNER)
+        .err()
+        .context("a removed owner bound the owners' resource")?;
+    assert!(format!("{refused:#}").contains(&forbidden), "{refused:#}");
+
+    // The remaining owner still binds.
+    fixture.accept("other-owner-call", OTHER_OWNER)?;
+    assert_eq!(provider.count(), 1);
     assert_eq!(fixture.ledger()?.outstanding_attempts, 0);
     Ok(())
 }

@@ -1759,17 +1759,10 @@ fn owners_entries_pass_membership_and_stay_within_it_for_resource_grants() -> Re
     effective.attenuate_resources(&artifact.contract().operations)?;
     let actors = &effective.resources.operations["items.read"]["directory"].actors;
     assert_eq!(actors, &BTreeSet::from([OWNERS.into()]));
-    let admins = &effective.policy.as_ref().unwrap().admins;
-    assert!(crate::authority::admits_owners(
-        actors,
-        "ada@wonderly.com",
-        admins
-    ));
+    let policy = effective.policy.as_ref().unwrap();
+    assert!(policy.admits_owners(actors, "ada@wonderly.com"));
     for refused in ["newhire@wonderly.com", service, "owners"] {
-        assert!(
-            !crate::authority::admits_owners(actors, refused, admins),
-            "{refused}"
-        );
+        assert!(!policy.admits_owners(actors, refused), "{refused}");
     }
 
     // An owner outside membership makes the grant exceed membership, so
