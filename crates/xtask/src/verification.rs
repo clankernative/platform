@@ -962,6 +962,7 @@ impl FixtureBuild {
             self.imports.as_ref(),
             build_native::VerificationProfile::default(),
         )
+        .map(|built| built.artifact)
     }
 }
 

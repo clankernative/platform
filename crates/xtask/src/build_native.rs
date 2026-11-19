@@ -49,6 +49,38 @@ impl Default for VerificationProfile {
     }
 }
 
+/// What a build's required verification proved, without its traces. The full
+/// evidence stays in the selected artifact's verification.json, which grows with
+/// the app and the campaign (tens of megabytes for Home), so `platform check`
+/// receives this summary from the build that produced it instead of reading the
+/// evidence back.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct VerificationSummary {
+    artifact: String,
+    seed: String,
+    examples: usize,
+    generated: usize,
+    checks: Vec<String>,
+}
+
+impl VerificationSummary {
+    fn of(evidence: &day2::development::Evidence) -> Self {
+        Self {
+            artifact: evidence.artifact.clone(),
+            seed: evidence.seed.clone(),
+            examples: evidence.examples,
+            generated: evidence.generated,
+            checks: evidence.checks.clone(),
+        }
+    }
+}
+
+/// The selected artifact and its required verification.
+pub(crate) struct Built {
+    pub(crate) artifact: PathBuf,
+    pub(crate) verification: VerificationSummary,
+}
+
 struct Prepared {
     roc: PathBuf,
     rust_glue: &'static str,
@@ -681,7 +713,7 @@ pub fn execute(
     import_context: Option<&BuildImportContext>,
     runner: &Path,
     campaign: BuildCampaign,
-) -> Result<PathBuf> {
+) -> Result<Built> {
     let BuildCampaign {
         budget,
         verification,
@@ -690,6 +722,7 @@ pub fn execute(
     let mut bound = None;
     let mut done = BTreeSet::new();
     let mut published = None;
+    let mut verified = None;
     let receipt = day2::automation::run(runner, &["build-recipe"], |request| {
         let parameters: BTreeMap<String, Value> = request.decode()?;
         ensure!(
@@ -1000,6 +1033,7 @@ pub fn execute(
                         artifact.join("verification.json"),
                         serde_json::to_vec_pretty(&evidence)?,
                     )?;
+                    verified = Some(VerificationSummary::of(&evidence));
                 }
                 "build-select" => {
                     ensure!(
@@ -1054,7 +1088,11 @@ pub fn execute(
         receipt["artifact"].as_str() == artifact.to_str(),
         "workflow build receipt differs from published artifact"
     );
-    Ok(artifact)
+    Ok(Built {
+        artifact,
+        // build-select requires build-verify, which records the summary.
+        verification: verified.context("workflow omitted required application verification")?,
+    })
 }
 
 #[cfg(test)]
@@ -1078,6 +1116,39 @@ mod verification_profile_tests {
         assert_eq!(VerificationProfile::requested(42, 1)?.cases, 2);
         assert!(VerificationProfile::requested(42, 0).is_err());
         assert!(VerificationProfile::requested(42, 101).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_check_summary_carries_no_traces_or_snapshot() -> Result<()> {
+        let evidence = day2::development::Evidence {
+            format: 1,
+            artifact: "sha256:artifact".into(),
+            seed: "42".into(),
+            requested_cases_per_generator: 4,
+            examples: 3,
+            generated: 136,
+            checks: vec!["examples".into(), "generated".into()],
+            traces: Vec::new(),
+            // Traces and the snapshot make real evidence tens of megabytes
+            // (Home's is 44 MB at two cases); none of it is the summary's.
+            snapshot: json!({ "items": vec!["snapshot"; 1024] }),
+            failure: None,
+            obligations: BTreeMap::from([("create".into(), 4)]),
+            setup_counts: BTreeMap::new(),
+            verification_complete: true,
+            error_traces: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(VerificationSummary::of(&evidence))?,
+            json!({
+                "artifact": "sha256:artifact",
+                "seed": "42",
+                "examples": 3,
+                "generated": 136,
+                "checks": ["examples", "generated"],
+            })
+        );
         Ok(())
     }
 }

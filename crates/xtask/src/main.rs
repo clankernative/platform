@@ -266,6 +266,7 @@ fn build_with_overrides(root: &Path, app: &Path, overrides: Option<&Path>) -> Re
         None,
         build_native::VerificationProfile::default(),
     )
+    .map(|built| built.artifact)
 }
 
 struct BuildImportContext {
@@ -280,7 +281,7 @@ fn build_recipe(
     isolated_job: Option<&Path>,
     imports: Option<&BuildImportContext>,
     verification: build_native::VerificationProfile,
-) -> Result<PathBuf> {
+) -> Result<build_native::Built> {
     let budget = BuildCampaignBudget::from_environment()?;
     let runner = if let Some(job) = isolated_job {
         for (name, expected) in day2::automation::SOURCES {
@@ -872,7 +873,8 @@ fn main() -> Result<()> {
             let source = PathBuf::from(args.next().context(USAGE)?);
             let receipt = PathBuf::from(args.next().context(USAGE)?);
             // A requested profile replaces the default required verification;
-            // `platform check` reads its result from the receipt's summary.
+            // `platform check` reads its result from the receipt's summary, which
+            // the build returns. The evidence itself can be tens of megabytes.
             let requested = match (args.next(), args.next()) {
                 (None, None) => None,
                 (Some(seed), Some(cases)) => Some(build_native::VerificationProfile::requested(
@@ -885,7 +887,7 @@ fn main() -> Result<()> {
                 args.next().is_none() && !receipt.exists(),
                 "new build receipt required"
             );
-            let artifact = build_recipe(
+            let built = build_recipe(
                 &root,
                 &source,
                 None,
@@ -894,21 +896,12 @@ fn main() -> Result<()> {
                 requested.unwrap_or_default(),
             )?;
             let value = if requested.is_some() {
-                let evidence: serde_json::Value =
-                    day2::json::decode_evidence(&fs::read(artifact.join("verification.json"))?)?;
-                serde_json::json!({
-                    "artifact": artifact,
-                    "verification": {
-                        "artifact": evidence["artifact"],
-                        "seed": evidence["seed"],
-                        "examples": evidence["examples"],
-                        "generated": evidence["generated"],
-                        "checks": evidence["checks"],
-                        "evidence": artifact.join("verification.json"),
-                    },
-                })
+                let mut verification = serde_json::to_value(&built.verification)?;
+                verification["evidence"] =
+                    serde_json::json!(built.artifact.join("verification.json"));
+                serde_json::json!({ "artifact": built.artifact, "verification": verification })
             } else {
-                serde_json::json!({ "artifact": artifact })
+                serde_json::json!({ "artifact": built.artifact })
             };
             use std::io::Write;
             let mut file = fs::OpenOptions::new()
