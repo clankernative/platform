@@ -282,6 +282,18 @@ pub struct Tick {
     pub schedule: String,
     pub offered: Vec<(i64, crate::protocol::Outcome)>,
     pub skipped: Option<Skipped>,
+    /// The most recent occurrence a block left pending, if any.
+    pub blocked: Option<Blocked>,
+}
+
+/// An occurrence a block left pending. Blocks are permanent and a blocked
+/// invocation never runs a business phase again, so its work is not done and,
+/// under `RunEach`, not redone. It no longer holds the schedule, so the source
+/// names it instead of refusing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Blocked {
+    pub occurrence_ms: i64,
+    pub reason: String,
 }
 
 /// The most recent occurrence offered for this schedule, read from the invocation
@@ -300,16 +312,46 @@ fn last_offered(connection: &rusqlite::Connection, schedule: &Schedule) -> Resul
 }
 
 /// The occurrence of a run that has not finished, if any.
+///
+/// A blocked invocation is not one. It stays pending, but blocks are permanent:
+/// the command pump never runs it, and it never runs a business phase again (an
+/// external attempt admitted before the block may only settle evidence). It will
+/// never finish, so counting it as running would stop the schedule for good.
+/// Activation's drained-work check, the command pump and runtime-pair handoff
+/// exclude blocked invocations the same way.
 fn in_flight(connection: &rusqlite::Connection, schedule: &Schedule) -> Result<Option<i64>> {
     let prefix = schedule.prefix();
     let identity: Option<String> = connection
         .query_row(
-            "SELECT id FROM day2_invocations WHERE id >= ?1 AND id < ?2 AND status='pending' ORDER BY id LIMIT 1",
+            "SELECT i.id FROM day2_invocations i WHERE i.id >= ?1 AND i.id < ?2 AND i.status='pending'
+             AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)
+             ORDER BY i.id LIMIT 1",
             rusqlite::params![prefix, format!("{prefix}~")],
             |row| row.get(0),
         )
         .optional()?;
     Ok(identity.and_then(|identity| schedule.occurrence_of(&identity)))
+}
+
+/// The most recent occurrence a block left pending, with the block's reason.
+fn blocked(connection: &rusqlite::Connection, schedule: &Schedule) -> Result<Option<Blocked>> {
+    let prefix = schedule.prefix();
+    let row: Option<(String, String)> = connection
+        .query_row(
+            "SELECT i.id, b.reason FROM day2_invocations i JOIN day2_authority_blocks b ON b.invocation=i.id
+             WHERE i.id >= ?1 AND i.id < ?2 AND i.status='pending' ORDER BY i.id DESC LIMIT 1",
+            rusqlite::params![prefix, format!("{prefix}~")],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(identity, reason)| {
+        schedule
+            .occurrence_of(&identity)
+            .map(|occurrence_ms| Blocked {
+                occurrence_ms,
+                reason,
+            })
+    }))
 }
 
 /// Run one tick of the occurrence source for every schedule the artifact declares.
@@ -337,6 +379,7 @@ pub fn tick(runtime: &crate::store::Runtime, now_ms: i64) -> Result<Vec<Tick>> {
             schedule: declaration.name.clone(),
             offered: Vec::new(),
             skipped: None,
+            blocked: None,
         };
         let Some(binding) = bindings.get(&declaration.name) else {
             tick.skipped = Some(Skipped::Unbound);
@@ -374,10 +417,11 @@ pub fn advance(
         schedule: schedule.name.clone(),
         offered: Vec::new(),
         skipped: None,
+        blocked: None,
     };
     // Queue facts are DATA. The native SQL owner must close and settle before
     // accept/execute can enter their separate SQL and provider phases.
-    let (in_flight, last) = runtime.sql_read(|connection| {
+    let (in_flight, last, blocked) = runtime.sql_read(|connection| {
         runtime.check_binding(connection)?;
         let pending = in_flight(connection, schedule)?;
         let last = if pending.is_none() {
@@ -385,8 +429,9 @@ pub fn advance(
         } else {
             None
         };
-        Ok((pending, last))
+        Ok((pending, last, blocked(connection, schedule)?))
     })?;
+    tick.blocked = blocked;
     if let Some(since_ms) = in_flight {
         tick.skipped = Some(Skipped::InFlight { since_ms });
         return Ok(tick);
@@ -434,8 +479,15 @@ pub fn from_declaration(app: &str, declaration: &crate::artifact::Schedule) -> R
 /// mattered. This reports a refusal when it starts and when it changes, and forgets
 /// it once the schedule runs again -- so the next failure is reported afresh rather
 /// than suppressed as a duplicate of an old one.
+///
+/// It also remembers the blocked occurrence last reported for each schedule. A
+/// block is permanent, so the same occurrence stays blocked on every tick; only a
+/// newly blocked occurrence is news.
 #[derive(Debug, Default)]
-pub struct Refusals(std::collections::BTreeMap<String, Skipped>);
+pub struct Refusals {
+    skipped: std::collections::BTreeMap<String, Skipped>,
+    blocked: std::collections::BTreeMap<String, i64>,
+}
 
 impl Refusals {
     pub fn should_report(&mut self, schedule: &str, skipped: Option<&Skipped>) -> bool {
@@ -443,17 +495,29 @@ impl Refusals {
             // Running, or nothing to do. Both mean the schedule is healthy, so a
             // later refusal is news again.
             None | Some(Skipped::NotDue) => {
-                self.0.remove(schedule);
+                self.skipped.remove(schedule);
                 false
             }
             Some(reason) => {
-                if self.0.get(schedule) == Some(reason) {
+                if self.skipped.get(schedule) == Some(reason) {
                     return false;
                 }
-                self.0.insert(schedule.to_owned(), reason.clone());
+                self.skipped.insert(schedule.to_owned(), reason.clone());
                 true
             }
         }
+    }
+
+    pub fn should_report_blocked(&mut self, schedule: &str, blocked: Option<&Blocked>) -> bool {
+        let Some(blocked) = blocked else {
+            return false;
+        };
+        if self.blocked.get(schedule) == Some(&blocked.occurrence_ms) {
+            return false;
+        }
+        self.blocked
+            .insert(schedule.to_owned(), blocked.occurrence_ms);
+        true
     }
 }
 
@@ -572,6 +636,27 @@ mod tests {
         // Not due is ordinary and must not itself be reported.
         assert!(!refusals.should_report("digest", Some(&Skipped::NotDue)));
         assert!(refusals.should_report("digest", Some(&Skipped::Disabled)));
+    }
+
+    #[test]
+    fn a_blocked_occurrence_is_reported_once_and_a_newly_blocked_one_again() {
+        let blocked = |occurrence_ms| Blocked {
+            occurrence_ms,
+            reason: "authority_policy_changed".into(),
+        };
+        let mut refusals = Refusals::default();
+        assert!(!refusals.should_report_blocked("sweep", None));
+        // Reported the first time the source sees it.
+        assert!(refusals.should_report_blocked("sweep", Some(&blocked(60_000))));
+        // A block is permanent, so the same occurrence is not restated every tick,
+        // including ticks where the schedule runs and nothing is blocked anew.
+        assert!(!refusals.should_report_blocked("sweep", Some(&blocked(60_000))));
+        assert!(!refusals.should_report("sweep", None));
+        assert!(!refusals.should_report_blocked("sweep", Some(&blocked(60_000))));
+        // A persistent block cause blocks the next occurrence too, which is news.
+        assert!(refusals.should_report_blocked("sweep", Some(&blocked(120_000))));
+        // Schedules are tracked independently.
+        assert!(refusals.should_report_blocked("digest", Some(&blocked(60_000))));
     }
 
     #[test]
