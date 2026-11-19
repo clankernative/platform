@@ -1179,6 +1179,8 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
             "symlink_metadata",
             "canonicalize",
             "set_permissions",
+            "set_times",
+            "set_times_nofollow",
             "hard_link",
         ],
         "std::thread" => &[
@@ -7595,7 +7597,7 @@ mod tests {
             "{findings:?}"
         );
         // Literal expected vocabulary is independent of the production helper.
-        // Rust1.98.1 path.rs forwards each method to a real filesystem read.
+        // Rust 1.100.0 path.rs forwards each method to a real filesystem read.
         for method in [
             "exists",
             "try_exists",

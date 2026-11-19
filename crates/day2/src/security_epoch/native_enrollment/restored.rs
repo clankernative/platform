@@ -727,24 +727,24 @@ mod refusal_test_support {
         pub(in crate::security_epoch::native_enrollment) fn all_refusal_test_roots_set(
             &self,
         ) -> bool {
-            if !self.refused.get() {
-                return false;
-            }
-            #[cfg(target_os = "linux")]
-            {
-                self.receiver_refusal
-                    .require_same(&self.receiver_refusal)
+            self.refused.get() && self.platform_refusal_test_roots_set()
+        }
+
+        #[cfg(target_os = "linux")]
+        fn platform_refusal_test_roots_set(&self) -> bool {
+            self.receiver_refusal
+                .require_same(&self.receiver_refusal)
+                .is_err()
+                && self
+                    .reader_refusal
+                    .require_same(&self.reader_refusal)
                     .is_err()
-                    && self
-                        .reader_refusal
-                        .require_same(&self.reader_refusal)
-                        .is_err()
-                    && self.channel_refusal.get()
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                true
-            }
+                && self.channel_refusal.get()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        fn platform_refusal_test_roots_set(&self) -> bool {
+            true
         }
     }
 }

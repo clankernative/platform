@@ -311,7 +311,7 @@ impl Driver {
             return;
         }
         let Some(sequence) = RECORDS
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 (value < 4096).then_some(value + 1)
             })
             .ok()

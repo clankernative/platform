@@ -6,7 +6,7 @@ resolver = "3"
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
-rust-version = "1.98"
+rust-version = "1.100"
 
 [patch.crates-io]
 # Own every kernel-installed sender pidfd before validating ancillary messages.

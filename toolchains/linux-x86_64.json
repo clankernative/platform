@@ -4,6 +4,6 @@
   "roc_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-10-13-b17d287/roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz",
   "roc_archive_sha256": "3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b",
   "roc_source_archive_sha256": "b8d4cfe189e68e7c92a8a19e747f5f4239d5856afb9cb7aa9218ecefc279e986",
-  "rust_version": "1.98.1",
+  "rust_version": "1.100.0",
   "host_target": "x86_64-unknown-linux-gnu"
 }

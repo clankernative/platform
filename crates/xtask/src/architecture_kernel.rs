@@ -921,7 +921,7 @@ mod tests {
                 kernel: false,
             },
         ];
-        // Stable standard APIs available before the pinned Rust 1.98.1. PathBuf
+        // Stable standard APIs in the pinned Rust 1.100.0. PathBuf
         // reaches the same Path definitions through Deref; only lexical path
         // operations remain outside this effect-method vocabulary.
         const METHODS: [(&str, &str); 10] = [
