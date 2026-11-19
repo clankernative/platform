@@ -202,11 +202,13 @@ rather than substituting a Linux result. Neither real native campaign is cached.
 Linux jobs keep the pinned OCI image, private cgroup without swap, four CPU
 allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Test
 preparation, including Clippy, has a 10 GiB allowance on the standard 16 GB Linux
-runner: compiling the `day2` unit-test library peaked at the former 8 GiB ceiling
-on main and was OOM-killed once new provider tests were added. Inputs, fixture preparation, joins and runtime shards retain
-6 GiB. The unchanged `standard` and `test-preparation` purposes check and record
-their fixed ceilings. Moving Clippy preserves the native Roc compiler's separate
-6 GiB ceiling; neither a larger runner nor an admission relaxation is required. Trusted
+runner. Under the former 8 GiB ceiling, main's cgroup peak (page cache included)
+already reached the limit, and a provider PR's added tests got rustc OOM-killed
+compiling `//crates/day2:unit_lib`. Splitting that library would lower the peak
+itself. Inputs, fixture preparation, joins and runtime shards retain 6 GiB. The
+unchanged `standard` and `test-preparation` purposes check and record their
+fixed ceilings. Moving Clippy preserved the native Roc compiler's separate 6 GiB
+ceiling without a larger runner or an admission relaxation. Trusted
 setup preserves and rechecks the checked-in ABI seed. Inner compiler/worker
 confinement and ELF/glibc/loader admission remain mandatory. This is separate
 from the production Mac private builder; no Linux production builder is added.
