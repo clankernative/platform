@@ -66,11 +66,9 @@ Operator prerequisites, none of which the platform performs:
 
 ## Resource target
 
-Today the target carries what the Directory and Calendar reads use:
-
 ```json
 {"kind":"google_workspace_domain","calendar_reader":"calendar-reader@example.com",
- "grantee_domains":["example.com"]}
+ "email_domain":"example.com","grantee_domains":["example.com"]}
 ```
 
 - `calendar_reader`: the one person Calendar is read as, by domain-wide
@@ -81,19 +79,14 @@ Today the target carries what the Directory and Calendar reads use:
   shows calendars to the reader through group, domain and default rules, and
   through organization-wide sharing (which appears as a domain rule). None of
   those count, and neither does the reader's own rule with `reader` or
-  `freeBusyReader`. An exact lowercase address, never normalised. A narrower
-  grant keeps the same reader. Until `email_domain` arrives with step 3, the
-  reader's domain is not separately constrained: the operator chooses it, and
-  Google refuses delegation to anyone who is not a person in the organization.
+  `freeBusyReader`. An exact lowercase address in `email_domain`, never
+  normalised. A narrower grant keeps the same reader.
+- `email_domain`: the only domain whose people may be impersonated, the
+  reader and an event's owner alike. Lowercase ASCII. A narrower grant keeps
+  the same domain.
 - `grantee_domains`: the domains a group may belong to in order to be looked
   up, tested for membership or named in a calendar's ACL. Lowercase ASCII,
   strictly sorted and unique. A narrower grant may only drop domains.
-
-The last field arrives with the first action that reads it, so a target never
-carries authority nothing enforces yet:
-
-- `email_domain` (step 3, impersonation): the only domain whose people may be
-  impersonated. `calendar_reader` will then have to be in it.
 
 ## Who is impersonated
 
@@ -116,17 +109,31 @@ calendar at a time:
 - To take a calendar out of play, remove the reader's rule. Its next read is
   `NotShared`.
 
-Planned for step 3: Meet and Drive run as **the owner of a calendar event**,
-derived by the adapter from the event it reads as `calendar_reader`:
+Meet runs as **the owner of a calendar event**, and Drive will too (step 4).
+The adapter derives the owner from the event it reads as `calendar_reader`:
 
 - the organizer, if it is a person in `email_domain`;
 - otherwise, when the organizer is a group or resource calendar
   (`@group.calendar.google.com`, `@resource.calendar.google.com`), the creator,
   if that is a person in `email_domain`;
-- otherwise there is no owner and nothing is impersonated.
+- otherwise there is no owner, the outcome is `NoOwner`, and nothing is
+  impersonated.
+
+A person in `email_domain` is an address whose domain is exactly
+`email_domain`: not a subdomain, not another case. The owner is delegated to
+with `meetings.space.readonly` alone. No other subject is ever asked for: a
+test checks every `signJwt` the world served, and an event organized from
+outside the domain produces no token request for its organizer.
 
 So an application can only act as someone who organized a meeting on a calendar
 in play, and only for that meeting.
+
+When the token endpoint refuses the owner with OAuth's `invalid_grant`, as
+Google does for a suspended, deleted or unknown person, the action fails with
+`google_workspace_owner_refused`. It is a failure rather than an outcome
+because `invalid_grant` alone cannot say which of those it is, and only its
+standard code is read, never Google's description. A refused reader stays
+`google_workspace_authentication_failed`: the reader is configuration.
 
 ## Actions
 
@@ -137,7 +144,7 @@ in play, and only for that meeting.
 | `google_workspace.calendar.v1` | read | `calendar_reader` | `calendar.readonly`, `calendar.acls.readonly` |
 | `google_workspace.calendar_events.v1` | read | `calendar_reader` | `calendar.readonly`, `calendar.acls.readonly` |
 | `google_workspace.calendar_event.v1` | read | `calendar_reader` | `calendar.readonly`, `calendar.acls.readonly` |
-| `google_workspace.event_conferences.v1` | read | `calendar_reader`, then the event's owner | `calendar.readonly calendar.acls.readonly`; `meetings.space.readonly` |
+| `google_workspace.event_conferences.v1` | read | `calendar_reader`, then the event's owner | `calendar.readonly`, `calendar.acls.readonly`; then `meetings.space.readonly` |
 | `google_workspace.share_artifact.v1` | write | `calendar_reader`, then the event's owner | `calendar.readonly calendar.acls.readonly`; `meetings.space.readonly drive` |
 
 Every request carries `prettyPrint=false`, Directory included, and nothing in
@@ -210,11 +217,44 @@ validated inputs.
   instance of an all-day series; `NotShared`; or `NotFound` (`404` or `410`).
   A cancelled instance of a timed series is `Found` with `CancelledUntimed`
   or `Cancelled {start, end}`.
-- **event_conferences** — for one event: its derived owner and Meet code, the
-  conference records for that code starting within thirty minutes of the
-  event, and each record's recordings, smart notes and transcripts with their
-  `state` (`started`, `ended`, `file_generated`) and generated Drive file or
-  document ID. `NoOwner` and `NoMeeting` are outcomes, not errors.
+- **event_conferences** — `{calendar_id, event_id}`. As `calendar_reader`:
+  the reader's rule and `events.get`, exactly as `calendar_event`, so
+  `NotShared`, `NotFound` and `AllDay` mean what they mean there. Then, in
+  order:
+  - a cancelled event Google reports without times is `NotFound`: there is no
+    window to search. A cancelled event that keeps its times and code is read
+    like any other, since the meeting may have happened; whether to act on it
+    is the application's policy, and `calendar_event` reports its status;
+  - no Meet code is `NoMeeting`, derived as the Calendar actions derive it
+    (`conferenceId` only for `hangoutsMeet`, else a `meet.google.com`
+    `hangoutLink`);
+  - no owner is `NoOwner`.
+
+  Then, as the owner, one page at a time up to the ceiling:
+  `GET meet.googleapis.com/v2/conferenceRecords?pageSize=5&filter=…&fields=conferenceRecords(name,space,startTime,endTime),nextPageToken`
+  with exactly the filter
+  `space.meeting_code = "{code}" AND start_time >= "{start − 30m}" AND start_time <= "{end + 30m}"`,
+  times in whole UTC seconds (`YYYY-MM-DDTHH:MM:SSZ`). Each record's start is
+  checked against the window again. A record outside it means Google did not
+  apply the filter, so the page is refused as `response_invalid` rather than
+  filtered. Records in more than one space are the outcome `Conflict`: one
+  code names one space, and choosing between two is not the adapter's to do.
+  For each record, `…/recordings`, `…/smartNotes` and `…/transcripts` with
+  `pageSize=5` and the masks
+  `recordings(name,state,driveDestination(file)),nextPageToken` and
+  `{smartNotes|transcripts}(name,state,docsDestination(document)),nextPageToken`.
+
+  `Found {owner, meeting_code, records}` lists records as Meet orders them,
+  latest start first. Each record is `{name, space, start_time, end_time?,
+  recordings, smart_notes, transcripts}`, and each artifact is
+  `{name, state, file_id?}` or `{name, state, document_id?}` with `state` one of
+  `Started`, `Ended`, `FileGenerated`. The Meet reference does not say a file
+  or document ID is set only once `FILE_GENERATED`, so it is optional at every
+  state. `STATE_UNSPECIFIED` is refused. A `files/` or `documents/` prefix on
+  an ID is stripped. Names are checked exactly: `conferenceRecords/{id}`,
+  `spaces/{id}` and `conferenceRecords/{record}/{collection}/{id}` for exactly
+  the record listed, with IDs of at most 128 letters, digits, `-` and `_`.
+  Timestamps are UTC with `Z` and 0, 3, 6 or 9 fractional digits.
 - **share_artifact** — for one event, one artifact name and one group: the
   adapter re-reads the event, re-derives its owner, confirms through Meet that
   the artifact belongs to one of that event's conference records and has
@@ -265,6 +305,23 @@ Four pages, one reserved call each, cover 400 rules. A test builds the maximal
 page against the response bound, and serves four of them through the
 simulation.
 
+An event's conferences are bounded the same way, and past a bound the action
+fails rather than truncates:
+
+- At most five conference records: two pages of five, so a short first page
+  can continue. A sixth record, or a continuation after the second page, is
+  `google_workspace_conference_record_budget`.
+- At most five recordings, five smart notes and five transcripts per record:
+  one page of five each. A sixth, or any continuation, is
+  `google_workspace_artifact_budget`.
+- Every name and ID is at most 128 characters JSON does not escape, the owner
+  at most 254, and a timestamp at most 30.
+
+The largest outcome, five records each with five of every artifact at those
+bounds, encodes to 38,193 bytes, 39,377 journaled. That is under the 56 KiB
+page bound, and with a 4 KiB request, under the 64 KiB observation. A test
+builds it and passes it through `bounded_observation`.
+
 ## Retries and unknown outcomes
 
 Reads are side-effect free. The rest of this section is the planned contract
@@ -287,12 +344,14 @@ strings, receipts or correlation. Failure codes are stable and redacted
 (`google_workspace_*`).
 
 Google reports rate and quota limits as `403` as well as `429`. A `403` is
-classified by `error.errors[].reason`:
+classified by its reasons: Calendar's and the Directory's `error.errors[].reason`,
+or Meet's `error.details[].reason` (an `ErrorInfo`) beside `error.status`.
 
-- `rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded` or
-  `dailyLimitExceeded` is `rate_limited`;
-- any other reason, such as a usage limit or a disabled API, is `denied`;
-- a body without reasons is `response_invalid`.
+- `rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded`,
+  `dailyLimitExceeded` or `RATE_LIMIT_EXCEEDED` is `rate_limited`;
+- any other reason, such as a usage limit or a disabled API, or a status with
+  no reason (`PERMISSION_DENIED`), is `denied`;
+- a body with neither is `response_invalid`.
 
 The reason itself never leaves the classifier. Only `404`, and `410` on
 `events.get`, mean not found.
@@ -310,7 +369,9 @@ Today the world serves:
 - the JWT-bearer token exchange;
 - the two Directory routes;
 - the five Calendar routes: `calendars.get`, `acl.get`, `acl.list`,
-  `events.list` and `events.get`.
+  `events.list` and `events.get`;
+- the four Meet routes: `conferenceRecords.list` and each record's
+  `recordings`, `smartNotes` and `transcripts`.
 
 It holds:
 
@@ -318,7 +379,18 @@ It holds:
 - the delegation client's authorized scopes;
 - users;
 - groups, with nested memberships and aliases;
-- calendars, with their ACLs and single events.
+- calendars, with their ACLs and single events;
+- suspended people, whom the token endpoint refuses as it refuses a stranger;
+- Meet spaces, each with its meeting code and owner;
+- conference records with start and end times, a rejoin being another record
+  in the same space, and their recordings, smart notes and transcripts;
+- the Drive files and Docs documents Meet generated (step 4 adds their
+  permissions).
+
+An artifact advances `STARTED` → `ENDED` → `FILE_GENERATED` through
+`google_meet_advance`, a scenario step. Generating it saves its Drive file or
+Docs document, owned by the space's owner, and puts the ID on the artifact, as
+Meet does; the next read reports it.
 
 Who can see a calendar is its ACL, resolved as Google resolves it:
 
@@ -331,6 +403,11 @@ Who can see a calendar is its ACL, resolved as Google resolves it:
   anything less is `403`.
 - The service account itself has no calendars.
 
+Who can see a conference record is its space's owner. Another person lists no
+records for the code and is refused (`403 PERMISSION_DENIED`) a record's
+artifacts. Whether co-hosts and participants see them too is a live
+qualification item.
+
 Events cover:
 
 - timed and all-day events;
@@ -341,10 +418,11 @@ Events cover:
 - Meet codes in `conferenceData` (with its solution type) or in `hangoutLink`
   only.
 
-`timeMin`/`timeMax` select overlapping events in start order. Every route
-answers `400` to any query or fields mask other than the reviewed constants,
-`prettyPrint=false` included, so the simulation cannot serve a request the
-adapter was not reviewed to send. Page tokens are opaque and bound to the
+`timeMin`/`timeMax` select overlapping events in start order. The records
+filter is parsed for exactly the pinned grammar; Meet records are listed latest
+start first. Every route answers `400` to any query, filter or fields mask
+other than the reviewed constants, `prettyPrint=false` included, so the
+simulation cannot serve a request the adapter was not reviewed to send. Page tokens are opaque and bound to the
 query that issued them, and another query's token, even a real one, is
 `400`. That binding is a simulation assumption that live qualification
 checks.
@@ -356,13 +434,16 @@ Simulated tokens are self-describing and verified by recomputing their tag:
 - only the service account itself holds the Directory role.
 
 Delegation fails as Google does, for a scope the client is not authorized for
-(`401 unauthorized_client`) and for a subject that is not a person in the
-organization (`400 invalid_grant`). Addresses are matched exactly, never
+(`401 unauthorized_client`) and for a subject that is not an active person in
+the organization, unknown or suspended (`400 invalid_grant`). The request log
+names the subject of each `signJwt`, so a test sees exactly who was
+impersonated. Addresses are matched exactly, never
 normalised. `hasMember` takes a user key, and answers a nested question across
 domains with `400 Invalid Input`.
 
-Errors use Google's envelope with a reason in `errors[]`. Scenarios schedule
-per-endpoint faults on every endpoint:
+Calendar and Directory errors use Google's envelope with a reason in
+`errors[]`; Meet's use the newer envelope, a status and an `ErrorInfo` reason.
+Scenarios schedule per-endpoint faults on every endpoint:
 
 - `400`;
 - `403` refused, and `403 rateLimitExceeded`;
@@ -380,8 +461,6 @@ Host tests run the actions through admission, reservation and settlement.
 
 Planned, by delivery step:
 
-- Step 3: Meet spaces and conference records (a rejoin is a second record), and
-  artifacts that advance `started` → `ended` → `file_generated`.
 - Step 4: Drive files and permissions, a lost-reply fault after a permission
   was created, and a seeded campaign of meetings, recordings, rejoins, faults
   and duplicate deliveries against an independent model. That model checks
@@ -420,12 +499,30 @@ What the simulation assumes and only Google can settle:
       four, so fewer than 400 rules may be covered.
 - [ ] `conferenceSolution.key.type` values for Meet, add-on and third-party
       conferences, and which of them carry a `hangoutLink`.
+- [ ] Conference record visibility: whether `conferenceRecords.list` and the
+      artifact lists show a space's records to co-hosts and participants, or
+      to the owner alone as the simulation models it, and whether a refusal
+      is `403` or `404`.
+- [ ] The filter: that Meet accepts whole-second `Z` times (its examples use
+      milliseconds), the spacing around operators, and a query string that
+      encodes spaces as `+`.
+- [ ] Artifact state progression and timing: how long `ENDED` lasts before
+      `FILE_GENERATED`, whether a file or document ID ever appears before it,
+      and whether IDs carry a `files/` or `documents/` prefix.
+- [ ] `smartNotes` availability on v2 for the organization's licence, and its
+      answer where smart notes are off.
+- [ ] Owner delegation: the token endpoint's answer for a suspended, deleted
+      and archived person, all `invalid_grant` in the simulation.
+- [ ] Meet's `403` and `429` bodies, and the `ErrorInfo` reasons it gives for
+      a rate or quota limit.
+- [ ] Meet ID lengths and character sets for records, spaces and artifacts,
+      against the 128-character bound.
 
 ## Status
 
-`group`, `group_member`, `calendar`, `calendar_events` and `calendar_event` are
-implemented; `event_conferences` and `share_artifact` are the planned contract
-and are not yet declared in the registry. Addresses are
+`group`, `group_member`, `calendar`, `calendar_events`, `calendar_event` and
+`event_conferences` are implemented; `share_artifact` is the planned contract
+and is not yet declared in the registry. Addresses are
 exact lowercase ASCII and are never normalised on the way in, so an application
 lowercases what it stores.
 
@@ -433,7 +530,11 @@ A Directory action reserves three or four calls: metadata, IAM, then one call
 per question. A Calendar action reserves the three delegated authentication
 exchanges (metadata, `signJwt`, the token exchange), the reader's rule, and
 then one more call: five in all. `calendar` instead reserves the calendar and
-every ACL page up to the ceiling, nine in all.
+every ACL page up to the ceiling, nine in all. `event_conferences` reserves
+both delegations (six exchanges), the reader's rule and the event, two pages
+of records, and three artifact lists for each of the five records the ceiling
+admits: twenty-five in all, so its grant's `max_calls_per_invocation` must be
+at least 25.
 Each reserves 32 KiB of request payload and, for each response, 16 KiB
 (authentication and Directory) or 64 KiB (Calendar) plus a probe byte, and
 settles what it actually used. Its grant must admit the whole envelope:
@@ -448,7 +549,8 @@ limit, from either API: for example the service account lacks its Directory
 role, or an API is off), `rate_limited` (a `429`, or a `403` with a rate or
 quota reason), `unavailable`,
 `request_refused`, `response_invalid`, `response_too_large`,
-`group_outside_grant` or `acl_page_budget`. Malformed application input is
+`group_outside_grant`, `acl_page_budget`, `owner_refused`,
+`conference_record_budget` or `artifact_budget`. Malformed application input is
 `google_workspace_request_invalid`, and an address outside the grant is
 refused as a resource authorization; neither reaches the network.
 
@@ -462,6 +564,7 @@ records real ones (`crates/day2/fixtures/provider-responses/GOOGLE-WORKSPACE-PRO
    registry entry, port, world and the two Directory reads. (Done.)
 2. The three Calendar reads, by delegation as `calendar_reader` and bounded by
    its own `writer` or `owner` rule. (Done.)
-3. `event_conferences`.
+3. `event_conferences`, with `email_domain` on the target and impersonation of
+   the event's derived owner. (Done.)
 4. `share_artifact`, with reconciliation and the saboteur.
 5. Live qualification.
