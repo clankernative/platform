@@ -28,3 +28,9 @@ occurrence that covers it. Each anchored occurrence still runs at most once and
 none is skipped: an installation that last ran at 00:00 runs nothing more until
 the next anchor hour, then continues on the anchored grid. `Coalesce` and
 `RunEach` catch up only anchored occurrences after that point.
+
+While an occurrence is still pending, the source offers nothing new, so runs of
+one schedule never overlap. An occurrence blocked by an authority change does
+not count: blocks are permanent and a blocked invocation never runs, so it stays
+pending without ever finishing. The next occurrence runs on schedule and the
+blocked one stays as it is.

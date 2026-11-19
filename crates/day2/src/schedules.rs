@@ -300,11 +300,19 @@ fn last_offered(connection: &rusqlite::Connection, schedule: &Schedule) -> Resul
 }
 
 /// The occurrence of a run that has not finished, if any.
+///
+/// An authority-blocked invocation is not one. It stays pending, but blocks are
+/// permanent and the command pump never runs a blocked invocation, so nothing will
+/// ever finish it or race a later occurrence on its rows. Counting it as running
+/// would stop the schedule for good. Activation, rollout and handoff use the same
+/// definition of runnable pending work.
 fn in_flight(connection: &rusqlite::Connection, schedule: &Schedule) -> Result<Option<i64>> {
     let prefix = schedule.prefix();
     let identity: Option<String> = connection
         .query_row(
-            "SELECT id FROM day2_invocations WHERE id >= ?1 AND id < ?2 AND status='pending' ORDER BY id LIMIT 1",
+            "SELECT i.id FROM day2_invocations i WHERE i.id >= ?1 AND i.id < ?2 AND i.status='pending'
+             AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)
+             ORDER BY i.id LIMIT 1",
             rusqlite::params![prefix, format!("{prefix}~")],
             |row| row.get(0),
         )

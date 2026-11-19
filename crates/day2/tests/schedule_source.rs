@@ -149,6 +149,80 @@ fn a_running_occurrence_blocks_the_next() -> Result<()> {
     Ok(())
 }
 
+/// Leave a pending occurrence behind, optionally blocked by an authority change.
+fn leave_pending(world: &World, occurrence_ms: i64, blocked: bool) -> Result<String> {
+    let identity = format!("schedule.reports.sweep.{occurrence_ms:016}");
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    db.execute(
+        "INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status) VALUES(?1,'reports.sweep','alice','{}',?2,?3,'pending')",
+        rusqlite::params![identity, world.runtime.artifact().id(), occurrence_ms / 1_000],
+    )?;
+    if blocked {
+        db.execute(
+            "INSERT INTO day2_authority_blocks(invocation,reason) VALUES(?1,'authority_policy_changed')",
+            [&identity],
+        )?;
+    }
+    Ok(identity)
+}
+
+fn status(world: &World, identity: &str) -> Result<String> {
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    Ok(db.query_row(
+        "SELECT status FROM day2_invocations WHERE id=?1",
+        [identity],
+        |row| row.get(0),
+    )?)
+}
+
+#[test]
+fn an_authority_blocked_occurrence_does_not_stop_the_schedule() -> Result<()> {
+    let world = World::new()?;
+    bind(&world, "alice", false)?;
+    // A policy change blocked this run while it was pending. Blocks are permanent and
+    // the pump never runs a blocked invocation, so it stays pending forever. Counting
+    // it as in flight stopped every later occurrence for good (Home's daily Directory
+    // sync, blocked on 2026-11-17).
+    let blocked = leave_pending(&world, MONDAY - INTERVAL_MS, true)?;
+
+    let tick = sweep_tick(&world.runtime, MONDAY)?;
+    assert_eq!(tick.skipped, None);
+    assert_eq!(tick.offered.len(), 1);
+    let occurrence = tick.offered[0].0;
+    assert_eq!(occurrence, MONDAY - MONDAY.rem_euclid(INTERVAL_MS));
+    assert_eq!(tick.offered[0].1.status, "success");
+    // The blocked run is left as it was: neither executed nor resolved.
+    assert_eq!(status(&world, &blocked)?, "pending");
+
+    // The schedule continues normally after it.
+    let again = sweep_tick(&world.runtime, MONDAY + 1_000)?;
+    assert_eq!(again.skipped, Some(Skipped::NotDue));
+    let next = sweep_tick(&world.runtime, occurrence + INTERVAL_MS)?;
+    assert_eq!(next.skipped, None);
+    assert_eq!(next.offered.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_runnable_occurrence_still_holds_the_schedule_beside_a_blocked_one() -> Result<()> {
+    let world = World::new()?;
+    bind(&world, "alice", false)?;
+    // Only the blocked run is excluded. A runnable pending one after it still means
+    // a run is in flight, so the source refuses and names that run.
+    leave_pending(&world, MONDAY - 2 * INTERVAL_MS, true)?;
+    leave_pending(&world, MONDAY - INTERVAL_MS, false)?;
+
+    let tick = sweep_tick(&world.runtime, MONDAY)?;
+    assert_eq!(
+        tick.skipped,
+        Some(Skipped::InFlight {
+            since_ms: MONDAY - INTERVAL_MS
+        })
+    );
+    assert!(tick.offered.is_empty());
+    Ok(())
+}
+
 #[test]
 fn the_schedule_runs_as_the_actor_the_instance_bound() -> Result<()> {
     let world = World::new()?;
