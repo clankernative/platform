@@ -24,12 +24,14 @@ const CALENDAR: &str = "google_workspace.calendar.v1";
 const EVENTS: &str = "google_workspace.calendar_events.v1";
 const EVENT: &str = "google_workspace.calendar_event.v1";
 const CONFERENCES: &str = "google_workspace.event_conferences.v1";
+const SHARE: &str = "google_workspace.share_artifact.v1";
 
 struct Setup {
     simulated: bool,
     max_request_bytes: u64,
     max_response_bytes: u64,
     max_calls: u64,
+    concurrency: u64,
 }
 
 impl Default for Setup {
@@ -39,6 +41,7 @@ impl Default for Setup {
             max_request_bytes: crate::google_workspace::MAX_ACTION_REQUEST_BYTES,
             max_response_bytes: crate::google_workspace::MAX_RESPONSE_BYTES as u64,
             max_calls: 32,
+            concurrency: 1,
         }
     }
 }
@@ -66,7 +69,9 @@ fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
         grantee_domains: vec!["synthetic.example".into()],
     })?;
     let operation = |observations: &[&str]| json!({"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]});
+    let command = json!({"actors":[ACTOR],"mode":{"kind":"current_state"},"models":{},"observations":[],"effects":[SHARE]});
     let policy = json!({"version":1,"admins":[],"operations":{
+        "share":command,"share_other":command,
         "lookup":operation(&[CALENDAR, EVENT, EVENTS, CONFERENCES, GROUP, MEMBER]),
         "lookup_other":operation(&[GROUP]),
         "directory":operation(&[CALENDAR, CONFERENCES, GROUP, "workspace_directory.user_path.v1"])}});
@@ -75,7 +80,8 @@ fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
             "allowed_resources":[{"id":resource,"revision":1}],
             "actions":["google_workspace_calendar","google_workspace_calendar_event",
                 "google_workspace_calendar_events","google_workspace_event_conferences",
-                "google_workspace_group","google_workspace_group_member"],
+                "google_workspace_group","google_workspace_group_member",
+                "google_workspace_share_artifact"],
             "limits":{"max_request_bytes":setup.max_request_bytes,
                 "max_response_bytes":setup.max_response_bytes,
                 "max_calls_per_invocation":setup.max_calls},
@@ -108,7 +114,7 @@ fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
                     "limits":{"max_request_bytes":32_768,"max_response_bytes":65_537,
                         "max_calls_per_invocation":4},"budgets":[]}}}},
         "budgets":{"workspace_budget":{"revision":1,"scope":"app","period_seconds":3600,
-            "limits":{"calls":1000,"bytes":100_000_000,"concurrency":1}}}});
+            "limits":{"calls":1000,"bytes":100_000_000,"concurrency":setup.concurrency}}}});
     let attachment = |policy: &str, operation: &str, resource: &str| {
         json!({"policy":{"id":policy,"revision":1},"operation":operation,
             "bindings":{"google_workspace":{"id":resource,"revision":1}}})
@@ -118,6 +124,8 @@ fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
             "resource_policies":[
                 attachment("workspace_read", "lookup", "groups"),
                 attachment("workspace_other_read", "lookup_other", "groups_other"),
+                attachment("workspace_read", "share", "groups"),
+                attachment("workspace_other_read", "share_other", "groups_other"),
                 attachment("directory_read", "directory", "directory")]}}});
     fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
     let contract = serde_json::from_value(json!({
@@ -126,6 +134,8 @@ fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
         "schema_digest":"google-workspace-test",
         "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
         "operations":[{"name":"lookup","kind":"query","input_type":"input","output_type":"output"},
+            {"name":"share","kind":"command","input_type":"input","output_type":""},
+            {"name":"share_other","kind":"command","input_type":"input","output_type":""},
             {"name":"lookup_other","kind":"query","input_type":"input","output_type":"output"},
             {"name":"directory","kind":"query","input_type":"input","output_type":"output"}],
         "sources":{},"admission":"local-spike-only"}))?;
@@ -240,7 +250,13 @@ fn authorize(
             .context("opaque handle")?
             .to_owned();
         instruction = Instruction {
-            kind: "observe".into(),
+            // The share is the one write: an effect, never an observation.
+            kind: if capability == SHARE {
+                "external"
+            } else {
+                "observe"
+            }
+            .into(),
             model: capability.into(),
             data: data(&handle).to_string(),
             ..Default::default()
@@ -290,7 +306,11 @@ fn admitted(
         reserved,
     )?;
     tx.commit()?;
-    let outcome = crate::capabilities::observe(runtime, capability, invocation);
+    let outcome = if instruction.model == SHARE {
+        crate::capabilities::execute(runtime, capability, invocation, invocation)
+    } else {
+        crate::capabilities::observe(runtime, capability, invocation)
+    };
     let result = outcome.result.and_then(|result| {
         crate::resources::validate_result(&resource, &result)?;
         Ok(result)
@@ -953,5 +973,157 @@ fn a_forged_organizer_is_never_impersonated() -> Result<()> {
         impersonated(&runtime)?,
         [GOOGLE_DEVELOPMENT_CALENDAR_READER]
     );
+    Ok(())
+}
+
+fn share(handle: &str) -> Value {
+    json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,"event_id":"standup0001",
+        "artifact":"conferenceRecords/conf-standup-1/recordings/rec-1",
+        "group_email":"engineering@synthetic.example"})
+}
+
+/// The group permissions on the stand-up's recording.
+fn shared(runtime: &Runtime) -> Result<Vec<String>> {
+    crate::integrations::simulated::update_google_workspace(runtime.db(), SCOPE, |state| {
+        Ok(state.world.drive_files["1recStandupFile01"]
+            .permissions
+            .iter()
+            .filter(|permission| permission.kind == "group")
+            .map(|permission| permission.id.clone())
+            .collect())
+    })
+}
+
+/// The share is a write: admitted only as an effect of a command, reserved
+/// and settled like any write, delegated only to the event's derived owner,
+/// and found again rather than created twice.
+#[test]
+fn the_share_is_a_reserved_write_found_again_and_never_for_a_non_owner() -> Result<()> {
+    let (_native_directory, native) = runtime(Setup {
+        simulated: false,
+        ..Setup::default()
+    })?;
+    let (_forged_directory, forged) = runtime(Setup::default())?;
+    let (_short_directory, short) = runtime(Setup {
+        max_calls: 15,
+        ..Setup::default()
+    })?;
+    let (_directory, runtime) = runtime(Setup::default())?;
+    let first = admitted(&runtime, "share", "share-first", SHARE, share)?;
+    let result: Value = serde_json::from_str(
+        first
+            .result
+            .as_deref()
+            .map_err(|code| anyhow::anyhow!("{code}"))?,
+    )?;
+    let id = result["Shared"]["permission_id"]
+        .as_str()
+        .context("shared")?
+        .to_owned();
+    assert!(first.usage.known && first.usage.dispatched);
+    assert_eq!(budget(&runtime)?["calls"], (first.usage.calls as i64, 0));
+    assert_eq!(
+        impersonated(&runtime)?,
+        [GOOGLE_DEVELOPMENT_CALENDAR_READER, "ada@synthetic.example"]
+    );
+    let again = admitted(&runtime, "share", "share-again", SHARE, share)?;
+    assert_eq!(
+        again.result,
+        Ok(json!({"AlreadyShared":{"permission_id":id}}).to_string())
+    );
+    assert_eq!(shared(&runtime)?, [id]);
+    // Never an observation, never through another connection.
+    let observed = authorize(&runtime, "lookup", "share-observed", SHARE, share)
+        .err()
+        .context("a write was admitted as an observation")?;
+    assert!(matches!(
+        observed.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::CapabilityForbidden)
+    ));
+    let other = admitted(&runtime, "share_other", "share-other", SHARE, share)?;
+    assert_eq!(
+        other.result,
+        Err("google_workspace_authentication_failed".into())
+    );
+    // A forged organizer: no owner, and no token for the organizer.
+    crate::integrations::simulated::update_google_workspace(forged.db(), SCOPE, |state| {
+        state
+            .world
+            .calendars
+            .get_mut(GOOGLE_DEVELOPMENT_CALENDAR)
+            .context("calendar")?
+            .events[0]
+            .creator = Some("grace@synthetic.example".into());
+        Ok(())
+    })?;
+    let refused = admitted(&forged, "share", "share-forged", SHARE, share)?;
+    assert_eq!(refused.result, Ok(r#""NoOwner""#.into()));
+    assert_eq!(impersonated(&forged)?, [GOOGLE_DEVELOPMENT_CALENDAR_READER]);
+    assert!(shared(&forged)?.is_empty());
+    // The source is frozen with the plan, and a grant below the envelope is
+    // refused before anything is reserved.
+    let (.., authorized, _) = authorize(&native, "share", "share-native", SHARE, share)?;
+    assert_eq!(
+        authorized
+            .google_workspace_plan()
+            .context("a Google Workspace plan")?
+            .source(),
+        crate::google_workspace::Source::Native
+    );
+    assert!(authorized.retries_are_idempotent());
+    let limited = admitted(&short, "share", "share-short", SHARE, share)
+        .err()
+        .context("a grant below the envelope was accepted")?;
+    assert!(matches!(
+        limited.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceLimitExceeded)
+    ));
+    assert!(calls(&short)?.is_empty());
+    Ok(())
+}
+
+/// A reply lost after the permission was created is an unknown outcome: the
+/// reservation is held, not settled, and the correlation names the Drive
+/// phase. Running the share again, as the effect's retry does, finds the
+/// permission and creates nothing.
+#[test]
+fn a_lost_share_reply_holds_its_reservation_and_a_retry_reconciles() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup {
+        concurrency: 2,
+        ..Setup::default()
+    })?;
+    crate::integrations::simulated::schedule_faults(
+        runtime.db(),
+        SCOPE,
+        crate::integrations::simulated::GOOGLE_WORKSPACE_WORLD,
+        vec![ScheduledFault {
+            endpoint: crate::integrations::simulated::GOOGLE_DRIVE_SHARE_ENDPOINT.into(),
+            remaining: 1,
+            fault: SimulatedFault::ReplyLost,
+        }],
+    )?;
+    let lost = admitted(&runtime, "share", "share-lost", SHARE, share)?;
+    assert_eq!(
+        lost.result,
+        Err("google_workspace_share_outcome_unknown".into())
+    );
+    assert!(!lost.usage.known);
+    assert_eq!(
+        serde_json::to_value(&lost.correlation)?,
+        json!([{"phase":"google_workspace_drive","http_status":null,"request_id":null,
+            "statement_handle":null}])
+    );
+    // The whole quote stays held while the outcome is unknown.
+    let held = budget(&runtime)?["calls"];
+    assert_eq!(held.0, 0);
+    assert!(held.1 > 0);
+    let created = shared(&runtime)?;
+    assert_eq!(created.len(), 1, "the permission landed");
+    let retry = admitted(&runtime, "share", "share-retry", SHARE, share)?;
+    assert_eq!(
+        retry.result,
+        Ok(json!({"AlreadyShared":{"permission_id":created[0]}}).to_string())
+    );
+    assert_eq!(shared(&runtime)?, created);
     Ok(())
 }

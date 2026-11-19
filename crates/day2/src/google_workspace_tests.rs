@@ -449,6 +449,9 @@ fn every_simulated_endpoint_has_a_scheduled_fault_case() {
                 || meet::meet_fault_cases()
                     .iter()
                     .any(|(case, ..)| *case == endpoint)
+                || share::share_fault_cases()
+                    .iter()
+                    .any(|(case, ..)| *case == endpoint)
                 || delegation_fault_cases()
                     .iter()
                     .any(|(case, ..)| *case == endpoint),
@@ -858,6 +861,30 @@ fn every_failure_is_produced_through_an_action() {
         SimulatedFault::Gone,
     );
     record(&world, &meet::conferences("standup0001"));
+    // A share whose reply was lost, and a file with too many permissions.
+    let plan = share::share(
+        "standup0001",
+        "conferenceRecords/conf-standup-1/recordings/rec-1",
+        "engineering@synthetic.example",
+    );
+    let world = World::development();
+    world.fault(
+        simulated::GOOGLE_DRIVE_SHARE_ENDPOINT,
+        SimulatedFault::ReplyLost,
+    );
+    record(&world, &plan);
+    let mut long = simulated::google_workspace_development_fixture();
+    long.drive_files
+        .get_mut("1recStandupFile01")
+        .unwrap()
+        .permissions
+        .extend((0..200).map(|index| simulated::GoogleDrivePermission {
+            id: format!("user{index}"),
+            kind: "user".into(),
+            role: "reader".into(),
+            ..Default::default()
+        }));
+    record(&World::new(long), &plan);
     let expected: std::collections::BTreeSet<_> = Failure::ALL
         .iter()
         .map(|failure| failure.code().to_owned())
@@ -1841,3 +1868,6 @@ fn the_largest_admissible_page_fits_one_observation() {
 
 #[path = "google_workspace_meet_tests.rs"]
 mod meet;
+
+#[path = "google_workspace_share_tests.rs"]
+mod share;

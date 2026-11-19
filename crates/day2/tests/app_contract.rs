@@ -1108,6 +1108,151 @@ expect match read(NOT_FOUND_JSON) {
 }
 
 #[test]
+fn native_google_workspace_share_decodes_through_public_sdk() -> Result<()> {
+    use day2::google_workspace::encode;
+    use day2::google_workspace_drive::{Permission, ShareOutcome};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    fs::create_dir(stage.join("app"))?;
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    // The exact request the SDK sends, which the adapter authorizes as the
+    // share it names.
+    let request = r#"{"artifact":"conferenceRecords/first-1/recordings/rec-1","calendar_id":"c_team@group.calendar.google.com","event_id":"e1","group_email":"team@example.com","handle":"fixture-handle"}"#;
+    let (plan, handle) = day2::google_workspace::Plan::authorize(
+        day2_capabilities::registry::Action::GoogleWorkspaceShareArtifact,
+        &day2_capabilities::integrations::LiveConnection::GoogleWorkspace {
+            service_account: "reader@example-project.iam.gserviceaccount.com".into(),
+        },
+        &day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
+            calendar_reader: "calendar@example.com".into(),
+            email_domain: "example.com".into(),
+            grantee_domains: vec!["example.com".into()],
+        },
+        request,
+        day2::google_workspace::Source::Simulated,
+    )?;
+    ensure!(
+        handle == "fixture-handle" && plan.is_write(),
+        "the share was not authorized as a write"
+    );
+    ensure!(
+        *plan.read()
+            == day2::google_workspace::Read::ShareArtifact {
+                calendar: "c_team@group.calendar.google.com".into(),
+                event: "e1".into(),
+                artifact: "conferenceRecords/first-1/recordings/rec-1".into(),
+                group: "team@example.com".into(),
+            },
+        "the SDK's request was not authorized as the share it names: {:?}",
+        plan.read()
+    );
+    let permission = || Permission {
+        permission_id: "0987654321".into(),
+    };
+    let source = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.GoogleWorkspace
+import pf.Resource
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+share = |handle| {
+    match Tx.evaluate(Resource.decode(handle).program(), []) {
+        Done(decoded) => Ok(GoogleWorkspace.share_artifact_with(decoded.value, "c_team@group.calendar.google.com", "e1",
+            "conferenceRecords/first-1/recordings/rec-1", "team@example.com").program())
+        _ => Err(NoResource)
+    }
+}
+outcome = |raw, check| answered("{\"token\":\"fixture-handle\"}", raw, check)
+answered = |handle, raw, check| {
+    match share(handle) {
+        Ok(program) => match Tx.evaluate(program, []) {
+            Pending(request) => request.instruction.model == CAPABILITY and request.instruction.data == REQUEST
+                and match Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}]) {
+                    Done(result) => check(result.value)
+                    _ => Bool.False
+                }
+            _ => Bool.False
+        }
+        Err(_) => Bool.False
+    }
+}
+expect outcome(SHARED_JSON, |value| match value {
+    Shared(permission) => permission.permission_id == "0987654321"
+    _ => Bool.False
+})
+expect outcome(ALREADY_JSON, |value| match value {
+    AlreadyShared(permission) => permission.permission_id == "0987654321"
+    _ => Bool.False
+})
+expect outcome(NOT_READY_JSON, |value| match value {
+    NotReady => Bool.True
+    _ => Bool.False
+})
+expect outcome(REFUSED_JSON, |value| match value {
+    SharingRefused => Bool.True
+    _ => Bool.False
+})
+expect outcome(NOT_FOUND_JSON, |value| match value {
+    NotFound => Bool.True
+    _ => Bool.False
+})
+"#
+    .replace(
+        "SHARED_JSON",
+        &serde_json::to_string(&encode(&ShareOutcome::Shared(permission())))?,
+    )
+    .replace(
+        "ALREADY_JSON",
+        &serde_json::to_string(&encode(&ShareOutcome::AlreadyShared(permission())))?,
+    )
+    .replace(
+        "NOT_READY_JSON",
+        &serde_json::to_string(&encode(&ShareOutcome::NotReady))?,
+    )
+    .replace(
+        "REFUSED_JSON",
+        &serde_json::to_string(&encode(&ShareOutcome::SharingRefused))?,
+    )
+    .replace(
+        "NOT_FOUND_JSON",
+        &serde_json::to_string(&encode(&ShareOutcome::NotFound))?,
+    )
+    .replace("REQUEST", &serde_json::to_string(request)?)
+    .replace(
+        "CAPABILITY",
+        &serde_json::to_string(
+            &day2_capabilities::registry::Action::GoogleWorkspaceShareArtifact.capability(),
+        )?,
+    );
+    fs::write(stage.join("app/main.roc"), source)?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .arg("test")
+        .arg(stage.join("app/main.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (5) tests passed"),
+        "native Google Workspace share contracts ({}): {diagnostics}",
+        output.status
+    );
+    Ok(())
+}
+
+#[test]
 fn native_carta_delivery_decodes_through_public_sdk() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

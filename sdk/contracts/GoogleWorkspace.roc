@@ -1,12 +1,16 @@
 import Observe
+import Effects
 import Resource
 import Context
+import Api
 
 # Organization reads through a keyless service account: Directory reads as the account itself, Calendar
 # reads by domain-wide delegation as the grant's Calendar reader. Every action has a fixed scope and
 # identity; an application names groups, members, calendars and events inside its grant, never a subject,
-# scope or URL.
+# scope or URL. The one write shares a Meet artifact's file with a group as reader.
 GoogleWorkspace :: [].{
+	share_effect = Api.external("google_workspace.share_artifact.v1")
+
 	# A group as the Directory reports it. `email` is the primary address, which may differ from an alias the
 	# application asked about; it is always in one of the grant's grantee domains.
 	Group : { id : Str, email : Str, name : Str }
@@ -83,6 +87,25 @@ GoogleWorkspace :: [].{
 	# `NoOwner`: nobody in the grant's email domain owns the event. `NoMeeting`: it has no Meet code. `Conflict`: the
 	# code's records in the event's window are in more than one space.
 	EventConferencesOutcome : [Found(EventConferences), NoOwner, NoMeeting, Conflict, AllDay, NotShared, NotFound]
+
+	Permission : { permission_id : Str }
+
+	# `Shared`: the group was given reader now. `AlreadyShared`: it already held reader or more and nothing was
+	# created. `NotReady`: Meet has not generated the file yet. `SharingRefused`: Drive refused the request itself,
+	# for an unknown group or a sharing policy. The rest mean what they mean for `event_conferences`; `NotFound`
+	# also covers an artifact of another event and a file the owner cannot see.
+	ShareOutcome : [
+		Shared(Permission),
+		AlreadyShared(Permission),
+		NotReady,
+		SharingRefused,
+		Conflict,
+		NoOwner,
+		NoMeeting,
+		AllDay,
+		NotShared,
+		NotFound,
+	]
 
 	group : Context, Str -> Observe(GroupOutcome)
 	group = |context, group_email| Resource.bind(context, "google_workspace").and_then(
@@ -187,6 +210,21 @@ GoogleWorkspace :: [].{
 			parsed : Try(EventConferencesOutcome, _)
 			parsed = Json.parse(raw)
 			Observe.from_host(parsed.map_err(|_| "invalid_google_workspace_event_conferences"))
+		},
+	)
+
+	# Share one artifact of one event with one group as reader, as the event's owner. `artifact` is the exact Meet
+	# name `event_conferences` reports. The share always lists before it creates, so running it again after an
+	# unknown outcome finds the first permission and creates nothing.
+	share_artifact_with : Resource, Str, Str, Str, Str -> Effects(ShareOutcome)
+	share_artifact_with = |resource, calendar_id, event_id, artifact, group_email| Effects.capability(
+		"google_workspace.share_artifact.v1",
+		Json.to_str({ handle: Resource.token(resource), calendar_id, event_id, artifact, group_email }),
+	).and_then(
+		|raw| {
+			parsed : Try(ShareOutcome, _)
+			parsed = Json.parse(raw)
+			Effects.from_host(parsed.map_err(|_| "invalid_google_workspace_share"))
 		},
 	)
 }

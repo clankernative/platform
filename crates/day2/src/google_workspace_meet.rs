@@ -59,6 +59,14 @@ impl Collection {
         }
     }
 
+    /// The reviewed fields mask for one artifact of this kind.
+    pub fn artifact_fields(self) -> &'static str {
+        match self {
+            Self::Recordings => "name,state,driveDestination(file)",
+            Self::SmartNotes | Self::Transcripts => "name,state,docsDestination(document)",
+        }
+    }
+
     /// The request's name for timing.
     pub fn endpoint(self) -> &'static str {
         match self {
@@ -245,6 +253,25 @@ pub fn space_name(name: &str) -> bool {
     name.strip_prefix("spaces/").is_some_and(meet_id)
 }
 
+/// The record, collection and ID of an exact artifact name,
+/// `conferenceRecords/{record}/{collection}/{id}`.
+pub fn parse_artifact_name(name: &str) -> Option<(&str, Collection, &str)> {
+    let mut parts = name.split('/');
+    let (Some("conferenceRecords"), Some(record), Some(segment), Some(id), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return None;
+    };
+    let collection = Collection::ALL
+        .into_iter()
+        .find(|collection| collection.segment() == segment)?;
+    (meet_id(record) && meet_id(id)).then_some((record, collection, id))
+}
+
 /// `conferenceRecords/{record}/{collection}/{id}` for exactly this record.
 pub fn artifact_name(name: &str, record: &str, collection: Collection) -> bool {
     name.strip_prefix("conferenceRecords/")
@@ -343,29 +370,59 @@ pub struct Artifact {
     pub id: Option<String>,
 }
 
-/// One page of one record's artifacts of one kind. A recording carries only a
-/// Drive destination and a smart note or transcript only a Docs destination.
+#[derive(Deserialize)]
+struct DriveDto {
+    file: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DocsDto {
+    document: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactDto {
+    name: String,
+    state: String,
+    drive_destination: Option<DriveDto>,
+    docs_destination: Option<DocsDto>,
+}
+
+/// One artifact as Meet reports it. A recording carries only a Drive
+/// destination and a smart note or transcript only a Docs destination.
+fn artifact(item: ArtifactDto, record: &str, collection: Collection) -> Result<Artifact, Failure> {
+    let state = match item.state.as_str() {
+        "STARTED" => ArtifactState::Started,
+        "ENDED" => ArtifactState::Ended,
+        "FILE_GENERATED" => ArtifactState::FileGenerated,
+        _ => return Err(Failure::ResponseInvalid),
+    };
+    let id = match (collection, item.drive_destination, item.docs_destination) {
+        (Collection::Recordings, drive, None) => drive.and_then(|drive| drive.file),
+        (Collection::SmartNotes | Collection::Transcripts, None, docs) => {
+            docs.and_then(|docs| docs.document)
+        }
+        _ => return Err(Failure::ResponseInvalid),
+    };
+    if id.as_deref().is_some_and(|id| !file_id(id))
+        || !artifact_name(&item.name, record, collection)
+    {
+        return Err(Failure::ResponseInvalid);
+    }
+    Ok(Artifact {
+        name: item.name,
+        state,
+        id,
+    })
+}
+
+/// One page of one record's artifacts of one kind.
 pub fn parse_artifact_page(
     body: &[u8],
     record: &str,
     collection: Collection,
 ) -> Result<Page<Artifact>, Failure> {
-    #[derive(Deserialize)]
-    struct Drive {
-        file: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Docs {
-        document: Option<String>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ArtifactDto {
-        name: String,
-        state: String,
-        drive_destination: Option<Drive>,
-        docs_destination: Option<Docs>,
-    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Page {
@@ -390,33 +447,21 @@ pub fn parse_artifact_page(
     {
         return Err(Failure::ResponseInvalid);
     }
-    let mut artifacts = Vec::new();
-    for item in items {
-        let state = match item.state.as_str() {
-            "STARTED" => ArtifactState::Started,
-            "ENDED" => ArtifactState::Ended,
-            "FILE_GENERATED" => ArtifactState::FileGenerated,
-            _ => return Err(Failure::ResponseInvalid),
-        };
-        let id = match (collection, item.drive_destination, item.docs_destination) {
-            (Collection::Recordings, drive, None) => drive.and_then(|drive| drive.file),
-            (Collection::SmartNotes | Collection::Transcripts, None, docs) => {
-                docs.and_then(|docs| docs.document)
-            }
-            _ => return Err(Failure::ResponseInvalid),
-        };
-        if id.as_deref().is_some_and(|id| !file_id(id))
-            || !artifact_name(&item.name, record, collection)
-        {
-            return Err(Failure::ResponseInvalid);
-        }
-        artifacts.push(Artifact {
-            name: item.name,
-            state,
-            id,
-        });
-    }
+    let artifacts = items
+        .into_iter()
+        .map(|item| artifact(item, record, collection))
+        .collect::<Result<_, _>>()?;
     Ok((artifacts, page.next_page_token))
+}
+
+/// One artifact read by its exact name, which the reply must repeat.
+pub fn parse_artifact(body: &[u8], name: &str) -> Result<Artifact, Failure> {
+    let (record, collection, _) = parse_artifact_name(name).ok_or(Failure::ResponseInvalid)?;
+    let item: ArtifactDto = crate::json::decode(body).map_err(|_| Failure::ResponseInvalid)?;
+    if item.name != name {
+        return Err(Failure::ResponseInvalid);
+    }
+    artifact(item, record, collection)
 }
 
 /// Put one record's artifacts of one kind in place.

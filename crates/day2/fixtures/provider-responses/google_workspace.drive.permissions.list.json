@@ -1,0 +1,23 @@
+{
+  "permissions": [
+    {
+      "id": "01234567890123456789",
+      "type": "user",
+      "role": "owner",
+      "emailAddress": "person@example.com",
+      "deleted": false
+    },
+    {
+      "id": "12345678901234567890",
+      "type": "group",
+      "role": "commenter",
+      "emailAddress": "other@example.com",
+      "deleted": false
+    },
+    {
+      "id": "anyoneWithLink",
+      "type": "anyone",
+      "role": "reader"
+    }
+  ]
+}
