@@ -1,0 +1,491 @@
+//! Host-only conformance for `google_workspace.group.v1` and `group_member.v1`:
+//! real acceptance, opaque handles, the authority transaction, budget
+//! reservation and SQLite settlement, against the simulated Google world. The
+//! contract is supplied by the test; this does not claim compiled Roc artifact
+//! admission.
+use super::*;
+use crate::{
+    authority_state, integration_host,
+    integrations::simulated::{
+        GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT, GOOGLE_GROUP_ENDPOINT, ScheduledFault, SimulatedFault,
+    },
+};
+use day2_capabilities::{integrations::LiveConnection, resources::ResourceTarget};
+use rusqlite::TransactionBehavior;
+use std::collections::BTreeMap;
+
+const ACTOR: &str = "lookup@synthetic.example";
+const SCOPE: &str = "workspaceco/test/app";
+const NOW: i64 = 1_700_000_001;
+const GROUP: &str = "google_workspace.group.v1";
+const MEMBER: &str = "google_workspace.group_member.v1";
+
+struct Setup {
+    simulated: bool,
+    max_request_bytes: u64,
+    max_response_bytes: u64,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            simulated: true,
+            max_request_bytes: crate::google_workspace::MAX_ACTION_REQUEST_BYTES,
+            max_response_bytes: crate::google_workspace::MAX_RESPONSE_BYTES as u64,
+        }
+    }
+}
+
+/// Operations and the slot each binds:
+/// - `lookup` reads through the reviewed connection;
+/// - `lookup_other` reads through a second connection naming another service
+///   account;
+/// - `directory` holds only a Workspace Directory grant.
+fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
+    let directory = tempfile::tempdir()?;
+    let instance_path = directory.path().join("instance.json");
+    let state = directory.path().join(".state");
+    fs::create_dir_all(&state)?;
+    let artifact_directory = directory.path().join("google-workspace-contract");
+    fs::create_dir(&artifact_directory)?;
+    let live = |service_account: &str| {
+        serde_json::to_value(LiveConnection::GoogleWorkspace {
+            service_account: service_account.into(),
+        })
+    };
+    let target = serde_json::to_value(ResourceTarget::GoogleWorkspaceDomain {
+        grantee_domains: vec!["synthetic.example".into()],
+    })?;
+    let operation = |observations: &[&str]| json!({"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]});
+    let policy = json!({"version":1,"admins":[],"operations":{
+        "lookup":operation(&[GROUP, MEMBER]),
+        "lookup_other":operation(&[GROUP]),
+        "directory":operation(&[GROUP, "workspace_directory.user_path.v1"])}});
+    let slot = |resource: &str| {
+        json!({"google_workspace":{"kind":"google_workspace_domain",
+            "allowed_resources":[{"id":resource,"revision":1}],
+            "actions":["google_workspace_group","google_workspace_group_member"],
+            "limits":{"max_request_bytes":setup.max_request_bytes,
+                "max_response_bytes":setup.max_response_bytes,"max_calls_per_invocation":16},
+            "budgets":[{"id":"workspace_budget","revision":1}]}})
+    };
+    let catalog = json!({"version":1,
+        "connections":{
+            "workspace":{"revision":1,"provider":"google_workspace",
+                "live":live(GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT)?},
+            "workspace_other":{"revision":1,"provider":"google_workspace",
+                "live":live("someone-else@synthetic-project.iam.gserviceaccount.com")?},
+            "directory":{"revision":1,"provider":"workspace_directory",
+                "live":{"provider":"workspace_directory",
+                    "service_account":"directory-reader@synthetic-project.iam.gserviceaccount.com",
+                    "auth":{"mode":"direct_service_account"}}}},
+        "resources":{
+            "groups":{"revision":1,"connection":{"id":"workspace","revision":1},"target":target},
+            "groups_other":{"revision":1,"connection":{"id":"workspace_other","revision":1},"target":target},
+            "directory":{"revision":1,"connection":{"id":"directory","revision":1},
+                "target":{"kind":"workspace_directory","customer_id":"Csynthetic"}}},
+        "policies":{
+            "workspace_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],
+                "max_duration_seconds":null,"slots":slot("groups")},
+            "workspace_other_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],
+                "max_duration_seconds":null,"slots":slot("groups_other")},
+            "directory_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],
+                "max_duration_seconds":null,"slots":{"google_workspace":{"kind":"workspace_directory",
+                    "allowed_resources":[{"id":"directory","revision":1}],
+                    "actions":["workspace_directory_user_path"],
+                    "limits":{"max_request_bytes":32_768,"max_response_bytes":65_537,
+                        "max_calls_per_invocation":4},"budgets":[]}}}},
+        "budgets":{"workspace_budget":{"revision":1,"scope":"app","period_seconds":3600,
+            "limits":{"calls":1000,"bytes":100_000_000,"concurrency":1}}}});
+    let attachment = |policy: &str, operation: &str, resource: &str| {
+        json!({"policy":{"id":policy,"revision":1},"operation":operation,
+            "bindings":{"google_workspace":{"id":resource,"revision":1}}})
+    };
+    let instance = json!({"installation":"workspaceco","environment":"test","resources":catalog,
+        "apps":{"app":{"artifact":artifact_directory,"readers":[ACTOR],"writers":[ACTOR],"authority":policy,
+            "resource_policies":[
+                attachment("workspace_read", "lookup", "groups"),
+                attachment("workspace_other_read", "lookup_other", "groups_other"),
+                attachment("directory_read", "directory", "directory")]}}});
+    fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
+    let contract = serde_json::from_value(json!({
+        "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+        "roc_version":"google-workspace-test","worker_digest":"google-workspace-test",
+        "schema_digest":"google-workspace-test",
+        "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+        "operations":[{"name":"lookup","kind":"query","input_type":"input","output_type":"output"},
+            {"name":"lookup_other","kind":"query","input_type":"input","output_type":"output"},
+            {"name":"directory","kind":"query","input_type":"input","output_type":"output"}],
+        "sources":{},"admission":"local-spike-only"}))?;
+    let inputs = crate::host_inputs::Inputs {
+        clock: Arc::new(crate::host_inputs::simulation::VirtualClock(
+            std::sync::Mutex::new((
+                std::time::Duration::from_secs(NOW as u64),
+                std::time::Duration::ZERO,
+            )),
+        )),
+        ..Default::default()
+    };
+    let runtime = Runtime {
+        integrations: Arc::new(integration_host::Host::local(&instance_path)?),
+        app_calls: None,
+        credentials: None,
+        connections: None,
+        rolling: false,
+        restore_registry_selector: None,
+        executor_generation: Arc::new(std::sync::OnceLock::new()),
+        instance_digest: crate::digest(b"nonrolling test instance"),
+        native_database: None,
+        instance_path,
+        app: "app".into(),
+        db: state.join("app.sqlite"),
+        scope: SCOPE.into(),
+        hosted_domain: None,
+        artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
+            "google-workspace-test".into(),
+            artifact_directory,
+            contract,
+        )),
+        host: Arc::new(crate::host::System(inputs.clone())),
+        inputs,
+    };
+    let runtime = if setup.simulated {
+        runtime.with_integrations(integration_host::Host::simulated_providers_with_app_calls(
+            &state.join("app.sqlite"),
+            SCOPE,
+        ))
+    } else {
+        runtime
+    };
+    runtime.initialize()?;
+    crate::integrations::simulated::seed(
+        runtime.db(),
+        SCOPE,
+        &crate::integrations::simulated::SimulatedFixture {
+            slack: crate::integrations::simulated::SlackWorld {
+                workspace_id: "TWORKSPACE".into(),
+                ..Default::default()
+            },
+            snowflake: crate::integrations::simulated::SnowflakeWorld {
+                account: "workspace-test".into(),
+                ..Default::default()
+            },
+            openai: crate::integrations::simulated::OpenAiWorld {
+                project_id: "proj_workspace".into(),
+                model: "model-workspace".into(),
+                max_input_tokens: 100_000,
+                ..Default::default()
+            },
+            google_workspace: crate::integrations::simulated::google_workspace_development_fixture(
+            ),
+            ..Default::default()
+        },
+    )?;
+    Ok((directory, runtime))
+}
+
+/// Bind the operation's resource and authorize one capability, as preparation
+/// does, without reserving or dispatching anything.
+fn authorize(
+    runtime: &Runtime,
+    operation: &str,
+    invocation: &str,
+    capability: &str,
+    data: impl FnOnce(&str) -> Value,
+) -> Result<(
+    Request,
+    Instruction,
+    crate::capabilities::Authorized,
+    rusqlite::Connection,
+)> {
+    runtime.accept(operation, ACTOR, invocation, &json!({}), NOW)?;
+    let mut connection = open(runtime.db())?;
+    let request;
+    let instruction;
+    let authorized;
+    {
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        request = Request {
+            operation: operation.into(),
+            input: "{}".into(),
+            context: crate::store::invocation_context(&tx, invocation)?,
+            observations: vec![],
+        };
+        let bound = crate::resources::host_operation(
+            &tx,
+            runtime,
+            &request,
+            &Instruction {
+                kind: "observe".into(),
+                model: crate::resources::BIND.into(),
+                data: json!({"binding":"google_workspace","invocation":invocation}).to_string(),
+                ..Default::default()
+            },
+        )?
+        .context("google workspace resource binding")?;
+        let handle = serde_json::from_str::<Value>(&bound)?["token"]
+            .as_str()
+            .context("opaque handle")?
+            .to_owned();
+        instruction = Instruction {
+            kind: "observe".into(),
+            model: capability.into(),
+            data: data(&handle).to_string(),
+            ..Default::default()
+        };
+        let active = authority_state::current(&tx)?;
+        authorized = crate::capabilities::authorized(
+            &tx,
+            runtime,
+            &request,
+            &instruction,
+            active.policy()?,
+            "ob_google_workspace",
+        )?;
+        tx.commit()?;
+    }
+    Ok((request, instruction, authorized, connection))
+}
+
+struct Admitted {
+    result: std::result::Result<String, String>,
+    usage: crate::resources::ProviderUsage,
+    reserved: crate::resources::ProviderQuote,
+    correlation: Vec<crate::integrations::ExchangeCorrelation>,
+}
+
+/// One observation through admission, reservation, dispatch and settlement.
+fn admitted(
+    runtime: &Runtime,
+    operation: &str,
+    invocation: &str,
+    capability: &str,
+    data: impl FnOnce(&str) -> Value,
+) -> Result<Admitted> {
+    let (request, instruction, capability, mut connection) =
+        authorize(runtime, operation, invocation, capability, data)?;
+    let resource = capability.resource().clone();
+    let reserved = capability.quote();
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    crate::resources::record_use(&tx, invocation, &resource)?;
+    let reservation = crate::resources::reserve_in(
+        &tx,
+        runtime,
+        &request,
+        &instruction,
+        invocation,
+        &resource,
+        reserved,
+    )?;
+    tx.commit()?;
+    let outcome = crate::capabilities::observe(runtime, capability, invocation);
+    let result = outcome.result.and_then(|result| {
+        crate::resources::validate_result(&resource, &result)?;
+        Ok(result)
+    });
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    crate::resources::record_correlation_in(&tx, invocation, &outcome.correlation)?;
+    crate::resources::settle_in(&tx, &reservation, outcome.usage)?;
+    tx.commit()?;
+    Ok(Admitted {
+        result: result.map_err(|error| crate::error::observation_code(&error)),
+        usage: outcome.usage,
+        reserved,
+        correlation: outcome.correlation,
+    })
+}
+
+fn group(handle: &str) -> Value {
+    json!({"handle":handle,"group_email":"engineering@synthetic.example"})
+}
+
+fn calls(runtime: &Runtime) -> Result<Vec<String>> {
+    crate::integrations::simulated::update_google_workspace(runtime.db(), SCOPE, |state| {
+        Ok(state.calls.clone())
+    })
+}
+
+/// Settled budget usage by unit, and whatever is still held.
+fn budget(runtime: &Runtime) -> Result<BTreeMap<String, (i64, i64)>> {
+    let connection = open(runtime.db())?;
+    let mut query = connection.prepare("SELECT unit,used,held FROM day2_budget_accounts")?;
+    let rows = query
+        .query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))))?
+        .collect::<rusqlite::Result<BTreeMap<String, (i64, i64)>>>()?;
+    Ok(rows)
+}
+
+#[test]
+fn a_read_reserves_its_envelope_and_settles_exactly_what_it_measured() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup::default())?;
+    let read = admitted(&runtime, "lookup", "group-read", GROUP, group)?;
+    assert_eq!(
+        read.result,
+        Ok(
+            r#"{"Found":{"email":"engineering@synthetic.example","id":"group-engineering","name":"Engineering"}}"#
+                .into()
+        )
+    );
+    assert!(read.correlation.is_empty());
+    assert_eq!(
+        read.reserved.request_bytes,
+        crate::google_workspace::MAX_ACTION_REQUEST_BYTES
+    );
+    // Metadata, IAM and the Directory: the IAM body and the Directory query are
+    // the only request payload, and every response byte is counted.
+    assert_eq!(read.usage.calls, 3);
+    let iam = crate::google_auth::direct_body(&[crate::google_workspace::GROUP_READ_SCOPE])?;
+    assert_eq!(
+        read.usage.request_bytes,
+        (iam.len() + "fields=id%2Cemail%2Cname".len()) as u64
+    );
+    assert!(
+        read.usage.response_bytes > 0 && read.usage.response_bytes < read.reserved.response_bytes
+    );
+    assert!(read.usage.known && read.usage.dispatched);
+    assert_eq!(calls(&runtime)?.len(), 3);
+    let settled = budget(&runtime)?;
+    assert_eq!(settled["calls"], (3, 0));
+    assert_eq!(
+        settled["bytes"],
+        (
+            (read.usage.request_bytes + read.usage.response_bytes) as i64,
+            0
+        )
+    );
+
+    let membership = admitted(&runtime, "lookup", "member-read", MEMBER, |handle| {
+        json!({"handle":handle,"group_email":"engineering@synthetic.example",
+            "member_email":"grace@synthetic.example"})
+    })?;
+    assert_eq!(membership.result, Ok(r#""Member""#.into()));
+    assert_eq!(membership.usage.calls, 4);
+    assert_eq!(budget(&runtime)?["calls"], (7, 0));
+    Ok(())
+}
+
+#[test]
+fn a_failed_read_correlates_only_its_final_phase_status_and_retry_after() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup::default())?;
+    crate::integrations::simulated::schedule_faults(
+        runtime.db(),
+        SCOPE,
+        crate::integrations::simulated::GOOGLE_WORKSPACE_WORLD,
+        vec![ScheduledFault {
+            endpoint: GOOGLE_GROUP_ENDPOINT.into(),
+            remaining: 1,
+            fault: SimulatedFault::RateLimited,
+        }],
+    )?;
+    let failed = admitted(&runtime, "lookup", "rate-limited", GROUP, group)?;
+    assert_eq!(failed.result, Err("google_workspace_rate_limited".into()));
+    assert_eq!(
+        serde_json::to_value(&failed.correlation)?,
+        json!([{"phase":"google_workspace_directory","http_status":429,"request_id":null,
+            "statement_handle":null,"retry_after_seconds":30}])
+    );
+    // The refused exchange was still provider traffic, and is settled as such.
+    assert_eq!(failed.usage.calls, 3);
+    assert!(failed.usage.known && failed.usage.response_bytes > 0);
+    assert_eq!(budget(&runtime)?["calls"], (3, 0));
+    Ok(())
+}
+
+#[test]
+fn a_grant_on_another_provider_or_connection_never_reaches_the_directory() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup::default())?;
+    // A Workspace Directory grant cannot carry a Google Workspace action.
+    let refused = authorize(&runtime, "directory", "other-provider", GROUP, group)
+        .err()
+        .context("another provider's grant was accepted")?;
+    assert!(
+        matches!(
+            refused.downcast_ref::<crate::error::Failure>(),
+            Some(crate::error::Failure::ResourceForbidden)
+        ),
+        "{refused:#}"
+    );
+    assert!(calls(&runtime)?.is_empty());
+    // A grant through a connection naming another service account is refused
+    // by IAM before any Directory request.
+    let other = admitted(&runtime, "lookup_other", "other-connection", GROUP, group)?;
+    assert_eq!(
+        other.result,
+        Err("google_workspace_authentication_failed".into())
+    );
+    let served = calls(&runtime)?;
+    assert_eq!(served.len(), 2);
+    assert!(!served.iter().any(|call| call.contains("directory")));
+    // Membership across domains is refused before anything is reserved.
+    let cross = authorize(&runtime, "lookup", "cross-domain", MEMBER, |handle| {
+        json!({"handle":handle,"group_email":"engineering@synthetic.example",
+            "member_email":"ada@other.example"})
+    })
+    .err()
+    .context("a member outside the group's domain was accepted")?;
+    assert!(matches!(
+        cross.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceForbidden)
+    ));
+    Ok(())
+}
+
+#[test]
+fn limits_below_the_envelope_are_refused_before_any_reservation() -> Result<()> {
+    for setup in [
+        Setup {
+            max_request_bytes: crate::google_workspace::MAX_ACTION_REQUEST_BYTES - 1,
+            ..Setup::default()
+        },
+        Setup {
+            max_response_bytes: crate::google_workspace::MAX_RESPONSE_BYTES as u64 - 1,
+            ..Setup::default()
+        },
+    ] {
+        let (_directory, runtime) = runtime(setup)?;
+        let refused = authorize(&runtime, "lookup", "short-grant", GROUP, group)
+            .err()
+            .context("a grant below the envelope was accepted")?;
+        assert!(matches!(
+            refused.downcast_ref::<crate::error::Failure>(),
+            Some(crate::error::Failure::ResourceForbidden)
+        ));
+        assert!(calls(&runtime)?.is_empty());
+        assert!(budget(&runtime)?.is_empty(), "nothing was reserved");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_source_is_frozen_at_authorization_and_a_simulated_host_never_goes_native() -> Result<()> {
+    let (_directory, simulated) = runtime(Setup::default())?;
+    let (.., authorized, _) = authorize(&simulated, "lookup", "simulated-source", GROUP, group)?;
+    assert_eq!(
+        authorized
+            .google_workspace_plan()
+            .context("a Google Workspace plan")?
+            .source(),
+        crate::google_workspace::Source::Simulated
+    );
+    // Served by the world: every exchange is in its request log.
+    let read = admitted(&simulated, "lookup", "simulated-read", GROUP, group)?;
+    assert!(read.result.is_ok());
+    assert_eq!(calls(&simulated)?.len(), 3);
+
+    // A host without simulated providers freezes the native source; nothing
+    // is dispatched here, and the seeded world is never a fallback.
+    let (_directory, native) = runtime(Setup {
+        simulated: false,
+        ..Setup::default()
+    })?;
+    let (.., authorized, _) = authorize(&native, "lookup", "native-source", GROUP, group)?;
+    assert_eq!(
+        authorized
+            .google_workspace_plan()
+            .context("a Google Workspace plan")?
+            .source(),
+        crate::google_workspace::Source::Native
+    );
+    assert!(calls(&native)?.is_empty());
+    Ok(())
+}
