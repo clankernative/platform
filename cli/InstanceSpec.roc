@@ -26,9 +26,11 @@ InstanceSpec :: {
 	platform_repository = "github.com/clankernative/platform"
 
 	## The job context of <org>/app-ci's required org-scoped workflow. Gitea posts
-	## it as "<org>/app-ci: day2 / verification (pull_request)" and counts only a
-	## status its Actions user produced for that source workflow, so neither an app
-	## workflow nor an API caller can satisfy it.
+	## it as "<org>/app-ci: day2 / verification (pull_request)". The derived name is
+	## the required pattern of that workflow's org registration, not a branch
+	## protection context: Gitea then counts only a status its Actions user produced
+	## for that source workflow, so neither an app workflow nor an API caller can
+	## satisfy it. The gate applies to any branch that has a protection rule.
 	required_context = "day2 / verification (pull_request)"
 
 	App : {
@@ -279,6 +281,11 @@ checked = |raw| {
 		return Err(BadJson("apps must be sorted by id"))
 	}
 	apps = check_apps(app_pairs, people, [])?
+	# A Chrome extension ID is one global identity: one key, one update URL, one
+	# Admin policy entry. Two apps can never pin the same one.
+	if !ascending(pinned_extensions(apps, []).sort_with(Names.order)) {
+		return Err(BadJson("apps must not pin the same Chrome extension ID"))
+	}
 	Ok(
 		InstanceSpec.{
 			installation,
@@ -395,6 +402,15 @@ strings = |nodes, at, done| match nodes {
 	[node, .. as rest] => {
 		value = node.string().map_err(|_| BadJson("${at} must contain only strings"))?
 		strings(rest, at, done.append(value))
+	}
+}
+
+pinned_extensions : List(SpecApp), List(Str) -> List(Str)
+pinned_extensions = |remaining, done| match remaining {
+	[] => done
+	[bound, .. as rest] => match bound.extension {
+		Pinned(pinned) => pinned_extensions(rest, done.append(pinned))
+		NoExtension => pinned_extensions(rest, done)
 	}
 }
 
@@ -620,6 +636,7 @@ expect rejects("\"schedules\":\"enabled\"", "\"schedules\":\"disabled\"")
 expect rejects(",\"schedules\":\"enabled\"", "")
 expect rejects("\"extension\":null", "\"extension\":\"\"")
 expect rejects("\"extension\":null,", "")
+expect rejects("\"extension\":null", "\"extension\":\"jldmikbinomhomcbmeppagennfohakni\"")
 expect rejects("jldmikbinomhomcbmeppagennfohakni", "jldmikbinomhomcbmeppagennfohakn")
 expect rejects("jldmikbinomhomcbmeppagennfohakni", "qldmikbinomhomcbmeppagennfohakni")
 expect rejects("jldmikbinomhomcbmeppagennfohakni", "JLDMIKBINOMHOMCBMEPPAGENNFOHAKNI")

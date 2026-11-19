@@ -1505,6 +1505,11 @@ mod tests {
             ),
             (r#""extension":null"#, r#""extension":"""#),
             (r#""extension":null"#, r#""extension":false"#),
+            // An extension ID is one global identity, so two apps can't pin it.
+            (
+                r#""extension":null"#,
+                r#""extension":"jldmikbinomhomcbmeppagennfohakni""#,
+            ),
             // Every per-app field is required.
             (r#""extension":null,"#, ""),
             (r#","schedules":"enabled""#, ""),
