@@ -90,7 +90,11 @@ such event, derives its owner (the organizer, or for a group or resource
 calendar the creator, when that is a person in the resource's `email_domain`),
 and lists that owner's Meet conference records for the event with their
 recordings, smart notes and transcripts, delegated with Meet's read scope
-alone. The token flow is
+alone. `google_workspace.share_artifact.v1`, the provider's only write, gives
+one in-grant group `reader` on the file of one of that event's artifacts, as
+the same owner with Meet's read scope and `drive`; it lists the file's
+permissions before it creates one, so a retry after an unknown outcome
+reconciles instead of creating twice. The token flow is
 the shared `google_auth` module Workspace Directory also uses; the adapter reaches
 Google through a request-level port, and the simulated port answers the same
 requests from `google_workspace.simulated.sqlite`. See

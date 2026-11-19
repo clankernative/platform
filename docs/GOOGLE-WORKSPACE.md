@@ -109,7 +109,7 @@ calendar at a time:
 - To take a calendar out of play, remove the reader's rule. Its next read is
   `NotShared`.
 
-Meet runs as **the owner of a calendar event**, and Drive will too (step 4).
+Meet and Drive run as **the owner of a calendar event**.
 The adapter derives the owner from the event it reads as `calendar_reader`,
 and the owner is always the event's **creator**:
 
@@ -165,7 +165,7 @@ Google's description. A refused reader stays
 | `google_workspace.calendar_events.v1` | read | `calendar_reader` | `calendar.readonly`, `calendar.acls.readonly` |
 | `google_workspace.calendar_event.v1` | read | `calendar_reader` | `calendar.readonly`, `calendar.acls.readonly` |
 | `google_workspace.event_conferences.v1` | read | `calendar_reader`, then the event's owner | `calendar.readonly`, `calendar.acls.readonly`; then `meetings.space.readonly` |
-| `google_workspace.share_artifact.v1` | write | `calendar_reader`, then the event's owner | `calendar.readonly calendar.acls.readonly`; `meetings.space.readonly drive` |
+| `google_workspace.share_artifact.v1` | write | `calendar_reader`, then the event's owner | `calendar.readonly`, `calendar.acls.readonly`; then `meetings.space.readonly`, `drive` |
 
 Every request carries `prettyPrint=false`, Directory included, and nothing in
 its route or query comes from anywhere but the reviewed constants and the
@@ -280,13 +280,57 @@ validated inputs.
   deletes a record 30 days after it ends), and the action fails with
   `google_workspace_conference_record_gone`: reading the event again lists its
   records as they are now.
-- **share_artifact** — for one event, one artifact name and one group: the
-  adapter re-reads the event, re-derives its owner, confirms through Meet that
-  the artifact belongs to one of that event's conference records and has
-  `file_generated`, lists the file's permissions as the owner and, only if the
-  group does not already hold reader or better, creates
-  `{type: group, role: reader}` with `sendNotificationEmail=false`. `Shared`,
-  `AlreadyShared`, `NotReady`, `NotFound` or `NoOwner`.
+- **share_artifact** — the only write, `(write, data)` in the registry and
+  never destroying: `{calendar_id, event_id, artifact, group_email}`.
+  `artifact` is one exact Meet name,
+  `conferenceRecords/{r}/{recordings|smartNotes|transcripts}/{a}`, checked
+  with the `event_conferences` name rules. `group_email` must be in a grantee
+  domain or the action is refused before anything is reserved. It is
+  admitted only as an effect of a command (`Api.external`), never as an
+  observation. Every part is read again; nothing an earlier read returned is
+  trusted:
+  1. As `calendar_reader`, the reader's rule and `events.get`, then the
+     owner, exactly as `event_conferences` derives them: `NotShared`,
+     `NotFound`, `AllDay`, `NoMeeting` and `NoOwner` mean what they mean
+     there.
+  2. One token for the owner with `meetings.space.readonly` and `drive`; a
+     refused owner is `google_workspace_owner_refused`.
+  3. The event's conference records with the same pinned filter, window and
+     paging. Records in two spaces are `Conflict`. The artifact's
+     `conferenceRecords/{r}` must be one of them, or the outcome is
+     `NotFound`: an artifact of another event is never shared.
+  4. `GET meet.googleapis.com/v2/{artifact}?fields=name,state,driveDestination(file)`
+     (or `docsDestination(document)`), whose name must repeat exactly. Only
+     `FILE_GENERATED` with a bare file or document ID goes on; anything else
+     is `NotReady`, and a `404` is `NotFound`.
+  5. `GET www.googleapis.com/drive/v3/files/{id}/permissions?supportsAllDrives=true&pageSize=100&fields=permissions(id,type,role,emailAddress,deleted),nextPageToken`,
+     up to two pages. A live (`deleted` false) `group` permission whose
+     address equals the group ignoring ASCII case (as Google treats
+     addresses, and as the ACL read compares them) with any role from
+     `reader` up (`reader`, `commenter`, `writer`, `fileOrganizer`,
+     `organizer`, `owner`) is `AlreadyShared {permission_id}`. A third page
+     is `google_workspace_permission_page_budget`: never an answer from part
+     of the list and never a create on top of one. A `404` is `NotFound`.
+  6. Only then
+     `POST …/files/{id}/permissions?supportsAllDrives=true&sendNotificationEmail=false&fields=id,type,role,emailAddress`
+     with exactly `{"type":"group","role":"reader","emailAddress":"{group}"}`.
+     The reply must echo a group, `reader` and the group's address:
+     `Shared {permission_id}`.
+
+  How the create's reply is read:
+  - `200` echoing the request is `Shared`.
+  - `409` lists again and answers `AlreadyShared`.
+  - `400 invalidSharingRequest` is the outcome `SharingRefused`, for a group
+    Drive does not know or a change the organization's sharing policy
+    forbids. It is an outcome because Drive answered definitely and nothing
+    was created; the application decides what to do.
+  - `404` is `NotFound`.
+  - Any other `400`, `401`, `403` (classified by reason, below) or `429` is a
+    definite failure: nothing was created.
+  - A lost reply, a `5xx`, an oversized or unreadable body, a `200` that
+    does not echo the request, or a `409` the second list cannot confirm is
+    `google_workspace_share_outcome_unknown`. See
+    [Retries and unknown outcomes](#retries-and-unknown-outcomes).
 
 There is no revoke, no other role, no user or domain grantee, no file the Meet
 API did not name, and no Drive search. Nothing is ever deleted.
@@ -326,6 +370,15 @@ journaled, but it must be read whole:
 - Google's own maximum of 250 per page could reach 80,054 bytes, so the
   adapter asks for 100.
 
+`share_artifact` reserves both delegations (six exchanges), the reader's rule
+and the event, two record pages, the artifact, two permission pages, the one
+create, and two more permission pages for a `409`'s second list: sixteen in
+all. Its posted payload, the two `signJwt` bodies, two token forms, every
+query and the share body, fits the same 32 KiB request reservation as every
+other action. A permission page holds at most 100 entries of a 128-character
+ID, a role, a type and a 254-character address, well inside the 64 KiB
+response bound.
+
 Four pages, one reserved call each, cover 400 rules. A test builds the maximal
 page against the response bound, and serves four of them through the
 simulation.
@@ -350,15 +403,33 @@ builds it and passes it through `bounded_observation`.
 
 ## Retries and unknown outcomes
 
-Reads are side-effect free. The rest of this section is the planned contract
-for `share_artifact` (step 4). `share_artifact` is reconcilable: it always lists
-before it creates, and a duplicate creation (Google answers `409` or returns the
-existing permission) re-lists. A share whose response was lost is therefore
-safe to run again with the same effect identity, and the second run answers
-`AlreadyShared`. This is verified reconciliation in the sense of
-[COMMAND-RUNTIME.md](COMMAND-RUNTIME.md#rust-enforcement-boundaries), not an
-idempotency key: a group removed by someone else between the two runs is shared
-again, which is the intended outcome.
+Reads are side-effect free.
+
+`share_artifact` is reconcilable rather than idempotent: Drive has no
+idempotency key for permissions, so it always lists before it creates.
+
+- **Unknown outcomes.** Once the create is sent, anything but a definite
+  answer is `google_workspace_share_outcome_unknown`, and its usage is
+  reported as not known. As for every write the platform cannot settle, the
+  whole reservation stays held: it is never settled as a definite failure.
+  That covers a lost reply, a `5xx`, an oversized or unreadable body, a reply
+  that does not echo the request, and a `409` the second list cannot confirm.
+- **Retries.** The capability is declared retry-safe the platform's way:
+  `Authorized::retries_are_idempotent` names it, so the effect executor admits
+  a second attempt of the same effect after an unknown outcome. That attempt
+  lists the file's permissions, finds the first one and answers
+  `AlreadyShared`; it never creates a second permission. Tests show this for
+  a reply lost after Drive created the permission, in the pipeline and
+  through the host.
+- **What reconciliation does not promise.** It is verified reconciliation in
+  the sense of [COMMAND-RUNTIME.md](COMMAND-RUNTIME.md#rust-enforcement-boundaries),
+  not an idempotency key: a group removed by someone else between two runs is
+  shared again, which is the intended outcome.
+- **Duplicate creates.** Drive's documentation does not say what creating a
+  permission that already exists returns. The simulation answers the existing
+  permission with `200`, which the adapter reports as `Shared` with that ID.
+  Since the adapter lists first, that only arises in a race. The real
+  behaviour is a live qualification item.
 
 ## Bounds
 
@@ -375,8 +446,8 @@ or, beside Meet's `error.status`, the `reason` of an `error.details[]` entry
 whose `@type` is `google.rpc.ErrorInfo`; no other detail's fields are read.
 
 - `rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded`,
-  `dailyLimitExceeded`, `RATE_LIMIT_EXCEEDED` or `RESOURCE_QUOTA_EXCEEDED` is
-  `rate_limited`;
+  `dailyLimitExceeded`, Drive's `sharingRateLimitExceeded`,
+  `RATE_LIMIT_EXCEEDED` or `RESOURCE_QUOTA_EXCEEDED` is `rate_limited`;
 - any other reason, such as a usage limit or a disabled API, or a status with
   no reason (`PERMISSION_DENIED`), is `denied`;
 - a body with neither is `response_invalid`.
@@ -413,8 +484,9 @@ It holds:
 - Meet spaces, each with its meeting code and owner;
 - conference records with start and end times, a rejoin being another record
   in the same space, and their recordings, smart notes and transcripts;
-- the Drive files and Docs documents Meet generated (step 4 adds their
-  permissions).
+- the Drive files and Docs documents Meet generated, each with its owner and
+  permissions, the owner's own first;
+- the domains Drive may share with, when the organization restricts sharing.
 
 An artifact advances `STARTED` → `ENDED` → `FILE_GENERATED` through
 `google_meet_advance`, a scenario step. Generating it saves its Drive file or
@@ -492,12 +564,26 @@ Host tests run the actions through admission, reservation and settlement.
 
 Planned, by delivery step:
 
-- Step 4: Drive files and permissions, a lost-reply fault after a permission
-  was created, and a seeded campaign of meetings, recordings, rejoins, faults
-  and duplicate deliveries against an independent model. That model checks
-  that every share lands only on an artifact of the named event, to a group in
-  `grantee_domains`, as reader and as the event's owner, and that a retried
-  share never creates a second permission.
+Drive is served at its two permission routes and Meet at the single-artifact
+route the share reads:
+
+- Only the file's owner can list or change its permissions; a file the
+  subject does not own is `404` (`writersCanShare` is not modelled).
+- A create admits exactly the reviewed query and body: a group as `reader`.
+- A group the world does not know, or one outside the trusted domains when
+  sharing is restricted, is `400 invalidSharingRequest`.
+- A group that already has a permission gets that permission back, unchanged,
+  with `200`.
+- Each created permission records the subject that created it, for
+  invariants; the wire never carries it.
+- The `ReplyLost` fault serves a request, so a create lands, and drops its
+  reply, as a lost connection after Google acted would.
+
+Planned: a seeded campaign of meetings, recordings, rejoins, faults and
+duplicate deliveries against an independent model. That model checks that
+every share lands only on an artifact of the named event, to a group in
+`grantee_domains`, as reader and as the event's owner, and that a retried share
+never creates a second permission.
 
 ## Live qualification
 
@@ -558,12 +644,24 @@ What the simulation assumes and only Google can settle:
       each: which reasons come with `403` and which with `429`.
 - [ ] Meet ID lengths and character sets for records, spaces and artifacts,
       against the 128-character bound.
+- [ ] Drive's answer to creating a permission a group already has: `200` with
+      the existing permission, as simulated, a `409`, or an error.
+- [ ] Drive's refusal when the organization restricts sharing to trusted
+      domains: `400 invalidSharingRequest`, as simulated, or a `403` with
+      which reason. Also its answer for a group address with no Google
+      account.
+- [ ] Permission visibility: who besides the file's owner can list a Meet
+      recording's permissions, and whether a non-owner's create is
+      `403 insufficientFilePermissions`.
+- [ ] Shared-drive files: whether Meet ever saves into a shared drive, and the
+      permissions a shared drive adds or inherits.
+- [ ] Permission propagation: how soon after a create the permission appears
+      in the list, which matters to a retry's reconciliation.
 
 ## Status
 
-`group`, `group_member`, `calendar`, `calendar_events`, `calendar_event` and
-`event_conferences` are implemented; `share_artifact` is the planned contract
-and is not yet declared in the registry. Addresses are
+`group`, `group_member`, `calendar`, `calendar_events`, `calendar_event`,
+`event_conferences` and `share_artifact` are implemented. Addresses are
 exact lowercase ASCII and are never normalised on the way in, so an application
 lowercases what it stores.
 
@@ -575,7 +673,7 @@ every ACL page up to the ceiling, nine in all. `event_conferences` reserves
 both delegations (six exchanges), the reader's rule and the event, two pages
 of records, and three artifact lists for each of the five records the ceiling
 admits: twenty-five in all, so its grant's `max_calls_per_invocation` must be
-at least 25.
+at least 25. `share_artifact` reserves sixteen (see Bounds).
 Each reserves 32 KiB of request payload and, for each response, 16 KiB
 (authentication and Directory) or 64 KiB (Calendar) plus a probe byte, and
 settles what it actually used. Its grant must admit the whole envelope:
@@ -591,7 +689,8 @@ role, or an API is off), `rate_limited` (a `429`, or a `403` with a rate or
 quota reason), `unavailable`,
 `request_refused`, `response_invalid`, `response_too_large`,
 `group_outside_grant`, `acl_page_budget`, `owner_refused`,
-`conference_record_budget`, `artifact_budget` or `conference_record_gone`. Malformed application input is
+`conference_record_budget`, `artifact_budget`, `conference_record_gone`,
+`permission_page_budget` or `share_outcome_unknown`. Malformed application input is
 `google_workspace_request_invalid`, and an address outside the grant is
 refused as a resource authorization; neither reaches the network.
 
@@ -607,5 +706,6 @@ records real ones (`crates/day2/fixtures/provider-responses/GOOGLE-WORKSPACE-PRO
    its own `writer` or `owner` rule. (Done.)
 3. `event_conferences`, with `email_domain` on the target and impersonation of
    the event's derived owner. (Done.)
-4. `share_artifact`, with reconciliation and the saboteur.
+4. `share_artifact`, reconciled by listing before it creates, with the
+   saboteurs. (Done.)
 5. Live qualification.
