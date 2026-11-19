@@ -122,7 +122,10 @@ Use `Handler.prepared(prepare, handle)` and return
 `Audit.history({ operations: ["links.edit"], after: input.after, limit: input.limit })`
 from `prepare`. The handle phase receives `CollectionPage(Audit.Entry)` and can
 project it into the app's own output or join current rows through ordinary model
-grants. The operation needs `"observations": ["audit.history.v1"]` in its policy.
+grants. Declare the read on the definition with `.observes("audit.history.v1")`;
+build verification grants it only when declared. The operation's company policy
+also needs `"observations": ["audit.history.v1"]` until policies are rendered
+from declarations.
 The host rechecks this grant before reading and before using a cached observation.
 No provider, resource binding or platform owner role is needed.
 

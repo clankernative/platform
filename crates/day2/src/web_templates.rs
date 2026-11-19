@@ -2774,6 +2774,7 @@ mod tests {
             indexes: vec![],
             rollups: vec![],
             domains: BTreeMap::new(),
+            owners: Default::default(),
         };
         let routes =
             crate::routing::Catalog::compile(std::slice::from_ref(&page), &operations, &schema)?;

@@ -10,6 +10,7 @@ import DirectoryUserTypes
 # supplies the path; no app row or employee profile is manufactured.
 DirectoryUser :: [].{
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.prepared(prepare, handle),
 		contract,
 		verification: { input: |_snapshot, _seed| Ok({}), check: verify_result },

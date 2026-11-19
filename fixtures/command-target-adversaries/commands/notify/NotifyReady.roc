@@ -17,16 +17,14 @@ NotifyReady :: [].{
 
 	Decision : { recipient : Notifications.Recipient, topic : Str, body : Str, ready : Bool }
 
-	definition = Api.command({
+	definition = Api.internal_command({
 		handler: Handler.effects(prepare, decide, deliver, complete),
 		contract,
-		execution: Api.internal(
-			Api.edit(
-				Data.reports,
-				Selectors.notify_input_report_id,
-				Selectors.notify_input_expected_version,
-				[Notifications.send_effect],
-			),
+		execution: Api.edit(
+			Data.reports,
+			Selectors.notify_input_report_id,
+			Selectors.notify_input_expected_version,
+			[Notifications.send_effect],
 		),
 		verification: { input: verify_input, check: verify_result },
 	})

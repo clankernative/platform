@@ -27,6 +27,7 @@ PublishNotification :: [].{
 	Decision : { row : Model.Entity(Models.Publication), resource : Resource, dispatch : Bool }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.effects(prepare, decide, deliver, complete),
 		contract,
 		execution: Api.current_state([

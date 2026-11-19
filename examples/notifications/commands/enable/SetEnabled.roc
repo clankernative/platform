@@ -13,6 +13,7 @@ import SetEnabledTypes
 
 SetEnabled :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.prepared(prepare, handle),
 		contract,
 		execution: Api.current_state([

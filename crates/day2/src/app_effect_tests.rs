@@ -28,6 +28,7 @@ fn fixture(db: &Connection) -> Result<Schema> {
         rollups: Vec::new(),
         indexes: vec![],
         domains: BTreeMap::new(),
+        owners: Default::default(),
     };
     for ddl in schema.ddl()? {
         db.execute_batch(&ddl)?;

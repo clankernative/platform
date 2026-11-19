@@ -22,6 +22,7 @@ CreatePersonal :: [].{
 	}
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.interactive(handle),
 		contract: {
 			title: "Create a selected personal credential",

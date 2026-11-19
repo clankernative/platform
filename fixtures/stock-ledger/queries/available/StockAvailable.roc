@@ -7,9 +7,12 @@ import Stock
 
 StockAvailable :: [].{
 	definition =
-		Api.query(
-			{ handler: Handler.local(handle), contract, verification: { input: verify_input, check: verify_result } },
-		)
+		Api.query({
+			audience: Employees,
+			handler: Handler.local(handle),
+			contract,
+			verification: { input: verify_input, check: verify_result },
+		})
 			.cross_app({ version: 1 })
 
 	handle : Context, StockAvailableTypes.Input -> Query(StockAvailableTypes.Output)

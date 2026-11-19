@@ -6,6 +6,7 @@ import PingTypes
 
 Ping :: [].{
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract: {
 			title: "Connection declaration conformance",

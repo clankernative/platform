@@ -7,6 +7,7 @@ import InspectIntentTypes
 
 InspectIntent :: [].{
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract: {
 			title: "Calendar canary intent",

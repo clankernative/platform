@@ -9,9 +9,12 @@ import LinkScenarios
 
 GetLink :: [].{
 	definition =
-		Api.query(
-			{ handler: Handler.local(handle), contract, verification: { input: verify_input, check: verify_result } },
-		)
+		Api.query({
+			audience: Employees,
+			handler: Handler.local(handle),
+			contract,
+			verification: { input: verify_input, check: verify_result },
+		})
 
 	handle : Context, GetLinkTypes.Input -> Query(LinkView.Value)
 	handle = |_context, input| Query.get(Data.links, input.link_id).map(LinkView.from_row)

@@ -16,6 +16,7 @@ import SaveConfigurationTypes
 
 SaveConfiguration :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.prepared(prepare, handle),
 		contract,
 		execution: Api.current_state([

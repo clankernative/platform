@@ -800,6 +800,7 @@ fn remaining_fixture(step: &str) -> bool {
         "build-reports",
         "build-reports-probe",
         "build-reports-search",
+        "build-audiences",
     ]
     .contains(&step)
 }
@@ -1588,7 +1589,7 @@ mod tests {
     fn preparation_join_rejects_foreign_identity_and_incomplete_or_swapped_parts() -> Result<()> {
         let complete = combine_parts(sample_parts()?, &sample_identity())?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 27);
+        assert_eq!(complete.fixtures.len(), 28);
         for fixture in complete.fixtures.keys() {
             let mut parts = sample_parts()?;
             let removed: usize = parts
@@ -1674,7 +1675,7 @@ mod tests {
                     .all(|step| part_steps("inputs").unwrap().contains(step))
             );
         }
-        assert_eq!(part_steps("fixtures")?.len(), 19);
+        assert_eq!(part_steps("fixtures")?.len(), 20);
         assert!(!part_steps("inputs")?.contains("lint"));
         assert_eq!(
             part_steps("tests")?,
@@ -2270,7 +2271,7 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            27
+            28
         );
         assert!(steps.contains("build-lifecycle"));
         assert!(steps.contains("build-reports-search"));

@@ -76,6 +76,7 @@ fn exact(specs: Vec<Spec>) -> Result<Catalog> {
             foreign_keys: Vec::new(),
             rollups: Vec::new(),
             indexes: vec![],
+            owners: Default::default(),
         },
     )
 }
@@ -206,6 +207,7 @@ fn route_input_handle_must_match_even_when_nominal_contracts_have_the_same_wire_
         foreign_keys: vec![],
         rollups: Vec::new(),
         indexes: vec![],
+        owners: Default::default(),
     };
     let operations = vec![Operation {
         name: "items.list".into(),
@@ -780,6 +782,7 @@ fn failure_pages_are_registered_terminal_pages_with_the_same_input() -> Result<(
         foreign_keys: vec![],
         rollups: Vec::new(),
         indexes: vec![],
+        owners: Default::default(),
     };
     let query = |name: &str, input_type: &str| Operation {
         name: name.into(),

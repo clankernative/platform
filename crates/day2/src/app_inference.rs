@@ -424,12 +424,17 @@ fn table_declaration(model: &str, block: &[Token<'_>]) -> Result<bool> {
                         Token::Punct(b':'),
                         Token::Word("Table"),
                         Token::Punct(b'.'),
-                        Token::Word("unique" | "non_unique" | "rollup"),
+                        Token::Word("unique" | "non_unique" | "rollup" | "owner"),
                         Token::Punct(b'('),
                         Token::Punct(b'{')
                     ])
                 ),
-                "{model}.table entries require Table.unique, Table.non_unique or Table.rollup"
+                "{model}.table entries require Table.unique, Table.non_unique, Table.rollup or Table.owner"
+            );
+            let owner = block.get(cursor + 4) == Some(&Token::Word("owner"));
+            ensure!(
+                owner == (block.get(cursor) == Some(&Token::Word("owned_by"))),
+                "{model}.table: write an owner column as `owned_by: Table.owner({{ column: row.column }})`; `owned_by` names nothing else"
             );
             cursor = closing(block, cursor + 5)? + 1;
             ensure!(
@@ -454,7 +459,7 @@ fn table_declaration(model: &str, block: &[Token<'_>]) -> Result<bool> {
             block.get(at + 4),
         ) {
             ensure!(
-                matches!(*kind, "unique" | "non_unique" | "rollup"),
+                matches!(*kind, "unique" | "non_unique" | "rollup" | "owner"),
                 "{model}.table: unknown key kind Table.{kind}"
             );
             let open = at + 4;
@@ -470,6 +475,12 @@ fn table_declaration(model: &str, block: &[Token<'_>]) -> Result<bool> {
                 rollup_columns(model, parameter, &block[end + 3..measures], true)?;
                 at = measures;
             } else {
+                if *kind == "owner" {
+                    ensure!(
+                        !block[open + 1..end].contains(&Token::Punct(b',')),
+                        "{model}.table: Table.owner selects exactly one column"
+                    );
+                }
                 key_columns(model, parameter, &block[open + 1..end])?;
                 at = end;
             }
@@ -1105,6 +1116,46 @@ mod tests {
             valid.replace("count: Table.count", "count: 1"),
         ] {
             assert!(schema_source(LEDGER, &sources(&invalid)).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_owner_column_is_owned_by_one_labelled_column() -> Result<()> {
+        let key = "by_date: Table.unique({ campaign: row.campaign, date: row.date })";
+        let valid = MODELS.replace(
+            key,
+            &format!("{key},\n\t\t\towned_by: Table.owner({{ date: row.date }})"),
+        );
+        schema_source(LEDGER, &sources(&valid))?;
+        for (invalid, message) in [
+            (
+                valid.replace("owned_by: Table.owner", "owner: Table.owner"),
+                "`owned_by` names nothing else",
+            ),
+            (
+                MODELS.replace("by_date: Table.unique", "owned_by: Table.unique"),
+                "`owned_by` names nothing else",
+            ),
+            (
+                valid.replace(
+                    "Table.owner({ date: row.date })",
+                    "Table.owner({ date: row.campaign })",
+                ),
+                "key column `date` reads `row.campaign`",
+            ),
+            (
+                valid.replace(
+                    "Table.owner({ date: row.date })",
+                    "Table.owner({ date: row.date, campaign: row.campaign })",
+                ),
+                "Table.owner selects exactly one column",
+            ),
+        ] {
+            let error = schema_source(LEDGER, &sources(&invalid))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
         }
         Ok(())
     }

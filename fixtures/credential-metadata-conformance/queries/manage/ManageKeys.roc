@@ -15,6 +15,7 @@ ManageKeys :: [].{
 	Output : { client : Navigation, personal : Navigation }
 
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract: {
 			title: "Manage credential keys",

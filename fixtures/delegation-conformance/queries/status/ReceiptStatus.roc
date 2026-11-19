@@ -10,6 +10,7 @@ ReceiptStatus :: [].{
 	Output : { status : Str }
 
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.prepared(prepare, handle),
 		contract,
 		verification: { input: verify_input, check: verify_result },

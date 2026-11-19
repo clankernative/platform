@@ -93,6 +93,7 @@ Verify :: [].{
 			"reports",
 			"reports-probe",
 			"reports-search",
+			"audiences",
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}

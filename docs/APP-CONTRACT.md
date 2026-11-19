@@ -19,12 +19,55 @@ not activate documentation, verification, stylesheets or scripts.
 
 Follow the [application layout](APP-LAYOUT.md), including when scaffolding new
 apps. Each operation module exports its complete `definition`; App binds that
-value to its public name. Each public record field contains `Api.command({ handler, contract, execution,
-verification })` or `Api.query({ handler, contract, verification })`. These are
+value to its public name. Each public record field contains `Api.command({ audience, handler, contract,
+execution, verification })` or `Api.query({ audience, handler, contract, verification })`. These are
 abbreviated signatures; the actual compiling example is Reports. Keys provide
 names, so a command and query cannot have the same public key: Roc rejects the
-duplicate record field. Internal commands use the same record and bind
-`Api.internal(...)` execution. Helpers become operations only through this root.
+duplicate record field. Internal commands use `Api.internal_command({ handler,
+contract, execution, verification })`: the same record without an audience.
+Helpers become operations only through this root.
+
+## Audiences
+
+Every public command and query declares who it serves: `audience: Employees`,
+`Owners` or `Closed`. The application chooses the class; the company installing
+it will bind each class to principals: `Employees` to the installation's people
+domain, `Owners` to the app's owners, and `Closed` to no one. An artifact
+therefore never names a person, and the same artifact serves another company
+with that company's people. The audience is a required constructor field, so a
+public operation without one, or an internal command with one, does not
+compile. Admission refuses an internal command with one, and a contract in
+which some public operations declare one and others do not. An application
+built before audiences existed declares none: its artifact still loads, backs
+up and migrates, so the running app can upgrade, and the planned policy
+renderer will refuse it until it is rebuilt. The artifact format is unchanged
+because an upgrade's recovery backup is taken by the target build's tooling,
+which refuses an incumbent artifact of an older format.
+
+Internal commands declare no audience. Theirs is derived: the union of the
+audiences of the operations that request them, plus the schedule actor when a
+schedule runs them and the ingress actor when an endpoint delivers to them. An
+internal command nothing reaches is closed.
+
+A page serves one audience. Its query, its `before_read` preparation commands,
+its `on_prepare_failure` fallback query, the page it renders `on_failure` and
+every redirect that renders it as the not-found page declare the same audience,
+or admission refuses the artifact.
+
+A model whose rows belong to a person declares that column on its table, as
+`owned_by: Table.owner({ owner: row.owner })` (see
+[tables and keys](STORAGE-INDEXES.md)). An `Employees` command that updates or
+soft-deletes rows of that model is meant for their owner; admins are not
+scoped. A command that writes those rows whatever their owner, such as a visit
+counter on someone else's link, declares `.any_owner(Data.links)`. Admission
+refuses that declaration on an `Owners` or `Closed` command, for a model that
+declares no owner, or for a model the command does not update or soft-delete.
+Other grants are not narrowed: every operation may read every model.
+
+These declarations are the input to company policy; today the company still
+writes every grant itself (see [authority](AUTHORITY.md)). Rendering that
+policy from audiences, owner columns and `.any_owner`, and refusing an artifact
+whose public operations lack an audience, is planned.
 
 The compiler checks required root fields, callback signatures, exact nested
 description records, typed examples and selectors. Both mandatory final profiles
@@ -126,6 +169,7 @@ Declare complete read visibility separately from write effects:
 
 ```roc
 definition = Api.query({
+    audience: Owners,
     handler: Handler.local(handle),
     contract,
     verification: { input: verify_input, check: verify_result },

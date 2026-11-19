@@ -11,9 +11,12 @@ import Data
 
 ListLinks :: [].{
 	definition =
-		Api.query(
-			{ handler: Handler.local(handle), contract, verification: { input: verify_input, check: verify_result } },
-		)
+		Api.query({
+			audience: Employees,
+			handler: Handler.local(handle),
+			contract,
+			verification: { input: verify_input, check: verify_result },
+		})
 
 	handle : Context, ListLinksTypes.Input -> Query(LinkView.Page)
 	handle =

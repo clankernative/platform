@@ -400,6 +400,7 @@ mod unsigned_storage_tests {
             foreign_keys: vec![],
             rollups: Vec::new(),
             indexes: vec![],
+            owners: Default::default(),
         };
         let values = [
             0,
@@ -4100,6 +4101,7 @@ mod selection_tests {
                 ],
                 unique: false,
             }],
+            owners: Default::default(),
         };
         let connection = Connection::open_in_memory()?;
         connection.execute_batch(PLATFORM_DDL)?;

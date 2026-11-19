@@ -36,6 +36,7 @@ fn opaque_pagination_wire_inputs_are_canonical_and_never_persistent_columns() ->
         foreign_keys: vec![],
         rollups: Vec::new(),
         indexes: vec![],
+        owners: Default::default(),
     };
     assert!(schema.validate().is_err());
     Ok(())
@@ -109,6 +110,7 @@ step_for_host = |raw| step(raw)
         foreign_keys: vec![],
         rollups: Vec::new(),
         indexes: vec![],
+        owners: Default::default(),
     };
     fs::write(stage.join("app/Data.roc"), schema.data_module()?)?;
     fs::write(stage.join("app/Inputs.roc"), schema.inputs_module()?)?;

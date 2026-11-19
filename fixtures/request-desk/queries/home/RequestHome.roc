@@ -6,9 +6,12 @@ import RequestHomeTypes
 
 RequestHome :: [].{
 	definition =
-		Api.query(
-			{ handler: Handler.local(handle), contract, verification: { input: verify_input, check: verify_result } },
-		)
+		Api.query({
+			audience: Employees,
+			handler: Handler.local(handle),
+			contract,
+			verification: { input: verify_input, check: verify_result },
+		})
 
 	handle : Context, RequestHomeTypes.Input -> Query(RequestHomeTypes.Output)
 	handle = |_context, _input| Query.from_try(Ok({ title: "Request stock" }))

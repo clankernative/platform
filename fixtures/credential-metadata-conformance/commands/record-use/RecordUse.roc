@@ -7,6 +7,7 @@ import Data
 
 RecordUse :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract: {
 			title: "Record a credential API use",

@@ -78,6 +78,11 @@ pub struct Schema {
     /// Totals the host maintains from each model's rows; see [`crate::rollup`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rollups: Vec<crate::rollup::Rollup>,
+    /// The text column holding the person each row belongs to, by model, declared
+    /// as `owned_by: Table.owner({ column: row.column })`. Authority metadata
+    /// only: it creates no storage and is not part of the schema digest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub owners: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub domains: BTreeMap<String, String>,
 }
@@ -113,6 +118,14 @@ struct Node {
     tags: Vec<Tag>,
 }
 
+/// Everything a model's attached `table` declares: keys, rollups and the
+/// optional owner column.
+struct TableDeclarations {
+    indexes: Vec<Index>,
+    rollups: Vec<crate::rollup::Rollup>,
+    owners: BTreeMap<String, String>,
+}
+
 impl Table {
     /// Keys come from each model's attached `table`, reflected through the
     /// platform-generated storage witness. Every key column must be a column of
@@ -121,7 +134,7 @@ impl Table {
         &self,
         models: &BTreeMap<String, Record>,
         model_types: &BTreeMap<String, String>,
-    ) -> Result<(Vec<Index>, Vec<crate::rollup::Rollup>)> {
+    ) -> Result<TableDeclarations> {
         let entries = self
             .entries
             .iter()
@@ -129,7 +142,11 @@ impl Table {
             .collect::<Vec<_>>();
         ensure!(entries.len() <= 1, "duplicate storage witness");
         let Some(entry) = entries.first() else {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(TableDeclarations {
+                indexes: Vec::new(),
+                rollups: Vec::new(),
+                owners: BTreeMap::new(),
+            });
         };
         let function = self.node(entry.type_id)?;
         ensure!(
@@ -163,6 +180,7 @@ impl Table {
         };
         let mut indexes = Vec::new();
         let mut rollups = Vec::new();
+        let mut owners = BTreeMap::new();
         for declared in &tables.fields {
             let model = models
                 .get(&declared.name)
@@ -190,6 +208,47 @@ impl Table {
                     "a key requires Table.unique or Table.non_unique"
                 );
                 let tag = &key.tags[0];
+                if tag.name == "Owner" {
+                    ensure!(
+                        definition.name == "owned_by",
+                        "table {} declares an owner column as `owned_by: Table.owner({{ column: row.column }})`, not as {}",
+                        declared.name,
+                        definition.name
+                    );
+                    ensure!(tag.payload.len() == 1, "invalid owner witness");
+                    let list = self.node(tag.payload[0])?;
+                    ensure!(list.kind == "list", "invalid owner witness");
+                    let columns = self.node(list.item)?;
+                    ensure!(
+                        columns.kind == "record"
+                            && columns.name.starts_with("__")
+                            && columns.fields.len() == 1,
+                        "owner of {} must select exactly one column, such as {{ owner: row.owner }}",
+                        declared.name
+                    );
+                    let column = &columns.fields[0];
+                    let expected = model.fields.get(&column.name).with_context(|| {
+                        format!(
+                            "owner of {} names {}, which is not a column of {}",
+                            declared.name, column.name, row.name
+                        )
+                    })?;
+                    ensure!(
+                        &self.kind(column.type_id, model_types)? == expected,
+                        "owner of {} column {} does not read the model's {} column",
+                        declared.name,
+                        column.name,
+                        column.name
+                    );
+                    ensure!(
+                        *expected == Kind::Text,
+                        "owner of {} column {} must be text holding a person",
+                        declared.name,
+                        column.name
+                    );
+                    owners.insert(declared.name.clone(), column.name.clone());
+                    continue;
+                }
                 if tag.name == "Rollup" {
                     rollups.push(self.rollup(
                         &declared.name,
@@ -203,6 +262,11 @@ impl Table {
                 ensure!(
                     matches!(tag.name.as_str(), "Unique" | "NonUnique") && tag.payload.len() == 1,
                     "a key requires Table.unique or Table.non_unique"
+                );
+                ensure!(
+                    definition.name != "owned_by",
+                    "table {}: `owned_by` is reserved for Table.owner",
+                    declared.name
                 );
                 let list = self.node(tag.payload[0])?;
                 ensure!(list.kind == "list", "invalid key witness");
@@ -244,7 +308,11 @@ impl Table {
         }
         indexes.sort_by(|left, right| (&left.model, &left.name).cmp(&(&right.model, &right.name)));
         rollups.sort_by(|left, right| (&left.model, &left.name).cmp(&(&right.model, &right.name)));
-        Ok((indexes, rollups))
+        Ok(TableDeclarations {
+            indexes,
+            rollups,
+            owners,
+        })
     }
 
     /// `Table.rollup(group, measures)` reflects as `Rollup(List(group), List(measures))`.
@@ -933,13 +1001,18 @@ impl Schema {
                     })
             })
             .collect();
-        let (indexes, rollups) = table.indexes(&models, &model_types)?;
+        let TableDeclarations {
+            indexes,
+            rollups,
+            owners,
+        } = table.indexes(&models, &model_types)?;
         let schema = Self {
             models,
             inputs,
             foreign_keys,
             indexes,
             rollups,
+            owners,
             domains: table.domains()?,
         };
         schema.validate_typed()?;
@@ -947,6 +1020,15 @@ impl Schema {
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(self.indexes.len() <= 128, "index count budget");
+        for (model, field) in &self.owners {
+            ensure!(
+                self.models
+                    .get(model)
+                    .and_then(|record| record.fields.get(field))
+                    == Some(&Kind::Text),
+                "owner column {model}.{field} must be a text column of its model"
+            );
+        }
         ensure!(self.rollups.len() <= 32, "rollup count budget");
         let mut rollup_tables = std::collections::BTreeSet::new();
         for rollup in &self.rollups {
@@ -1709,6 +1791,7 @@ mod empty_input_tests {
             rollups: Vec::new(),
             indexes: vec![],
             domains: BTreeMap::new(),
+            owners: Default::default(),
         };
         let normal = schema.inputs_module()?;
         let restricted = schema.admission_inputs_module()?;
@@ -1762,6 +1845,7 @@ mod structured_input_tests {
             rollups: Vec::new(),
             indexes: vec![],
             domains: BTreeMap::new(),
+            owners: Default::default(),
         }
     }
 
@@ -2094,6 +2178,169 @@ mod deletion_invariants {
                 .validate()
                 .with_context(|| format!("{field} was refused as secret material"))?;
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn node(kind: &str, name: &str) -> Value {
+        json!({"kind":kind, "name":name, "item":0, "ret":0, "fields":[], "args":[], "tags":[]})
+    }
+
+    fn record(name: &str, fields: Value) -> Value {
+        let mut node = node("record", name);
+        node["fields"] = fields;
+        node
+    }
+
+    fn list(item: usize) -> Value {
+        let mut node = node("list", "");
+        node["item"] = json!(item);
+        node
+    }
+
+    /// The checked-type graph the storage witness reflects for one model, `links`,
+    /// whose table declares one entry `label: Table.<tag>({ columns })`.
+    fn table(label: &str, tag: &str, columns: &[&str]) -> Result<Table> {
+        let column_type = |name: &str| if name == "rank" { 11 } else { 10 };
+        let mut function = node("function", "");
+        function["args"] = json!([1]);
+        function["ret"] = json!(2);
+        let mut union = node("union", "");
+        union["tags"] = json!([{"name": tag, "payload": [12]}]);
+        let types = vec![
+            function,
+            node("unit", ""),
+            record("", json!([{"name":"tables","type_id":3}])),
+            record("", json!([{"name":"links","type_id":4}])),
+            record(
+                "Table",
+                json!([{"name":"row_witness","type_id":5},{"name":"key_witness","type_id":7}]),
+            ),
+            list(6),
+            record(
+                "Models.Link",
+                json!([{"name":"name","type_id":10},{"name":"owner","type_id":10},{"name":"rank","type_id":11}]),
+            ),
+            list(8),
+            record("", json!([{"name": label, "type_id": 9}])),
+            union,
+            node("text", ""),
+            node("integer", "I64"),
+            list(13),
+            record(
+                "__AnonStruct_owner",
+                Value::Array(
+                    columns
+                        .iter()
+                        .map(|column| json!({"name": column, "type_id": column_type(column)}))
+                        .collect(),
+                ),
+            ),
+        ];
+        Ok(serde_json::from_value(json!({
+            "entries": [{"symbol": "day2_storage", "type_id": 0}],
+            "types": types,
+        }))?)
+    }
+
+    fn models() -> BTreeMap<String, Record> {
+        BTreeMap::from([(
+            "links".into(),
+            Record {
+                fields: BTreeMap::from([
+                    ("name".into(), Kind::Text),
+                    ("owner".into(), Kind::Text),
+                    ("rank".into(), Kind::Integer),
+                ]),
+                roc_type: Some("Models.Link".into()),
+                identity: None,
+            },
+        )])
+    }
+
+    fn owners(label: &str, tag: &str, columns: &[&str]) -> Result<BTreeMap<String, String>> {
+        let TableDeclarations {
+            indexes,
+            rollups,
+            owners,
+        } = table(label, tag, columns)?.indexes(&models(), &BTreeMap::new())?;
+        ensure!(
+            indexes.is_empty() && rollups.is_empty(),
+            "an owner column is not storage"
+        );
+        Ok(owners)
+    }
+
+    #[test]
+    fn owned_by_reflects_one_text_column_of_the_model_as_authority_metadata() -> Result<()> {
+        assert_eq!(
+            owners("owned_by", "Owner", &["owner"])?,
+            BTreeMap::from([("links".to_owned(), "owner".to_owned())])
+        );
+        for (label, tag, columns, message) in [
+            ("owner", "Owner", &["owner"][..], "not as owner"),
+            (
+                "owned_by",
+                "Owner",
+                &["owner", "name"][..],
+                "exactly one column",
+            ),
+            ("owned_by", "Owner", &[][..], "exactly one column"),
+            (
+                "owned_by",
+                "Owner",
+                &["creator"][..],
+                "which is not a column",
+            ),
+            (
+                "owned_by",
+                "Owner",
+                &["rank"][..],
+                "must be text holding a person",
+            ),
+            (
+                "owned_by",
+                "Unique",
+                &["owner"][..],
+                "reserved for Table.owner",
+            ),
+        ] {
+            let error = owners(label, tag, columns).unwrap_err().to_string();
+            assert!(
+                error.contains(message),
+                "{label} {tag} {columns:?}: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn owner_columns_are_not_part_of_the_schema_digest() -> Result<()> {
+        let schema = Schema {
+            models: models(),
+            inputs: BTreeMap::new(),
+            foreign_keys: vec![],
+            indexes: vec![],
+            rollups: Vec::new(),
+            owners: BTreeMap::new(),
+            domains: BTreeMap::new(),
+        };
+        let owned = Schema {
+            owners: BTreeMap::from([("links".to_owned(), "owner".to_owned())]),
+            ..schema.clone()
+        };
+        owned.validate()?;
+        assert_eq!(schema.hash()?, owned.hash()?);
+        let integer = Schema {
+            owners: BTreeMap::from([("links".to_owned(), "rank".to_owned())]),
+            ..schema.clone()
+        };
+        assert!(integer.validate().is_err());
         Ok(())
     }
 }

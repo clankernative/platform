@@ -15,6 +15,7 @@ RequestStock :: [].{
 	Decision : { id : Ref(Models.Request), quantity : U64, available : U64 }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.effects(prepare, decide, deliver, complete),
 		contract,
 		execution: Api.current_state([

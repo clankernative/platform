@@ -12,6 +12,7 @@ InspectKey :: [].{
 	Output : { status : Str, lineage : Str, version : Str, revision : U64, state : Str }
 
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.prepared(prepare, |_context, _input, output| Query.from_try(Ok(output))),
 		contract: {
 			title: "Inspect one client credential",

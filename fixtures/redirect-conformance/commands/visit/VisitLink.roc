@@ -17,6 +17,7 @@ import Errors
 # pages/Redirects.roc bind this command, as GoLinks binds golinks.visit.
 VisitLink :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state([Api.update(Data.links, [Api.field(Selectors.links_visits)])]),
