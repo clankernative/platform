@@ -490,6 +490,138 @@ expect match read_user_path(USER_PATH_JSON) {
 }
 
 #[test]
+fn native_google_workspace_outcomes_decode_through_public_sdk() -> Result<()> {
+    use day2::google_workspace::{Group, GroupOutcome, MembershipOutcome};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    fs::create_dir(stage.join("app"))?;
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    let found = GroupOutcome::Found(Group {
+        id: "g1".into(),
+        email: "team@example.com".into(),
+        name: "Team".into(),
+    })
+    .encode();
+    let source = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.GoogleWorkspace
+import pf.Resource
+import pf.Observe
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+answer = |program, raw| {
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+read_group = |raw| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| GoogleWorkspace.group_with(resource, "team@example.com"))
+        .program(),
+    raw,
+)
+read_member = |raw| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| GoogleWorkspace.group_member_with(resource, "team@example.com", "person@example.com"))
+        .program(),
+    raw,
+)
+requested = |resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(|resource| GoogleWorkspace.group_member_with(resource, "team@example.com", "person@example.com"))
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => request.instruction.model == MEMBER_CAPABILITY
+        _ => Bool.False
+    }
+}
+expect requested("{\"token\":\"fixture-handle\"}")
+expect match read_group(FOUND_JSON) {
+    Done(result) => match result.value {
+        Found(group) => group.id == "g1" and group.email == "team@example.com" and group.name == "Team"
+        NotFound => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read_group(NOT_FOUND_JSON) {
+    Done(result) => match result.value {
+        Found(_) => Bool.False
+        NotFound => Bool.True
+    }
+    _ => Bool.False
+}
+expect match read_member(MEMBER_JSON) {
+    Done(result) => match result.value {
+        Member => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read_member(NOT_MEMBER_JSON) {
+    Done(result) => match result.value {
+        NotMember => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read_member(GROUP_NOT_FOUND_JSON) {
+    Done(result) => match result.value {
+        GroupNotFound => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+"#
+    .replace(
+        "GROUP_NOT_FOUND_JSON",
+        &serde_json::to_string(&MembershipOutcome::GroupNotFound.encode())?,
+    )
+    .replace("NOT_FOUND_JSON", &serde_json::to_string(&GroupOutcome::NotFound.encode())?)
+    .replace("FOUND_JSON", &serde_json::to_string(&found)?)
+    .replace(
+        "NOT_MEMBER_JSON",
+        &serde_json::to_string(&MembershipOutcome::NotMember.encode())?,
+    )
+    .replace(
+        "MEMBER_JSON",
+        &serde_json::to_string(&MembershipOutcome::Member.encode())?,
+    )
+    .replace(
+        "MEMBER_CAPABILITY",
+        &serde_json::to_string(
+            &day2_capabilities::registry::Action::GoogleWorkspaceGroupMember.capability(),
+        )?,
+    );
+    fs::write(stage.join("app/main.roc"), source)?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .arg("test")
+        .arg(stage.join("app/main.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (6) tests passed"),
+        "native Google Workspace contracts ({}): {diagnostics}",
+        output.status
+    );
+    Ok(())
+}
+
+#[test]
 fn native_carta_delivery_decodes_through_public_sdk() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

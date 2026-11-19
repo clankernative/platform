@@ -42,6 +42,10 @@ mod integration_host_tests;
 mod capture_delivery_host_tests;
 
 #[cfg(test)]
+#[path = "google_workspace_host_tests.rs"]
+mod google_workspace_host_tests;
+
+#[cfg(test)]
 #[path = "read_coverage_tests.rs"]
 mod read_coverage_tests;
 

@@ -103,6 +103,7 @@ fn simulated_fixture() -> crate::integrations::simulated::SimulatedFixture {
             max_input_tokens: 1000,
         },
         workspace_directory: Default::default(),
+        google_workspace: Default::default(),
         carta: None,
     }
 }

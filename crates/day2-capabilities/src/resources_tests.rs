@@ -495,6 +495,9 @@ mod connections {
                 service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
                 auth: crate::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
             }),
+            Provider::GoogleWorkspace => Some(LiveConnection::GoogleWorkspace {
+                service_account: "workspace-reader@example-project.iam.gserviceaccount.com".into(),
+            }),
             Provider::Slack => Some(LiveConnection::Slack {
                 credential_ref: reference("slack_token"),
                 signing_secret_ref: None,
@@ -798,6 +801,9 @@ mod narrowing {
             ResourceKind::WorkspaceDirectory => ResourceTarget::WorkspaceDirectory {
                 customer_id: "C01".into(),
             },
+            ResourceKind::GoogleWorkspaceDomain => ResourceTarget::GoogleWorkspaceDomain {
+                grantee_domains: vec!["example.com".into(), "groups.example.com".into()],
+            },
             ResourceKind::LinearOrganization => ResourceTarget::LinearOrganization {
                 organization_id: "org-1".into(),
                 email_domain: "example.com".into(),
@@ -954,6 +960,90 @@ mod narrowing {
                     "{target:?} narrowed to a target of another kind"
                 );
             }
+        }
+    }
+
+    /// A Workspace grant narrows only by dropping grantee domains.
+    #[test]
+    fn a_workspace_grant_narrows_only_by_dropping_grantee_domains() {
+        let parent = sample(ResourceKind::GoogleWorkspaceDomain);
+        parent.validate().unwrap();
+        let fewer = ResourceTarget::GoogleWorkspaceDomain {
+            grantee_domains: vec!["example.com".into()],
+        };
+        fewer.validate().unwrap();
+        assert!(fewer.is_subset_of(&parent));
+        assert!(
+            !parent.is_subset_of(&fewer),
+            "a grant added a grantee domain"
+        );
+        let other = ResourceTarget::GoogleWorkspaceDomain {
+            grantee_domains: vec!["other.example".into()],
+        };
+        other.validate().unwrap();
+        assert!(!other.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn a_workspace_target_is_exact_lowercase_and_strictly_sorted() {
+        let target = |grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
+            grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
+        };
+        target(&["a.example", "example.com"]).validate().unwrap();
+        for (invalid, code) in [
+            (target(&[]), "invalid_google_workspace_grantee_domains"),
+            (
+                target(&["example.com", "a.example"]),
+                "invalid_google_workspace_grantee_domains",
+            ),
+            (
+                target(&["example.com", "example.com"]),
+                "invalid_google_workspace_grantee_domains",
+            ),
+            (target(&["Example.com"]), "invalid_resource_email_domain"),
+            (target(&["example"]), "invalid_resource_email_domain"),
+        ] {
+            assert_eq!(
+                invalid.validate().unwrap_err().to_string(),
+                code,
+                "{invalid:?}"
+            );
+        }
+        for extra in [
+            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"],
+                "subject":"anyone@example.com"}),
+            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"],
+                "calendar_reader":"calendar@example.com"}),
+        ] {
+            assert!(
+                serde_json::from_value::<ResourceTarget>(extra).is_err(),
+                "a target carries only what this PR reads"
+            );
+        }
+        for address in [
+            "a@example.com",
+            "first.last+tag@example.com",
+            "a-b_c@sub.example.com",
+        ] {
+            assert!(
+                crate::resources::google_workspace_address(address).is_ok(),
+                "{address}"
+            );
+        }
+        for address in [
+            "A@example.com",
+            "a@Example.com",
+            ".a@example.com",
+            "a..b@example.com",
+            "a@b@example.com",
+            "a@example",
+            "@example.com",
+            "a b@example.com",
+        ] {
+            assert!(
+                crate::resources::google_workspace_address(address).is_err(),
+                "{address}"
+            );
         }
     }
 

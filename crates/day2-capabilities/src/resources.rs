@@ -137,6 +137,17 @@ pub enum ResourceTarget {
     WorkspaceDirectory {
         customer_id: String,
     },
+    /// What a `GoogleWorkspace` grant may reach in its organization.
+    ///
+    /// `grantee_domains` are the domains a group may belong to in order to be
+    /// looked up or tested for membership. An application never names a
+    /// subject, scope or URL. The fields later actions read (the domain whose
+    /// people may be impersonated, the one Calendar reader) arrive with those
+    /// actions; see docs/GOOGLE-WORKSPACE.md.
+    GoogleWorkspaceDomain {
+        /// Strictly sorted and unique, never normalised on the way in.
+        grantee_domains: Vec<String>,
+    },
     LinearOrganization {
         organization_id: String,
         email_domain: String,
@@ -285,6 +296,7 @@ impl ResourceTarget {
             Self::CartaIssuer { .. } => ResourceKind::CartaIssuer,
             Self::GoogleDirectory { .. } => ResourceKind::GoogleDirectory,
             Self::WorkspaceDirectory { .. } => ResourceKind::WorkspaceDirectory,
+            Self::GoogleWorkspaceDomain { .. } => ResourceKind::GoogleWorkspaceDomain,
             Self::LinearOrganization { .. } => ResourceKind::LinearOrganization,
             Self::LinearIssueSource { .. } => ResourceKind::LinearIssueSource,
             Self::GitHubRepository { .. } => ResourceKind::GitHubRepository,
@@ -383,6 +395,17 @@ impl ResourceTarget {
                 Ok(())
             }
             Self::WorkspaceDirectory { customer_id } => bounded_text(customer_id, 256),
+            Self::GoogleWorkspaceDomain { grantee_domains } => {
+                ensure!(
+                    (1..=32).contains(&grantee_domains.len())
+                        && grantee_domains.is_sorted_by(|left, right| left < right),
+                    "invalid_google_workspace_grantee_domains"
+                );
+                for domain in grantee_domains {
+                    email_domain_text(domain)?;
+                }
+                Ok(())
+            }
             Self::GoogleDirectory {
                 customer_id,
                 email_domain,
@@ -502,6 +525,15 @@ impl ResourceTarget {
                     customer_id: parent,
                 },
             ) => customer_id == parent,
+            // A narrower grant may only drop grantee domains, never add one.
+            (
+                Self::GoogleWorkspaceDomain { grantee_domains },
+                Self::GoogleWorkspaceDomain {
+                    grantee_domains: parent_grantees,
+                },
+            ) => grantee_domains
+                .iter()
+                .all(|domain| parent_grantees.contains(domain)),
             (
                 Self::GoogleDirectory {
                     customer_id,
@@ -662,6 +694,29 @@ fn email_domain_text(domain: &str) -> Result<()> {
         "invalid_resource_email_domain"
     );
     Ok(())
+}
+
+/// A Google Workspace address exactly as the platform accepts one: lowercase
+/// ASCII, a conservative local part and a valid domain. Nothing is normalised,
+/// so an address is compared byte for byte with the grant it is checked against.
+/// Returns the local part and the domain.
+pub fn google_workspace_address(value: &str) -> Result<(&str, &str)> {
+    let (local, domain) = value
+        .split_once('@')
+        .context("invalid_google_workspace_address")?;
+    ensure!(
+        value.len() <= 254
+            && (1..=64).contains(&local.len())
+            && local.bytes().all(|byte| byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || b"._+-".contains(&byte))
+            && !local.starts_with('.')
+            && !local.ends_with('.')
+            && !local.contains(".."),
+        "invalid_google_workspace_address"
+    );
+    email_domain_text(domain).map_err(|_| anyhow::anyhow!("invalid_google_workspace_address"))?;
+    Ok((local, domain))
 }
 
 pub fn email_in_domain(email: &str, domain: &str) -> bool {
@@ -938,6 +993,7 @@ fn validate_connection(
         | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. }))
         | (Provider::Carta, Some(value @ LiveConnection::Carta { .. }))
         | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. }))
+        | (Provider::GoogleWorkspace, Some(value @ LiveConnection::GoogleWorkspace { .. }))
         | (Provider::FreetoolExecutor, Some(value @ LiveConnection::FreetoolExecutor { .. })) => value.validate(),
         (
             Provider::LocalNotifications

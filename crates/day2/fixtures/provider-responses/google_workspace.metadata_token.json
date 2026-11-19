@@ -1,0 +1,5 @@
+{
+  "access_token": "ya29.EXAMPLE_METADATA_TOKEN",
+  "expires_in": 3599,
+  "token_type": "Bearer"
+}

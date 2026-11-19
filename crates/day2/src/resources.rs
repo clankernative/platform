@@ -807,6 +807,11 @@ pub(crate) fn reserve_in(
             service_account,
             ..
         }) => format!("workspace_directory/{service_account}"),
+        // One service account: Google's quotas follow the project and client, so
+        // every Workspace action through it shares the pool.
+        Some(day2_capabilities::integrations::LiveConnection::GoogleWorkspace {
+            service_account,
+        }) => format!("google_workspace/{service_account}"),
         // One OAuth client in one deployment: Carta's rate limits follow the
         // client, so every issuer read through it shares the pool.
         Some(day2_capabilities::integrations::LiveConnection::Carta {

@@ -170,6 +170,18 @@ providers! {
             WorkspaceDirectoryDeliveryPage => "workspace_directory.page.v2" (read, data),
         },
     },
+    // One provider for Calendar, Meet, Drive and Directory, so the calendar
+    // event -> conference -> recording -> group flow commits to one world and is
+    // expressible in one deterministic campaign. Each action has a fixed scope and
+    // identity; see docs/GOOGLE-WORKSPACE.md.
+    GoogleWorkspace {
+        kind: GoogleWorkspaceDomain,
+        world: "google_workspace.simulated.sqlite",
+        actions: {
+            GoogleWorkspaceGroup => "google_workspace.group.v1" (read, data),
+            GoogleWorkspaceGroupMember => "google_workspace.group_member.v1" (read, data),
+        },
+    },
     // App-to-app delegation. The "provider" is another application in this same
     // instance, which is why it has no connection and no credential: there is
     // nothing to reach. It is a provider anyway because everything a delegated

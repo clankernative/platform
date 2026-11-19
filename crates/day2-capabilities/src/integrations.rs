@@ -82,6 +82,11 @@ pub enum LiveConnection {
         service_account: String,
         auth: WorkspaceDirectoryAuth,
     },
+    /// Google Workspace organization reads (and one narrow write) through
+    /// workload identity. No secret is mounted: the runtime's identity asks IAM
+    /// for this service account's tokens, directly or by domain-wide delegation
+    /// to a subject each action derives itself. See docs/GOOGLE-WORKSPACE.md.
+    GoogleWorkspace { service_account: String },
     /// Carta's issuer API through OAuth client credentials. `client_id` is an
     /// identifier reviewed with the profile; only the client secret is mounted.
     /// The environment selects one of the adapter's fixed origin pairs, so no
@@ -145,7 +150,7 @@ impl LiveConnection {
             | Self::Carta { credential_ref, .. }
             | Self::OpenAi { credential_ref, .. }
             | Self::FreetoolExecutor { credential_ref, .. } => Some(credential_ref),
-            Self::WorkspaceDirectory { .. } => None,
+            Self::WorkspaceDirectory { .. } | Self::GoogleWorkspace { .. } => None,
         }
     }
 
@@ -167,7 +172,8 @@ impl LiveConnection {
             | Self::GitHubActions { .. }
             | Self::Carta { .. }
             | Self::FreetoolExecutor { .. }
-            | Self::WorkspaceDirectory { .. } => None,
+            | Self::WorkspaceDirectory { .. }
+            | Self::GoogleWorkspace { .. } => None,
         }
     }
 
@@ -183,6 +189,7 @@ impl LiveConnection {
     pub fn credential_refs(&self) -> Vec<&VersionRef> {
         match self {
             Self::WorkspaceDirectory { .. } => vec![],
+            Self::GoogleWorkspace { service_account: _ } => vec![],
             Self::FreetoolExecutor {
                 credential_ref,
                 endpoint: _,
@@ -373,6 +380,7 @@ impl LiveConnection {
                 }
                 Ok(())
             }
+            Self::GoogleWorkspace { service_account } => workspace_service_account(service_account),
             Self::Carta {
                 client_id,
                 max_pages_per_collection,

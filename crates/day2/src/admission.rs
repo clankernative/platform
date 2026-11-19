@@ -124,6 +124,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "96b618ebeabaacab43bb9c41c631ed3a1ea60492e81bf3ee8014df3b2591e819",
     ),
     (
+        "GoogleWorkspace.roc",
+        "",
+        "78459356ce1d5347d561112421787970b7e0d5dbc183f8e6ce92a0637cdb1aad",
+    ),
+    (
         "Linear.roc",
         "",
         "f8695efa1f64c52898737f7369afead1fe4d298547fad77cbdca722623fae729",

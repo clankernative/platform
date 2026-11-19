@@ -85,6 +85,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "GoogleWorkspace.roc",
+        source: "contracts/GoogleWorkspace.roc",
+        app_export: true,
+    },
+    Module {
         file: "Linear.roc",
         source: "contracts/Linear.roc",
         app_export: true,
