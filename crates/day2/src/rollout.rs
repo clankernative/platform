@@ -698,10 +698,11 @@ pub(crate) fn pending_artifacts(runtime: &Runtime) -> Result<Vec<String>> {
     runtime.sql_read(|db| {
         authority_for(runtime, db)?;
         crate::runtime_generation::require_queue(db)?;
-        let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations i WHERE i.status='pending' AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id))", [], |row| row.get(0))?;
+        let runnable = authority_state::RUNNABLE_INVOCATION;
+        let pending: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM day2_invocations i WHERE {runnable})"), [], |row| row.get(0))?;
         if !pending { return Ok(Vec::new()); }
         let generation = crate::runtime_generation::selected(runtime, db)?;
-        let mut statement = db.prepare("SELECT DISTINCT i.artifact FROM day2_invocations i JOIN day2_invocation_runtime r ON r.invocation=i.id WHERE i.status='pending' AND r.generation=?1 ORDER BY i.artifact")?;
+        let mut statement = db.prepare(&format!("SELECT DISTINCT i.artifact FROM day2_invocations i JOIN day2_invocation_runtime r ON r.invocation=i.id WHERE {runnable} AND r.generation=?1 ORDER BY i.artifact"))?;
         let ids = statement.query_map([generation], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut admitted_ids = Vec::new();
         for id in ids { if admitted(db, &id, runtime.scope())? { admitted_ids.push(id); } }
@@ -869,6 +870,8 @@ fn collect_retired(runtime: &Runtime) -> Result<()> {
     }
     let retired = runtime.sql_read(|db| {
         if state(db)?.is_none() { return Ok(Vec::new()); }
+        // Unlike completion, any pending row keeps its artifact, blocked or not:
+        // blocked work stays recorded against the artifact that admitted it.
         let mut query = db.prepare("SELECT id FROM day2_rollout_artifacts a WHERE retired_ms IS NOT NULL
             AND retired_ms < ?1 AND NOT EXISTS(SELECT 1 FROM day2_invocations i WHERE i.artifact=a.id AND i.status='pending')")?;
         let ids = query.query_map([now_ms()?.saturating_sub(1_800_000)], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1044,9 +1047,15 @@ pub fn transition(
             (Phase::Prepared, Phase::Serving) | (Phase::Serving, Phase::Draining)
             | (Phase::Draining, Phase::Complete) | (Phase::Prepared, Phase::Aborted)
             | (Phase::Serving, Phase::Aborted)), "rollout_phase_conflict");
+        // Completion and abort wait only for runnable work on the artifact being
+        // retired. Blocked work never runs again, so waiting for it would hold
+        // the release forever; it stays pending against its artifact.
+        let runnable = |artifact: &str| -> Result<bool> {
+            Ok(tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM day2_invocations i WHERE {} AND i.artifact=?1)",
+                authority_state::RUNNABLE_INVOCATION), [artifact], |row| row.get(0))?)
+        };
         if next == Phase::Complete {
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations WHERE status='pending' AND artifact=?1)", [&release.source.artifact], |row| row.get(0))?;
-            ensure!(!pending, "rollout_source_work_pending");
+            ensure!(!runnable(&release.source.artifact)?, "rollout_source_work_pending");
             // Promotion keeps the policy revision: a release does not revoke or
             // regrant business authority, nor erase completed command outcomes.
             let path = runtime.instance_path().parent().context("installation root")?
@@ -1057,8 +1066,7 @@ pub fn transition(
             tx.execute("UPDATE day2_rollout_artifacts SET retired_ms=?1 WHERE id=?2", params![now_ms()?,release.source.artifact])?;
         }
         if next == Phase::Aborted && matches!(release.kind, ReleaseKind::AppArtifact) {
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_invocations WHERE status='pending' AND artifact=?1)", [&release.target.artifact], |row| row.get(0))?;
-            ensure!(!pending, "rollout_target_work_pending");
+            ensure!(!runnable(&release.target.artifact)?, "rollout_target_work_pending");
             tx.execute("UPDATE day2_rollout_artifacts SET retired_ms=?1 WHERE id=?2", params![now_ms()?,release.target.artifact])?;
         }
         release.phase = next;

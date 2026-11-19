@@ -244,7 +244,10 @@ pub(crate) fn request(
         .count();
     ensure!(ordinal < 8, "command_request_budget");
     let active: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM day2_invocations i WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)",
+        &format!(
+            "SELECT COUNT(*) FROM day2_invocations i WHERE {}",
+            crate::authority_state::RUNNABLE_INVOCATION
+        ),
         [],
         |row| row.get(0),
     )?;
@@ -531,8 +534,9 @@ fn select_ready(
     } else {
         "?5 IS NULL"
     };
+    let runnable = crate::authority_state::RUNNABLE_INVOCATION;
     let sql = format!(
-        "SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND {ownership} AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1"
+        "SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE {runnable} AND i.artifact=?1 AND {ownership} AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1"
     );
     let next: Option<(String, String, String)> = connection
         .query_row(
