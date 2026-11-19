@@ -38,8 +38,6 @@ Workflow :: [].{
 		Maintain(Str, Str),
 	]
 
-	BuildReceipt : { artifact : Str }
-
 	LocalReceipt : { instance : Str }
 
 	parse : List(Str) -> Try(Request, Str)

@@ -281,7 +281,7 @@ fn build_recipe(
     isolated_job: Option<&Path>,
     imports: Option<&BuildImportContext>,
     verification: build_native::VerificationProfile,
-) -> Result<build_native::Built> {
+) -> Result<day2::development::BuildReceipt> {
     let budget = BuildCampaignBudget::from_environment()?;
     let runner = if let Some(job) = isolated_job {
         for (name, expected) in day2::automation::SOURCES {
@@ -872,43 +872,28 @@ fn main() -> Result<()> {
             const USAGE: &str = "usage: xtask build-receipt SOURCE NEW_RECEIPT [SEED CASES]";
             let source = PathBuf::from(args.next().context(USAGE)?);
             let receipt = PathBuf::from(args.next().context(USAGE)?);
-            // A requested profile replaces the default required verification;
-            // `platform check` reads its result from the receipt's summary, which
-            // the build returns. The evidence itself can be tens of megabytes.
-            let requested = match (args.next(), args.next()) {
-                (None, None) => None,
-                (Some(seed), Some(cases)) => Some(build_native::VerificationProfile::requested(
+            // A requested profile replaces the default required verification.
+            // Either way the receipt carries the build's verification summary;
+            // the evidence itself can be tens of megabytes.
+            let verification = match (args.next(), args.next()) {
+                (None, None) => build_native::VerificationProfile::default(),
+                (Some(seed), Some(cases)) => build_native::VerificationProfile::requested(
                     seed.parse().context("seed must be a U64")?,
                     cases.parse().context("case count must be 1..100")?,
-                )?),
+                )?,
                 _ => bail!(USAGE),
             };
             ensure!(
                 args.next().is_none() && !receipt.exists(),
                 "new build receipt required"
             );
-            let built = build_recipe(
-                &root,
-                &source,
-                None,
-                None,
-                None,
-                requested.unwrap_or_default(),
-            )?;
-            let value = if requested.is_some() {
-                let mut verification = serde_json::to_value(&built.verification)?;
-                verification["evidence"] =
-                    serde_json::json!(built.artifact.join("verification.json"));
-                serde_json::json!({ "artifact": built.artifact, "verification": verification })
-            } else {
-                serde_json::json!({ "artifact": built.artifact })
-            };
+            let built = build_recipe(&root, &source, None, None, None, verification)?;
             use std::io::Write;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(receipt)?;
-            file.write_all(&serde_json::to_vec(&value)?)?;
+            file.write_all(&serde_json::to_vec(&built)?)?;
             file.sync_all()?;
         }
         "cli" => {

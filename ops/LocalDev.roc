@@ -181,7 +181,7 @@ LocalDev :: [].{
 			return Capability.call!("local-status", "{}", host!)
 		}
 		built = Build.source!(options.source, host!)?
-		opened = Capability.call!("local-open", Json.to_str(built), host!)?
+		opened = Capability.call!("local-open", Json.to_str({ artifact: built.artifact }), host!)?
 		state : { fresh : Bool }
 		state = Json.parse(opened).map_err(|_| "invalid local instance")?
 		if state.fresh {
@@ -194,7 +194,7 @@ LocalDev :: [].{
 		} else {
 			_ = Capability.call!("local-drain", "{}", host!)?
 			_ = Capability.call!("local-snapshot", "{}", host!)?
-			_ = Capability.call!("local-migrate", Json.to_str(built), host!)?
+			_ = Capability.call!("local-migrate", Json.to_str({ artifact: built.artifact }), host!)?
 		}
 		_ = Capability.call!("local-properties", "{}", host!)?
 		_ = Capability.call!("local-activate", "{}", host!)?
@@ -232,7 +232,7 @@ LocalDev :: [].{
 		_ = Capability.call!("local-pause", "{}", host!)?
 		_ = Capability.call!("local-drain", "{}", host!)?
 		_ = Capability.call!("local-snapshot", "{}", host!)?
-		_ = Capability.call!("local-migrate", Json.to_str(built), host!)?
+		_ = Capability.call!("local-migrate", Json.to_str({ artifact: built.artifact }), host!)?
 		_ = Capability.call!("local-properties", "{}", host!)?
 		_ = Capability.call!("local-activate", "{}", host!)?
 		Ok({})
