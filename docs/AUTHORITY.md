@@ -76,8 +76,8 @@ schedules that request them. The company still binds each class's members:
 [owners entry](#the-apps-owners) and the schedule to its own schedule actor.
 The same reusable artifact therefore still receives different company
 policies, and every grant in the activated document remains the company's.
-None of this exists in the SDK or the authority contract until those changes
-land.
+The SDK declarations exist; nothing renders a policy from them yet, so today
+the company still writes every grant, as below.
 
 For example, this entry belongs under `authority.operations`:
 

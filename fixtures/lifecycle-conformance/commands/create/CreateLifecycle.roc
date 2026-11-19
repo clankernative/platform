@@ -9,6 +9,7 @@ import Domains
 
 CreateLifecycle :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state([Api.create(Data.parents), Api.create(Data.children)]),

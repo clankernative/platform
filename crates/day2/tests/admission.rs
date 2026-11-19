@@ -87,6 +87,7 @@ step_for_host = |raw| step(raw)
         foreign_keys: vec![],
         rollups: Vec::new(),
         indexes: vec![],
+        owners: Default::default(),
     };
     let outputs = BTreeMap::from([(
         "title".into(),

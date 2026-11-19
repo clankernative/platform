@@ -1099,6 +1099,7 @@ mod query_form_tests {
             indexes: vec![],
             rollups: vec![],
             domains: BTreeMap::new(),
+            owners: Default::default(),
         };
         crate::routing::Catalog::compile(&[root, page], &operations, &schema).unwrap()
     }

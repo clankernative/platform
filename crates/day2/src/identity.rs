@@ -781,6 +781,7 @@ mod tests {
             foreign_keys: vec![],
             rollups: Vec::new(),
             indexes: vec![],
+            owners: Default::default(),
         };
         assert!(prepare(app.path(), &schema, true).is_err());
         let registry = prepare(app.path(), &schema, false)?;
@@ -795,6 +796,7 @@ mod tests {
             foreign_keys: vec![],
             rollups: Vec::new(),
             indexes: vec![],
+            owners: Default::default(),
         };
         let next = prepare(app.path(), &renamed, true)?;
         assert_eq!(

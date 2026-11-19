@@ -1020,6 +1020,7 @@ mod tests {
             indexes: Vec::new(),
             rollups: Vec::new(),
             domains: BTreeMap::new(),
+            owners: Default::default(),
         };
         let intent = crate::operation_metadata::Entry {
             target: crate::operation_metadata::Target {
@@ -1053,10 +1054,12 @@ mod tests {
             response_example: r#"{"title":"Example"}"#.into(),
             deprecated: false,
             export_version: 0,
+            audience: Some(crate::app_contract::Audience::Employees),
             execution: Default::default(),
             credential_access: Default::default(),
             errors: Vec::new(),
             required_all_rows: Vec::new(),
+            any_owner: Vec::new(),
             observations: Vec::new(),
             verification_setup: Vec::new(),
             verification_delegation: Vec::new(),
@@ -1070,10 +1073,12 @@ mod tests {
             response_example: r#"{"title":"Saved"}"#.into(),
             deprecated: false,
             export_version: 0,
+            audience: Some(crate::app_contract::Audience::Employees),
             execution: Default::default(),
             credential_access: Default::default(),
             errors: vec!["gallery:invalid_item".into()],
             required_all_rows: Vec::new(),
+            any_owner: Vec::new(),
             observations: Vec::new(),
             verification_setup: Vec::new(),
             verification_delegation: Vec::new(),

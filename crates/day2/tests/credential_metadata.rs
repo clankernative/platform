@@ -1131,6 +1131,7 @@ expect (Credentials.clients.ref_from_str)("cr1_personal_abc") == Err(InvalidRef)
         foreign_keys: vec![],
         rollups: vec![],
         indexes: vec![],
+        owners: Default::default(),
     };
     let restricted = temporary.path().join("restricted");
     day2::admission::prepare(

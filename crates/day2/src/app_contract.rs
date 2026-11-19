@@ -59,6 +59,55 @@ pub struct CredentialAccess {
     pub interactive: bool,
 }
 
+/// Who a public operation serves. The application declares the class; the
+/// installing company binds each class to principals, so an artifact never names
+/// a person. Internal commands declare none: their audience is derived from the
+/// operations, schedules and ingress endpoints that reach them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Audience {
+    Employees,
+    Owners,
+    Closed,
+}
+
+impl Audience {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Employees => "employees",
+            Self::Owners => "owners",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+/// The generated contract carries the declared audience as its wire name, and an
+/// internal command as "". Artifacts built before audiences existed have no field.
+mod audience_wire {
+    use super::Audience;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Audience>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(value.map_or("", Audience::as_str))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Audience>, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "" => Ok(None),
+            "employees" => Ok(Some(Audience::Employees)),
+            "owners" => Ok(Some(Audience::Owners)),
+            "closed" => Ok(Some(Audience::Closed)),
+            other => Err(D::Error::custom(format!(
+                "unknown operation audience: {other}"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
@@ -68,12 +117,28 @@ pub struct Operation {
     pub deprecated: bool,
     #[serde(default)]
     pub export_version: u32,
+    /// `None` for an internal command. The SDK cannot build a public operation
+    /// without one, and the contract is re-derived from the compiled worker on
+    /// load, so only an application built before audiences existed has public
+    /// operations without one: then none of them has one (see
+    /// [`Definition::declares_audiences`]). That artifact still loads, backs up
+    /// and migrates, so its running app can upgrade; a policy renderer refuses it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "audience_wire"
+    )]
+    pub audience: Option<Audience>,
     pub execution: Execution,
     #[serde(default)]
     pub credential_access: CredentialAccess,
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_all_rows: Vec<String>,
+    /// Owned models this command writes whatever the row's owner; see
+    /// `Api.CommandDef.any_owner`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub any_owner: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observations: Vec<String>,
     pub verification_setup: Vec<String>,
@@ -95,18 +160,67 @@ impl Operation {
 
     fn validate_observations(&self) -> Result<()> {
         ensure!(
-            self.observations.len() <= crate::capabilities::READS.len(),
+            self.observations.len() <= crate::capabilities::READS.len() + 1,
             "observation requirement budget"
         );
         let mut seen = BTreeSet::new();
         for capability in &self.observations {
             ensure!(
-                crate::capabilities::READS.contains(&capability.as_str()),
+                crate::capabilities::READS.contains(&capability.as_str())
+                    || capability == crate::audit::HISTORY,
                 "unknown observation requirement: {capability}"
             );
             ensure!(
                 seen.insert(capability),
                 "duplicate observation requirement: {capability}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A public operation's audience is declared by the SDK constructor; an
+    /// internal command never has one, whatever a forged contract claims.
+    fn validate_audience(&self, name: &str) -> Result<()> {
+        ensure!(
+            !(self.execution.internal && self.audience.is_some()),
+            "internal command cannot declare an audience: {name}"
+        );
+        Ok(())
+    }
+
+    /// Each model is declared once, is owned (`owned_by: Table.owner`), and is one
+    /// this command writes. An exemption that matches nothing is refused rather
+    /// than kept as a silent grant for some later effect.
+    fn validate_any_owner(&self, name: &str, schema: &Schema) -> Result<()> {
+        // Only an employees write is narrowed to the row's owner (admins never
+        // are), so an exemption anywhere else would grant nothing today and
+        // silently widen the command if its audience later became `Employees`.
+        ensure!(
+            self.any_owner.is_empty()
+                || self.execution.internal
+                || self.audience == Some(Audience::Employees),
+            "any_owner applies only to an Employees or internal command: {name}"
+        );
+        let mut seen = BTreeSet::new();
+        for model in &self.any_owner {
+            ensure!(
+                seen.insert(model),
+                "duplicate any_owner model: {name} {model}"
+            );
+            ensure!(
+                schema.owners.contains_key(model),
+                "any_owner names {model}, which declares no owned_by column: {name}"
+            );
+            ensure!(
+                self.execution
+                    .effects
+                    .iter()
+                    .any(|effect| effect.model == *model
+                        && matches!(
+                            effect.kind.as_str(),
+                            "update" | "update_created" | "soft_delete"
+                        )),
+                "any_owner names {model}, which {name} does not update or soft-delete"
             );
         }
         Ok(())
@@ -635,10 +749,15 @@ impl Definition {
                 definition.export_version == 0 || !definition.execution.internal,
                 "internal command cannot be a cross-app export: {name}"
             );
+            definition.validate_audience(name)?;
+            definition.validate_any_owner(name, &artifact.schema)?;
             definition.validate_required_all_rows(&artifact.schema)?;
             definition.validate_observations()?;
             definition.validate_verification_delegation()?;
             validate_verification_setup(artifact, name, operation, definition)?;
+        }
+        if self.declares_audiences()? {
+            self.validate_page_audiences(&artifact.pages, &artifact.redirects)?;
         }
         for (path, media) in [
             (&self.presentation.stylesheet, "text/css; charset=utf-8"),
@@ -653,6 +772,94 @@ impl Definition {
                     "declared presentation resource is missing or has the wrong type: {path}"
                 );
             }
+        }
+        Ok(())
+    }
+}
+
+impl Definition {
+    /// Whether this application was built with audiences. Then every public
+    /// operation declares one; an application built before audiences existed
+    /// declares none. Anything between is refused, so no current build serves a
+    /// public operation without an audience.
+    fn declares_audiences(&self) -> Result<bool> {
+        let public = || {
+            self.operations
+                .iter()
+                .filter(|(_, operation)| !operation.execution.internal)
+        };
+        if public().all(|(_, operation)| operation.audience.is_none()) {
+            return Ok(false);
+        }
+        if let Some((name, _)) = public().find(|(_, operation)| operation.audience.is_none()) {
+            anyhow::bail!("public operation declares no audience: {name}");
+        }
+        Ok(true)
+    }
+
+    /// A page is one audience: its query, its preparation commands, its
+    /// preparation fallback, the page it renders on failure and every redirect
+    /// that renders it as its not-found page must all declare the same one.
+    fn validate_page_audiences(
+        &self,
+        pages: &[crate::artifact::Page],
+        redirects: &[crate::artifact::Redirect],
+    ) -> Result<()> {
+        for page in pages {
+            let mut members = vec![page.operation.as_str()];
+            members.extend(page.preparation.iter().map(String::as_str));
+            members.extend(
+                redirects
+                    .iter()
+                    .filter(|redirect| redirect.not_found_page == page.path)
+                    .map(|redirect| redirect.operation.as_str()),
+            );
+            if !page.prepare_failure_operation.is_empty() {
+                members.push(&page.prepare_failure_operation);
+            }
+            if !page.failure_page.is_empty() {
+                let failure = pages
+                    .iter()
+                    .find(|candidate| candidate.path == page.failure_page)
+                    .with_context(|| {
+                        format!("page {} renders an unregistered failure page", page.name)
+                    })?;
+                members.push(&failure.operation);
+            }
+            let declared = members
+                .iter()
+                .map(|member| {
+                    self.operations
+                        .get(*member)
+                        .map(|operation| (*member, operation.audience))
+                        .with_context(|| {
+                            format!("page {} names unknown operation {member}", page.name)
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let audiences = declared
+                .iter()
+                .filter_map(|(_, audience)| *audience)
+                .collect::<BTreeSet<_>>();
+            if let Some((member, _)) = declared.iter().find(|(_, audience)| audience.is_none()) {
+                anyhow::bail!(
+                    "page {} operation {member} declares no audience; every operation of a page declares one",
+                    page.name
+                );
+            }
+            ensure!(
+                audiences.len() == 1,
+                "page {} mixes audiences {}; its query, preparation commands, preparation fallback, failure page and not-found redirects declare one audience",
+                page.name,
+                declared
+                    .iter()
+                    .map(|(member, audience)| format!(
+                        "{member}={}",
+                        audience.map_or("", Audience::as_str)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         Ok(())
     }
@@ -1167,7 +1374,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), observations: product.operations.{name}.observations(), verification_setup: product.operations.{name}.verification_setup(), verification_delegation: product.operations.{name}.verification_delegation(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, audience: product.operations.{name}.audience(), execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), any_owner: product.operations.{name}.any_owner_models(), observations: product.operations.{name}.observations(), verification_setup: product.operations.{name}.verification_setup(), verification_delegation: product.operations.{name}.verification_delegation(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }
@@ -1876,6 +2083,304 @@ mod selector_tests {
     }
 
     #[test]
+    fn audiences_decode_as_declared_classes_and_internal_or_older_contracts_have_none() -> Result<()>
+    {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let base = serde_json::to_value(&contracts["create"])?;
+        assert!(
+            base.get("audience").is_none(),
+            "an undeclared audience is omitted, so older artifacts keep their bytes"
+        );
+        for (wire, expected) in [
+            ("employees", Some(Audience::Employees)),
+            ("owners", Some(Audience::Owners)),
+            ("closed", Some(Audience::Closed)),
+            ("", None),
+        ] {
+            let mut value = base.clone();
+            value["audience"] = serde_json::json!(wire);
+            let operation: Operation = serde_json::from_value(value)?;
+            assert_eq!(operation.audience, expected);
+            let encoded = serde_json::to_value(&operation)?;
+            assert_eq!(
+                encoded.get("audience").and_then(serde_json::Value::as_str),
+                expected.map(Audience::as_str)
+            );
+        }
+        for forged in ["admins", "Employees", "everyone", "domain:example.com"] {
+            let mut value = base.clone();
+            value["audience"] = serde_json::json!(forged);
+            assert!(
+                serde_json::from_value::<Operation>(value).is_err(),
+                "audience {forged} must not decode"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_public_operation_declares_an_audience_or_the_app_predates_them() -> Result<()> {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let definition = |create: Option<Audience>, preview: Option<Audience>, internal: bool| {
+            let mut operations = contracts.clone();
+            let create_operation = operations.get_mut("create").unwrap();
+            create_operation.audience = create;
+            create_operation.execution.internal = internal;
+            operations.get_mut("preview").unwrap().audience = preview;
+            Definition {
+                operations,
+                presentation: Presentation {
+                    stylesheet: String::new(),
+                    script: String::new(),
+                },
+                identities: String::new(),
+                invariants: BTreeMap::new(),
+                domains: Default::default(),
+                errors: BTreeMap::new(),
+            }
+        };
+        let owners = Some(Audience::Owners);
+        assert!(definition(owners, owners, false).declares_audiences()?);
+        // Only an internal command is without one.
+        assert!(definition(None, owners, true).declares_audiences()?);
+        // An application built before audiences existed declares none.
+        assert!(!definition(None, None, false).declares_audiences()?);
+        assert_eq!(
+            definition(None, owners, false)
+                .declares_audiences()
+                .unwrap_err()
+                .to_string(),
+            "public operation declares no audience: create"
+        );
+
+        let mut operation = contracts["create"].clone();
+        operation.audience = Some(Audience::Owners);
+        operation.validate_audience("create")?;
+        operation.execution.internal = true;
+        assert_eq!(
+            operation
+                .validate_audience("create")
+                .unwrap_err()
+                .to_string(),
+            "internal command cannot declare an audience: create"
+        );
+        operation.audience = None;
+        operation.validate_audience("create")?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_page_its_preparation_fallback_failure_page_and_redirects_share_one_audience() -> Result<()>
+    {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let operation = |audience: Option<Audience>| {
+            let mut operation = contracts["preview"].clone();
+            operation.audience = audience;
+            operation
+        };
+        let page = |name: &str,
+                    path: &str,
+                    query: &str,
+                    preparation: &[&str],
+                    fallback: &str,
+                    failure: &str| {
+            serde_json::from_value::<crate::artifact::Page>(serde_json::json!({
+                "name": name, "title": name, "operation": query, "defaults": "{}", "path": path,
+                "preparation": preparation, "prepare_failure_operation": fallback, "failure_page": failure,
+            }))
+        };
+        let pages = vec![
+            page(
+                "dashboard",
+                "/",
+                "list",
+                &["refresh"],
+                "list_unavailable",
+                "/unavailable",
+            )?,
+            page("unavailable", "/unavailable", "unavailable", &[], "", "")?,
+        ];
+        let definition = |audiences: [Option<Audience>; 5]| Definition {
+            operations: [
+                "list",
+                "refresh",
+                "list_unavailable",
+                "unavailable",
+                "visit",
+            ]
+            .into_iter()
+            .zip(audiences)
+            .map(|(name, audience)| (name.to_owned(), operation(audience)))
+            .collect(),
+            presentation: Presentation {
+                stylesheet: String::new(),
+                script: String::new(),
+            },
+            identities: String::new(),
+            invariants: BTreeMap::new(),
+            domains: Default::default(),
+            errors: BTreeMap::new(),
+        };
+        // A redirect renders the dashboard to its own caller when the link is
+        // missing, so the redirect command joins the dashboard's audience.
+        let redirects = vec![serde_json::from_value::<crate::artifact::Redirect>(
+            serde_json::json!({
+                "name": "visit", "path": "/go", "operation": "visit", "input_type": "visit_input",
+                "output_type": "result", "location": "url", "schemes": "web",
+                "not_found": ["app:example.invalid_input"], "not_found_page": "/",
+            }),
+        )?];
+        let employees = Some(Audience::Employees);
+        definition([employees; 5]).validate_page_audiences(&pages, &redirects)?;
+        definition([Some(Audience::Owners); 5]).validate_page_audiences(&pages, &redirects)?;
+        for (audiences, member) in [
+            (
+                [
+                    employees,
+                    Some(Audience::Owners),
+                    employees,
+                    employees,
+                    employees,
+                ],
+                "refresh=owners",
+            ),
+            (
+                [
+                    employees,
+                    employees,
+                    Some(Audience::Closed),
+                    employees,
+                    employees,
+                ],
+                "list_unavailable=closed",
+            ),
+            (
+                [
+                    employees,
+                    employees,
+                    employees,
+                    Some(Audience::Owners),
+                    employees,
+                ],
+                "unavailable=owners",
+            ),
+            (
+                [
+                    employees,
+                    employees,
+                    employees,
+                    employees,
+                    Some(Audience::Owners),
+                ],
+                "visit=owners",
+            ),
+        ] {
+            let error = definition(audiences)
+                .validate_page_audiences(&pages, &redirects)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("page dashboard mixes audiences") && error.contains(member),
+                "{error}"
+            );
+        }
+        let error = definition([employees, None, employees, employees, employees])
+            .validate_page_audiences(&pages, &redirects)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "page dashboard operation refresh declares no audience; every operation of a page declares one"
+        );
+        let mut missing = pages.clone();
+        missing[0].failure_page = "/missing".into();
+        assert!(
+            definition([employees; 5])
+                .validate_page_audiences(&missing, &redirects)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn any_owner_names_an_owned_model_the_command_writes_once() -> Result<()> {
+        let (_, mut schema, _) = fixture();
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let mut operation = contracts["create"].clone();
+        operation.audience = Some(Audience::Employees);
+        let write = |kind: &str| Effect {
+            command: String::new(),
+            kind: kind.into(),
+            model: "rows".into(),
+            fields: Vec::new(),
+        };
+        operation.any_owner = vec!["rows".into()];
+        operation.execution.effects = vec![write("update")];
+        assert_eq!(
+            operation
+                .validate_any_owner("create", &schema)
+                .unwrap_err()
+                .to_string(),
+            "any_owner names rows, which declares no owned_by column: create"
+        );
+        schema.owners.insert("rows".into(), "owner".into());
+        for kind in ["update", "update_created", "soft_delete"] {
+            operation.execution.effects = vec![write(kind)];
+            operation.validate_any_owner("create", &schema)?;
+        }
+        operation.execution.effects = vec![write("create")];
+        assert_eq!(
+            operation
+                .validate_any_owner("create", &schema)
+                .unwrap_err()
+                .to_string(),
+            "any_owner names rows, which create does not update or soft-delete"
+        );
+        operation.execution.effects = vec![write("update")];
+        operation.any_owner = vec!["rows".into(), "rows".into()];
+        assert_eq!(
+            operation
+                .validate_any_owner("create", &schema)
+                .unwrap_err()
+                .to_string(),
+            "duplicate any_owner model: create rows"
+        );
+        operation.any_owner = vec!["rows".into()];
+        // Owners and Closed writes are never owner-scoped, so an exemption there
+        // would only wait to widen a later Employees declaration.
+        for audience in [Audience::Owners, Audience::Closed] {
+            operation.audience = Some(audience);
+            assert_eq!(
+                operation
+                    .validate_any_owner("create", &schema)
+                    .unwrap_err()
+                    .to_string(),
+                "any_owner applies only to an Employees or internal command: create"
+            );
+        }
+        operation.audience = None;
+        operation.execution.internal = true;
+        operation.validate_any_owner("create", &schema)?;
+        Ok(())
+    }
+
+    #[test]
+    fn observations_accept_the_applications_own_audit_history() -> Result<()> {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let mut operation = contracts["preview"].clone();
+        operation.observations = vec![
+            crate::audit::HISTORY.into(),
+            "workspace_directory.user_path.v1".into(),
+        ];
+        operation.validate_observations()?;
+        operation.observations = vec![crate::audit::HISTORY.into(), crate::audit::HISTORY.into()];
+        assert!(operation.validate_observations().is_err());
+        operation.observations = vec!["audit.history.v2".into()];
+        assert!(operation.validate_observations().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn required_all_rows_generation_covers_command_and_query_without_replacing_errors() -> Result<()>
     {
         let (mut catalog, schema, outputs) = fixture();
@@ -2304,6 +2809,7 @@ mod selector_tests {
             rollups: Vec::new(),
             indexes: vec![],
             domains: BTreeMap::new(),
+            owners: Default::default(),
         };
         let outputs = BTreeMap::from([(
             "result".into(),

@@ -22,6 +22,8 @@ NonUniqueKey(fields) := [NonUnique(List(fields))]
 
 RollupKey(group, measures) := [Rollup(List(group), List(measures))]
 
+OwnerColumn(column) := [Owner(List(column))]
+
 Table(row, keys) :: { row_witness : List(row), key_witness : List(keys) }.{
 	# A table with no business keys. The platform supplies this for any model that
 	# declares no `table`, so applications never need to write it.
@@ -62,6 +64,16 @@ Table(row, keys) :: { row_witness : List(row), key_witness : List(keys) }.{
 	# rows or sums an integer column, which it is named after.
 	rollup : { ..group }, { ..measures } -> RollupKey({ ..group }, { ..measures })
 	rollup = |_group, _measures| Rollup([], [])
+
+	# The column holding the person a row belongs to, declared as the entry
+	# `owned_by`, e.g. `owned_by: Table.owner({ owner: row.owner })`. It selects
+	# exactly one text column, labelled with the column it reads, and a model has
+	# at most one. The rendered company policy scopes an `Employees` command that
+	# updates or soft-deletes these rows to the row's owner, unless the command
+	# declares `.any_owner(model)`; admins are not scoped. It is authority metadata
+	# only: no index and no storage change.
+	owner : { ..column } -> OwnerColumn({ ..column })
+	owner = |_selected| Owner([])
 
 	hour : I64 -> [Hour(I64)]
 	hour = |time| Hour(time)

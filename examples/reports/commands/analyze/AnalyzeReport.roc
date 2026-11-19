@@ -13,26 +13,24 @@ import Commands
 # Analysis is an internal command. Its captured input is computed outside the
 # decision transaction, then applied only while the document revision still matches.
 AnalyzeReport :: [].{
-	definition = Api.command({
+	definition = Api.internal_command({
 		handler: Handler.prepared(prepare, decide),
 		contract,
-		execution: Api.internal(
-			Api.edit(
-				Data.reports,
-				Selectors.analyze_input_report_id,
-				Selectors.analyze_input_expected_version,
-				[
-					Api.update(
-						Data.reports,
-						[
-							Api.field(Selectors.reports_ready),
-							Api.field(Selectors.reports_bytes),
-							Api.field(Selectors.reports_lines),
-						],
-					),
-					Api.request(Commands.notify),
-				],
-			),
+		execution: Api.edit(
+			Data.reports,
+			Selectors.analyze_input_report_id,
+			Selectors.analyze_input_expected_version,
+			[
+				Api.update(
+					Data.reports,
+					[
+						Api.field(Selectors.reports_ready),
+						Api.field(Selectors.reports_bytes),
+						Api.field(Selectors.reports_lines),
+					],
+				),
+				Api.request(Commands.notify),
+			],
 		),
 		verification: { input: verify_input, check: verify_result },
 	})

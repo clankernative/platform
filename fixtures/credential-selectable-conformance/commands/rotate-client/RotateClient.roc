@@ -13,6 +13,7 @@ RotateClient :: [].{
 	Output : { status : Str, lineage : Str, version : Str, revision : U64 }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.interactive(handle),
 		contract: {
 			title: "Rotate a client credential",

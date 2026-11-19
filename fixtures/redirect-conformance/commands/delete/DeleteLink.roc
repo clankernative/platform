@@ -10,6 +10,7 @@ import Selectors
 # Soft deletion: the name stays reserved, and visiting it no longer resolves.
 DeleteLink :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state([Api.update(Data.links, [Api.field(Selectors.links_deleted)])]),

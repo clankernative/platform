@@ -19,6 +19,7 @@ BatchUpdateEntries :: [].{
 	CheckedChange : { id : Ref(Models.Entry), version : RowVersion, note : Str }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state([Api.update(Data.entries, [Api.field(Selectors.entries_note)])]),

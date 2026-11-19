@@ -28,10 +28,11 @@ History :: [].{
 
 	definition =
 		Api.query({
+			audience: Employees,
 			handler: Handler.prepared(prepare, handle),
 			contract,
 			verification: { input: verify_input, check: verify_result },
-		})
+		}).observes("audit.history.v1")
 
 	prepare : Context, HistoryTypes.Input -> Observe(CollectionPage(Audit.Entry))
 	prepare =

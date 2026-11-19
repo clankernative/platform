@@ -1055,6 +1055,11 @@ fn fixture_build(
         "reports-search" => {
             FixtureBuild::overlay(root, "examples/reports", "fixtures/reactive-query-search")
         }
+        "audiences" => FixtureBuild::overlay(
+            root,
+            "fixtures/row-authority-web-conformance",
+            "fixtures/audience-conformance",
+        ),
         "http" => FixtureBuild::overlay(
             root,
             "fixtures/row-authority-web-conformance",
@@ -1826,6 +1831,12 @@ fn configure_tests(
             "reports_http::checked_report_search_uses_native_get_and_preserves_owner_scoped_reads",
         ]);
     }
+    if !fixtures.contains_key("audiences") {
+        command.args([
+            "--skip",
+            "app_contract::admitted_audiences_and_row_owner_reach_the_artifact_and_pages_refuse_mixtures",
+        ]);
+    }
     if !fixtures.contains_key("chart-live") {
         for test in [
             "web::presentation_delivery_tests::http_delivery_rechecks_revocation_after_render",
@@ -1935,6 +1946,7 @@ fn configure_tests(
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
         ("reports-search", "DAY2_TEST_REPORTS_SEARCH_ARTIFACT"),
+        ("audiences", "DAY2_TEST_AUDIENCES_ARTIFACT"),
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
         ("lifecycle", "DAY2_TEST_LIFECYCLE_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
@@ -2186,6 +2198,7 @@ fn required_steps(scope: &str) -> Result<Vec<&'static str>> {
             "build-reports",
             "build-reports-probe",
             "build-reports-search",
+            "build-audiences",
             "build-owned",
             "build-owned-probe",
             "build-repeated-field",
@@ -3703,6 +3716,7 @@ mod tests {
             "build-http",
             "build-reports-probe",
             "build-reports-search",
+            "build-audiences",
             "build-owned-probe",
             "build-repeated-field",
             "build-chart-live",

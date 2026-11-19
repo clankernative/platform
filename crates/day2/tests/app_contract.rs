@@ -1297,6 +1297,7 @@ logs : Model({ complete : Bool })
 logs = Model.define("logs", "log", |raw| Json.parse(raw).map_err(|_| "log"), |value| Json.to_str(value))
 usage = {purpose: "Check complete state.", use_when: [], avoid_when: [], preconditions: [], effects: [], result: "Result."}
 command_base = Api.command({
+    audience: Owners,
     handler: Handler.local(|_context, input| Tx.succeed({accepted: !input.reason.is_empty()})),
     contract: {
         title: "Create", usage, inputs: {reason: "Reason."}, outputs: {accepted: "Accepted."},
@@ -1307,6 +1308,7 @@ command_base = Api.command({
     verification: {input: |_snapshot, _seed| Ok({reason: "generated"}), check: |_before, output, _after| Ok(output.accepted)},
 })
 query_base = Api.query({
+    audience: Closed,
     handler: Handler.local(|_context, input| Query.from_try(Ok({count: input.path.count_utf8_bytes()}))),
     contract: {
         title: "Preview", usage, inputs: {path: "Path."}, outputs: {count: "Count."},
@@ -1315,6 +1317,16 @@ query_base = Api.query({
     },
     verification: {input: |_snapshot, _seed| Ok({path: "/generated"}), check: |_before, output, _after| Ok(output.count == 10)},
 })
+internal_base = Api.internal_command({
+    handler: Handler.local(|_context, input| Tx.succeed({accepted: !input.reason.is_empty()})),
+    contract: {
+        title: "Create", usage, inputs: {reason: "Reason."}, outputs: {accepted: "Accepted."},
+        example: |_| Ok({input: {reason: "example"}, output: {accepted: Bool.True}}),
+        input_sources: |_| [], follow_ups: [], deprecated: Bool.False, errors: [],
+    },
+    execution: Api.current_state([Api.create(rows)]),
+    verification: {input: |_snapshot, _seed| Ok({reason: "generated"}), check: |_before, output, _after| Ok(output.accepted)},
+})
 command = command_base.require_all_rows(rows).require_all_rows(logs)
 query = query_base.require_all_rows(logs).require_all_rows(rows)
 command_program : Context, { reason : Str } -> Tx({ accepted : Bool })
@@ -1322,6 +1334,11 @@ command_program = command.command_program()
 query_program : Context, { path : Str } -> Tx({ count : U64 })
 query_program = query.query_program()
 expect command_base.required_all_rows().is_empty() and query_base.required_all_rows().is_empty()
+expect command_base.audience() == "owners" and query_base.audience() == "closed"
+expect internal_base.audience() == "" and internal_base.execution().internal and !command_base.execution().internal
+expect command_base.observes("audit.history.v1").observations() == ["audit.history.v1"]
+expect command_base.any_owner_models().is_empty() and query_base.any_owner_models().is_empty()
+expect command_base.any_owner(rows).any_owner(logs).any_owner_models() == ["rows", "logs"]
 expect command_base.observations().is_empty() and query_base.observations().is_empty()
 expect command_base.observes("workspace_directory.user_path.v1").observations() == ["workspace_directory.user_path.v1"]
 expect query_base.observes("workspace_directory.hierarchy.v2").observes("workspace_directory.page.v2").observations() == ["workspace_directory.hierarchy.v2", "workspace_directory.page.v2"]
@@ -1350,7 +1367,7 @@ expect query_base.credentials(Credential.metadata_access(Credential.client_famil
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (13) tests passed"),
+        output.status.success() && diagnostics.contains("All (18) tests passed"),
         "native read requirements: {diagnostics}"
     );
     Ok(())
@@ -1616,6 +1633,116 @@ fn internal_examples_are_offline_only_and_do_not_expose_public_commands() -> Res
             .unwrap_err()
             .to_string(),
         "unknown_operation"
+    );
+    Ok(())
+}
+
+#[test]
+fn admitted_audiences_and_row_owner_reach_the_artifact_and_pages_refuse_mixtures() -> Result<()> {
+    use day2::app_contract::Audience;
+    let artifact = std::env::var_os("DAY2_TEST_AUDIENCES_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask verify or set DAY2_TEST_AUDIENCES_ARTIFACT")?;
+    let admitted = LoadedArtifact::load(&artifact)?.contract().clone();
+    let contract = admitted
+        .app_contract
+        .as_ref()
+        .context("application contract")?;
+    let audience = |operation: &str| {
+        contract
+            .operations
+            .get(operation)
+            .map(|definition| definition.audience)
+            .with_context(|| format!("{operation} contract"))
+    };
+    ensure!(audience("links.list")? == Some(Audience::Employees));
+    ensure!(audience("links.edit")? == Some(Audience::Employees));
+    ensure!(audience("links.detail")? == Some(Audience::Owners));
+    ensure!(audience("links.create")? == Some(Audience::Closed));
+    ensure!(
+        contract.operations["links.edit"].any_owner == ["links"],
+        "the edit command's any_owner exemption reaches the admitted contract"
+    );
+    ensure!(
+        admitted.schema.owners
+            == std::collections::BTreeMap::from([("links".to_owned(), "owner".to_owned())])
+    );
+    ensure!(
+        admitted.schema.indexes.is_empty(),
+        "an owner column is authority metadata, not an index"
+    );
+    // Positive control: the admitted contract validates as served.
+    day2::operation_catalog::Catalog::from_artifact(&admitted)?;
+
+    let page = |contract: &mut day2::artifact::Artifact| {
+        contract
+            .pages
+            .iter_mut()
+            .find(|page| page.operation == "links.detail")
+            .expect("the link page reads links.detail")
+            .preparation = vec!["links.create".into()];
+    };
+    let refused = |contract: &day2::artifact::Artifact| {
+        match day2::operation_catalog::Catalog::from_artifact(contract) {
+            Ok(_) => String::new(),
+            Err(error) => format!("{error:#}"),
+        }
+    };
+
+    let mut mixed = admitted.clone();
+    page(&mut mixed);
+    let error = refused(&mixed);
+    ensure!(
+        error.contains("mixes audiences") && error.contains("links.create=closed"),
+        "an owners page with a closed preparation command must be refused: {error}"
+    );
+
+    let mut undeclared = admitted.clone();
+    undeclared
+        .app_contract
+        .as_mut()
+        .context("application contract")?
+        .operations
+        .get_mut("links.create")
+        .context("create contract")?
+        .audience = None;
+    let error = refused(&undeclared);
+    ensure!(
+        error.contains("public operation declares no audience: links.create"),
+        "a public operation without an audience must be refused: {error}"
+    );
+
+    let mut internal_member = admitted.clone();
+    page(&mut internal_member);
+    let create = internal_member
+        .app_contract
+        .as_mut()
+        .context("application contract")?
+        .operations
+        .get_mut("links.create")
+        .context("create contract")?;
+    create.audience = None;
+    create.execution.internal = true;
+    let error = refused(&internal_member);
+    ensure!(
+        error.contains("operation links.create declares no audience"),
+        "a page whose preparation command is internal must be refused: {error}"
+    );
+
+    let mut internal = admitted.clone();
+    internal
+        .app_contract
+        .as_mut()
+        .context("application contract")?
+        .operations
+        .get_mut("links.create")
+        .context("create contract")?
+        .execution
+        .internal = true;
+    let error = refused(&internal);
+    ensure!(
+        error.contains("internal command cannot declare an audience: links.create"),
+        "an internal command that declares an audience must be refused: {error}"
     );
     Ok(())
 }

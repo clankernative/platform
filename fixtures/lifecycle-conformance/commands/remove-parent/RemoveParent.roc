@@ -11,6 +11,7 @@ import Selectors
 
 RemoveParent :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.edit(

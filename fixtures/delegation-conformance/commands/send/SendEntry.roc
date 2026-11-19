@@ -11,6 +11,7 @@ SendEntry :: [].{
 	Output : { receipt : Str }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.effects(prepare, decide, deliver, complete),
 		contract,
 		execution: Api.current_state([Api.external("app.send.v1")]),

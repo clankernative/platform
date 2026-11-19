@@ -111,6 +111,7 @@ fn routes() -> Result<routing::Catalog> {
         foreign_keys: vec![],
         rollups: Vec::new(),
         indexes: vec![],
+        owners: Default::default(),
     };
     let operations: Vec<_> = [("links.list", "list_links"), ("links.get", "get_link")]
         .into_iter()

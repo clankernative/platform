@@ -15,6 +15,7 @@ CreatePersonal :: [].{
 	Output : { lineage : Str, version : Str, label : Str, expires_at : I64 }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.interactive(handle),
 		contract: {
 			title: "Create a personal credential",

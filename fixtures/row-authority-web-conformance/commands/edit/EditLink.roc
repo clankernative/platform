@@ -12,6 +12,7 @@ import LinkScenarios
 EditLink :: [].{
 	definition =
 		Api.command({
+			audience: Employees,
 			handler: Handler.local(handle),
 			contract,
 			execution: Api.edit(

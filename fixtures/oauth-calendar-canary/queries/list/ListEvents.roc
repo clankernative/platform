@@ -13,6 +13,7 @@ ListEvents :: [].{
 	Output : { status : Str, events : CollectionPage(GoogleCalendar.Event) }
 
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.prepared(prepare, |_context, _input, output| Query.from_try(Ok(output))),
 		contract: {
 			title: "Read work calendar events",

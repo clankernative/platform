@@ -19,12 +19,12 @@ import Models
 # forever, and no one finds out. This is the smallest honest use of a schedule --
 # it repairs state rather than producing any of its own.
 SweepReports :: [].{
-	definition = Api.command({
+	definition = Api.internal_command({
 		handler: Handler.local(handle),
 		contract,
 		# Internal: a schedule is its only caller. No HTTP, form or MCP entrypoint,
 		# so declaring the schedule cannot open a second way in.
-		execution: Api.internal(Api.current_state([Api.request(Commands.notify)])),
+		execution: Api.current_state([Api.request(Commands.notify)]),
 		verification: { input: verify_input, check: verify_result },
 	})
 

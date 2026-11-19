@@ -13,6 +13,7 @@ RevokePersonal :: [].{
 	Output : { status : Str, lineage : Str, revision : U64 }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.interactive(handle),
 		contract: {
 			title: "Revoke a personal credential",

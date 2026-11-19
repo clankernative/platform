@@ -175,6 +175,7 @@ mod tests {
             foreign_keys: vec![],
             rollups: Vec::new(),
             indexes: vec![],
+            owners: Default::default(),
         };
         let mut domains = Catalog::from([(
             "Title".into(),

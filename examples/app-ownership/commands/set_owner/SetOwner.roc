@@ -11,6 +11,7 @@ import Errors
 
 SetOwner :: [].{
 	definition = Api.command({
+		audience: Owners,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state(

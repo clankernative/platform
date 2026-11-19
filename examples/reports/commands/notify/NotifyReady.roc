@@ -17,19 +17,17 @@ NotifyReady :: [].{
 
 	Decision : { recipient : Notifications.Recipient, topic : Str, body : Str, ready : Bool }
 
-	definition = Api.command({
+	definition = Api.internal_command({
 		handler: Handler.effects(prepare, decide, deliver, complete),
 		contract,
 		# Api.edit declares the concurrency target; the write itself is a separate
 		# effect and is declared here. announced is the only field this command
 		# may change.
-		execution: Api.internal(
-			Api.edit(
-				Data.reports,
-				Selectors.notify_input_report_id,
-				Selectors.notify_input_expected_version,
-				[Notifications.send_effect, Api.update(Data.reports, [Api.field(Selectors.reports_announced)])],
-			),
+		execution: Api.edit(
+			Data.reports,
+			Selectors.notify_input_report_id,
+			Selectors.notify_input_expected_version,
+			[Notifications.send_effect, Api.update(Data.reports, [Api.field(Selectors.reports_announced)])],
 		),
 		verification: { input: verify_input, check: verify_result },
 	})

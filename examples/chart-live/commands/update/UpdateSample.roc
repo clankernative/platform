@@ -13,6 +13,7 @@ import Selectors
 
 UpdateSample :: [].{
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state([

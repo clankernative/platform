@@ -51,7 +51,7 @@ Reports demonstrates all three forms:
 - [GetReport](../examples/reports/queries/detail/GetReport.roc) combines a local
   report with a prepared capability read of its notification status.
 
-`Api.internal(Api.edit(...))` makes a command requestable through generated
+`Api.internal_command({ ..., execution: Api.edit(...) })` makes a command requestable through generated
 `Commands` handles while excluding it from HTTP, forms, OpenAPI and MCP. There is
 no public completion operation. Child requests require an authentic observation
 from the current transaction and explicit instance-policy grants.

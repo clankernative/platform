@@ -12,6 +12,7 @@ RestoreMarkers :: [].{
 	Output : { count : U64, page : CollectionPage({ note : Str }) }
 
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract: {
 			title: "Read complete public restore markers",

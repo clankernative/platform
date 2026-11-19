@@ -17,6 +17,7 @@ ListKeys :: [].{
 	Output : { status : Str, page : CollectionPage(Item) }
 
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.prepared(prepare, |_context, _input, output| Query.from_try(Ok(output))),
 		contract: {
 			title: "List client credential metadata",

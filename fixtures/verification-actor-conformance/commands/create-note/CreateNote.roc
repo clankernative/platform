@@ -12,6 +12,7 @@ CreateNote :: [].{
 	Output : { owner : Str, text : Str }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state([Api.create(Data.notes)]),

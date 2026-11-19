@@ -53,6 +53,19 @@ Api :: [].{
 
 	ExecutionMetadata : { internal : Bool, model : Str, id_field : Str, version_field : Str, effects : List(Effect) }
 
+	# Who an operation serves. The application chooses the class; the company that
+	# installs it binds each class to principals (its people domain, the app's
+	# owners), so an artifact never names a person. Internal commands declare no
+	# audience: theirs is derived from the operations and schedules that reach them.
+	Audience : [Employees, Owners, Closed]
+
+	audience_name : Audience -> Str
+	audience_name = |audience| match audience {
+		Employees => "employees"
+		Owners => "owners"
+		Closed => "closed"
+	}
+
 	CredentialAccess : {
 		enabled : Bool,
 		local_reads : List(Str),
@@ -75,10 +88,12 @@ Api :: [].{
 		response_example : Str,
 		deprecated : Bool,
 		export_version : U64,
+		audience : Str,
 		execution : ExecutionMetadata,
 		credential_access : CredentialAccess,
 		errors : List(Str),
 		required_all_rows : List(Str),
+		any_owner : List(Str),
 		observations : List(Str),
 		verification_setup : List(Str),
 		verification_delegation : List({ actor : Str, application : Str }),
@@ -309,11 +324,13 @@ Api :: [].{
 		handler : (Context, input -> Tx(output)),
 		contract : Contract(input, output, input_fields, output_fields),
 		execution : Execution(input),
+		audience : [Public(Audience), Internal],
 		credential_access : CredentialAccess,
 		verification_setup : List(Str),
 		verification_delegation : [None, Some({ actor : Str, application : Str })],
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
+		any_owner : List(Str),
 		observations : List(Str),
 		export_version : U64,
 	}.{
@@ -441,6 +458,13 @@ Api :: [].{
 		execution : CommandDef(input, output, input_fields, output_fields) -> Execution(input)
 		execution = |definition| definition.execution
 
+		# The declared audience's wire name, or "" for an internal command.
+		audience : CommandDef(input, output, input_fields, output_fields) -> Str
+		audience = |definition| match definition.audience {
+			Public(declared) => audience_name(declared)
+			Internal => ""
+		}
+
 		credential_access : CommandDef(input, output, input_fields, output_fields) -> CredentialAccess
 		credential_access = |definition| definition.credential_access
 
@@ -486,8 +510,22 @@ Api :: [].{
 		required_all_rows : CommandDef(input, output, input_fields, output_fields) -> List(Str)
 		required_all_rows = |definition| definition.required_all_rows
 
-		# Declared read capabilities select disposable verification fixtures.
-		# Production authority remains an independent operator decision.
+		# An Employees command's writes to rows of a model declared with
+		# `owned_by: Table.owner(...)` are scoped to the row's owner. Declare this
+		# for a model whose rows the command writes whatever their owner, such as a
+		# visit counter on someone else's link. It grants nothing by itself.
+		any_owner :
+			CommandDef(input, output, input_fields, output_fields),
+			Model(model) -> CommandDef(input, output, input_fields, output_fields)
+		any_owner = |definition, model| { ..definition, any_owner: definition.any_owner.append(model.name()) }
+
+		any_owner_models : CommandDef(input, output, input_fields, output_fields) -> List(Str)
+		any_owner_models = |definition| definition.any_owner
+
+		# Declares a read capability or `audit.history.v1` this operation observes.
+		# Build verification grants an operation only the observations it declares.
+		# Production authority is still the company's policy; rendering that policy
+		# from these declarations is planned.
 		observes :
 			CommandDef(input, output, input_fields, output_fields),
 			Str -> CommandDef(input, output, input_fields, output_fields)
@@ -503,6 +541,7 @@ Api :: [].{
 		handler : (Context, input -> Tx(output)),
 		contract : Contract(input, output, input_fields, output_fields),
 		verification : Verification(input, output),
+		audience : Audience,
 		credential_access : CredentialAccess,
 		verification_setup : List(Str),
 		required_all_rows : List(Str),
@@ -574,6 +613,9 @@ Api :: [].{
 			QueryDef(input, output, input_fields, output_fields) -> Contract(input, output, input_fields, output_fields)
 		contract = |definition| definition.contract
 
+		audience : QueryDef(input, output, input_fields, output_fields) -> Str
+		audience = |definition| audience_name(definition.audience)
+
 		verify_after :
 			QueryDef(input, output, input_fields, output_fields),
 			Write({}, setup_output) -> QueryDef(input, output, input_fields, output_fields)
@@ -607,6 +649,11 @@ Api :: [].{
 		required_all_rows : QueryDef(input, output, input_fields, output_fields) -> List(Str)
 		required_all_rows = |definition| definition.required_all_rows
 
+		# Queries write nothing, so no row owner applies to them.
+		any_owner_models : QueryDef(input, output, input_fields, output_fields) -> List(Str)
+		any_owner_models = |_| []
+
+		# See CommandDef.observes.
 		observes :
 			QueryDef(input, output, input_fields, output_fields),
 			Str -> QueryDef(input, output, input_fields, output_fields)
@@ -616,7 +663,29 @@ Api :: [].{
 		observations = |definition| definition.observations
 	}
 
+	# A public command: reachable over HTTP, forms and MCP by its declared audience.
 	command :
+		{
+			audience : Audience,
+			handler : Handler(input, Tx(output)),
+			contract : Contract(input, output, input_fields, output_fields),
+			execution : Execution(input),
+			verification : Verification(input, output),
+		} ->
+			CommandDef(input, output, input_fields, output_fields)
+	command = |definition| command_def(
+		{
+			handler: definition.handler,
+			contract: definition.contract,
+			execution: definition.execution,
+			verification: definition.verification,
+		},
+		Public(definition.audience),
+	)
+
+	# A command only reached as a child request or a schedule run: the same
+	# contract, but no HTTP, form or MCP entrypoint and no declared audience.
+	internal_command :
 		{
 			handler : Handler(input, Tx(output)),
 			contract : Contract(input, output, input_fields, output_fields),
@@ -624,14 +693,33 @@ Api :: [].{
 			verification : Verification(input, output),
 		} ->
 			CommandDef(input, output, input_fields, output_fields)
-	command = |definition| {
+	internal_command = |definition| command_def(definition, Internal)
+
+	command_def :
+		{
+			handler : Handler(input, Tx(output)),
+			contract : Contract(input, output, input_fields, output_fields),
+			execution : Execution(input),
+			verification : Verification(input, output),
+		},
+		[Public(Audience), Internal] ->
+			CommandDef(input, output, input_fields, output_fields)
+	# The audience decides reachability: `Internal` is the only way to an internal
+	# command and `Public` always carries an audience, so no definition is public
+	# without one or internal with one, however this is called.
+	command_def = |definition, audience| {
 		handler = definition.handler
+		internal = match audience {
+			Public(_) => Bool.False
+			Internal => Bool.True
+		}
 		{
 			input_witness: |value| value,
 			output_witness: |value| value,
 			handler: |context, input| Handler.program(handler, context, input, |body| body),
 			contract: definition.contract,
-			execution: definition.execution,
+			execution: { ..definition.execution, internal },
+			audience,
 			credential_access: {
 				enabled: Bool.False,
 				local_reads: [],
@@ -651,6 +739,7 @@ Api :: [].{
 			verification_setup: [],
 			verification_delegation: None,
 			required_all_rows: [],
+			any_owner: [],
 			observations: [],
 			export_version: 0,
 		}
@@ -658,6 +747,7 @@ Api :: [].{
 
 	query :
 		{
+			audience : Audience,
 			handler : Handler(input, Query(output)),
 			contract : Contract(input, output, input_fields, output_fields),
 			verification : Verification(input, output),
@@ -671,6 +761,7 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body.as_transaction()),
 			contract: definition.contract,
 			verification: definition.verification,
+			audience: definition.audience,
 			verification_setup: [],
 			credential_access: {
 				enabled: Bool.False,
@@ -756,10 +847,6 @@ Api :: [].{
 	# A request is accepted atomically with the caller's local changes.
 	request : Write(a, b) -> Effect
 	request = |handle| { kind: "request", model: "", fields: [], command: handle.name() }
-
-	# Internal commands have the same contract but no HTTP, form or MCP entrypoint.
-	internal : Execution(input) -> Execution(input)
-	internal = |execution| { ..execution, internal: Bool.True }
 
 	current_state : List(Effect) -> Execution(input)
 	current_state =

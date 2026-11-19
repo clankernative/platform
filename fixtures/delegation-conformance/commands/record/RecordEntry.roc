@@ -10,6 +10,7 @@ RecordEntry :: [].{
 	Output : { identity : IdentityView.Value, id : Str, note : Str }
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		execution: Api.current_state([Api.create(Data.entries)]),

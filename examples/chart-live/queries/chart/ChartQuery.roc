@@ -13,6 +13,7 @@ import Data
 
 ChartQuery :: [].{
 	definition = Api.query({
+		audience: Employees,
 		handler: Handler.local(handle),
 		contract,
 		verification: { input: verify_input, check: verify_result },

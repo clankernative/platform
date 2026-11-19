@@ -15,6 +15,7 @@ import ReportScenarios
 ReviseReport :: [].{
 	definition =
 		Api.command({
+			audience: Employees,
 			handler: Handler.local(handle),
 			contract,
 			execution: Api.edit(

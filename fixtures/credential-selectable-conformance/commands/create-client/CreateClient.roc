@@ -24,6 +24,7 @@ CreateClient :: [].{
 	}
 
 	definition = Api.command({
+		audience: Employees,
 		handler: Handler.interactive(handle),
 		contract: {
 			title: "Create a selected named client credential",

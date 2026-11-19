@@ -77,8 +77,13 @@ is verification data, not application authority. Checks still compare complete
 live/deleted snapshots and must preserve unrelated rows and fields.
 
 Internal commands use the same layout, required contract and verification as
-public commands. `Api.internal(...)` excludes them from public routes; generated
-`Commands` handles allow atomic requests from other commands. Preparation and
+public commands. `Api.internal_command(...)` excludes them from public routes;
+generated `Commands` handles allow atomic requests from other commands. Every
+public command and query declares its audience (`Employees`, `Owners` or
+`Closed`); internal commands declare none, and theirs is derived from the
+operations and schedules that reach them. A page and its preparation commands,
+fallback query and failure page share one audience. See
+[audiences](APP-CONTRACT.md#audiences). Preparation and
 effects are phases of a command or query, not separately registered operations.
 See [the runtime contract](COMMAND-RUNTIME.md) for the authoring API.
 
