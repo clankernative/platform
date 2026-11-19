@@ -622,6 +622,171 @@ expect match read_member(GROUP_NOT_FOUND_JSON) {
 }
 
 #[test]
+fn native_google_workspace_calendar_outcomes_decode_through_public_sdk() -> Result<()> {
+    use day2::google_workspace_calendar::{
+        Calendar, CalendarOutcome, Event, EventOutcome, EventStatus, EventsOutcome, EventsPage,
+        GroupRole, Text, Visibility,
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    fs::create_dir(stage.join("app"))?;
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    let event = Event {
+        id: "abc123_20260106T170000Z".into(),
+        status: EventStatus::Confirmed,
+        visibility: Visibility::Private,
+        start: Text::Some("2026-01-06T09:00:00-08:00".into()),
+        end: Text::Some("2026-01-06T10:00:00-08:00".into()),
+        original_start: Text::Some("2026-01-06T09:00:00-08:00".into()),
+        organizer: Text::Some("c_team@group.calendar.google.com".into()),
+        creator: Text::None,
+        meeting_code: Text::Some("abc-defg-hij".into()),
+    };
+    let cancelled = Event {
+        status: EventStatus::Cancelled,
+        visibility: Visibility::Default,
+        start: Text::None,
+        end: Text::None,
+        organizer: Text::None,
+        meeting_code: Text::None,
+        ..event.clone()
+    };
+    let calendar = CalendarOutcome::Found(Calendar {
+        id: "c_team@group.calendar.google.com".into(),
+        summary: "Team".into(),
+        group_role: GroupRole::FreeBusyReader,
+    })
+    .encode();
+    let page = EventsOutcome::Found(EventsPage {
+        events: vec![event.clone(), cancelled],
+        next_page_token: Text::Some("next".into()),
+        all_day_omitted: 1,
+    })
+    .encode();
+    let source = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.GoogleWorkspace
+import pf.Resource
+import pf.Observe
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+answer = |program, raw| {
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+handle = Resource.decode("{\"token\":\"fixture-handle\"}")
+read_calendar = |raw| answer(
+    handle.and_then(|resource| GoogleWorkspace.calendar_with(resource, "c_team@group.calendar.google.com", "team@example.com"))
+        .program(),
+    raw,
+)
+read_events = |raw| answer(
+    handle.and_then(|resource| GoogleWorkspace.calendar_events_with(resource, "c_team@group.calendar.google.com",
+        "2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z", None))
+        .program(),
+    raw,
+)
+read_event = |raw| answer(
+    handle.and_then(|resource| GoogleWorkspace.calendar_event_with(resource, "c_team@group.calendar.google.com", "e1"))
+        .program(),
+    raw,
+)
+requested = |program| {
+    match Tx.evaluate(program, []) {
+        Pending(request) => request.instruction.model == EVENTS_CAPABILITY
+        _ => Bool.False
+    }
+}
+expect requested(handle.and_then(|resource| GoogleWorkspace.calendar_events_with(resource, "c_team@group.calendar.google.com",
+    "2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z", Some("next"))).program())
+expect match read_calendar(CALENDAR_JSON) {
+    Done(result) => match result.value {
+        Found(calendar) => calendar.summary == "Team" and calendar.group_role == FreeBusyReader
+        NotFound => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read_events(PAGE_JSON) {
+    Done(result) => match result.value {
+        Found(page) => page.all_day_omitted == 1 and page.next_page_token == Some("next")
+            and page.events.len() == 2
+            and page.events.any(|event| event.meeting_code == Some("abc-defg-hij") and event.visibility == Private
+                and event.creator == None and event.start == Some("2026-01-06T09:00:00-08:00"))
+            and page.events.any(|event| event.status == Cancelled and event.start == None)
+        NotFound => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read_events(EVENTS_NOT_FOUND_JSON) {
+    Done(result) => match result.value {
+        Found(_) => Bool.False
+        NotFound => Bool.True
+    }
+    _ => Bool.False
+}
+expect match read_event(EVENT_JSON) {
+    Done(result) => match result.value {
+        Found(event) => event.original_start == Some("2026-01-06T09:00:00-08:00") and event.status == Confirmed
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read_event(ALL_DAY_JSON) {
+    Done(result) => match result.value {
+        AllDay => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+"#
+    .replace("EVENTS_NOT_FOUND_JSON", &serde_json::to_string(&EventsOutcome::NotFound.encode())?)
+    .replace("CALENDAR_JSON", &serde_json::to_string(&calendar)?)
+    .replace("PAGE_JSON", &serde_json::to_string(&page)?)
+    .replace(
+        "EVENT_JSON",
+        &serde_json::to_string(&EventOutcome::Found(event).encode())?,
+    )
+    .replace(
+        "ALL_DAY_JSON",
+        &serde_json::to_string(&EventOutcome::AllDay.encode())?,
+    )
+    .replace(
+        "EVENTS_CAPABILITY",
+        &serde_json::to_string(
+            &day2_capabilities::registry::Action::GoogleWorkspaceCalendarEvents.capability(),
+        )?,
+    );
+    fs::write(stage.join("app/main.roc"), source)?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .arg("test")
+        .arg(stage.join("app/main.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (6) tests passed"),
+        "native Google Workspace Calendar contracts ({}): {diagnostics}",
+        output.status
+    );
+    Ok(())
+}
+
+#[test]
 fn native_carta_delivery_decodes_through_public_sdk() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

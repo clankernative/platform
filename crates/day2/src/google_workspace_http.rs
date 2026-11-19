@@ -4,13 +4,14 @@
 //! sends exactly the exchange or request it is given over one fixed-origin
 //! client that follows no redirect, retries nothing and uses no proxy.
 use crate::google_auth::{self, AccessToken, Exchange, Origins, Reply, Unreached};
-use crate::google_workspace::{ApiRequest, DIRECTORY_ORIGIN, GooglePort};
+use crate::google_workspace::{ApiRequest, CALENDAR_ORIGIN, DIRECTORY_ORIGIN, GooglePort, Service};
 use anyhow::Result;
 
 pub struct NativeGooglePort {
     client: reqwest::blocking::Client,
     origins: Origins,
     directory: reqwest::Url,
+    calendar: reqwest::Url,
 }
 
 impl NativeGooglePort {
@@ -25,6 +26,7 @@ impl NativeGooglePort {
             client,
             origins: Origins::production()?,
             directory: reqwest::Url::parse(DIRECTORY_ORIGIN)?,
+            calendar: reqwest::Url::parse(CALENDAR_ORIGIN)?,
         })
     }
 
@@ -41,7 +43,8 @@ impl NativeGooglePort {
         Ok(Self {
             client: google_auth::native_client(false)?,
             origins: Origins::fixture(url.clone(), url.clone(), url.join("/token")?),
-            directory: url,
+            directory: url.clone(),
+            calendar: url,
         })
     }
 }
@@ -67,7 +70,10 @@ impl GooglePort for NativeGooglePort {
         token: &AccessToken,
         max_bytes: usize,
     ) -> std::result::Result<Reply, Unreached> {
-        let mut url = self.directory.clone();
+        let mut url = match request.service {
+            Service::Directory => self.directory.clone(),
+            Service::Calendar => self.calendar.clone(),
+        };
         url.path_segments_mut()
             .map_err(|_| Unreached::default())?
             .clear()

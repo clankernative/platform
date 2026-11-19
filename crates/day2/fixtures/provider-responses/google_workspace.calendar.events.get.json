@@ -1,0 +1,20 @@
+{
+  "id": "abc123def456ghi789jkl012mn",
+  "status": "tentative",
+  "visibility": "confidential",
+  "start": {
+    "dateTime": "2026-01-05T17:00:00Z"
+  },
+  "end": {
+    "dateTime": "2026-01-05T17:30:00Z"
+  },
+  "creator": {
+    "email": "person@example.com"
+  },
+  "organizer": {
+    "email": "person@example.com"
+  },
+  "conferenceData": {
+    "conferenceId": "abc-defg-hij"
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "items": [
+    {
+      "id": "abc123def456ghi789jkl012mn",
+      "status": "confirmed",
+      "start": {
+        "dateTime": "2026-01-05T09:00:00-08:00",
+        "timeZone": "America/Los_Angeles"
+      },
+      "end": {
+        "dateTime": "2026-01-05T09:30:00-08:00",
+        "timeZone": "America/Los_Angeles"
+      },
+      "creator": {
+        "email": "person@example.com"
+      },
+      "organizer": {
+        "email": "person@example.com"
+      },
+      "conferenceData": {
+        "conferenceId": "abc-defg-hij"
+      },
+      "hangoutLink": "https://meet.google.com/abc-defg-hij"
+    },
+    {
+      "id": "opq345rst678uvw901_20260106T170000Z",
+      "status": "confirmed",
+      "visibility": "private",
+      "start": {
+        "dateTime": "2026-01-06T09:00:00-08:00"
+      },
+      "end": {
+        "dateTime": "2026-01-06T10:00:00-08:00"
+      },
+      "originalStartTime": {
+        "dateTime": "2026-01-06T09:00:00-08:00",
+        "timeZone": "America/Los_Angeles"
+      },
+      "creator": {
+        "email": "person@example.com"
+      },
+      "organizer": {
+        "email": "c_team@group.calendar.google.com"
+      },
+      "hangoutLink": "https://meet.google.com/klm-nopq-rst"
+    },
+    {
+      "id": "opq345rst678uvw901_20260113T170000Z",
+      "status": "cancelled",
+      "originalStartTime": {
+        "dateTime": "2026-01-13T09:00:00-08:00"
+      }
+    },
+    {
+      "id": "xyz987wvu654",
+      "status": "confirmed",
+      "start": {
+        "date": "2026-01-07"
+      },
+      "end": {
+        "date": "2026-01-08"
+      },
+      "organizer": {
+        "email": "person@example.com"
+      }
+    }
+  ],
+  "nextPageToken": "EXAMPLE_NEXT_PAGE_TOKEN"
+}

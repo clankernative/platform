@@ -7,6 +7,7 @@ use super::*;
 use crate::{
     authority_state, integration_host,
     integrations::simulated::{
+        GOOGLE_ACL_ENDPOINT, GOOGLE_DEVELOPMENT_CALENDAR, GOOGLE_DEVELOPMENT_CALENDAR_READER,
         GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT, GOOGLE_GROUP_ENDPOINT, ScheduledFault, SimulatedFault,
     },
 };
@@ -19,6 +20,9 @@ const SCOPE: &str = "workspaceco/test/app";
 const NOW: i64 = 1_700_000_001;
 const GROUP: &str = "google_workspace.group.v1";
 const MEMBER: &str = "google_workspace.group_member.v1";
+const CALENDAR: &str = "google_workspace.calendar.v1";
+const EVENTS: &str = "google_workspace.calendar_events.v1";
+const EVENT: &str = "google_workspace.calendar_event.v1";
 
 struct Setup {
     simulated: bool,
@@ -54,17 +58,19 @@ fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
         })
     };
     let target = serde_json::to_value(ResourceTarget::GoogleWorkspaceDomain {
+        calendar_reader: GOOGLE_DEVELOPMENT_CALENDAR_READER.into(),
         grantee_domains: vec!["synthetic.example".into()],
     })?;
     let operation = |observations: &[&str]| json!({"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]});
     let policy = json!({"version":1,"admins":[],"operations":{
-        "lookup":operation(&[GROUP, MEMBER]),
+        "lookup":operation(&[CALENDAR, EVENT, EVENTS, GROUP, MEMBER]),
         "lookup_other":operation(&[GROUP]),
-        "directory":operation(&[GROUP, "workspace_directory.user_path.v1"])}});
+        "directory":operation(&[CALENDAR, GROUP, "workspace_directory.user_path.v1"])}});
     let slot = |resource: &str| {
         json!({"google_workspace":{"kind":"google_workspace_domain",
             "allowed_resources":[{"id":resource,"revision":1}],
-            "actions":["google_workspace_group","google_workspace_group_member"],
+            "actions":["google_workspace_calendar","google_workspace_calendar_event",
+                "google_workspace_calendar_events","google_workspace_group","google_workspace_group_member"],
             "limits":{"max_request_bytes":setup.max_request_bytes,
                 "max_response_bytes":setup.max_response_bytes,"max_calls_per_invocation":16},
             "budgets":[{"id":"workspace_budget","revision":1}]}})
@@ -430,20 +436,60 @@ fn a_grant_on_another_provider_or_connection_never_reaches_the_directory() -> Re
     Ok(())
 }
 
+fn calendar(handle: &str) -> Value {
+    json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,
+        "group_email":"engineering@synthetic.example"})
+}
+
 #[test]
 fn limits_below_the_envelope_are_refused_before_any_reservation() -> Result<()> {
-    for setup in [
-        Setup {
-            max_request_bytes: crate::google_workspace::MAX_ACTION_REQUEST_BYTES - 1,
-            ..Setup::default()
-        },
-        Setup {
-            max_response_bytes: crate::google_workspace::MAX_RESPONSE_BYTES as u64 - 1,
-            ..Setup::default()
-        },
+    let directory = crate::google_workspace::MAX_DIRECTORY_RESPONSE_BYTES as u64;
+    let calendar_response = crate::google_workspace_calendar::MAX_CALENDAR_RESPONSE_BYTES as u64;
+    for (setup, capability, data) in [
+        (
+            Setup {
+                max_request_bytes: crate::google_workspace::MAX_ACTION_REQUEST_BYTES - 1,
+                ..Setup::default()
+            },
+            GROUP,
+            group as fn(&str) -> Value,
+        ),
+        (
+            Setup {
+                max_response_bytes: directory - 1,
+                ..Setup::default()
+            },
+            GROUP,
+            group,
+        ),
+        (
+            Setup {
+                max_request_bytes: crate::google_workspace::MAX_ACTION_REQUEST_BYTES - 1,
+                ..Setup::default()
+            },
+            CALENDAR,
+            calendar,
+        ),
+        // A grant sized for the Directory is too small for a Calendar page.
+        (
+            Setup {
+                max_response_bytes: directory,
+                ..Setup::default()
+            },
+            CALENDAR,
+            calendar,
+        ),
+        (
+            Setup {
+                max_response_bytes: calendar_response - 1,
+                ..Setup::default()
+            },
+            CALENDAR,
+            calendar,
+        ),
     ] {
         let (_directory, runtime) = runtime(setup)?;
-        let refused = authorize(&runtime, "lookup", "short-grant", GROUP, group)
+        let refused = authorize(&runtime, "lookup", "short-grant", capability, data)
             .err()
             .context("a grant below the envelope was accepted")?;
         assert!(matches!(
@@ -453,6 +499,120 @@ fn limits_below_the_envelope_are_refused_before_any_reservation() -> Result<()> 
         assert!(calls(&runtime)?.is_empty());
         assert!(budget(&runtime)?.is_empty(), "nothing was reserved");
     }
+    // The Directory envelope is enough for a Directory read.
+    let (_directory, runtime) = runtime(Setup {
+        max_response_bytes: directory,
+        ..Setup::default()
+    })?;
+    assert!(authorize(&runtime, "lookup", "directory-sized", GROUP, group).is_ok());
+    Ok(())
+}
+
+#[test]
+fn calendar_reads_are_delegated_reserved_and_settled_like_any_read() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup::default())?;
+    let read = admitted(&runtime, "lookup", "calendar-read", CALENDAR, calendar)?;
+    assert_eq!(
+        read.result,
+        Ok(format!(
+            r#"{{"Found":{{"group_role":"Reader","id":"{GOOGLE_DEVELOPMENT_CALENDAR}","summary":"Engineering"}}}}"#
+        ))
+    );
+    // Metadata, signJwt, the token exchange, the calendar and one ACL page,
+    // against a reservation of every ACL page the ceiling allows.
+    assert_eq!(read.usage.calls, 5);
+    assert!(read.usage.known && read.usage.request_bytes > 0);
+    assert!(read.usage.response_bytes < read.reserved.response_bytes);
+    let settled = budget(&runtime)?;
+    assert_eq!(settled["calls"], (5, 0));
+    assert_eq!(
+        settled["bytes"],
+        (
+            (read.usage.request_bytes + read.usage.response_bytes) as i64,
+            0
+        )
+    );
+    let served = calls(&runtime)?;
+    assert!(served[1].starts_with("google_workspace.iam.sign_jwt"));
+    let events = admitted(&runtime, "lookup", "events-read", EVENTS, |handle| {
+        json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,
+            "time_min":"2026-01-01T00:00:00Z","time_max":"2026-01-31T00:00:00Z","page_token":"None"})
+    })?;
+    let page: Value = serde_json::from_str(
+        events
+            .result
+            .as_deref()
+            .map_err(|code| anyhow::anyhow!("{code}"))?,
+    )?;
+    assert_eq!(page["Found"]["events"].as_array().map(Vec::len), Some(2));
+    assert_eq!(page["Found"]["all_day_omitted"], 1);
+    assert_eq!(events.usage.calls, 4);
+    let event = admitted(
+        &runtime,
+        "lookup",
+        "event-read",
+        EVENT,
+        |handle| json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,"event_id":"standup0001"}),
+    )?;
+    assert!(
+        event
+            .result
+            .as_deref()
+            .is_ok_and(|result| result.starts_with(r#"{"Found""#))
+    );
+    assert_eq!(budget(&runtime)?["calls"], (13, 0));
+    // A Workspace Directory grant cannot carry a Calendar action either.
+    let refused = authorize(
+        &runtime,
+        "directory",
+        "calendar-other-provider",
+        CALENDAR,
+        calendar,
+    )
+    .err()
+    .context("another provider's grant was accepted")?;
+    assert!(matches!(
+        refused.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceForbidden)
+    ));
+    // The plan is frozen with the simulated source and the grant's reader.
+    let (.., authorized, _) = authorize(&runtime, "lookup", "calendar-source", CALENDAR, calendar)?;
+    assert_eq!(
+        authorized
+            .google_workspace_plan()
+            .context("a Google Workspace plan")?
+            .source(),
+        crate::google_workspace::Source::Simulated
+    );
+    assert_eq!(
+        GOOGLE_DEVELOPMENT_CALENDAR_READER,
+        "calendar-reader@synthetic.example"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failed_calendar_read_correlates_its_calendar_phase() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup::default())?;
+    crate::integrations::simulated::schedule_faults(
+        runtime.db(),
+        SCOPE,
+        crate::integrations::simulated::GOOGLE_WORKSPACE_WORLD,
+        vec![ScheduledFault {
+            endpoint: GOOGLE_ACL_ENDPOINT.into(),
+            remaining: 1,
+            fault: SimulatedFault::ServerError,
+        }],
+    )?;
+    let failed = admitted(&runtime, "lookup", "acl-unavailable", CALENDAR, calendar)?;
+    assert_eq!(failed.result, Err("google_workspace_unavailable".into()));
+    assert_eq!(
+        serde_json::to_value(&failed.correlation)?,
+        json!([{"phase":"google_workspace_calendar","http_status":500,"request_id":null,
+            "statement_handle":null}])
+    );
+    assert_eq!(failed.usage.calls, 5);
+    assert_eq!(budget(&runtime)?["calls"], (5, 0));
     Ok(())
 }
 

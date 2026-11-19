@@ -217,6 +217,151 @@ pub struct GoogleWorkspaceWorld {
     pub users: BTreeSet<String>,
     /// Groups, by primary address.
     pub groups: BTreeMap<String, GoogleGroup>,
+    /// Calendars, by ID. Who can see one is its ACL, as in Google: a calendar
+    /// with no `user` entry for the delegated subject is not found.
+    #[serde(default)]
+    pub calendars: BTreeMap<String, GoogleCalendar>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleCalendar {
+    pub summary: String,
+    /// In Google's order: the order ACL pages report it.
+    pub acl: Vec<GoogleAclRule>,
+    /// Single events, as `singleEvents=true` expands them: a recurring
+    /// instance has an `original_start` and its own ID.
+    pub events: Vec<GoogleEvent>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleAclRule {
+    /// `user`, `group`, `domain` or `default`.
+    pub scope_type: String,
+    /// Absent for `default`.
+    #[serde(default)]
+    pub scope_value: Option<String>,
+    /// `none`, `freeBusyReader`, `reader`, `writer` or `owner`.
+    pub role: String,
+}
+
+/// An event time: `date_time` for a timed event, `date` for an all-day one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleTime {
+    #[serde(default)]
+    pub date_time: Option<String>,
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+impl GoogleTime {
+    pub fn at(date_time: &str) -> Self {
+        Self {
+            date_time: Some(date_time.into()),
+            date: None,
+        }
+    }
+
+    pub fn day(date: &str) -> Self {
+        Self {
+            date_time: None,
+            date: Some(date.into()),
+        }
+    }
+
+    /// Seconds since the epoch; an all-day date is its UTC midnight.
+    fn seconds(&self) -> Option<i64> {
+        use crate::google_workspace_calendar::{date_days, rfc3339_seconds};
+        match (&self.date_time, &self.date) {
+            (Some(value), None) => rfc3339_seconds(value),
+            (None, Some(date)) => date_days(date).map(|days| days * 86_400),
+            _ => None,
+        }
+    }
+
+    fn wire(&self) -> Value {
+        match (&self.date_time, &self.date) {
+            (Some(value), _) => json!({"dateTime":value,"timeZone":"UTC"}),
+            (None, Some(date)) => json!({ "date": date }),
+            (None, None) => json!({}),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleEvent {
+    pub id: String,
+    /// `confirmed`, `tentative` or `cancelled`.
+    pub status: String,
+    /// Absent is Google's `default`, which it does not report.
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// Absent only on a cancelled instance Google reports by id alone.
+    #[serde(default)]
+    pub start: Option<GoogleTime>,
+    #[serde(default)]
+    pub end: Option<GoogleTime>,
+    #[serde(default)]
+    pub original_start: Option<GoogleTime>,
+    #[serde(default)]
+    pub organizer: Option<String>,
+    #[serde(default)]
+    pub creator: Option<String>,
+    #[serde(default)]
+    pub conference_id: Option<String>,
+    #[serde(default)]
+    pub hangout_link: Option<String>,
+}
+
+impl GoogleEvent {
+    /// The item Google reports under the reviewed fields mask.
+    fn wire(&self) -> Value {
+        let mut item = serde_json::Map::new();
+        item.insert("id".into(), json!(self.id));
+        item.insert("status".into(), json!(self.status));
+        if let Some(visibility) = &self.visibility {
+            item.insert("visibility".into(), json!(visibility));
+        }
+        for (name, time) in [
+            ("start", &self.start),
+            ("end", &self.end),
+            ("originalStartTime", &self.original_start),
+        ] {
+            if let Some(time) = time {
+                item.insert(name.into(), time.wire());
+            }
+        }
+        for (name, email) in [("creator", &self.creator), ("organizer", &self.organizer)] {
+            if let Some(email) = email {
+                item.insert(name.into(), json!({ "email": email }));
+            }
+        }
+        if let Some(conference) = &self.conference_id {
+            item.insert(
+                "conferenceData".into(),
+                json!({ "conferenceId": conference }),
+            );
+        }
+        if let Some(link) = &self.hangout_link {
+            item.insert("hangoutLink".into(), json!(link));
+        }
+        Value::Object(item)
+    }
+
+    /// The span `timeMin`/`timeMax` compare: its start and end, or for an
+    /// instance reported by id alone, its original start.
+    fn span(&self) -> Option<(i64, i64)> {
+        match (&self.start, &self.end) {
+            (Some(start), Some(end)) => Some((start.seconds()?, end.seconds()?)),
+            _ => {
+                let original = self.original_start.as_ref()?.seconds()?;
+                Some((original, original + 1))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1174,11 +1319,15 @@ pub fn update_workspace_directory<T>(
 /// no such account or domain exists, and nothing here reaches Google.
 pub const GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT: &str =
     "workspace-reader@synthetic-project.iam.gserviceaccount.com";
+pub const GOOGLE_DEVELOPMENT_CALENDAR_READER: &str = "calendar-reader@synthetic.example";
+/// A shared calendar in the development organization.
+pub const GOOGLE_DEVELOPMENT_CALENDAR: &str = "c_engineering@group.calendar.google.com";
 const GOOGLE_DEVELOPMENT_DOMAIN: &str = "synthetic.example";
 
 /// The disposable grant matching [`google_workspace_development_fixture`].
 pub fn google_workspace_development_target() -> day2_capabilities::resources::ResourceTarget {
     day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
+        calendar_reader: GOOGLE_DEVELOPMENT_CALENDAR_READER.into(),
         grantee_domains: vec![GOOGLE_DEVELOPMENT_DOMAIN.into()],
     }
 }
@@ -1206,7 +1355,10 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
         .map(str::to_owned)
         .collect(),
         directory_reader: true,
-        users: ["ada", "grace"].into_iter().map(address).collect(),
+        users: ["ada", "grace", "calendar-reader"]
+            .into_iter()
+            .map(address)
+            .collect(),
         groups: BTreeMap::from([
             (
                 address("engineering"),
@@ -1222,6 +1374,60 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
             ),
             (address("empty"), group("group-empty", "Empty", &[])),
         ]),
+        calendars: BTreeMap::from([(
+            GOOGLE_DEVELOPMENT_CALENDAR.into(),
+            GoogleCalendar {
+                summary: "Engineering".into(),
+                acl: vec![
+                    GoogleAclRule {
+                        scope_type: "user".into(),
+                        scope_value: Some(address("ada")),
+                        role: "owner".into(),
+                    },
+                    GoogleAclRule {
+                        scope_type: "user".into(),
+                        scope_value: Some(GOOGLE_DEVELOPMENT_CALENDAR_READER.into()),
+                        role: "writer".into(),
+                    },
+                    GoogleAclRule {
+                        scope_type: "group".into(),
+                        scope_value: Some(address("engineering")),
+                        role: "reader".into(),
+                    },
+                ],
+                events: vec![
+                    GoogleEvent {
+                        id: "standup0001".into(),
+                        status: "confirmed".into(),
+                        start: Some(GoogleTime::at("2026-01-05T17:00:00Z")),
+                        end: Some(GoogleTime::at("2026-01-05T17:30:00Z")),
+                        organizer: Some(address("ada")),
+                        creator: Some(address("ada")),
+                        conference_id: Some("abc-defg-hij".into()),
+                        ..GoogleEvent::default()
+                    },
+                    GoogleEvent {
+                        id: "review0002".into(),
+                        status: "confirmed".into(),
+                        visibility: Some("private".into()),
+                        start: Some(GoogleTime::at("2026-01-06T15:00:00Z")),
+                        end: Some(GoogleTime::at("2026-01-06T16:00:00Z")),
+                        organizer: Some(GOOGLE_DEVELOPMENT_CALENDAR.into()),
+                        creator: Some(address("grace")),
+                        hangout_link: Some("https://meet.google.com/klm-nopq-rst".into()),
+                        ..GoogleEvent::default()
+                    },
+                    GoogleEvent {
+                        id: "offsite0003".into(),
+                        status: "confirmed".into(),
+                        start: Some(GoogleTime::day("2026-01-07")),
+                        end: Some(GoogleTime::day("2026-01-08")),
+                        organizer: Some(address("ada")),
+                        ..GoogleEvent::default()
+                    },
+                ],
+            },
+        )]),
     }
 }
 
@@ -1248,14 +1454,22 @@ pub const GOOGLE_IAM_SIGN_ENDPOINT: &str = "google_workspace.iam.sign_jwt";
 pub const GOOGLE_OAUTH_TOKEN_ENDPOINT: &str = "google_workspace.oauth.token";
 pub const GOOGLE_GROUP_ENDPOINT: &str = "google_workspace.directory.groups.get";
 pub const GOOGLE_HAS_MEMBER_ENDPOINT: &str = "google_workspace.directory.groups.has_member";
+pub const GOOGLE_CALENDAR_ENDPOINT: &str = "google_workspace.calendar.calendars.get";
+pub const GOOGLE_ACL_ENDPOINT: &str = "google_workspace.calendar.acl.list";
+pub const GOOGLE_EVENTS_ENDPOINT: &str = "google_workspace.calendar.events.list";
+pub const GOOGLE_EVENT_ENDPOINT: &str = "google_workspace.calendar.events.get";
 /// Every endpoint a scenario can schedule a fault against.
-pub const GOOGLE_ENDPOINTS: [&str; 6] = [
+pub const GOOGLE_ENDPOINTS: [&str; 10] = [
     GOOGLE_METADATA_ENDPOINT,
     GOOGLE_IAM_TOKEN_ENDPOINT,
     GOOGLE_IAM_SIGN_ENDPOINT,
     GOOGLE_OAUTH_TOKEN_ENDPOINT,
     GOOGLE_GROUP_ENDPOINT,
     GOOGLE_HAS_MEMBER_ENDPOINT,
+    GOOGLE_CALENDAR_ENDPOINT,
+    GOOGLE_ACL_ENDPOINT,
+    GOOGLE_EVENTS_ENDPOINT,
+    GOOGLE_EVENT_ENDPOINT,
 ];
 /// The key the simulated IAM signs with. Its "signature" is derived from the
 /// signed bytes, so the token endpoint can tell its own assertions from others.
@@ -1300,11 +1514,7 @@ pub(crate) fn google_workspace_serve(
                 ..
             }) => GOOGLE_IAM_SIGN_ENDPOINT,
             GoogleRequest::Auth(Exchange::Token { .. }) => GOOGLE_OAUTH_TOKEN_ENDPOINT,
-            GoogleRequest::Api { request, .. } => match request.segments.get(5).map(String::as_str)
-            {
-                Some("hasMember") => GOOGLE_HAS_MEMBER_ENDPOINT,
-                _ => GOOGLE_GROUP_ENDPOINT,
-            },
+            GoogleRequest::Api { request, .. } => google_api_endpoint(request),
         };
         state.calls.push(match &request {
             GoogleRequest::Auth(Exchange::Iam {
@@ -1594,6 +1804,9 @@ fn google_reply(
                     "Request had invalid authentication credentials.",
                 ));
             };
+            if request.service == crate::google_workspace::Service::Calendar {
+                return google_calendar_reply(world, request, &issued);
+            }
             let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
             let (required, group, member) = match segments.as_slice() {
                 ["admin", "directory", "v1", "groups", group] => {
@@ -1671,6 +1884,235 @@ fn google_reply(
                 }
             }
         }
+    })
+}
+
+/// The endpoint a request names, for faults and the request log.
+fn google_api_endpoint(request: &crate::google_workspace::ApiRequest) -> &'static str {
+    use crate::google_workspace::Service;
+    let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
+    match (request.service, segments.as_slice()) {
+        (Service::Directory, [.., "hasMember", _]) => GOOGLE_HAS_MEMBER_ENDPOINT,
+        (Service::Directory, _) => GOOGLE_GROUP_ENDPOINT,
+        (Service::Calendar, [.., "acl"]) => GOOGLE_ACL_ENDPOINT,
+        (Service::Calendar, [.., "events"]) => GOOGLE_EVENTS_ENDPOINT,
+        (Service::Calendar, [.., "events", _]) => GOOGLE_EVENT_ENDPOINT,
+        (Service::Calendar, _) => GOOGLE_CALENDAR_ENDPOINT,
+    }
+}
+
+/// An opaque continuation bound to the query it continues: another query's
+/// token is refused, as Google refuses one.
+fn google_page_token(world: &GoogleWorkspaceWorld, binding: &str, offset: usize) -> Result<String> {
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&json!({"b":binding,"o":offset}))?);
+    let tag = crate::digest(&serde_json::to_vec(&(
+        "google-workspace-simulated-page",
+        &world.service_account,
+        &payload,
+    ))?);
+    Ok(format!("page.{payload}.{}", &tag[7..39]))
+}
+
+fn google_page_offset(world: &GoogleWorkspaceWorld, binding: &str, token: &str) -> Option<usize> {
+    let payload = token.strip_prefix("page.")?.split('.').next()?;
+    let value: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?,
+    )
+    .ok()?;
+    let offset = usize::try_from(value["o"].as_u64()?).ok()?;
+    (value["b"] == binding && google_page_token(world, binding, offset).ok()?.as_str() == token)
+        .then_some(offset)
+}
+
+/// Serve one Calendar route as the token's delegated subject. Who can see a
+/// calendar is its ACL: no `user` entry for the subject (or only free/busy
+/// access) is `404`, and listing the ACL needs `writer` or `owner`. IDs and
+/// addresses are matched exactly.
+fn google_calendar_reply(
+    world: &GoogleWorkspaceWorld,
+    request: &crate::google_workspace::ApiRequest,
+    grant: &GoogleGrant,
+) -> Result<crate::google_auth::Reply> {
+    use crate::google_workspace_calendar::{
+        CALENDAR_ACL_READ_SCOPE, CALENDAR_READ_SCOPE, rfc3339_seconds,
+    };
+    let reply = |status: u16, body: Value| crate::google_auth::Reply {
+        status,
+        metadata_flavor: false,
+        json: true,
+        body: body.to_string().into_bytes(),
+        retry_after_seconds: None,
+    };
+    let error = |status: u16, message: &str| {
+        reply(
+            status,
+            json!({"error":{"code":status,"message":message,"status":"SIMULATED"}}),
+        )
+    };
+    let query = |name: &str| {
+        request
+            .query
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
+    let ["calendar", "v3", "calendars", calendar_id, rest @ ..] = segments.as_slice() else {
+        return Ok(error(404, "Not Found"));
+    };
+    let required = match rest {
+        [] | ["events"] | ["events", _] => CALENDAR_READ_SCOPE,
+        ["acl"] => CALENDAR_ACL_READ_SCOPE,
+        _ => return Ok(error(404, "Not Found")),
+    };
+    if !grant.scopes.contains(required) {
+        return Ok(error(
+            403,
+            "Request had insufficient authentication scopes.",
+        ));
+    }
+    // The service account itself has no calendars: only a delegated person's
+    // sharing is visible.
+    let not_found = error(404, "Not Found");
+    let Some(subject) = grant.subject.as_deref() else {
+        return Ok(not_found);
+    };
+    let Some(calendar) = world.calendars.get(*calendar_id) else {
+        return Ok(not_found);
+    };
+    let Some(role) = calendar
+        .acl
+        .iter()
+        .find(|rule| rule.scope_type == "user" && rule.scope_value.as_deref() == Some(subject))
+        .map(|rule| rule.role.as_str())
+        .filter(|role| matches!(*role, "reader" | "writer" | "owner"))
+    else {
+        return Ok(not_found);
+    };
+    let page_size = |default: usize, maximum: usize| -> Option<usize> {
+        match query("maxResults") {
+            None => Some(default),
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|size| (1..=maximum).contains(size)),
+        }
+    };
+    Ok(match rest {
+        [] => {
+            if query("fields") == Some("id,summary") {
+                reply(200, json!({"id":calendar_id,"summary":calendar.summary}))
+            } else {
+                reply(
+                    200,
+                    json!({"kind":"calendar#calendar","etag":"\"simulated\"","id":calendar_id,
+                        "summary":calendar.summary,"timeZone":"UTC"}),
+                )
+            }
+        }
+        ["acl"] => {
+            if !matches!(role, "writer" | "owner") {
+                return Ok(error(403, "Forbidden"));
+            }
+            let Some(size) = page_size(100, 250) else {
+                return Ok(error(400, "Invalid Value"));
+            };
+            let binding = format!("acl:{calendar_id}");
+            let offset = match query("pageToken") {
+                None => 0,
+                Some(token) => match google_page_offset(world, &binding, token) {
+                    Some(offset) => offset,
+                    None => return Ok(error(400, "Invalid page token value")),
+                },
+            };
+            let minimal = query("fields") == Some("items(scope(type,value),role),nextPageToken");
+            let items: Vec<Value> = calendar
+                .acl
+                .iter()
+                .skip(offset)
+                .take(size)
+                .map(|rule| {
+                    let mut scope = json!({ "type": rule.scope_type });
+                    if let Some(value) = &rule.scope_value {
+                        scope["value"] = json!(value);
+                    }
+                    if minimal {
+                        json!({"scope":scope,"role":rule.role})
+                    } else {
+                        json!({"kind":"calendar#aclRule","etag":"\"simulated\"",
+                            "id":format!("{}:{}", rule.scope_type, rule.scope_value.as_deref().unwrap_or("default")),
+                            "scope":scope,"role":rule.role})
+                    }
+                })
+                .collect();
+            let mut body = json!({ "items": items });
+            if offset + size < calendar.acl.len() {
+                body["nextPageToken"] = json!(google_page_token(world, &binding, offset + size)?);
+            }
+            reply(200, body)
+        }
+        ["events"] => {
+            // The adapter reads expanded single events only; the master of a
+            // recurring series is not modelled.
+            if query("singleEvents") != Some("true") {
+                return Ok(error(400, "Only single events are simulated"));
+            }
+            let bound = |name: &str| match query(name) {
+                None => Ok(None),
+                Some(value) => rfc3339_seconds(value).map(Some).ok_or(()),
+            };
+            let (Ok(time_min), Ok(time_max)) = (bound("timeMin"), bound("timeMax")) else {
+                return Ok(error(400, "Bad Request"));
+            };
+            let Some(size) = page_size(250, 2500) else {
+                return Ok(error(400, "Invalid Value"));
+            };
+            let show_deleted = query("showDeleted") == Some("true");
+            let binding = format!(
+                "events:{calendar_id}:{}:{}:{show_deleted}",
+                query("timeMin").unwrap_or_default(),
+                query("timeMax").unwrap_or_default()
+            );
+            let offset = match query("pageToken") {
+                None => 0,
+                Some(token) => match google_page_offset(world, &binding, token) {
+                    Some(offset) => offset,
+                    None => return Ok(error(400, "Invalid page token value")),
+                },
+            };
+            // An event overlaps the window: it ends after timeMin and starts
+            // before timeMax, ordered by start.
+            let mut selected: Vec<(i64, &GoogleEvent)> = calendar
+                .events
+                .iter()
+                .filter(|event| show_deleted || event.status != "cancelled")
+                .filter_map(|event| {
+                    let (start, end) = event.span()?;
+                    (time_min.is_none_or(|min| end > min) && time_max.is_none_or(|max| start < max))
+                        .then_some((start, event))
+                })
+                .collect();
+            selected.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.id.cmp(&right.1.id)));
+            let items: Vec<Value> = selected
+                .iter()
+                .skip(offset)
+                .take(size)
+                .map(|(_, event)| event.wire())
+                .collect();
+            let mut body = json!({ "items": items });
+            if offset + size < selected.len() {
+                body["nextPageToken"] = json!(google_page_token(world, &binding, offset + size)?);
+            }
+            reply(200, body)
+        }
+        ["events", event_id] => match calendar.events.iter().find(|event| event.id == *event_id) {
+            Some(event) => reply(200, event.wire()),
+            None => not_found,
+        },
+        _ => not_found,
     })
 }
 

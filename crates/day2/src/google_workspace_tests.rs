@@ -1,9 +1,11 @@
 use super::*;
 use crate::integrations::simulated::{
-    self, GOOGLE_ENDPOINTS, GOOGLE_GROUP_ENDPOINT, GOOGLE_HAS_MEMBER_ENDPOINT,
-    GOOGLE_IAM_SIGN_ENDPOINT, GOOGLE_IAM_TOKEN_ENDPOINT, GOOGLE_METADATA_ENDPOINT,
-    GOOGLE_OAUTH_TOKEN_ENDPOINT, GOOGLE_WORKSPACE_WORLD, GoogleGroup, GoogleWorkspaceWorld,
-    ScheduledFault, SimulatedFault,
+    self, GOOGLE_ACL_ENDPOINT, GOOGLE_CALENDAR_ENDPOINT, GOOGLE_DEVELOPMENT_CALENDAR,
+    GOOGLE_ENDPOINTS, GOOGLE_EVENT_ENDPOINT, GOOGLE_EVENTS_ENDPOINT, GOOGLE_GROUP_ENDPOINT,
+    GOOGLE_HAS_MEMBER_ENDPOINT, GOOGLE_IAM_SIGN_ENDPOINT, GOOGLE_IAM_TOKEN_ENDPOINT,
+    GOOGLE_METADATA_ENDPOINT, GOOGLE_OAUTH_TOKEN_ENDPOINT, GOOGLE_WORKSPACE_WORLD, GoogleAclRule,
+    GoogleCalendar, GoogleEvent, GoogleGroup, GoogleTime, GoogleWorkspaceWorld, ScheduledFault,
+    SimulatedFault,
 };
 use day2_capabilities::integrations::LiveConnection;
 
@@ -222,6 +224,7 @@ fn requests_outside_the_grant_or_malformed_are_refused_before_any_exchange() {
     // Even inside the grant, a member in another domain than the group is a
     // question Google refuses for nested groups, so it is never asked.
     let two_domains = ResourceTarget::GoogleWorkspaceDomain {
+        calendar_reader: simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER.into(),
         grantee_domains: vec![
             "groups.synthetic.example".into(),
             "synthetic.example".into(),
@@ -438,6 +441,7 @@ fn every_simulated_endpoint_has_a_scheduled_fault_case() {
         assert!(
             directory_fault_cases()
                 .iter()
+                .chain(&calendar_fault_cases())
                 .any(|(case, ..)| *case == endpoint)
                 || delegation_fault_cases()
                     .iter()
@@ -802,9 +806,589 @@ fn every_failure_is_produced_through_an_action() {
         },
     );
     record(&World::new(aliased), &group_plan("team@synthetic.example"));
+    // A calendar whose ACL is longer than the pages an action reads.
+    record(
+        &World::new(with_long_acl(
+            ACL_PAGE_CEILING as usize * ACL_PAGE_SIZE as usize + 1,
+        )),
+        &calendar_read("engineering@synthetic.example"),
+    );
     let expected: std::collections::BTreeSet<_> = Failure::ALL
         .iter()
         .map(|failure| failure.code().to_owned())
         .collect();
     assert_eq!(produced, expected);
+}
+
+// Calendar reads: delegated as the grant's Calendar reader.
+
+const CALENDAR: &str = GOOGLE_DEVELOPMENT_CALENDAR;
+
+fn calendar_read(group: &str) -> Plan {
+    plan_for(
+        Action::GoogleWorkspaceCalendar,
+        &serde_json::json!({"handle":"h","calendar_id":CALENDAR,"group_email":group}).to_string(),
+    )
+    .unwrap()
+}
+
+fn events_read(time_min: &str, time_max: &str, page_token: Option<&str>) -> Result<Plan> {
+    plan_for(
+        Action::GoogleWorkspaceCalendarEvents,
+        &serde_json::json!({"handle":"h","calendar_id":CALENDAR,"time_min":time_min,
+            "time_max":time_max,"page_token":page_token.map_or(serde_json::json!("None"),
+                |token| serde_json::json!({"Some":token}))})
+        .to_string(),
+    )
+}
+
+fn january() -> Plan {
+    events_read("2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z", None).unwrap()
+}
+
+fn event_read(calendar: &str, event: &str) -> Result<Plan> {
+    plan_for(
+        Action::GoogleWorkspaceCalendarEvent,
+        &serde_json::json!({"handle":"h","calendar_id":calendar,"event_id":event}).to_string(),
+    )
+}
+
+fn decoded(result: Result<String>) -> serde_json::Value {
+    serde_json::from_str(&result.unwrap()).unwrap()
+}
+
+/// The development organization with one more calendar setting.
+fn with_calendar(adjust: impl FnOnce(&mut GoogleCalendar)) -> GoogleWorkspaceWorld {
+    let mut organization = simulated::google_workspace_development_fixture();
+    adjust(organization.calendars.get_mut(CALENDAR).unwrap());
+    organization
+}
+
+/// An ACL with `rules` user entries before the group's, and the reader's own
+/// entry first so the calendar stays visible.
+fn with_long_acl(rules: usize) -> GoogleWorkspaceWorld {
+    with_calendar(|calendar| {
+        let mut acl = vec![GoogleAclRule {
+            scope_type: "user".into(),
+            scope_value: Some(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER.into()),
+            role: "writer".into(),
+        }];
+        acl.extend((1..rules).map(|index| GoogleAclRule {
+            scope_type: "user".into(),
+            scope_value: Some(format!("person{index}@synthetic.example")),
+            role: "reader".into(),
+        }));
+        acl.push(GoogleAclRule {
+            scope_type: "group".into(),
+            scope_value: Some("engineering@synthetic.example".into()),
+            role: "owner".into(),
+        });
+        calendar.acl = acl;
+    })
+}
+
+fn calendar_fault_cases() -> Vec<(&'static str, SimulatedFault, &'static str)> {
+    use SimulatedFault::*;
+    let mut cases = Vec::new();
+    for endpoint in [
+        GOOGLE_CALENDAR_ENDPOINT,
+        GOOGLE_ACL_ENDPOINT,
+        GOOGLE_EVENTS_ENDPOINT,
+        GOOGLE_EVENT_ENDPOINT,
+    ] {
+        cases.extend([
+            (endpoint, RateLimited, "rate_limited"),
+            (endpoint, ServerError, "unavailable"),
+            (endpoint, ConnectionLost, "unavailable"),
+            (endpoint, NotJson, "response_invalid"),
+            (endpoint, Oversized, "response_too_large"),
+            (endpoint, BadRequest, "request_refused"),
+        ]);
+    }
+    // A 403 on the ACL is the reader lacking sharing access; elsewhere a 403
+    // is a calendar the reader cannot see, which is an outcome, not a fault.
+    cases.push((GOOGLE_ACL_ENDPOINT, Denied, "denied"));
+    cases
+}
+
+fn calendar_plan_for(endpoint: &str) -> Plan {
+    match endpoint {
+        GOOGLE_EVENTS_ENDPOINT => january(),
+        GOOGLE_EVENT_ENDPOINT => event_read(CALENDAR, "standup0001").unwrap(),
+        _ => calendar_read("engineering@synthetic.example"),
+    }
+}
+
+#[test]
+fn every_scheduled_calendar_fault_is_classified_and_consumed() {
+    for (endpoint, fault, expected) in calendar_fault_cases() {
+        let world = World::development();
+        world.fault(endpoint, fault);
+        let plan = calendar_plan_for(endpoint);
+        let (result, meter) = world.observe(&plan);
+        assert_eq!(
+            code(&result),
+            format!("google_workspace_{expected}"),
+            "{endpoint} {fault:?}"
+        );
+        assert_eq!(meter.last.map(|last| last.phase), Some(Phase::Calendar));
+        let (retried, _) = world.observe(&plan);
+        assert!(retried.is_ok(), "{endpoint} {fault:?} did not recover");
+    }
+}
+
+#[test]
+fn a_calendar_is_read_as_the_calendar_reader_and_answers_one_groups_role() {
+    let world = World::development();
+    let (result, meter) = world.observe(&calendar_read("engineering@synthetic.example"));
+    assert_eq!(
+        decoded(result),
+        serde_json::json!({"Found":{"id":CALENDAR,"summary":"Engineering","group_role":"Reader"}})
+    );
+    // Metadata, signJwt, the token exchange, the calendar and one ACL page.
+    assert_eq!(meter.calls, 5);
+    let calls = world.state().calls;
+    assert!(calls[1].starts_with(GOOGLE_IAM_SIGN_ENDPOINT));
+    assert_eq!(calls[2], GOOGLE_OAUTH_TOKEN_ENDPOINT);
+    assert!(calls[3].starts_with(GOOGLE_CALENDAR_ENDPOINT));
+    assert!(calls[4].starts_with(GOOGLE_ACL_ENDPOINT));
+    // A group the ACL does not name holds no role, and the ACL never leaves.
+    let (result, _) = world.observe(&calendar_read("platform@synthetic.example"));
+    assert_eq!(decoded(result)["Found"]["group_role"], "None");
+    // Neither a calendar that does not exist nor one the reader cannot see is
+    // found: Google answers the delegated user the same way.
+    let hidden = with_calendar(|calendar| {
+        calendar.acl.retain(|rule| {
+            rule.scope_value.as_deref() != Some(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER)
+        })
+    });
+    let (result, _) = World::new(hidden).observe(&calendar_read("engineering@synthetic.example"));
+    assert_eq!(decoded(result), serde_json::json!("NotFound"));
+    let other = plan_for(
+        Action::GoogleWorkspaceCalendar,
+        r#"{"handle":"h","calendar_id":"c_absent@group.calendar.google.com","group_email":"engineering@synthetic.example"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        decoded(world.observe(&other).0),
+        serde_json::json!("NotFound")
+    );
+    // A reader who can see the calendar but not its sharing is refused.
+    let read_only = with_calendar(|calendar| {
+        for rule in &mut calendar.acl {
+            if rule.scope_value.as_deref() == Some(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER) {
+                rule.role = "reader".into();
+            }
+        }
+    });
+    let (result, _) =
+        World::new(read_only).observe(&calendar_read("engineering@synthetic.example"));
+    assert_eq!(code(&result), "google_workspace_denied");
+}
+
+#[test]
+fn the_acl_is_paged_to_its_ceiling_and_never_answered_from_part_of_it() {
+    // The group's entry on the last page the ceiling reads.
+    let fits = ACL_PAGE_CEILING as usize * ACL_PAGE_SIZE as usize - 1;
+    let world = World::new(with_long_acl(fits));
+    let (result, meter) = world.observe(&calendar_read("engineering@synthetic.example"));
+    assert_eq!(decoded(result)["Found"]["group_role"], "Owner");
+    assert_eq!(meter.calls, 3 + 1 + ACL_PAGE_CEILING);
+    // One rule further and the role cannot be answered.
+    let world = World::new(with_long_acl(fits + 1));
+    let plan = calendar_read("engineering@synthetic.example");
+    let (result, meter) = world.observe(&plan);
+    assert_eq!(code(&result), "google_workspace_acl_page_budget");
+    assert_eq!(meter.calls, plan.planned_calls());
+    assert!(meter.response_bytes <= plan.response_envelope());
+}
+
+/// A calendar with every shape the events read must handle.
+fn varied_calendar() -> GoogleWorkspaceWorld {
+    with_calendar(|calendar| {
+        let event = |id: &str, start: &str, end: &str| GoogleEvent {
+            id: id.into(),
+            status: "confirmed".into(),
+            start: Some(GoogleTime::at(start)),
+            end: Some(GoogleTime::at(end)),
+            organizer: Some("ada@synthetic.example".into()),
+            ..GoogleEvent::default()
+        };
+        calendar.events = vec![
+            GoogleEvent {
+                conference_id: Some("abc-defg-hij".into()),
+                ..event(
+                    "timed0001",
+                    "2026-01-05T09:00:00-08:00",
+                    "2026-01-05T09:30:00-08:00",
+                )
+            },
+            // A recurring instance whose Meet code is only in its link, run by
+            // a resource calendar and created by a person.
+            GoogleEvent {
+                original_start: Some(GoogleTime::at("2026-01-06T17:00:00Z")),
+                organizer: Some("c_room@resource.calendar.google.com".into()),
+                creator: Some("grace@synthetic.example".into()),
+                hangout_link: Some("https://meet.google.com/klm-nopq-rst".into()),
+                visibility: Some("confidential".into()),
+                ..event(
+                    "series_20260106T170000Z",
+                    "2026-01-06T17:00:00Z",
+                    "2026-01-06T18:00:00Z",
+                )
+            },
+            // A cancelled instance reported by id alone.
+            GoogleEvent {
+                id: "series_20260113T170000Z".into(),
+                status: "cancelled".into(),
+                original_start: Some(GoogleTime::at("2026-01-13T17:00:00Z")),
+                ..GoogleEvent::default()
+            },
+            // A conference that is not Meet, and a link that is not Meet's.
+            GoogleEvent {
+                conference_id: Some("not-a-meet-code-at-all".into()),
+                hangout_link: Some("https://example.com/abc-defg-hij".into()),
+                visibility: Some("private".into()),
+                ..event(
+                    "private0004",
+                    "2026-01-08T10:00:00Z",
+                    "2026-01-08T11:00:00Z",
+                )
+            },
+            GoogleEvent {
+                start: Some(GoogleTime::day("2026-01-09")),
+                end: Some(GoogleTime::day("2026-01-10")),
+                ..event("allday0005", "2026-01-09T00:00:00Z", "2026-01-10T00:00:00Z")
+            },
+            // Outside January entirely, and one ending exactly at its start.
+            event(
+                "february0006",
+                "2026-02-02T10:00:00Z",
+                "2026-02-02T11:00:00Z",
+            ),
+            event("edge0007", "2025-12-31T23:00:00Z", "2026-01-01T00:00:00Z"),
+        ];
+    })
+}
+
+#[test]
+fn events_are_one_bounded_page_of_timed_events_with_their_meeting_codes() {
+    let world = World::new(varied_calendar());
+    let (result, meter) = world.observe(&january());
+    let page = decoded(result)["Found"].clone();
+    assert_eq!(meter.calls, 4);
+    let events = page["events"].as_array().unwrap();
+    let ids: Vec<_> = events
+        .iter()
+        .map(|event| event["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "timed0001",
+            "series_20260106T170000Z",
+            "private0004",
+            "series_20260113T170000Z"
+        ]
+    );
+    assert_eq!(page["all_day_omitted"], 1);
+    assert_eq!(page["next_page_token"], "None");
+    assert_eq!(
+        events[0]["meeting_code"],
+        serde_json::json!({"Some":"abc-defg-hij"})
+    );
+    assert_eq!(
+        events[1]["meeting_code"],
+        serde_json::json!({"Some":"klm-nopq-rst"})
+    );
+    assert_eq!(
+        events[1]["original_start"],
+        serde_json::json!({"Some":"2026-01-06T17:00:00Z"})
+    );
+    assert_eq!(
+        events[1]["organizer"],
+        serde_json::json!({"Some":"c_room@resource.calendar.google.com"})
+    );
+    assert_eq!(events[1]["visibility"], "Confidential");
+    assert_eq!(events[2]["meeting_code"], "None");
+    assert_eq!(events[2]["visibility"], "Private");
+    assert_eq!(events[3]["status"], "Cancelled");
+    assert_eq!(events[3]["start"], "None");
+    // The events read asks for exactly calendar.readonly.
+    let delegated = world
+        .token(
+            google_auth::Identity::Delegated(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER),
+            &[CALENDAR_READ_SCOPE],
+        )
+        .unwrap();
+    assert_eq!(
+        world
+            .calendar_route(&["calendars", CALENDAR, "acl"], delegated.bearer(), &[])
+            .status,
+        403,
+        "an events token reached the ACL"
+    );
+}
+
+#[test]
+fn event_pages_continue_only_the_query_that_issued_them() {
+    let world = World::new(with_calendar(|calendar| {
+        calendar.events = (0..30)
+            .map(|index| GoogleEvent {
+                id: format!("event{index:04}"),
+                status: "confirmed".into(),
+                start: Some(GoogleTime::at(&format!(
+                    "2026-01-{:02}T10:00:00Z",
+                    index % 28 + 1
+                ))),
+                end: Some(GoogleTime::at(&format!(
+                    "2026-01-{:02}T11:00:00Z",
+                    index % 28 + 1
+                ))),
+                ..GoogleEvent::default()
+            })
+            .collect();
+    }));
+    let first = decoded(world.observe(&january()).0)["Found"].clone();
+    assert_eq!(
+        first["events"].as_array().unwrap().len(),
+        EVENT_PAGE_SIZE as usize
+    );
+    let token = first["next_page_token"]["Some"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let window = ("2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z");
+    let second = decoded(
+        world
+            .observe(&events_read(window.0, window.1, Some(&token)).unwrap())
+            .0,
+    )["Found"]
+        .clone();
+    assert_eq!(second["events"].as_array().unwrap().len(), 5);
+    assert_eq!(second["next_page_token"], "None");
+    // The same token on another window is refused by Google, not reinterpreted.
+    let (result, _) =
+        world.observe(&events_read("2026-01-02T00:00:00Z", window.1, Some(&token)).unwrap());
+    assert_eq!(code(&result), "google_workspace_request_refused");
+    // A token another calendar's query issued is refused too.
+    let (result, _) =
+        world.observe(&events_read(window.0, window.1, Some("page.e30.0000")).unwrap());
+    assert_eq!(code(&result), "google_workspace_request_refused");
+}
+
+#[test]
+fn an_event_is_found_all_day_or_not_found() {
+    let world = World::new(varied_calendar());
+    let read = |event: &str| decoded(world.observe(&event_read(CALENDAR, event).unwrap()).0);
+    assert_eq!(
+        read("timed0001")["Found"]["meeting_code"],
+        serde_json::json!({"Some":"abc-defg-hij"})
+    );
+    assert_eq!(
+        read("series_20260113T170000Z")["Found"]["status"],
+        "Cancelled"
+    );
+    assert_eq!(read("allday0005"), serde_json::json!("AllDay"));
+    assert_eq!(read("absent0000"), serde_json::json!("NotFound"));
+    // IDs are matched exactly.
+    assert_eq!(read("TIMED0001"), serde_json::json!("NotFound"));
+}
+
+#[test]
+fn calendar_inputs_are_exact_and_refused_before_any_exchange() {
+    let invalid = |action: Action, request: serde_json::Value| {
+        assert_eq!(
+            plan_for(action, &request.to_string())
+                .unwrap_err()
+                .to_string(),
+            "google_workspace_request_invalid",
+            "{request}"
+        );
+    };
+    for calendar in [
+        "C_ENGINEERING@group.calendar.google.com",
+        "../c_engineering@group.calendar.google.com",
+        "c_engineering%2F@group.calendar.google.com",
+        "a/b@group.calendar.google.com",
+        "en.usa#holiday@group.v.calendar.google.com",
+        "primary",
+        "c_engineering@localhost",
+        "c engineering@group.calendar.google.com",
+        "",
+    ] {
+        invalid(
+            Action::GoogleWorkspaceCalendar,
+            serde_json::json!({"handle":"h","calendar_id":calendar,"group_email":"engineering@synthetic.example"}),
+        );
+        invalid(
+            Action::GoogleWorkspaceCalendarEvent,
+            serde_json::json!({"handle":"h","calendar_id":calendar,"event_id":"standup0001"}),
+        );
+    }
+    for event in [
+        "../standup0001",
+        "a/b",
+        "a b",
+        "a%2Fb",
+        "a.b",
+        "",
+        &"x".repeat(1025),
+    ] {
+        invalid(
+            Action::GoogleWorkspaceCalendarEvent,
+            serde_json::json!({"handle":"h","calendar_id":CALENDAR,"event_id":event}),
+        );
+    }
+    for (time_min, time_max) in [
+        // No offset, fractional seconds, a lower-case separator, an impossible
+        // date, a reversed window, an empty one and one longer than 31 days.
+        ("2026-01-01T00:00:00", "2026-01-31T00:00:00Z"),
+        ("2026-01-01T00:00:00.5Z", "2026-01-31T00:00:00Z"),
+        ("2026-01-01t00:00:00Z", "2026-01-31T00:00:00Z"),
+        ("2026-02-30T00:00:00Z", "2026-03-02T00:00:00Z"),
+        ("2026-01-31T00:00:00Z", "2026-01-01T00:00:00Z"),
+        ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        ("2026-01-01T00:00:00Z", "2026-02-01T00:00:01Z"),
+        ("2026-01-01T00:00:00+24:00", "2026-01-31T00:00:00Z"),
+    ] {
+        assert!(
+            events_read(time_min, time_max, None).is_err(),
+            "{time_min} {time_max}"
+        );
+    }
+    // Exactly 31 days, and an offset window, are admitted.
+    assert!(events_read("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", None).is_ok());
+    assert!(
+        events_read(
+            "2026-01-01T00:00:00-08:00",
+            "2026-01-31T23:59:59+05:30",
+            None
+        )
+        .is_ok()
+    );
+    for token in ["", "a b", &"x".repeat(1025)] {
+        assert!(
+            events_read("2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z", Some(token)).is_err(),
+            "{token}"
+        );
+    }
+    // A group outside the grant is refused as an authorization.
+    let error = plan_for(
+        Action::GoogleWorkspaceCalendar,
+        &serde_json::json!({"handle":"h","calendar_id":CALENDAR,"group_email":"team@other.example"})
+            .to_string(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceForbidden)
+    ));
+}
+
+#[test]
+fn the_simulation_answers_calendars_only_to_a_delegated_subject_with_access() {
+    let world = World::development();
+    let route = ["calendars", CALENDAR];
+    // The reader, delegated with calendar.readonly, sees the calendar.
+    let reader = world
+        .token(
+            google_auth::Identity::Delegated(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER),
+            &[CALENDAR_READ_SCOPE],
+        )
+        .unwrap();
+    assert_eq!(
+        world.calendar_route(&route, reader.bearer(), &[]).status,
+        200
+    );
+    // Another person the calendar is not shared with does not.
+    let grace = world
+        .token(
+            google_auth::Identity::Delegated("grace@synthetic.example"),
+            &[CALENDAR_READ_SCOPE],
+        )
+        .unwrap();
+    assert_eq!(
+        world.calendar_route(&route, grace.bearer(), &[]).status,
+        404
+    );
+    // The service account itself has no calendars.
+    let direct = world
+        .token(
+            google_auth::Identity::ServiceAccount,
+            &[CALENDAR_READ_SCOPE],
+        )
+        .unwrap();
+    assert_eq!(
+        world.calendar_route(&route, direct.bearer(), &[]).status,
+        404
+    );
+    // A token for another scope cannot read Calendar at all.
+    let meetings = world
+        .token(
+            google_auth::Identity::Delegated(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER),
+            &["https://www.googleapis.com/auth/meetings.space.readonly"],
+        )
+        .unwrap();
+    assert_eq!(
+        world.calendar_route(&route, meetings.bearer(), &[]).status,
+        403
+    );
+    // A reader who is not a person in the organization cannot be delegated to.
+    let mut without_reader = simulated::google_workspace_development_fixture();
+    without_reader
+        .users
+        .remove(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER);
+    let (result, meter) =
+        World::new(without_reader).observe(&calendar_read("engineering@synthetic.example"));
+    assert_eq!(code(&result), "google_workspace_authentication_failed");
+    assert_eq!(meter.last.map(|last| last.phase), Some(Phase::Token));
+}
+
+impl World {
+    /// One Calendar request with any bearer, as a client could send it.
+    fn calendar_route(
+        &self,
+        segments: &[&str],
+        bearer: &str,
+        query: &[(&'static str, &str)],
+    ) -> Reply {
+        simulated::google_workspace_serve(
+            &self.database,
+            SCOPE,
+            simulated::GoogleRequest::Api {
+                request: &ApiRequest::calendar("probe", segments, query),
+                bearer,
+            },
+            MAX_CALENDAR_RESPONSE_BYTES,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn calendar_plans_reserve_the_delegated_envelope() {
+    let read = calendar_read("engineering@synthetic.example");
+    assert_eq!(read.planned_calls(), 3 + 1 + ACL_PAGE_CEILING);
+    assert_eq!(read.max_response_bytes(), MAX_CALENDAR_RESPONSE_BYTES);
+    assert_eq!(
+        read.response_envelope(),
+        3 * (google_auth::MAX_EXCHANGE_RESPONSE_BYTES as u64 + 1)
+            + (1 + ACL_PAGE_CEILING) * (MAX_CALENDAR_RESPONSE_BYTES as u64 + 1)
+    );
+    for plan in [january(), event_read(CALENDAR, "standup0001").unwrap()] {
+        assert_eq!(plan.planned_calls(), 4);
+    }
+    assert_eq!(
+        group_plan("engineering@synthetic.example").max_response_bytes(),
+        MAX_DIRECTORY_RESPONSE_BYTES
+    );
+    let world = World::new(varied_calendar());
+    for plan in [read, january(), event_read(CALENDAR, "timed0001").unwrap()] {
+        let (result, meter) = world.observe(&plan);
+        result.unwrap();
+        assert!(meter.calls <= plan.planned_calls());
+        assert!(meter.response_bytes <= plan.response_envelope());
+        assert!(meter.request_bytes <= MAX_ACTION_REQUEST_BYTES);
+    }
 }

@@ -66,32 +66,30 @@ Operator prerequisites, none of which the platform performs:
 
 ## Resource target
 
-Today the target carries only what the Directory reads use:
+Today the target carries what the Directory and Calendar reads use:
 
 ```json
-{"kind":"google_workspace_domain","grantee_domains":["example.com"]}
-```
-
-- `grantee_domains`: the domains a group may belong to in order to be looked
-  up, tested for membership or granted access. Lowercase ASCII, strictly
-  sorted and unique. A narrower grant may only drop domains.
-
-Each field below arrives with the first action that reads it, so a target
-never carries authority nothing enforces yet:
-
-```json
-{"kind":"google_workspace_domain","email_domain":"example.com",
- "calendar_reader":"calendar-reader@example.com",
+{"kind":"google_workspace_domain","calendar_reader":"calendar-reader@example.com",
  "grantee_domains":["example.com"]}
 ```
 
-- `calendar_reader` (step 2, the Calendar reads): the one person Calendar is
-  read as. Calendar reads see exactly the calendars shared with this account,
-  and the ACL read requires that it can see them; this is how an operator
-  bounds which calendars are in play, without listing them in configuration.
-  It must be in `email_domain`.
-- `email_domain` (step 2, with `calendar_reader`, and step 3, impersonation):
-  the only domain whose people may be impersonated.
+- `calendar_reader`: the one person Calendar is read as, by domain-wide
+  delegation. Calendar reads see exactly the calendars shared with this
+  account, and the ACL read requires that it can manage their sharing; this is
+  how an operator bounds which calendars are in play, without listing them in
+  configuration. An exact lowercase address, never normalised. A narrower
+  grant keeps the same reader. Until `email_domain` arrives with step 3, the
+  reader's domain is not separately constrained: the operator chooses it, and
+  Google refuses delegation to anyone who is not a person in the organization.
+- `grantee_domains`: the domains a group may belong to in order to be looked
+  up, tested for membership or named in a calendar's ACL. Lowercase ASCII,
+  strictly sorted and unique. A narrower grant may only drop domains.
+
+The last field arrives with the first action that reads it, so a target never
+carries authority nothing enforces yet:
+
+- `email_domain` (step 3, impersonation): the only domain whose people may be
+  impersonated. `calendar_reader` will then have to be in it.
 
 ## Who is impersonated
 
@@ -134,18 +132,47 @@ shared with the reader, and only for that meeting.
   member and group share a domain (otherwise `400 Invalid Input`), so a
   question it cannot answer is refused before dispatch. The member key is a
   user, as the reference defines it.
-- **calendar** — the calendar's `id` and `summary`, and the role one named group
-  holds in its ACL (`none`, `free_busy_reader`, `reader`, `writer`, `owner`).
-  The ACL is paged inside the action up to a fixed page ceiling and never
-  returned. `NotFound` covers both a missing calendar and one the reader cannot
-  see.
-- **calendar_events** — one page of single events in a window of at most 31
-  days, including cancelled ones, ordered by start. Each event has `id`,
-  `status`, `visibility`, `start`, `end`, the original start of a recurrence
-  instance, `organizer`, `creator` and the Meet code from `conferenceData` (or
-  the `hangoutLink` path). All-day events are omitted. The page size is fixed
-  so a page fits one observation; the application persists the page token.
-- **calendar_event** — one event in the same shape, or `NotFound`.
+- **calendar** — `GET calendar/v3/calendars/{calendar}?fields=id,summary`, then
+  `GET …/acl?maxResults=250[&pageToken]&fields=items(scope(type,value),role),nextPageToken`
+  until the first rule whose scope is the named group (compared ignoring ASCII
+  case, as Google treats addresses). `Found {id, summary, group_role}` with
+  `group_role` one of `None`, `FreeBusyReader`, `Reader`, `Writer`, `Owner`,
+  or `NotFound`, which covers a missing calendar and one the reader cannot see
+  (`404` or `403`). The ACL is never returned. At most four ACL pages (1,000
+  rules) are read; a longer ACL fails with `google_workspace_acl_page_budget`
+  rather than answering from part of it. A `403` on the ACL means the reader
+  can see the calendar but not its sharing, and fails with
+  `google_workspace_denied`. The group must be in a grantee domain.
+- **calendar_events** — one page of
+  `GET …/events?singleEvents=true&orderBy=startTime&showDeleted=true&maxResults=25&timeMin&timeMax[&pageToken]`
+  with the item mask
+  `id,originalStartTime,start,end,status,visibility,creator/email,organizer/email,conferenceData/conferenceId,hangoutLink`.
+  `time_min` and `time_max` are RFC 3339 with whole seconds and an explicit
+  offset (`Z` or `±HH:MM`), increasing, and at most 31 days apart; an event is
+  on the page when it overlaps the window. `Found {events, next_page_token,
+  all_day_omitted}` or `NotFound` (a calendar the reader cannot see). Each
+  event has `id`, `status` (`Confirmed`, `Tentative`, `Cancelled`),
+  `visibility` (`Default`, `Public`, `Private`, `Confidential`), `start`,
+  `end`, `original_start` for a recurring instance, `organizer`, `creator`
+  and `meeting_code`, as reported. `start` and `end` are absent only on a
+  cancelled event, which Google may report by `id` and `originalStartTime`
+  alone. The Meet code comes from `conferenceData.conferenceId`, else the
+  path of a `https://meet.google.com/{code}` `hangoutLink`, and is kept only
+  in Meet's `xxx-xxxx-xxx` shape. All-day events carry no time and are
+  omitted; `all_day_omitted` counts them. Every field is bounded, so 25 events
+  always journal within one observation; the application persists the page
+  token, which continues only the query that issued it.
+- **calendar_event** — `GET …/events/{event}` with the same item mask.
+  `Found(Event)`, `AllDay` for an event with no time, or `NotFound` (`403`,
+  `404` or `410`).
+
+Calendar IDs are exact: lowercase ASCII, one `@`, a local part of letters,
+digits and `._+-`, and a domain of lowercase labels, which covers people's
+calendars and Google's `@group.calendar.google.com` and
+`@resource.calendar.google.com` IDs. Event IDs are ASCII letters, digits and
+`_`, up to 1,024 characters, which covers recurring instances'
+`_YYYYMMDDTHHMMSSZ` suffix. Every accepted character is safe in a URL path
+segment, so nothing an application supplies can change a route.
 - **event_conferences** — for one event: its derived owner and Meet code, the
   conference records for that code starting within thirty minutes of the
   event, and each record's recordings, smart notes and transcripts with their
@@ -190,10 +217,19 @@ the provider's world, so token handling, URL construction and parsing run on the
 real path in both lanes.
 
 Today the world serves the metadata server, IAM `generateAccessToken` and
-`signJwt`, the JWT-bearer token exchange and the two Directory routes. It holds
-the service account, whether it has the Directory admin role, the delegation
-client's authorized scopes, users, and groups with nested memberships and
-aliases. Tokens are self-describing and verified by recomputing their tag: a
+`signJwt`, the JWT-bearer token exchange, the two Directory routes and the four
+Calendar routes. It holds the service account, whether it has the Directory
+admin role, the delegation client's authorized scopes, users, groups with
+nested memberships and aliases, and calendars with their ACLs and single
+events. Who can see a calendar is its ACL, as in Google: without a `user` rule
+for the delegated subject (or with only free/busy access) a calendar is `404`,
+the service account itself has no calendars, and listing the ACL needs
+`writer` or `owner`. Events cover timed and all-day events, recurring
+instances with `originalStartTime`, cancelled instances reported by id alone,
+private and confidential visibility, group and resource organizers, and Meet
+codes in `conferenceData` or `hangoutLink` only. `timeMin`/`timeMax` select
+overlapping events in start order, and page tokens are opaque and bound to
+the query that issued them; another query's token is `400`. Tokens are self-describing and verified by recomputing their tag: a
 forged or workload bearer gets `401`, a token without a route's scope gets
 `403`, and only the service account itself holds the Directory role.
 Delegation fails as Google does for a scope the client is not authorized for
@@ -201,19 +237,17 @@ Delegation fails as Google does for a scope the client is not authorized for
 organization (`400 invalid_grant`). Addresses are matched exactly, never
 normalised. `hasMember` takes a user key and answers a nested question across
 domains with `400 Invalid Input`. Scenarios schedule per-endpoint faults: `400`,
-`403`, `429`, `5xx`, a lost connection, a non-JSON body and an oversized body.
+`403`, `429`, `5xx`, a lost connection, a non-JSON body and an oversized body,
+on every endpoint.
 
 The gates are the ones
 [PROVIDER-REGISTRY.md](PROVIDER-REGISTRY.md#what-this-does-not-do) requires: a
 parity suite, coverage of every action, every failure code produced through an
 action, and saboteurs that a constant or world-mutating simulation must fail.
-Host tests run both actions through admission, reservation and settlement.
+Host tests run the actions through admission, reservation and settlement.
 
 Planned, by delivery step:
 
-- Step 2: calendars, ACLs and events (recurring instances, cancellations,
-  reschedules, private and confidential visibility, group and resource
-  organizers).
 - Step 3: Meet spaces and conference records (a rejoin is a second record), and
   artifacts that advance `started` → `ended` → `file_generated`.
 - Step 4: Drive files and permissions, a lost-reply fault after a permission
@@ -235,23 +269,29 @@ statuses and counts with no provider values. Receipts will report
 
 ## Status
 
-`group` and `group_member` are implemented; the other actions in the table are
-the planned contract and are not yet declared in the registry. Addresses are
+`group`, `group_member`, `calendar`, `calendar_events` and `calendar_event` are
+implemented; `event_conferences` and `share_artifact` are the planned contract
+and are not yet declared in the registry. Addresses are
 exact lowercase ASCII and are never normalised on the way in, so an application
 lowercases what it stores.
 
 A Directory action reserves three or four calls (metadata, IAM, then one call
-per question), 32 KiB of request payload and 16 KiB plus a probe byte for each
-response, and settles what it actually used. Its grant must admit that whole
-envelope: `max_request_bytes` of at least 32 KiB and `max_response_bytes` of at
-least 16 KiB, or the action is refused before anything is reserved. The
+per question); a Calendar action reserves the three delegated authentication
+exchanges (metadata, `signJwt`, the token exchange) and then one call, or for
+`calendar` the calendar and every ACL page up to the ceiling (eight in all).
+Each reserves 32 KiB of request payload and, for each response, 16 KiB
+(authentication and Directory) or 64 KiB (Calendar) plus a probe byte, and
+settles what it actually used. Its grant must admit the whole envelope:
+`max_request_bytes` of at least 32 KiB and `max_response_bytes` of at least
+the action's largest response (16 KiB for Directory reads, 64 KiB for Calendar
+reads), or the action is refused before anything is reserved. The
 simulated or native source is frozen when the capability is authorized. A failure keeps the phase,
 status and `Retry-After` of its final exchange as correlation, never content.
 Codes are `google_workspace_` followed by `workload_identity_unavailable`,
 `authentication_failed`, `denied` (a `403` from the Directory: the service
 account lacks its admin role or the API is off), `rate_limited`, `unavailable`,
-`request_refused`, `response_invalid`, `response_too_large` or
-`group_outside_grant`. Malformed application input is
+`request_refused`, `response_invalid`, `response_too_large`,
+`group_outside_grant` or `acl_page_budget`. Malformed application input is
 `google_workspace_request_invalid`, and an address outside the grant is
 refused as a resource authorization; neither reaches the network.
 
@@ -263,7 +303,7 @@ records real ones (`crates/day2/fixtures/provider-responses/GOOGLE-WORKSPACE-PRO
 
 1. `google_auth` extracted from `WorkspaceDirectory`; the connection, target,
    registry entry, port, world and the two Directory reads. (Done.)
-2. The three Calendar reads.
+2. The three Calendar reads, by delegation as `calendar_reader`. (Done.)
 3. `event_conferences`.
 4. `share_artifact`, with reconciliation and the saboteur.
 5. Live qualification.
