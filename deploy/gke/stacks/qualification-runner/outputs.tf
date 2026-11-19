@@ -16,5 +16,5 @@ output "service_account_email" {
 
 output "ssh_command" {
   description = "IAP-tunnelled SSH (no external IP, no public port 22)."
-  value       = var.enabled ? "gcloud compute ssh ${var.name} --project=${var.project_id} --zone=${var.zone} --tunnel-through-iap" : null
+  value       = var.enabled && var.instance_enabled ? "gcloud compute ssh ${var.name} --project=${var.project_id} --zone=${var.zone} --tunnel-through-iap" : null
 }

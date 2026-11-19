@@ -71,6 +71,56 @@ run "refuses_arm_machine_types" {
   expect_failures = [var.machine_type]
 }
 
+run "retire_instance_preserves_shared_infrastructure" {
+  command = plan
+
+  variables {
+    enabled                  = true
+    instance_enabled         = false
+    operator_members         = ["user:operator@example.com"]
+    image_push_repository_id = "example-repository"
+  }
+
+  assert {
+    condition = (
+      length(google_compute_instance.runner) == 0 &&
+      length(google_iap_tunnel_instance_iam_member.operator_tunnel) == 0 &&
+      length(google_compute_instance_iam_member.operator_os_admin_login) == 0 &&
+      length(google_compute_network.runner) == 1 &&
+      length(google_compute_subnetwork.runner) == 1 &&
+      length(google_compute_router.runner) == 1 &&
+      length(google_compute_router_nat.runner) == 1 &&
+      length(google_compute_firewall.runner_iap_ssh) == 1 &&
+      length(google_service_account.runner) == 1 &&
+      length(google_artifact_registry_repository_iam_member.runner_push) == 1 &&
+      length(google_service_account_iam_member.operator_service_account_user) == 1 &&
+      length(google_project_iam_member.operator_compute_viewer) == 1
+    )
+    error_message = "VM retirement removes only the VM and its instance-scoped grants, not shared infrastructure or service-account access"
+  }
+
+  assert {
+    condition     = output.instance_name == null && output.zone == null && output.ssh_command == null
+    error_message = "a retired instance must not publish an SSH command or instance identity"
+  }
+}
+
+run "prepare_boot_retention_without_removing_instance" {
+  command = plan
+
+  variables {
+    enabled               = true
+    instance_enabled      = true
+    boot_disk_auto_delete = false
+    operator_members      = ["user:operator@example.com"]
+  }
+
+  assert {
+    condition     = length(google_compute_instance.runner) == 1 && !google_compute_instance.runner[0].boot_disk[0].auto_delete
+    error_message = "retention preparation must keep the existing VM while disabling boot-disk auto-delete"
+  }
+}
+
 run "requires_an_operator_when_enabled" {
   command = plan
 

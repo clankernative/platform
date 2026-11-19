@@ -10,12 +10,14 @@
 # stack enables both).
 
 locals {
-  count          = var.enabled ? 1 : 0
-  operators      = var.enabled ? var.operator_members : toset([])
-  iap_tcp_range  = "35.235.240.0/20"
-  push_repo_id   = trimspace(var.image_push_repository_id)
-  push_repo_iam  = var.enabled && local.push_repo_id != "" ? 1 : 0
-  startup_script = file("${path.module}/startup.sh")
+  count              = var.enabled ? 1 : 0
+  operators          = var.enabled ? var.operator_members : toset([])
+  instance_count     = var.enabled && var.instance_enabled ? 1 : 0
+  instance_operators = var.enabled && var.instance_enabled ? var.operator_members : toset([])
+  iap_tcp_range      = "35.235.240.0/20"
+  push_repo_id       = trimspace(var.image_push_repository_id)
+  push_repo_iam      = var.enabled && local.push_repo_id != "" ? 1 : 0
+  startup_script     = file("${path.module}/startup.sh")
 }
 
 resource "google_compute_network" "runner" {
@@ -110,7 +112,7 @@ resource "google_compute_firewall" "runner_iap_ssh" {
 }
 
 resource "google_compute_instance" "runner" {
-  count = local.count
+  count = local.instance_count
 
   name           = var.name
   project        = var.project_id
@@ -125,6 +127,7 @@ resource "google_compute_instance" "runner" {
   }
 
   boot_disk {
+    auto_delete = var.boot_disk_auto_delete
     initialize_params {
       image = var.boot_image
       size  = var.boot_disk_gb
@@ -170,7 +173,7 @@ resource "google_compute_instance" "runner" {
 }
 
 resource "google_iap_tunnel_instance_iam_member" "operator_tunnel" {
-  for_each = local.operators
+  for_each = local.instance_operators
 
   project  = var.project_id
   zone     = google_compute_instance.runner[0].zone
@@ -182,7 +185,7 @@ resource "google_iap_tunnel_instance_iam_member" "operator_tunnel" {
 # osAdminLogin (sudo) rather than osLogin: operators add themselves to the
 # docker group, and qualification talks to the Docker socket.
 resource "google_compute_instance_iam_member" "operator_os_admin_login" {
-  for_each = local.operators
+  for_each = local.instance_operators
 
   project       = var.project_id
   zone          = google_compute_instance.runner[0].zone

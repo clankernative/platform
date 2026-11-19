@@ -37,6 +37,18 @@ variable "desired_status" {
   }
 }
 
+variable "instance_enabled" {
+  description = "Keep the qualification VM and its instance-scoped operator grants. Set false to retire only the VM while preserving this root's network, NAT and service account for other users."
+  type        = bool
+  default     = true
+}
+
+variable "boot_disk_auto_delete" {
+  description = "Delete the boot disk with the VM. To retain an existing disk, first apply false while instance_enabled is true and verify the actual attachment before retiring the VM; changing this alongside removal cannot update an absent instance."
+  type        = bool
+  default     = true
+}
+
 variable "name" {
   description = "VM, service account and network resource name stem."
   type        = string
