@@ -164,7 +164,8 @@ whose local decision committed while external delivery remains incomplete.
 Runnable means pending and not blocked by an authority change. Rollout
 completion and abort wait for the same set on the artifact they retire. Blocked
 work never runs again, so it holds neither; it stays pending against the
-artifact that admitted it, which is kept for inspection.
+artifact that admitted it, which is kept for inspection, until an operator
+abandons it.
 
 There is no atomic commit across SQLite and an external service. Failure after
 the decision commit retains those committed changes. Applications must model any
@@ -237,9 +238,10 @@ deduplication does not establish retry safety for a future live adapter. Adding 
 real provider is a separate adapter implementation. A recorded preparation error is
 currently terminal for that invocation identity; fresh attempts can resume an
 application checkpoint, but automatic provider read retries are not implemented.
-An invocation blocked after committing its application decision can also require
-an operator recovery API that is not implemented; see the concrete
-[operator recovery boundary](OPERATOR-RECOVERY.md).
+A blocked invocation, including one that committed its application decision,
+never resumes. A local operator can abandon it, finishing it as a failure and
+fencing permits that have not started; running it again is not implemented. See
+the concrete [operator recovery boundary](OPERATOR-RECOVERY.md).
 
 ## Rust enforcement boundaries
 

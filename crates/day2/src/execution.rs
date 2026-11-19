@@ -619,6 +619,39 @@ impl DispatchPermit {
                 reservation,
             } => (attempt, capability, reservation),
         };
+        // An operator may abandon the invocation after this attempt was admitted.
+        // A permit that has not started is then refused. The provider was never
+        // called, so the attempt and its reservation settle as not dispatched. A
+        // permit already past this read may still be in flight when the
+        // abandonment commits; its result is recorded as evidence.
+        if runtime
+            .sql_read(|connection| crate::recovery::effect_abandoned(connection, &permit.effect))?
+        {
+            let refused = crate::resources::bounded_observation(Observation {
+                instruction: permit.instruction,
+                result: String::new(),
+                error: crate::error::Failure::InvocationAbandoned.code().into(),
+            })?;
+            let encoded = serde_json::to_string(&refused)?;
+            runtime.sql_write(|tx| {
+                runtime.check_binding(tx)?;
+                crate::resources::settle_in(
+                    tx,
+                    &reservation,
+                    crate::resources::ProviderUsage {
+                        known: true,
+                        ..Default::default()
+                    },
+                )?;
+                tx.execute(
+                    "UPDATE day2_external_attempts SET observation=?1
+                     WHERE identity=?2 AND effect=?3 AND observation IS NULL",
+                    params![encoded, attempt, permit.effect],
+                )?;
+                Ok(())
+            })?;
+            bail!(crate::error::Failure::InvocationAbandoned);
+        }
         let resource = capability.resource().clone();
         let completed =
             crate::capabilities::execute(runtime, *capability, &permit.effect, &attempt);

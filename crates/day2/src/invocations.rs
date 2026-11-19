@@ -406,7 +406,7 @@ pub fn children(runtime: &Runtime, parent: &str) -> Result<Vec<Invocation>> {
 }
 
 fn children_in(connection: &Connection, parent: &str) -> Result<Vec<Invocation>> {
-    let mut statement = connection.prepare("SELECT i.id,r.parent,i.operation,CASE WHEN EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) THEN 'blocked' ELSE i.status END FROM day2_command_requests r JOIN day2_invocations i ON i.id=r.id WHERE r.parent=?1 ORDER BY r.ordinal")?;
+    let mut statement = connection.prepare("SELECT i.id,r.parent,i.operation,CASE WHEN i.status='pending' AND EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) THEN 'blocked' ELSE i.status END FROM day2_command_requests r JOIN day2_invocations i ON i.id=r.id WHERE r.parent=?1 ORDER BY r.ordinal")?;
     Ok(statement
         .query_map([parent], |row| {
             Ok(Invocation {

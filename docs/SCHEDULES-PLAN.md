@@ -38,4 +38,6 @@ settle evidence. So it never finishes. The next occurrence runs on schedule
 under current authority, and the blocked one stays as it is. Its work is not
 done, and under `RunEach` it is not redone. The source names the most recent
 blocked occurrence on each tick, and the host reports each blocked occurrence
-once (`schedule_occurrence_blocked <schedule> <occurrence> <reason>`).
+once (`schedule_occurrence_blocked <schedule> <occurrence> <reason>`). An
+operator may abandon it ([operator recovery](OPERATOR-RECOVERY.md)); it then
+finishes as a failure and is no longer reported.

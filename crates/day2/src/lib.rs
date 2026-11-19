@@ -83,6 +83,7 @@ pub mod presentation;
 pub mod properties;
 pub mod protocol;
 pub mod public_downloads;
+pub mod recovery;
 pub mod redirects;
 pub mod registry;
 mod request_timing;

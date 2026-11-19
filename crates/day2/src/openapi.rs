@@ -231,7 +231,7 @@ fn audit_document(schemas: &mut BTreeMap<String, Value>, paths: &mut BTreeMap<St
         "required":["sequence","scope","kind","identity","actor","initiator","operation","outcome","at_ms","artifact","reason"],
         "properties":{
             "sequence":{"type":"integer"},"scope":{"type":"string"},
-            "kind":{"type":"string","enum":["admission","execution_attempt","invocation","web"]},
+            "kind":{"type":"string","enum":["admission","execution_attempt","invocation","recovery","web"]},
             "identity":{"type":"string"},"actor":{"type":["string","null"]},
             "initiator":{"type":["string","null"],"description":"Original requesting actor, when known."},
             "operation":{"type":["string","null"]},"outcome":{"type":"string"},
@@ -296,7 +296,7 @@ fn audit_document(schemas: &mut BTreeMap<String, Value>, paths: &mut BTreeMap<St
                     160,
                 ),
                 "kind" => (
-                    "Event kind: admission, execution_attempt, invocation or web. Empty or omitted matches all.",
+                    "Event kind: admission, execution_attempt, invocation, recovery or web. Empty or omitted matches all.",
                     32,
                 ),
                 "identity" => (
@@ -304,7 +304,7 @@ fn audit_document(schemas: &mut BTreeMap<String, Value>, paths: &mut BTreeMap<St
                     160,
                 ),
                 "outcome" => (
-                    "Event outcome: accepted, reused, rejected, interrupted, success, failure, received or response. Empty or omitted matches all.",
+                    "Event outcome: accepted, reused, rejected, interrupted, success, failure, received, response or abandoned. Empty or omitted matches all.",
                     32,
                 ),
                 _ => unreachable!(),

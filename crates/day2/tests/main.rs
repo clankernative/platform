@@ -38,6 +38,7 @@ mod native_enrollment_recipe;
 mod numeric;
 mod oauth_setup;
 mod operation_catalog;
+mod operator_recovery;
 mod output_schema;
 mod owned_runtime;
 mod owned_web;
