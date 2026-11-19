@@ -180,6 +180,10 @@ providers! {
         actions: {
             GoogleWorkspaceGroup => "google_workspace.group.v1" (read, data),
             GoogleWorkspaceGroupMember => "google_workspace.group_member.v1" (read, data),
+            // Read by domain-wide delegation as the grant's Calendar reader.
+            GoogleWorkspaceCalendar => "google_workspace.calendar.v1" (read, data),
+            GoogleWorkspaceCalendarEvents => "google_workspace.calendar_events.v1" (read, data),
+            GoogleWorkspaceCalendarEvent => "google_workspace.calendar_event.v1" (read, data),
         },
     },
     // App-to-app delegation. The "provider" is another application in this same

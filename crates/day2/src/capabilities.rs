@@ -515,7 +515,11 @@ pub(crate) fn authorized(
                 }
             }
         }
-        "google_workspace.group.v1" | "google_workspace.group_member.v1" => {
+        "google_workspace.group.v1"
+        | "google_workspace.group_member.v1"
+        | "google_workspace.calendar.v1"
+        | "google_workspace.calendar_events.v1"
+        | "google_workspace.calendar_event.v1" => {
             ensure!(
                 resource.grant.provider == Provider::GoogleWorkspace,
                 crate::error::Failure::ResourceForbidden
@@ -545,8 +549,7 @@ pub(crate) fn authorized(
                 handle == resource.handle
                     && resource.grant.limits.max_request_bytes
                         >= crate::google_workspace::MAX_ACTION_REQUEST_BYTES
-                    && resource.grant.limits.max_response_bytes
-                        >= crate::google_workspace::MAX_RESPONSE_BYTES as u64,
+                    && resource.grant.limits.max_response_bytes >= plan.max_response_bytes() as u64,
                 crate::error::Failure::ResourceForbidden
             );
             resource.planned_calls = plan.planned_calls();
@@ -971,6 +974,7 @@ impl ProviderResult {
                     Phase::Iam => ExchangePhase::GoogleWorkspaceIam,
                     Phase::Token => ExchangePhase::GoogleWorkspaceToken,
                     Phase::Directory => ExchangePhase::GoogleWorkspaceDirectory,
+                    Phase::Calendar => ExchangePhase::GoogleWorkspaceCalendar,
                 },
                 http_status: last.http_status,
                 request_id: None,

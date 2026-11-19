@@ -30,7 +30,7 @@
 //!   self-produced fixture is indistinguishable from the self-consistency trap.
 
 use super::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use day2_capabilities::integrations::{OpenAiText, SlackChannel, SnowflakeView};
 use day2_capabilities::resources::{Action, ResourceTarget, VersionRef};
 use serde_json::{Value, json};
@@ -831,22 +831,30 @@ const GOOGLE_HAS_MEMBER: RecordedBase = RecordedBase::from_repository(
     include_bytes!("../../fixtures/provider-responses/google_workspace.groups.has_member.json"),
 );
 
-/// Replays bodies to the Google pipeline in request order and keeps every reply
-/// a delegate port served, so the simulation's own bodies can be compared too.
+/// Replays bodies to the Google pipeline in request order, each with its
+/// status.
 struct GoogleReplay {
-    bodies: std::collections::VecDeque<Vec<u8>>,
+    replies: std::collections::VecDeque<(u16, Vec<u8>)>,
 }
 
 impl GoogleReplay {
+    /// Every body answered `200`.
+    fn ok(bodies: Vec<Vec<u8>>) -> Self {
+        Self {
+            replies: bodies.into_iter().map(|body| (200, body)).collect(),
+        }
+    }
+
     fn reply(&mut self, metadata: bool) -> crate::google_auth::Reply {
+        let (status, body) = self
+            .replies
+            .pop_front()
+            .expect("no unplanned Google request");
         crate::google_auth::Reply {
-            status: 200,
+            status,
             metadata_flavor: metadata,
             json: true,
-            body: self
-                .bodies
-                .pop_front()
-                .expect("no unplanned Google request"),
+            body,
             retry_after_seconds: None,
         }
     }
@@ -883,19 +891,22 @@ fn google_plan(action: Action) -> Result<crate::google_workspace::Plan> {
         &LiveConnection::GoogleWorkspace {
             service_account: "reader@example-project.iam.gserviceaccount.com".into(),
         },
-        &ResourceTarget::GoogleWorkspaceDomain {
-            grantee_domains: vec!["example.com".into()],
-        },
+        &google_target(),
         &request.to_string(),
         crate::google_workspace::Source::Simulated,
     )?
     .0)
 }
 
+fn google_target() -> ResourceTarget {
+    ResourceTarget::GoogleWorkspaceDomain {
+        calendar_reader: "calendar@example.com".into(),
+        grantee_domains: vec!["example.com".into()],
+    }
+}
+
 fn google_against(action: Action, bodies: Vec<Vec<u8>>) -> Result<String> {
-    let mut replay = GoogleReplay {
-        bodies: bodies.into(),
-    };
+    let mut replay = GoogleReplay::ok(bodies);
     let (result, _) = crate::google_workspace::observe(&google_plan(action)?, &mut replay, 100);
     result
 }
@@ -1070,7 +1081,7 @@ fn the_google_simulation_emits_exactly_the_documented_fields() -> Result<()> {
         let value: Value = serde_json::from_slice(bytes)?;
         Ok(value
             .as_object()
-            .ok_or_else(|| anyhow::anyhow!("object"))?
+            .context("object")?
             .keys()
             .cloned()
             .collect())
@@ -1089,6 +1100,644 @@ fn google_bases_cite_the_published_reference_they_follow() {
         &GOOGLE_GENERATE_ACCESS_TOKEN,
         &GOOGLE_GROUP,
         &GOOGLE_HAS_MEMBER,
+    ] {
+        assert!(base.claim.len() > 20, "claim is not a real sentence");
+        assert!(base.origin.starts_with("https://"));
+        assert!(!base.bytes.is_empty());
+    }
+}
+
+const GOOGLE_SIGN_JWT: RecordedBase = RecordedBase::from_repository(
+    "signJwt returns the signing key's id and the signed JWT, and nothing that names a direct token",
+    "https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/signJwt",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.sign_jwt.json"),
+);
+
+const GOOGLE_OAUTH_TOKEN: RecordedBase = RecordedBase::from_repository(
+    "the JWT-bearer grant returns access_token, expires_in and token_type for the delegated subject",
+    "https://developers.google.com/identity/protocols/oauth2/service-account#httprest",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.oauth_token.json"),
+);
+
+const GOOGLE_ACL_RULE: RecordedBase = RecordedBase::from_repository(
+    "acl.get for the rule id user:{email} with the scope/role mask returns that one rule's scope and role",
+    "https://developers.google.com/workspace/calendar/api/v3/reference/acl/get",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.calendar.acl.get.json"),
+);
+
+const GOOGLE_CALENDAR_RATE_LIMIT: RecordedBase = RecordedBase::from_repository(
+    "Calendar reports a rate limit as a 403 whose errors[].reason is rateLimitExceeded, in Google's error envelope",
+    "https://developers.google.com/workspace/calendar/api/guides/errors",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.calendar.error.rate_limit.json"
+    ),
+);
+
+const GOOGLE_CALENDAR_FORBIDDEN: RecordedBase = RecordedBase::from_repository(
+    "Calendar reports a refusal as a 403 in the same envelope, with a reason that is not a rate or quota limit",
+    "https://developers.google.com/workspace/calendar/api/guides/errors",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.calendar.error.forbidden.json"
+    ),
+);
+
+const GOOGLE_CALENDAR: RecordedBase = RecordedBase::from_repository(
+    "calendars.get with the fields=id,summary mask returns exactly the calendar's id and summary",
+    "https://developers.google.com/workspace/calendar/api/v3/reference/calendars/get",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.calendars.get.json"),
+);
+
+const GOOGLE_ACL: RecordedBase = RecordedBase::from_repository(
+    "acl.list with the scope/role mask returns rules whose scope has a type and, except for default, a value",
+    "https://developers.google.com/workspace/calendar/api/v3/reference/acl/list",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.calendar.acl.list.json"),
+);
+
+const GOOGLE_EVENTS: RecordedBase = RecordedBase::from_repository(
+    "events.list with singleEvents reports timed, recurring-instance, cancelled and all-day items under the item mask",
+    "https://developers.google.com/workspace/calendar/api/v3/reference/events/list",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.calendar.events.list.json"),
+);
+
+const GOOGLE_EVENT: RecordedBase = RecordedBase::from_repository(
+    "events.get reports one item under the same mask, with visibility only when it is not default",
+    "https://developers.google.com/workspace/calendar/api/v3/reference/events/get",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.calendar.events.get.json"),
+);
+
+/// The signJwt base with its JWT replaced by one that carries the plan's claims:
+/// the adapter checks every claim, so a recorded JWT for another subject could
+/// never be exchanged.
+fn google_signed(scopes: &[&str]) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    let claims = crate::google_auth::delegated_claims(
+        "reader@example-project.iam.gserviceaccount.com",
+        "calendar@example.com",
+        scopes,
+        100,
+    )
+    .map_err(|failure| anyhow::anyhow!("{failure:?}"))?;
+    let mut base = GOOGLE_SIGN_JWT.value()?;
+    let key = base["keyId"].as_str().unwrap_or_default().to_owned();
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    base["signedJwt"] = json!(format!(
+        "{}.{}.{}",
+        encode(json!({"alg":"RS256","kid":key}).to_string().as_bytes()),
+        encode(claims.as_bytes()),
+        encode(&[7u8; 64])
+    ));
+    Ok(base.to_string().into_bytes())
+}
+
+fn calendar_plan(action: Action, request: Value) -> Result<crate::google_workspace::Plan> {
+    Ok(crate::google_workspace::Plan::authorize(
+        action,
+        &LiveConnection::GoogleWorkspace {
+            service_account: "reader@example-project.iam.gserviceaccount.com".into(),
+        },
+        &google_target(),
+        &request.to_string(),
+        crate::google_workspace::Source::Simulated,
+    )?
+    .0)
+}
+
+fn calendar_request(action: Action) -> Value {
+    match action {
+        Action::GoogleWorkspaceCalendar => json!({"handle":"h",
+            "calendar_id":"c_team@group.calendar.google.com","group_email":"team@example.com"}),
+        Action::GoogleWorkspaceCalendarEvents => json!({"handle":"h",
+            "calendar_id":"c_team@group.calendar.google.com","time_min":"2026-01-01T00:00:00Z",
+            "time_max":"2026-01-31T00:00:00Z","page_token":"None"}),
+        _ => json!({"handle":"h","calendar_id":"c_team@group.calendar.google.com",
+            "event_id":"abc123def456ghi789jkl012mn"}),
+    }
+}
+
+/// Every Calendar action reads the reader's own rule, so each is delegated
+/// with both Calendar scopes.
+const CALENDAR_SCOPES: [&str; 2] = [
+    crate::google_workspace_calendar::CALENDAR_READ_SCOPE,
+    crate::google_workspace_calendar::CALENDAR_ACL_READ_SCOPE,
+];
+
+fn calendar_against(action: Action, api: Vec<Vec<u8>>) -> Result<String> {
+    calendar_replies(action, api.into_iter().map(|body| (200, body)).collect())
+}
+
+fn calendar_replies(action: Action, api: Vec<(u16, Vec<u8>)>) -> Result<String> {
+    let mut replay = GoogleReplay::ok(vec![
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        google_signed(&CALENDAR_SCOPES)?,
+        GOOGLE_OAUTH_TOKEN.bytes.to_vec(),
+    ]);
+    replay.replies.extend(api);
+    let (result, _) = crate::google_workspace::observe(
+        &calendar_plan(action, calendar_request(action))?,
+        &mut replay,
+        100,
+    );
+    result
+}
+
+/// Each action's API replies in order: the reader's own rule first.
+fn calendar_bases(action: Action) -> Vec<Vec<u8>> {
+    let rest = match action {
+        Action::GoogleWorkspaceCalendar => vec![&GOOGLE_CALENDAR, &GOOGLE_ACL],
+        Action::GoogleWorkspaceCalendarEvents => vec![&GOOGLE_EVENTS],
+        _ => vec![&GOOGLE_EVENT],
+    };
+    std::iter::once(&GOOGLE_ACL_RULE)
+        .chain(rest)
+        .map(|base| base.bytes.to_vec())
+        .collect()
+}
+
+const CALENDAR_ACTIONS: [Action; 3] = [
+    Action::GoogleWorkspaceCalendar,
+    Action::GoogleWorkspaceCalendarEvents,
+    Action::GoogleWorkspaceCalendarEvent,
+];
+
+#[test]
+fn google_calendar_parses_the_published_provider_responses() -> Result<()> {
+    let calendar: Value = serde_json::from_str(&calendar_against(
+        Action::GoogleWorkspaceCalendar,
+        calendar_bases(Action::GoogleWorkspaceCalendar),
+    )?)?;
+    assert_eq!(
+        calendar,
+        json!({"Found":{"id":"c_team@group.calendar.google.com","summary":"Team","group_role":"Reader"}})
+    );
+    let page: Value = serde_json::from_str(&calendar_against(
+        Action::GoogleWorkspaceCalendarEvents,
+        calendar_bases(Action::GoogleWorkspaceCalendarEvents),
+    )?)?;
+    let page = &page["Found"];
+    assert_eq!(page["all_day_omitted"], 1);
+    assert_eq!(
+        page["next_page_token"],
+        json!({"Some":"EXAMPLE_NEXT_PAGE_TOKEN"})
+    );
+    let events = page["events"].as_array().context("events")?;
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["meeting_code"], json!({"Some":"abc-defg-hij"}));
+    assert_eq!(
+        events[0]["status"],
+        json!({"Confirmed":{"start":"2026-01-05T09:00:00-08:00","end":"2026-01-05T09:30:00-08:00"}})
+    );
+    // A hangoutLink is the fallback when there is no conferenceData.
+    assert_eq!(events[1]["meeting_code"], json!({"Some":"klm-nopq-rst"}));
+    assert_eq!(events[1]["visibility"], "Private");
+    assert_eq!(
+        events[1]["original_start"],
+        json!({"Some":"2026-01-06T09:00:00-08:00"})
+    );
+    assert_eq!(
+        events[1]["organizer"],
+        json!({"Some":"c_team@group.calendar.google.com"})
+    );
+    // A cancelled instance may carry no times at all.
+    assert_eq!(events[2]["status"], json!("CancelledUntimed"));
+    assert_eq!(
+        events[2]["original_start"],
+        json!({"Some":"2026-01-13T09:00:00-08:00"})
+    );
+    let event: Value = serde_json::from_str(&calendar_against(
+        Action::GoogleWorkspaceCalendarEvent,
+        calendar_bases(Action::GoogleWorkspaceCalendarEvent),
+    )?)?;
+    assert_eq!(
+        event["Found"]["status"],
+        json!({"Tentative":{"start":"2026-01-05T17:00:00Z","end":"2026-01-05T17:30:00Z"}})
+    );
+    assert_eq!(event["Found"]["visibility"], "Confidential");
+    assert_eq!(
+        event["Found"]["meeting_code"],
+        json!({"Some":"abc-defg-hij"})
+    );
+    // A conference ID is a Meet code only from the hangoutsMeet solution.
+    let mut bases: Vec<Value> = calendar_bases(Action::GoogleWorkspaceCalendarEvent)
+        .iter()
+        .map(|bytes| serde_json::from_slice(bytes))
+        .collect::<serde_json::Result<_>>()?;
+    bases[1]["conferenceData"]["conferenceSolution"]["key"]["type"] = json!("addOn");
+    let event: Value = serde_json::from_str(&calendar_against(
+        Action::GoogleWorkspaceCalendarEvent,
+        bases
+            .iter()
+            .map(|base| base.to_string().into_bytes())
+            .collect(),
+    )?)?;
+    assert_eq!(event["Found"]["meeting_code"], "None");
+    // The reader's own rule with a lesser role: not shared, on every action,
+    // before anything else is read.
+    for action in CALENDAR_ACTIONS {
+        let mut rule = GOOGLE_ACL_RULE.value()?;
+        rule["role"] = json!("reader");
+        assert_eq!(
+            calendar_against(action, vec![rule.to_string().into_bytes()])?,
+            r#""NotShared""#,
+            "{action:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Google's 403s on every Calendar call: a rate or quota reason is a limit;
+/// any other reason is a refusal. A refused read of the reader's own rule is
+/// not shared only if the reader can still see the calendar.
+#[test]
+fn google_calendar_classifies_the_published_403s() -> Result<()> {
+    for action in CALENDAR_ACTIONS {
+        let bases = calendar_bases(action);
+        for position in 0..bases.len() {
+            let answered = |error: &RecordedBase| -> Vec<(u16, Vec<u8>)> {
+                bases[..position]
+                    .iter()
+                    .map(|body| (200, body.clone()))
+                    .chain([(403, error.bytes.to_vec())])
+                    .collect()
+            };
+            assert_eq!(
+                calendar_replies(action, answered(&GOOGLE_CALENDAR_RATE_LIMIT))
+                    .err()
+                    .map(|error| error.to_string())
+                    .as_deref(),
+                Some("google_workspace_rate_limited"),
+                "{action:?} {position}"
+            );
+            let mut refused = answered(&GOOGLE_CALENDAR_FORBIDDEN);
+            if position == 0 {
+                // A rule the reader may not read: the calendar is read next.
+                // Visible, it is not shared; refused again, it is a refusal.
+                let mut visible = refused.clone();
+                visible.push((200, GOOGLE_CALENDAR.bytes.to_vec()));
+                assert_eq!(
+                    calendar_replies(action, visible)?,
+                    r#""NotShared""#,
+                    "{action:?}"
+                );
+                refused.push((403, GOOGLE_CALENDAR_FORBIDDEN.bytes.to_vec()));
+            }
+            assert_eq!(
+                calendar_replies(action, refused)
+                    .err()
+                    .map(|error| error.to_string())
+                    .as_deref(),
+                Some("google_workspace_denied"),
+                "{action:?} {position}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Each mutation of a Calendar base names the failure it must produce.
+#[test]
+fn mutating_the_calendar_responses_is_rejected_in_the_named_way() -> Result<()> {
+    type Mutation = fn(&mut Value);
+    let cases: [(Action, usize, &str, Mutation, &str); 11] = [
+        (
+            Action::GoogleWorkspaceCalendar,
+            0,
+            "the reader's rule with a role outside Google's set",
+            |rule| rule["role"] = json!("editor"),
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            0,
+            "a rule other than the reader's own",
+            |rule| rule["scope"] = json!({"type":"domain","value":"example.com"}),
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendar,
+            1,
+            "a calendar other than the one asked for",
+            |calendar| calendar["id"] = json!("c_other@group.calendar.google.com"),
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendar,
+            2,
+            "an ACL role outside Google's set",
+            |acl| acl["items"][2]["role"] = json!("editor"),
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            1,
+            "an event without a status",
+            |page| {
+                page["items"][0]
+                    .as_object_mut()
+                    .expect("event")
+                    .remove("status");
+            },
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            1,
+            "a timed event whose time has no offset",
+            |page| page["items"][0]["start"]["dateTime"] = json!("2026-01-05T09:00:00"),
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            1,
+            "a confirmed event without an end",
+            |page| {
+                page["items"][0]
+                    .as_object_mut()
+                    .expect("event")
+                    .remove("end");
+            },
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            1,
+            "an event that ends before it starts",
+            |page| page["items"][0]["end"]["dateTime"] = json!("2026-01-05T08:00:00-08:00"),
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            1,
+            "an event id that could escape a path",
+            |page| page["items"][0]["id"] = json!("../abc"),
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            1,
+            "more events than one page admits",
+            |page| {
+                let item = page["items"][0].clone();
+                page["items"] = json!(vec![item; 26]);
+            },
+            "google_workspace_response_invalid",
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvent,
+            1,
+            "an event other than the one asked for",
+            |event| event["id"] = json!("other0001"),
+            "google_workspace_response_invalid",
+        ),
+    ];
+    for (action, index, name, mutate, expect) in cases {
+        let mut bases: Vec<Value> = calendar_bases(action)
+            .iter()
+            .map(|bytes| serde_json::from_slice(bytes))
+            .collect::<serde_json::Result<_>>()?;
+        mutate(&mut bases[index]);
+        let outcome = calendar_against(
+            action,
+            bases
+                .iter()
+                .map(|base| base.to_string().into_bytes())
+                .collect(),
+        );
+        assert_eq!(
+            outcome.err().map(|error| error.to_string()).as_deref(),
+            Some(expect),
+            "mutation was not rejected as expected: {name}"
+        );
+    }
+    // A delegated token that is not a bearer is refused before Calendar.
+    let mut token = GOOGLE_OAUTH_TOKEN.value()?;
+    token["token_type"] = json!("mac");
+    let mut replay = GoogleReplay::ok(vec![
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        google_signed(&CALENDAR_SCOPES)?,
+        token.to_string().into_bytes(),
+    ]);
+    let (result, _) = crate::google_workspace::observe(
+        &calendar_plan(
+            Action::GoogleWorkspaceCalendarEvent,
+            calendar_request(Action::GoogleWorkspaceCalendarEvent),
+        )?,
+        &mut replay,
+        100,
+    );
+    assert_eq!(
+        result.err().map(|error| error.to_string()).as_deref(),
+        Some("google_workspace_authentication_failed")
+    );
+    Ok(())
+}
+
+/// The simulated world answers every Calendar route with only the fields the
+/// published shapes carry, at every level of the response.
+#[test]
+fn the_google_calendar_simulation_emits_only_documented_fields() -> Result<()> {
+    struct Recording<'a> {
+        inner: crate::google_workspace::SimulatedGooglePort,
+        bodies: &'a mut Vec<Vec<u8>>,
+    }
+    impl crate::google_workspace::GooglePort for Recording<'_> {
+        fn authenticate(
+            &mut self,
+            exchange: &crate::google_auth::Exchange<'_>,
+            max_bytes: usize,
+        ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+            let reply = self.inner.authenticate(exchange, max_bytes)?;
+            self.bodies.push(reply.body.clone());
+            Ok(reply)
+        }
+
+        fn call(
+            &mut self,
+            request: &crate::google_workspace::ApiRequest,
+            token: &crate::google_auth::AccessToken,
+            max_bytes: usize,
+        ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+            let reply = self.inner.call(request, token, max_bytes)?;
+            self.bodies.push(reply.body.clone());
+            Ok(reply)
+        }
+    }
+    fn keys(value: &Value, path: &str, into: &mut std::collections::BTreeSet<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let path = format!("{path}.{key}");
+                    into.insert(path.clone());
+                    keys(child, &path, into);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    keys(item, &format!("{path}[]"), into);
+                }
+            }
+            _ => {}
+        }
+    }
+    let documented = |bases: &[&RecordedBase]| -> Result<std::collections::BTreeSet<String>> {
+        let mut into = std::collections::BTreeSet::new();
+        for base in bases {
+            keys(&base.value()?, "", &mut into);
+        }
+        Ok(into)
+    };
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("app.sqlite");
+    let mut world = super::simulated::google_workspace_development_fixture();
+    world.service_account = "reader@example-project.iam.gserviceaccount.com".into();
+    world.users.insert("calendar@example.com".into());
+    let mut calendar = world
+        .calendars
+        .remove(super::simulated::GOOGLE_DEVELOPMENT_CALENDAR)
+        .context("development calendar")?;
+    for rule in &mut calendar.acl {
+        if rule.scope_value.as_deref() == Some(super::simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER)
+        {
+            rule.scope_value = Some("calendar@example.com".into());
+        }
+    }
+    calendar.acl.push(super::simulated::GoogleAclRule {
+        scope_type: "group".into(),
+        scope_value: Some("team@example.com".into()),
+        role: "reader".into(),
+    });
+    calendar.events.push(super::simulated::GoogleEvent {
+        id: "abc123def456ghi789jkl012mn".into(),
+        status: "cancelled".into(),
+        original_start: Some(super::simulated::GoogleTime::at("2026-01-09T17:00:00Z")),
+        ..Default::default()
+    });
+    world
+        .calendars
+        .insert("c_team@group.calendar.google.com".into(), calendar);
+    super::simulated::seed(
+        &database,
+        "parity/app",
+        &super::simulated::SimulatedFixture {
+            slack: super::simulated::SlackWorld {
+                workspace_id: "TPARITY".into(),
+                ..Default::default()
+            },
+            snowflake: super::simulated::SnowflakeWorld {
+                account: "parity".into(),
+                ..Default::default()
+            },
+            openai: super::simulated::OpenAiWorld {
+                project_id: "proj_parity".into(),
+                model: "model-parity".into(),
+                max_input_tokens: 1,
+                ..Default::default()
+            },
+            google_workspace: world,
+            ..Default::default()
+        },
+    )?;
+    for (action, documented) in [
+        (
+            Action::GoogleWorkspaceCalendar,
+            documented(&[&GOOGLE_ACL_RULE, &GOOGLE_CALENDAR, &GOOGLE_ACL])?,
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvents,
+            documented(&[&GOOGLE_ACL_RULE, &GOOGLE_EVENTS])?,
+        ),
+        (
+            Action::GoogleWorkspaceCalendarEvent,
+            documented(&[&GOOGLE_ACL_RULE, &GOOGLE_EVENT, &GOOGLE_EVENTS])?,
+        ),
+    ] {
+        let mut bodies = Vec::new();
+        let mut port = Recording {
+            inner: crate::google_workspace::SimulatedGooglePort::new(&database, "parity/app")?,
+            bodies: &mut bodies,
+        };
+        let (result, _) = crate::google_workspace::observe(
+            &calendar_plan(action, calendar_request(action))?,
+            &mut port,
+            100,
+        );
+        result?;
+        // The three authentication replies, then the Calendar replies.
+        assert!(bodies.len() >= 4, "{action:?}");
+        let mut emitted = std::collections::BTreeSet::new();
+        for body in &bodies[3..] {
+            keys(&serde_json::from_slice(body)?, "", &mut emitted);
+        }
+        let mut documented_items = documented.clone();
+        // An events.get item is a list item without the list's envelope.
+        for key in &documented {
+            if let Some(item) = key.strip_prefix(".items[]") {
+                documented_items.insert(item.to_owned());
+            }
+        }
+        let extra: Vec<_> = emitted.difference(&documented_items).collect();
+        assert!(extra.is_empty(), "{action:?} emits undocumented {extra:?}");
+    }
+    // The simulation's 403s carry the documented error envelope and nothing
+    // else.
+    let errors = documented(&[&GOOGLE_CALENDAR_RATE_LIMIT, &GOOGLE_CALENDAR_FORBIDDEN])?;
+    for fault in [
+        super::simulated::SimulatedFault::RateLimitForbidden,
+        super::simulated::SimulatedFault::Denied,
+    ] {
+        super::simulated::schedule_faults(
+            &database,
+            "parity/app",
+            super::simulated::GOOGLE_WORKSPACE_WORLD,
+            vec![super::simulated::ScheduledFault {
+                endpoint: super::simulated::GOOGLE_ACL_RULE_ENDPOINT.into(),
+                remaining: 1,
+                fault,
+            }],
+        )?;
+        let mut bodies = Vec::new();
+        let mut port = Recording {
+            inner: crate::google_workspace::SimulatedGooglePort::new(&database, "parity/app")?,
+            bodies: &mut bodies,
+        };
+        let action = Action::GoogleWorkspaceCalendarEvent;
+        let _ = crate::google_workspace::observe(
+            &calendar_plan(action, calendar_request(action))?,
+            &mut port,
+            100,
+        );
+        let mut emitted = std::collections::BTreeSet::new();
+        keys(&serde_json::from_slice(&bodies[3])?, "", &mut emitted);
+        assert_eq!(emitted, errors, "{fault:?}");
+    }
+    let signed: Value = serde_json::from_slice(&google_signed(&CALENDAR_SCOPES)?)?;
+    assert_eq!(
+        signed
+            .as_object()
+            .context("object")?
+            .keys()
+            .collect::<Vec<_>>(),
+        GOOGLE_SIGN_JWT
+            .value()?
+            .as_object()
+            .context("object")?
+            .keys()
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn google_calendar_bases_cite_the_published_reference_they_follow() {
+    for base in [
+        &GOOGLE_SIGN_JWT,
+        &GOOGLE_OAUTH_TOKEN,
+        &GOOGLE_ACL_RULE,
+        &GOOGLE_CALENDAR_RATE_LIMIT,
+        &GOOGLE_CALENDAR_FORBIDDEN,
+        &GOOGLE_CALENDAR,
+        &GOOGLE_ACL,
+        &GOOGLE_EVENTS,
+        &GOOGLE_EVENT,
     ] {
         assert!(base.claim.len() > 20, "claim is not a real sentence");
         assert!(base.origin.starts_with("https://"));

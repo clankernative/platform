@@ -1,0 +1,7 @@
+{
+  "scope": {
+    "type": "user",
+    "value": "calendar@example.com"
+  },
+  "role": "writer"
+}

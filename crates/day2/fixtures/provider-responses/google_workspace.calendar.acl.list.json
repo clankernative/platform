@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "scope": {
+        "type": "user",
+        "value": "calendar@example.com"
+      },
+      "role": "writer"
+    },
+    {
+      "scope": {
+        "type": "default"
+      },
+      "role": "none"
+    },
+    {
+      "scope": {
+        "type": "group",
+        "value": "team@example.com"
+      },
+      "role": "reader"
+    }
+  ]
+}

@@ -139,12 +139,16 @@ pub enum ResourceTarget {
     },
     /// What a `GoogleWorkspace` grant may reach in its organization.
     ///
-    /// `grantee_domains` are the domains a group may belong to in order to be
-    /// looked up or tested for membership. An application never names a
-    /// subject, scope or URL. The fields later actions read (the domain whose
-    /// people may be impersonated, the one Calendar reader) arrive with those
-    /// actions; see docs/GOOGLE-WORKSPACE.md.
+    /// `calendar_reader` is the one person Calendar is read as, by domain-wide
+    /// delegation: the calendars shared with that account are the calendars in
+    /// play. `grantee_domains` are the domains a group may belong to in order
+    /// to be looked up, tested for membership or named in a calendar's ACL. An
+    /// application never names a subject, scope or URL. The domain whose people
+    /// may be impersonated arrives with impersonation; see
+    /// docs/GOOGLE-WORKSPACE.md.
     GoogleWorkspaceDomain {
+        /// An exact lowercase address, never normalised.
+        calendar_reader: String,
         /// Strictly sorted and unique, never normalised on the way in.
         grantee_domains: Vec<String>,
     },
@@ -395,7 +399,12 @@ impl ResourceTarget {
                 Ok(())
             }
             Self::WorkspaceDirectory { customer_id } => bounded_text(customer_id, 256),
-            Self::GoogleWorkspaceDomain { grantee_domains } => {
+            Self::GoogleWorkspaceDomain {
+                calendar_reader,
+                grantee_domains,
+            } => {
+                google_workspace_address(calendar_reader)
+                    .map_err(|_| anyhow::anyhow!("invalid_google_workspace_calendar_reader"))?;
                 ensure!(
                     (1..=32).contains(&grantee_domains.len())
                         && grantee_domains.is_sorted_by(|left, right| left < right),
@@ -525,15 +534,23 @@ impl ResourceTarget {
                     customer_id: parent,
                 },
             ) => customer_id == parent,
-            // A narrower grant may only drop grantee domains, never add one.
+            // The same Calendar reader; a narrower grant may only drop grantee
+            // domains, never add one.
             (
-                Self::GoogleWorkspaceDomain { grantee_domains },
                 Self::GoogleWorkspaceDomain {
+                    calendar_reader,
+                    grantee_domains,
+                },
+                Self::GoogleWorkspaceDomain {
+                    calendar_reader: parent_reader,
                     grantee_domains: parent_grantees,
                 },
-            ) => grantee_domains
-                .iter()
-                .all(|domain| parent_grantees.contains(domain)),
+            ) => {
+                calendar_reader == parent_reader
+                    && grantee_domains
+                        .iter()
+                        .all(|domain| parent_grantees.contains(domain))
+            }
             (
                 Self::GoogleDirectory {
                     customer_id,

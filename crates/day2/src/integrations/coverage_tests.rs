@@ -189,9 +189,11 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::FreetoolResultPage
         | Action::FreetoolRegister
         | Action::FreetoolExecute => Demonstration::FreetoolExecutorWorld,
-        Action::GoogleWorkspaceGroup | Action::GoogleWorkspaceGroupMember => {
-            Demonstration::WorkspaceRead
-        }
+        Action::GoogleWorkspaceGroup
+        | Action::GoogleWorkspaceGroupMember
+        | Action::GoogleWorkspaceCalendar
+        | Action::GoogleWorkspaceCalendarEvents
+        | Action::GoogleWorkspaceCalendarEvent => Demonstration::WorkspaceRead,
     }
 }
 
@@ -459,14 +461,64 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                 "lastModifiedDatetime":{"value":"2026-01-01T00:00:00Z"}}]}),
             ],
         }),
-        // The group's name and its membership differ, so a group read and a
-        // membership read can only answer from the world they were given.
+        // The group's name and membership, the calendar's summary and the
+        // group's role in it, and the event's time all differ, so every
+        // Workspace read can only answer from the world it was given.
         google_workspace: crate::integrations::simulated::GoogleWorkspaceWorld {
             domain: "coverage.test".into(),
             service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
-            delegated_scopes: BTreeSet::new(),
+            delegated_scopes: BTreeSet::from([
+                crate::google_workspace_calendar::CALENDAR_ACL_READ_SCOPE.into(),
+                crate::google_workspace_calendar::CALENDAR_READ_SCOPE.into(),
+            ]),
             directory_reader: true,
-            users: BTreeSet::from(["ada@coverage.test".into()]),
+            users: BTreeSet::from(["ada@coverage.test".into(), GOOGLE_COVERAGE_READER.into()]),
+            calendars: BTreeMap::from([(
+                GOOGLE_COVERAGE_CALENDAR.into(),
+                crate::integrations::simulated::GoogleCalendar {
+                    summary: if variant == Variant::A {
+                        "Alpha calendar"
+                    } else {
+                        "Beta calendar"
+                    }
+                    .into(),
+                    acl: vec![
+                        crate::integrations::simulated::GoogleAclRule {
+                            scope_type: "user".into(),
+                            scope_value: Some(GOOGLE_COVERAGE_READER.into()),
+                            role: "writer".into(),
+                        },
+                        crate::integrations::simulated::GoogleAclRule {
+                            scope_type: "group".into(),
+                            scope_value: Some("coverage-team@coverage.test".into()),
+                            role: if variant == Variant::A {
+                                "reader"
+                            } else {
+                                "writer"
+                            }
+                            .into(),
+                        },
+                    ],
+                    events: vec![crate::integrations::simulated::GoogleEvent {
+                        id: "coverage1".into(),
+                        status: "confirmed".into(),
+                        start: Some(crate::integrations::simulated::GoogleTime::at(
+                            if variant == Variant::A {
+                                "2026-01-05T10:00:00Z"
+                            } else {
+                                "2026-01-05T11:00:00Z"
+                            },
+                        )),
+                        end: Some(crate::integrations::simulated::GoogleTime::at(
+                            "2026-01-05T12:00:00Z",
+                        )),
+                        organizer: Some("ada@coverage.test".into()),
+                        conference_id: Some("abc-defg-hij".into()),
+                        conference_type: Some("hangoutsMeet".into()),
+                        ..Default::default()
+                    }],
+                },
+            )]),
             groups: BTreeMap::from([(
                 "coverage-team@coverage.test".into(),
                 crate::integrations::simulated::GoogleGroup {
@@ -490,6 +542,8 @@ fn fixture(variant: Variant) -> SimulatedFixture {
 }
 
 const GOOGLE_COVERAGE_ACCOUNT: &str = "coverage-reader@coverage-project.iam.gserviceaccount.com";
+const GOOGLE_COVERAGE_READER: &str = "calendar@coverage.test";
+const GOOGLE_COVERAGE_CALENDAR: &str = "c_coverage@group.calendar.google.com";
 
 /// One Google Workspace read through the real pipeline and the simulated port,
 /// planned by the same `Plan::authorize` the host calls. Host admission itself
@@ -506,6 +560,13 @@ fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed
         }
         Action::GoogleWorkspaceGroupMember => json!({"handle":"coverage",
             "group_email":"coverage-team@coverage.test","member_email":"ada@coverage.test"}),
+        Action::GoogleWorkspaceCalendar => json!({"handle":"coverage",
+            "calendar_id":GOOGLE_COVERAGE_CALENDAR,"group_email":"coverage-team@coverage.test"}),
+        Action::GoogleWorkspaceCalendarEvents => json!({"handle":"coverage",
+            "calendar_id":GOOGLE_COVERAGE_CALENDAR,"time_min":"2026-01-01T00:00:00Z",
+            "time_max":"2026-01-31T00:00:00Z","page_token":"None"}),
+        Action::GoogleWorkspaceCalendarEvent => json!({"handle":"coverage",
+            "calendar_id":GOOGLE_COVERAGE_CALENDAR,"event_id":"coverage1"}),
         _ => anyhow::bail!("not a Google Workspace read"),
     };
     let (plan, _) = crate::google_workspace::Plan::authorize(
@@ -514,6 +575,7 @@ fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed
             service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
         },
         &ResourceTarget::GoogleWorkspaceDomain {
+            calendar_reader: GOOGLE_COVERAGE_READER.into(),
             grantee_domains: vec!["coverage.test".into()],
         },
         &request.to_string(),
@@ -1622,10 +1684,11 @@ fn the_gate_rejects_each_way_a_simulation_can_be_fake() -> Result<()> {
 
     // A Workspace read that answers a constant, or that changes a world to
     // answer, has not demonstrated a read of its own world.
-    for action in [
-        Action::GoogleWorkspaceGroup,
-        Action::GoogleWorkspaceGroupMember,
-    ] {
+    for action in Action::ALL
+        .iter()
+        .copied()
+        .filter(|action| action.provider() == Provider::GoogleWorkspace)
+    {
         assert!(check(action, constant).is_err(), "{action:?} constant");
         let mutating = |variant| {
             let mut after = empty();

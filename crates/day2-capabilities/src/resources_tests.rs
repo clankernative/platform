@@ -802,6 +802,7 @@ mod narrowing {
                 customer_id: "C01".into(),
             },
             ResourceKind::GoogleWorkspaceDomain => ResourceTarget::GoogleWorkspaceDomain {
+                calendar_reader: "calendar@example.com".into(),
                 grantee_domains: vec!["example.com".into(), "groups.example.com".into()],
             },
             ResourceKind::LinearOrganization => ResourceTarget::LinearOrganization {
@@ -968,28 +969,47 @@ mod narrowing {
     fn a_workspace_grant_narrows_only_by_dropping_grantee_domains() {
         let parent = sample(ResourceKind::GoogleWorkspaceDomain);
         parent.validate().unwrap();
-        let fewer = ResourceTarget::GoogleWorkspaceDomain {
-            grantee_domains: vec!["example.com".into()],
+        let target = |reader: &str, grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
+            calendar_reader: reader.into(),
+            grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
         };
+        let fewer = target("calendar@example.com", &["example.com"]);
         fewer.validate().unwrap();
         assert!(fewer.is_subset_of(&parent));
         assert!(
             !parent.is_subset_of(&fewer),
             "a grant added a grantee domain"
         );
-        let other = ResourceTarget::GoogleWorkspaceDomain {
-            grantee_domains: vec!["other.example".into()],
-        };
-        other.validate().unwrap();
-        assert!(!other.is_subset_of(&parent));
+        for other in [
+            target("calendar@example.com", &["other.example"]),
+            // The Calendar reader is the grant's identity: it never narrows.
+            target("someone@example.com", &["example.com"]),
+        ] {
+            other.validate().unwrap();
+            assert!(!other.is_subset_of(&parent), "{other:?}");
+        }
     }
 
     #[test]
     fn a_workspace_target_is_exact_lowercase_and_strictly_sorted() {
         let target = |grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
+            calendar_reader: "calendar@example.com".into(),
             grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
         };
         target(&["a.example", "example.com"]).validate().unwrap();
+        for reader in ["Calendar@example.com", "calendar", "a b@example.com", ""] {
+            assert_eq!(
+                ResourceTarget::GoogleWorkspaceDomain {
+                    calendar_reader: reader.into(),
+                    grantee_domains: vec!["example.com".into()],
+                }
+                .validate()
+                .unwrap_err()
+                .to_string(),
+                "invalid_google_workspace_calendar_reader",
+                "{reader}"
+            );
+        }
         for (invalid, code) in [
             (target(&[]), "invalid_google_workspace_grantee_domains"),
             (
@@ -1009,15 +1029,17 @@ mod narrowing {
                 "{invalid:?}"
             );
         }
-        for extra in [
-            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"],
-                "subject":"anyone@example.com"}),
-            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"],
-                "calendar_reader":"calendar@example.com"}),
+        for refused in [
+            json!({"kind":"google_workspace_domain","calendar_reader":"calendar@example.com",
+                "grantee_domains":["example.com"],"subject":"anyone@example.com"}),
+            // The impersonation domain arrives with impersonation.
+            json!({"kind":"google_workspace_domain","calendar_reader":"calendar@example.com",
+                "grantee_domains":["example.com"],"email_domain":"example.com"}),
+            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"]}),
         ] {
             assert!(
-                serde_json::from_value::<ResourceTarget>(extra).is_err(),
-                "a target carries only what this PR reads"
+                serde_json::from_value::<ResourceTarget>(refused).is_err(),
+                "a target carries exactly what its actions read"
             );
         }
         for address in [

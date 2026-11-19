@@ -78,8 +78,15 @@ Authorization freezes the provider source before reserving provider traffic: a s
 
 `google_workspace.group.v1` and `google_workspace.group_member.v1` read a group
 and test direct or nested membership as a keyless service account, inside the
-grantee domains a `google_workspace_domain` resource names. The token flow is the
-shared `google_auth` module Workspace Directory also uses; the adapter reaches
+grantee domains a `google_workspace_domain` resource names.
+`google_workspace.calendar.v1`, `calendar_events.v1` and `calendar_event.v1`
+read a calendar and one group's role in its ACL, one page of events in a window
+of at most 31 days, and one event, by domain-wide delegation as the resource's
+`calendar_reader` with exactly each action's Calendar scopes. A calendar is in
+play only when its ACL gives the reader its own `writer` or `owner` rule, which
+every Calendar action reads first; visibility through a group, the domain or
+the public is `NotShared`. The token flow is
+the shared `google_auth` module Workspace Directory also uses; the adapter reaches
 Google through a request-level port, and the simulated port answers the same
 requests from `google_workspace.simulated.sqlite`. See
 [Google Workspace](GOOGLE-WORKSPACE.md) for the contract, bounds and codes.
