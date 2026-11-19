@@ -3,7 +3,7 @@
 //! journal admission and actual measured code admit a process. No image or pod
 //! attestation is inferred from these facts.
 use super::*;
-use crate::{runtime_generation, security_admission::HostCode};
+use crate::{deployment::Access, runtime_generation, security_admission::HostCode};
 use rusqlite::Connection;
 use std::{fs::File, path::Path, sync::Arc};
 
@@ -426,13 +426,55 @@ pub async fn supervise(
     selection: Selection,
     evidence: &Path,
 ) -> Result<()> {
+    supervise_with(instance, app, selection, evidence, Access::Edge).await
+}
+
+/// Use the real serving and executor guards with a loopback development login
+/// on the already-prepared, separately scoped native trial database.
+pub async fn supervise_trial(
+    instance: &Path,
+    app: &str,
+    selection: Selection,
+    evidence: &Path,
+    published_port: std::num::NonZeroU16,
+) -> Result<()> {
+    require_trial_instance(&Instance::load(instance)?, app)?;
+    supervise_with(
+        instance,
+        app,
+        selection,
+        evidence,
+        Access::Development {
+            actor: TRIAL_ACTOR,
+            published_port,
+        },
+    )
+    .await
+}
+
+async fn supervise_with(
+    instance: &Path,
+    app: &str,
+    selection: Selection,
+    evidence: &Path,
+    access: Access<'_>,
+) -> Result<()> {
     let _lease = crate::deployment::pair_executor_lease(instance, app)?;
     let runtime = Runtime::load(instance, app)?;
+    let trial = matches!(access, Access::Development { .. });
     let current_pair = runtime.sql_read(|db| {
-        Ok(rollout::state(db)?.is_some_and(|release| {
-            matches!(release.kind, ReleaseKind::RuntimePair { .. })
-                && release.id == selection.release
-        }))
+        if let Some(release) = rollout::state(db)?
+            && let ReleaseKind::RuntimePair { admission, .. } = release.kind
+            && release.id == selection.release
+        {
+            ensure!(
+                trial == matches!(admission.receipt.outcome, Outcome::Trial { .. }),
+                "runtime_pair_candidate_access_changed"
+            );
+            return Ok(true);
+        }
+        ensure!(!trial, "runtime_pair_trial_selection_required");
+        Ok(false)
     })?;
     if !current_pair
         && runtime.sql_read(|db| runtime_generation::installed_process(&runtime, db))?
@@ -440,7 +482,7 @@ pub async fn supervise(
         return crate::deployment::serve(instance, app, crate::deployment::Access::Edge).await;
     }
     let candidate = Candidate::open(instance, app, selection)?;
-    candidate.serve(evidence).await
+    candidate.serve(evidence, access).await
 }
 
 pub(crate) fn bind_serving_process(runtime: &Runtime, selection: &Selection) -> Result<()> {
@@ -551,7 +593,7 @@ impl Candidate {
 
     /// A standby listener exposes only health. Public readiness and every
     /// application route remain closed even after a successful candidate check.
-    pub async fn serve(self, evidence_directory: &Path) -> Result<()> {
+    async fn serve(self, evidence_directory: &Path, access: Access<'_>) -> Result<()> {
         let directory = evidence_directory.to_path_buf();
         let candidate = tokio::task::spawn_blocking(move || -> Result<Self> {
             let prepared = self
@@ -570,6 +612,7 @@ impl Candidate {
                 candidate.runtime.instance_path(),
                 candidate.runtime.app(),
                 candidate.selection.clone(),
+                access,
             )
             .await;
         }
@@ -602,6 +645,7 @@ impl Candidate {
             candidate.runtime.instance_path(),
             candidate.runtime.app(),
             candidate.selection.clone(),
+            access,
         )
         .await
     }

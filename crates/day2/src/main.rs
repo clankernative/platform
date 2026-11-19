@@ -88,7 +88,7 @@ fn main() -> Result<()> {
             serde_json::json!({"staged":true})
         }
         [
-            "runtime-pair-prepare",
+            mode @ ("runtime-pair-prepare" | "runtime-pair-prepare-trial"),
             instance,
             app,
             candidate,
@@ -105,7 +105,12 @@ fn main() -> Result<()> {
                 anyhow::ensure!(bytes.len() <= 1_048_576, "runtime_pair_input_budget");
                 Ok(bytes)
             };
-            serde_json::to_value(day2::runtime_pair::prepare(
+            let prepare = if *mode == "runtime-pair-prepare-trial" {
+                day2::runtime_pair::prepare_trial
+            } else {
+                day2::runtime_pair::prepare
+            };
+            serde_json::to_value(prepare(
                 &Runtime::load(Path::new(instance), app)?,
                 &read(candidate)?,
                 &day2::json::decode(&read(request)?)?,

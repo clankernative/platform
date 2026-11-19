@@ -392,12 +392,23 @@ existing blobs after approval. App builds continue to select their compiled SDK
 independently of any runtime transition and reuse it with the existing cache.
 
 To create the pair receipt, the native campaign needs a disposable execution
-scope that can run the handoff before the passing receipt exists. Keep that
-scope separate from ordinary runtime-pair preparation. It needs a fresh
-SQLite volume and a fixture with local credentials, and must bind the measured
-source and target binaries and images before exercising their shared state.
-Issue a passing receipt only after the native campaign observes every required
-case. Installed apps continue to require the completed, pinned receipt.
+scope that can run the handoff before the passing receipt exists. Allocate a
+fresh SQLite volume for Reports with installation `runtime_pair_qualification`
+and environment `trial_` followed by a random 32-character lowercase hex nonce.
+Use `runtime-pair-qualifier` as the sole local operator and loopback login actor.
+Keep the fixture free of edge, provider and external authority bindings.
+
+`day2 runtime-pair-prepare-trial` takes the same arguments as
+`runtime-pair-prepare`. Its input specifies `outcome: {"trial": {"scope":
+"runtime_pair_qualification/trial_<nonce>/reports"}}` and `checks: []`. The
+journal reader matches that scope to the SQLite database. It still checks both
+exact native identities, the complete store shape and the runtime protocols.
+Start the candidate with `day2-serve INSTANCE reports --runtime-candidate-trial
+SELECTION EVIDENCE_DIRECTORY PUBLISHED_PORT` and publish the port on loopback.
+It uses the ordinary handoff and executor admission before opening its local
+login. The installed preparation command and release-index assembler accept
+only `outcome: "passed"` with the complete check set. Issue that receipt after
+observing every required case on the two measured images.
 
 ### Runtime-pair evidence
 
