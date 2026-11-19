@@ -87,14 +87,16 @@ Nothing below can be configured, restated or overridden.
 | Required app check | `<org>/app-ci: day2 / verification (pull_request)` |
 | SDK image registry | `<region>-docker.pkg.dev/<project>/day2` |
 | Shared OpenTofu state bucket | `<project>-tofu-state` |
-| Platform root state | bucket `<project>-tofu-state`, prefixes `foundation` (project), `platform/cluster`, `platform/tenancy` |
+| Platform root state | bucket `<project>-tofu-state`, prefixes `foundation` (project), `platform/cluster`, `platform/tenancy`, `platform/app` (app edges) and `day2` (roots an instance opts into, such as its CI integration); the security shell's prefix is not derived yet |
+| Cluster | `day2`, kube context `gke_<project>_<zone>_day2` |
 | App repository | `<org>/<id>` |
 | App hostname | `<id>.<domains.apps>` |
-| App namespace | `app-<id>` |
+| App namespace | `app-<id>` (prefix `app-`) |
 | App image | `<region>-docker.pkg.dev/<project>/<id>/<id>` |
 | App state | bucket `<project>-<id>-state`, prefix `day2-app/<id>` |
 | App edge state | bucket `<project>-tofu-state`, prefix `platform/app/<id>` |
 | App backups | `<project>-<id>-backups` |
+| App resources | from `size`: `standard` 512 MiB, `large` 2048 MiB; both 1000m CPU, 1024 processes, 4 concurrent requests, 30 s shutdown and a 5 GiB SQLite volume |
 | Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set |
 | Extension update URL | `https://<id>.<domains.apps>/downloads/updates.xml`, when `extension` is set |
 | Extension signing key | Secret Manager secret `<id>-chrome-extension-signing-key`, when `extension` is set |
@@ -135,15 +137,61 @@ scheme and stays because moving it is a state move. The renderer emits no root
 the spec cannot yet describe: the installation security shell
 (`security-shell-edge`, `security-shell`), opt-in integrations under
 `deploy/integrations/` (such as `gitea-instance-ci`), optional stacks (such as
-`qualification-runner`) and roots an instance owns itself. Variables follow
-backends; authority access policy is not an OpenTofu input and is rendered at
-release activation (step 3).
+`qualification-runner`) and roots an instance owns itself. Access policy
+(day2-app's `readers`, `writers` and `authority`) is rendered at release
+activation (step 3), not by this command.
+
+### Variables
+
+Each root also carries its variables as one `.tfvars.json` document, named
+exactly as its stack declares them. Every value is a derived name, the app's
+size preset or a fixed platform constant:
+
+| Root | Rendered variables |
+| --- | --- |
+| `project` | `project_id`, `region`, `state_bucket_name`, `state_prefixes` |
+| `cluster` | `project_id`, `region`, `zone`, `cluster_name`, `cluster_labels`, `subnet_cidr`, `pod_cidr`, `service_cidr`, `shared_node_pod_pids_limit` |
+| `tenancy` | `kube_context`, `app_namespace_prefix` |
+| `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs` |
+| `day2-app` | `kube_context`, `app_id`, `namespace`, `installation`, `environment`, `hosted_domain`, `edge_origin`, `runtime_resources`, `pod_pids_limit`, `backup_bucket` |
+
+- **People.** The `operators` hold every app's off-site backups and are named
+  in its IAP members, which also admit `domain:<domains.people>`. `owners`
+  grant nothing yet.
+- **Sizes.** The app resources row above. Every preset has the same volume
+  until resizing is designed: moving an app to a size with a smaller volume
+  would try to shrink its PVC, which cannot shrink.
+- **Constants.** The cluster network (nodes `10.10.0.0/20`, pods
+  `10.20.0.0/16`, services `10.30.0.0/20`, kube-dns `10.30.0.10`), the 1024
+  pod PID limit, the `app-sqlite-rwo` storage class and the `production`
+  environment. An input at its stack default is rendered only when another
+  rendered value is computed from it, so two roots always read the same
+  constant.
+- **`state_prefixes` is byte-exact.** Each key and value names a conditional
+  IAM binding, so changing one replaces that binding.
+
+Everything else is still committed by the instance until the spec can describe
+it:
+- identity lists that may name its CI service accounts
+  (`state_reader_members`, `state_writer_members`, `deployer_subjects`,
+  `platform_automation_usernames`);
+- node counts, the Cloud Asset API opt-in and other project or cluster choices;
+- discovered IDs (`project_number`, `cloudflare_zone_id`,
+  `backend_service_name`);
+- images and artifact IDs;
+- access policy (step 3) and extension download routes (step 4);
+- per-app extras: runtime identities, secrets, provider credentials, resource
+  catalogs and policies, schedules, pod labels and guardrail overrides
+  (`container_max`, `resource_guardrails`).
+
+Nothing consumes the rendered variables yet: instance CI switches to them
+before an instance deletes its committed copies.
 
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
    `day2 instance check`. Nothing consumes the spec yet.
-2. **Render inputs (started: core-root backends).** The platform renders every
+2. **Render inputs (started: core-root backends and derived variables).** The platform renders every
    OpenTofu input (variables and backends) from the spec, and instance
    repositories stop committing them.
    Fields are added only for real choices (size presets, verification cases,

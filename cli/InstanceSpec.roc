@@ -50,6 +50,21 @@ InstanceSpec :: {
 		state_prefix : Str,
 		edge_state_prefix : Str,
 		backup_bucket : Str,
+
+		## The size preset's runtime limits, exactly day2-app's runtime_resources.
+		runtime_resources : Resources,
+
+		## The size preset's SQLite volume in GiB. Every preset uses one size until resizing is designed, because
+		## moving an app to a size with a smaller volume would try to shrink its PVC.
+		sqlite_storage_gb : U64,
+	}
+
+	Resources : {
+		memory_mib : U64,
+		cpu_millis : U64,
+		process_limit : U64,
+		http_concurrency : U64,
+		shutdown_seconds : U64,
 	}
 
 	## A self-hosted Chrome extension: every name is derived from the app and its pinned ID.
@@ -78,7 +93,9 @@ InstanceSpec :: {
 		required_check : Str,
 		sdk_registry : Str,
 		tofu_state_bucket : Str,
-		platform_state_prefixes : { project : Str, cluster : Str, tenancy : Str },
+		platform_state_prefixes : { project : Str, cluster : Str, tenancy : Str, app_edge : Str, day2 : Str },
+		cluster : { name : Str, kube_context : Str },
+		app_namespace_prefix : Str,
 		apps : List(App),
 	}
 
@@ -120,15 +137,50 @@ InstanceSpec :: {
 			required_check: "${spec.org}/app-ci: ${required_context}",
 			sdk_registry: "${registry}/day2",
 			tofu_state_bucket,
-			# Where each core platform root's state already lives in tofu_state_bucket.
-			# "foundation" predates the platform/<root> scheme; moving it is a state move.
-			platform_state_prefixes: {
-				project: "foundation",
-				cluster: "platform/cluster",
-				tenancy: "platform/tenancy",
-			},
+			platform_state_prefixes,
+			cluster: { name: cluster_name, kube_context: "gke_${spec.project}_${spec.zone}_${cluster_name}" },
+			app_namespace_prefix,
 			apps: spec.apps.map(|bound| derive_app(spec.org, spec.domain, spec.project, registry, bound)),
 		}
+	}
+}
+
+## Where platform state lives in tofu_state_bucket: the core roots, every app edge (app_edge/<id>) and the roots an
+## instance opts into, such as its CI integration (day2/<root>). "foundation" predates the platform/<root> scheme;
+## moving it is a state move. The installation security shell's prefix is not derived until the shell is rendered.
+platform_state_prefixes : { project : Str, cluster : Str, tenancy : Str, app_edge : Str, day2 : Str }
+platform_state_prefixes = {
+	project: "foundation",
+	cluster: "platform/cluster",
+	tenancy: "platform/tenancy",
+	app_edge: "platform/app",
+	day2: "day2",
+}
+
+## The one GKE cluster every instance runs.
+cluster_name : Str
+cluster_name = "day2"
+
+## Every app namespace is this prefix and the app ID; tenancy's admission policies match on it.
+app_namespace_prefix : Str
+app_namespace_prefix = "app-"
+
+## What each size runs with. Only memory differs; every preset has the same 5 GiB volume.
+size_preset : Size -> { runtime_resources : InstanceSpec.Resources, sqlite_storage_gb : U64 }
+size_preset = |size| {
+	memory_mib = match size {
+		Standard => 512
+		Large => 2048
+	}
+	{
+		runtime_resources: {
+			memory_mib,
+			cpu_millis: 1000,
+			process_limit: 1024,
+			http_concurrency: 4,
+			shutdown_seconds: 30,
+		},
+		sqlite_storage_gb: 5,
 	}
 }
 
@@ -155,6 +207,7 @@ derive_app : Str, Str, Str, Str, SpecApp -> InstanceSpec.App
 derive_app = |org, domain, project, registry, bound| {
 	id = bound.id.to_str()
 	hostname = "${id}.${domain}"
+	preset = size_preset(bound.size)
 	{
 		id,
 		delivery: delivery_name(bound.delivery),
@@ -180,12 +233,14 @@ derive_app = |org, domain, project, registry, bound| {
 		},
 		repository: "${org}/${id}",
 		hostname,
-		namespace: "app-${id}",
+		namespace: "${app_namespace_prefix}${id}",
 		image: "${registry}/${id}/${id}",
 		state_bucket: "${project}-${id}-state",
 		state_prefix: "day2-app/${id}",
-		edge_state_prefix: "platform/app/${id}",
+		edge_state_prefix: "${platform_state_prefixes.app_edge}/${id}",
 		backup_bucket: "${project}-${id}-backups",
+		runtime_resources: preset.runtime_resources,
+		sqlite_storage_gb: preset.sqlite_storage_gb,
 	}
 }
 
@@ -582,14 +637,43 @@ expect match InstanceSpec.from_json(sample) {
 									state_prefix: "day2-app/go",
 									edge_state_prefix: "platform/app/go",
 									backup_bucket: "exampleco-tools-go-backups",
+									runtime_resources: {
+										memory_mib: 512,
+										cpu_millis: 1000,
+										process_limit: 1024,
+										http_concurrency: 4,
+										shutdown_seconds: 30,
+									},
+									sqlite_storage_gb: 5,
 								})
 	}
 	Err(_) => Bool.False
 }
 
 expect match InstanceSpec.from_json(sample) {
-	Ok(spec) => spec.derived().platform_state_prefixes
-		== { project: "foundation", cluster: "platform/cluster", tenancy: "platform/tenancy" }
+	Ok(spec) => {
+		names = spec.derived()
+		names.platform_state_prefixes
+			== {
+				project: "foundation",
+				cluster: "platform/cluster",
+				tenancy: "platform/tenancy",
+				app_edge: "platform/app",
+				day2: "day2",
+			}
+			and names.cluster
+				== { name: "day2", kube_context: "gke_exampleco-tools_us-central1-a_day2" }
+				and names.app_namespace_prefix
+					== "app-"
+	}
+	Err(_) => Bool.False
+}
+
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => match spec.derived().apps.last() {
+		Ok(home) => home.runtime_resources.memory_mib == 2048 and home.sqlite_storage_gb == 5
+		Err(_) => Bool.False
+	}
 	Err(_) => Bool.False
 }
 
@@ -609,6 +693,38 @@ expect match InstanceSpec.from_json(sample) {
 	}
 	Err(_) => Bool.False
 }
+
+# Every preset fits day2-app's runtime_resources bounds and default container_max (4000m CPU, 4096 MiB), keeps a
+# process_limit no lower than the cluster's 1024 pod PID limit, and shares one volume size.
+expect [Standard, Large]
+	.map(size_preset)
+	.all(
+		|preset| {
+			limits = preset.runtime_resources
+			limits.memory_mib
+				>= 64
+				and limits.memory_mib
+					<= 4096
+					and limits.cpu_millis
+						>= 50
+						and limits.cpu_millis
+							<= 4000
+							and limits.process_limit
+								>= 1024
+								and limits.process_limit
+									<= 4096
+									and limits.http_concurrency
+										>= 1
+										and limits.http_concurrency
+											<= 32
+											and limits.shutdown_seconds
+												>= 5
+												and limits.shutdown_seconds
+													<= 300
+													and preset.sqlite_storage_gb
+														== size_preset(Standard).sqlite_storage_gb
+		},
+	)
 
 rejects : Str, Str -> Bool
 rejects = |old, new| {
