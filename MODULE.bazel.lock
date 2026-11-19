@@ -500,7 +500,7 @@
           "REPO_MAPPING:rules_rust+,bazel_tools bazel_tools",
           "REPO_MAPPING:rules_rust+,rules_cc rules_cc+",
           "FILE:@@//Cargo.lock 472d5961b74a23f55a520b55be6392b3cba1bf99e44c8b20acf4fbc2da47cebd",
-          "FILE:@@//Cargo.toml 4eb2ccd88afed56765fdf1281f3f287cf58f3932469fbe99a43364c9d3438323",
+          "FILE:@@//Cargo.toml c87fca96a12fb1180594847676503922355412f2e349b53c6c7d4f539c96d413",
           "FILE:@@//crates/worker/Cargo.toml b8e2f551cc92785726ac6133da2ef8afdd397b7c1a05ec4acf47f070f812ee67",
           "FILE:@@//crates/xtask/Cargo.toml f44a25720249070a4d6ce1d6b3c4a95ec1cda72fe61e29740d9cd9cc391f16fc",
           "FILE:@@//crates/day2/Cargo.toml 773a65438afc3a3a59ac816e1a9de20d6f03445e113a2b8047fe875c5ee896f8",

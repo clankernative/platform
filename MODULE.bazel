@@ -12,6 +12,7 @@ single_version_override(
         "//build/bazel:patches/rules-rust-0.74.0-platform-profiles.patch",
         "//build/bazel:patches/rules-rust-0.74.0-build-script-inputs.patch",
         "//build/bazel:patches/rules-rust-0.74.0-clippy-enforcement.patch",
+        "//build/bazel:patches/rules-rust-0.74.0-required-tool-checksums.patch",
     ],
     patch_strip = 1,
 )
@@ -24,9 +25,10 @@ rust.toolchain(
     opt_level = {"fastbuild": "2", "dbg": "2", "opt": "3"},
     extra_rustc_flags = ["-Cembed-bitcode=no", "-Cdebuginfo=0"],
     extra_exec_rustc_flags = ["-Cembed-bitcode=no", "-Cdebuginfo=0"],
-    # rules_rust's built-in table has no 1.100.0 entries, and a missing entry
-    # downloads unverified. These are the xz_hash values of the signed
-    # channel-rust-1.100.0.toml for each supported host's toolchain archives.
+    # rules_rust's built-in table has no 1.100.0 entries. The required-checksums
+    # patch refuses any tool archive without one, so a version bump must replace
+    # this table. Values are the xz_hash entries of the signed
+    # channel-rust-<version>.toml for each supported host's toolchain archives.
     sha256s = {
         "cargo-1.100.0-aarch64-apple-darwin.tar.xz": "7e18265d2d2cda8dec6cac4d0faa3bbafe927b401e5185350abc7d669f9adafb",
         "clippy-1.100.0-aarch64-apple-darwin.tar.xz": "fb57f639b5b9bcf1262df1ff81bcfc9e44338fbc729b0d5aad531b96493d6391",

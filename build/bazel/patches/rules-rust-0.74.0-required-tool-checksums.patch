@@ -1,0 +1,20 @@
+--- a/rust/private/repository_utils.bzl
++++ b/rust/private/repository_utils.bzl
+@@ -686,6 +686,8 @@
+         if not sha256:
+             sha256 = ""
+             is_reproducible = False
++    if not sha256:
++        fail("Rust tool archive {} has no pinned sha256; add it to rust.toolchain sha256s".format(archive_path))
+ 
+     result = ctx.download_and_extract(
+         url,
+@@ -977,6 +979,8 @@
+     if sha256 == None:
+         sha256 = ctx_sha256
+         is_reproducible = bool(ctx_sha256)
++    if not sha256:
++        fail("Rust tool archive {} has no pinned sha256; add it to rust.toolchain sha256s".format(archive_path))
+ 
+     for subdirectory in tool_subdirectories:
+         # As long as the sha256 value is consistent across calls here the
