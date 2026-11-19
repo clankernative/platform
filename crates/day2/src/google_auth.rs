@@ -155,10 +155,13 @@ pub enum Failure {
     WorkloadIdentityUnavailable,
     /// IAM or the token endpoint refused, or answered outside the plan.
     AuthenticationFailed,
-    /// The token endpoint refused the delegated subject with OAuth's
-    /// `invalid_grant`: Google's answer for a subject that is not an active
-    /// person in the organization, such as a suspended or deleted user. Every
-    /// claim is checked before the exchange, so this names the subject.
+    /// The token endpoint refused the delegated assertion with OAuth's
+    /// `invalid_grant`. Google answers that for a subject that is not an
+    /// active person in the organization (suspended, deleted or unknown), and
+    /// also for an assertion it will not accept, such as one outside its time
+    /// window or with a bad signature. The caller decides whether it can name
+    /// the subject: one whose previous exchange, with the same signer and
+    /// clock, has just succeeded can.
     SubjectRefused,
     /// IAM or the token endpoint answered 429.
     RateLimited,

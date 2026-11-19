@@ -91,6 +91,10 @@ failures! {
     /// A conference record has more recordings, smart notes or transcripts of
     /// one kind than an action reads.
     ArtifactBudget => "google_workspace_artifact_budget",
+    /// A conference record listed for the event was gone (`404`) when its
+    /// artifacts were read: Meet deletes a record 30 days after it ends.
+    /// Reading the event again lists its records as they are now.
+    ConferenceRecordGone => "google_workspace_conference_record_gone",
 }
 
 impl fmt::Display for Failure {
@@ -981,6 +985,8 @@ fn event_conferences(
     };
     let window = meet::record_window(times).ok_or(Failure::ResponseInvalid)?;
     let filter = meet::record_filter(code, window).ok_or(Failure::ResponseInvalid)?;
+    // The reader's exchange has just succeeded with the same service account,
+    // signer and clock, so a refused assertion now is a refused owner.
     let token = token_for(
         plan,
         port,
@@ -993,87 +999,133 @@ fn event_conferences(
         google_auth::Failure::SubjectRefused => Failure::OwnerRefused,
         failure => Failure::from(failure),
     })?;
-    let page_size = meet::RECORD_PAGE_SIZE.to_string();
-    let mut records = Vec::new();
-    let mut continuation: Option<String> = None;
-    let mut complete = false;
-    for _ in 0..meet::RECORD_PAGE_CEILING {
-        let mut query = vec![
-            ("pageSize", page_size.as_str()),
-            ("filter", filter.as_str()),
-        ];
-        if let Some(page_token) = &continuation {
-            query.push(("pageToken", page_token.as_str()));
-        }
-        query.push(("fields", meet::RECORDS_FIELDS));
-        let request = ApiRequest::meet("meet_conference_records", &["conferenceRecords"], &query);
-        let reply = send(port, meter, &request, &token, MAX_CALENDAR_RESPONSE_BYTES)?;
-        accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
-        let (page, next) = meet::parse_records_page(&reply.body, window)?;
-        records.extend(page);
-        if records.len() > meet::MAX_RECORDS {
-            return Err(Failure::ConferenceRecordBudget);
-        }
-        continuation = next;
-        if continuation.is_none() {
-            complete = true;
-            break;
-        }
-    }
-    if !complete {
-        return Err(Failure::ConferenceRecordBudget);
-    }
+    let mut lists = MeetLists {
+        port,
+        meter,
+        token: &token,
+    };
+    let records = lists.pages(
+        MeetList {
+            endpoint: "meet_conference_records",
+            segments: &["conferenceRecords"],
+            page_size: meet::RECORD_PAGE_SIZE,
+            filter: Some(&filter),
+            fields: meet::RECORDS_FIELDS,
+            ceiling: meet::RECORD_PAGE_CEILING,
+            max: meet::MAX_RECORDS,
+            budget: Failure::ConferenceRecordBudget,
+            // A list route is never missing.
+            missing: Failure::ResponseInvalid,
+        },
+        |body| meet::parse_records_page(body, window),
+    )?;
     // One meeting code names one space. Records in two mean the code was
     // reused or reassigned inside the window: not this event's to choose.
-    let spaces: std::collections::BTreeSet<&str> =
-        records.iter().map(|record| record.space.as_str()).collect();
+    let spaces: std::collections::BTreeSet<&str> = records
+        .iter()
+        .map(|(_, record)| record.space.as_str())
+        .collect();
     if spaces.len() > 1 {
         return Ok(EventConferencesOutcome::Conflict);
     }
-    let artifact_size = meet::ARTIFACT_PAGE_SIZE.to_string();
-    for record in &mut records {
-        let id = meet::record_id(&record.name)
-            .ok_or(Failure::ResponseInvalid)?
-            .to_owned();
+    let mut listed = Vec::new();
+    for (id, mut record) in records {
         for collection in meet::Collection::ALL {
-            let mut artifacts = Vec::new();
-            let mut continuation: Option<String> = None;
-            let mut complete = false;
-            for _ in 0..meet::ARTIFACT_PAGE_CEILING {
-                let mut query = vec![("pageSize", artifact_size.as_str())];
-                if let Some(page_token) = &continuation {
-                    query.push(("pageToken", page_token.as_str()));
-                }
-                query.push(("fields", collection.fields()));
-                let request = ApiRequest::meet(
-                    collection.endpoint(),
-                    &["conferenceRecords", &id, collection.segment()],
-                    &query,
-                );
-                let reply = send(port, meter, &request, &token, MAX_CALENDAR_RESPONSE_BYTES)?;
-                accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
-                let (page, next) = meet::parse_artifact_page(&reply.body, &id, collection)?;
-                artifacts.extend(page);
-                if artifacts.len() > meet::MAX_ARTIFACTS {
-                    return Err(Failure::ArtifactBudget);
-                }
-                continuation = next;
-                if continuation.is_none() {
-                    complete = true;
-                    break;
-                }
-            }
-            if !complete {
-                return Err(Failure::ArtifactBudget);
-            }
-            meet::attach(record, collection, artifacts);
+            let artifacts = lists.pages(
+                MeetList {
+                    endpoint: collection.endpoint(),
+                    segments: &["conferenceRecords", &id, collection.segment()],
+                    page_size: meet::ARTIFACT_PAGE_SIZE,
+                    filter: None,
+                    fields: collection.fields(),
+                    ceiling: meet::ARTIFACT_PAGE_CEILING,
+                    max: meet::MAX_ARTIFACTS,
+                    budget: Failure::ArtifactBudget,
+                    // The record expired between the two reads.
+                    missing: Failure::ConferenceRecordGone,
+                },
+                |body| meet::parse_artifact_page(body, &id, collection),
+            )?;
+            meet::attach(&mut record, collection, artifacts);
         }
+        listed.push(record);
     }
+    let records = listed;
     meet::found(meet::EventConferences {
         owner,
         meeting_code: code.clone(),
         records,
     })
+}
+
+/// One Meet list: its fixed route and query, how many pages it reads, how
+/// many items it admits, and the failure past either.
+struct MeetList<'a> {
+    endpoint: &'static str,
+    segments: &'a [&'a str],
+    page_size: u32,
+    filter: Option<&'a str>,
+    fields: &'static str,
+    ceiling: u64,
+    max: usize,
+    budget: Failure,
+    /// What a `404` means for this list.
+    missing: Failure,
+}
+
+/// Meet lists read as the event's owner.
+struct MeetLists<'a> {
+    port: &'a mut dyn GooglePort,
+    meter: &'a mut Meter,
+    token: &'a AccessToken,
+}
+
+impl MeetLists<'_> {
+    /// Every item of one list, page by page up to its ceiling. A short or
+    /// empty page may still continue. More items than the list admits, or a
+    /// continuation past the ceiling, is its budget failure: never a
+    /// truncated answer.
+    fn pages<T>(
+        &mut self,
+        list: MeetList<'_>,
+        parse: impl Fn(&[u8]) -> Result<meet::Page<T>, Failure>,
+    ) -> Result<Vec<T>, Failure> {
+        let page_size = list.page_size.to_string();
+        let mut items = Vec::new();
+        let mut continuation: Option<String> = None;
+        for _ in 0..list.ceiling {
+            let mut query = vec![("pageSize", page_size.as_str())];
+            if let Some(filter) = list.filter {
+                query.push(("filter", filter));
+            }
+            if let Some(page_token) = &continuation {
+                query.push(("pageToken", page_token.as_str()));
+            }
+            query.push(("fields", list.fields));
+            let request = ApiRequest::meet(list.endpoint, list.segments, &query);
+            let reply = send(
+                self.port,
+                self.meter,
+                &request,
+                self.token,
+                MAX_CALENDAR_RESPONSE_BYTES,
+            )?;
+            if reply.status == 404 {
+                return Err(list.missing);
+            }
+            accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
+            let (page, next) = parse(&reply.body)?;
+            items.extend(page);
+            if items.len() > list.max {
+                return Err(list.budget);
+            }
+            match next {
+                None => return Ok(items),
+                Some(next) => continuation = Some(next),
+            }
+        }
+        Err(list.budget)
+    }
 }
 
 /// Whether a calendar is in play for this grant.

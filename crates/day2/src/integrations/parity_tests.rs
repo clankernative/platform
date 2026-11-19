@@ -2019,6 +2019,7 @@ fn the_google_meet_simulation_emits_only_documented_fields() -> Result<()> {
                 start: Some(super::simulated::GoogleTime::at("2026-01-05T17:00:00Z")),
                 end: Some(super::simulated::GoogleTime::at("2026-01-05T17:30:00Z")),
                 organizer: Some("person@example.com".into()),
+                creator: Some("person@example.com".into()),
                 conference_id: Some("abc-defg-hij".into()),
                 conference_type: Some("hangoutsMeet".into()),
                 ..Default::default()

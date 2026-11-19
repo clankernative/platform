@@ -851,6 +851,13 @@ fn every_failure_is_produced_through_an_action() {
     for (world, plan) in meet::failing_worlds() {
         record(&World::new(world), &plan);
     }
+    // A conference record gone between its listing and its artifacts.
+    let world = World::development();
+    world.fault(
+        simulated::GOOGLE_MEET_RECORDINGS_ENDPOINT,
+        SimulatedFault::Gone,
+    );
+    record(&world, &meet::conferences("standup0001"));
     let expected: std::collections::BTreeSet<_> = Failure::ALL
         .iter()
         .map(|failure| failure.code().to_owned())

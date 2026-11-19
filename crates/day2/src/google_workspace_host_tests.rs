@@ -921,3 +921,37 @@ fn a_failed_conferences_read_correlates_its_final_phase() -> Result<()> {
     );
     Ok(())
 }
+
+/// `events.import` lets a writer set any organizer. An imported event whose
+/// in-domain organizer did not create it is no one's, and that organizer is
+/// never asked for, even with its own meeting code.
+#[test]
+fn a_forged_organizer_is_never_impersonated() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup::default())?;
+    crate::integrations::simulated::update_google_workspace(runtime.db(), SCOPE, |state| {
+        let calendar = state
+            .world
+            .calendars
+            .get_mut(GOOGLE_DEVELOPMENT_CALENDAR)
+            .context("calendar")?;
+        let mut imported = calendar.events[0].clone();
+        imported.id = "imported0001".into();
+        imported.creator = Some("grace@synthetic.example".into());
+        calendar.events.push(imported);
+        Ok(())
+    })?;
+    let read = admitted(
+        &runtime,
+        "lookup",
+        "forged-organizer",
+        CONFERENCES,
+        |handle| json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,"event_id":"imported0001"}),
+    )?;
+    assert_eq!(read.result, Ok(r#""NoOwner""#.into()));
+    assert_eq!(read.usage.calls, 5);
+    assert_eq!(
+        impersonated(&runtime)?,
+        [GOOGLE_DEVELOPMENT_CALENDAR_READER]
+    );
+    Ok(())
+}

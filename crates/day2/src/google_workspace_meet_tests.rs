@@ -181,6 +181,20 @@ fn nobody_but_a_derived_owner_in_the_domain_is_impersonated() {
             Some(GRACE),
         ),
         ("no organizer at all", None, Some(GRACE)),
+        // An organizer can be forged with events.import: an in-domain
+        // organizer counts only as its own event's creator.
+        (
+            "an in-domain organizer someone else created the event for",
+            Some(ADA),
+            Some(GRACE),
+        ),
+        ("an in-domain organizer and no creator", Some(ADA), None),
+        // Every delegated subject is an exact Workspace address.
+        (
+            "an upper-case creator",
+            Some("Ada@synthetic.example"),
+            Some("Ada@synthetic.example"),
+        ),
     ] {
         let world = World::new(with_event(meeting("owner0001", organizer, creator)));
         let (result, meter) = world.observe(&conferences("owner0001"));
@@ -258,6 +272,43 @@ fn an_event_that_cannot_have_conferences_says_why() {
         decoded(world.observe(&conferences("standup0001")).0)["Found"]["owner"],
         ADA
     );
+}
+
+/// Meet may serve a short or empty page that still continues (AIP-158): the
+/// second page is read, and the ceiling still holds.
+#[test]
+fn short_and_empty_record_pages_continue_within_the_ceiling() {
+    let plan = conferences("standup0001");
+    let mut five = simulated::google_workspace_development_fixture();
+    for index in 0..3 {
+        five.conference_records.insert(
+            format!("conf-extra-{index}"),
+            GoogleConferenceRecord {
+                space: "spaceStandup01".into(),
+                start_time: format!("2026-01-05T17:4{index}:00Z"),
+                ..GoogleConferenceRecord::default()
+            },
+        );
+    }
+    five.meet_record_pages = vec![2];
+    let (result, meter) = World::new(five).observe(&plan);
+    assert_eq!(
+        decoded(result)["Found"]["records"].as_array().map(Vec::len),
+        Some(MAX_RECORDS)
+    );
+    assert_eq!(meter.calls, plan.planned_calls());
+    let mut empty = simulated::google_workspace_development_fixture();
+    empty.meet_record_pages = vec![0];
+    let (result, meter) = World::new(empty.clone()).observe(&plan);
+    assert_eq!(
+        decoded(result)["Found"]["records"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(meter.calls, 3 + 2 + 3 + 2 + 2 * 3);
+    // Two empty pages that still continue reach the ceiling.
+    empty.meet_record_pages = vec![0, 0];
+    let (result, _) = World::new(empty).observe(&plan);
+    assert_eq!(code(&result), "google_workspace_conference_record_budget");
 }
 
 #[test]
@@ -554,6 +605,17 @@ pub(super) fn meet_fault_cases() -> Vec<(&'static str, SimulatedFault, &'static 
             (endpoint, Oversized, "response_too_large"),
             (endpoint, BadRequest, "request_refused"),
             (endpoint, Denied, "denied"),
+            // A 404 on a list is a record gone since it was listed; the
+            // records list itself is never missing.
+            (
+                endpoint,
+                Gone,
+                if endpoint == GOOGLE_MEET_RECORDS_ENDPOINT {
+                    "response_invalid"
+                } else {
+                    "conference_record_gone"
+                },
+            ),
         ]);
     }
     cases
@@ -629,22 +691,24 @@ fn the_owner_window_and_filter_are_exact() {
     };
     let owner = |organizer, creator| meet::owner(&event(organizer, creator), "example.com");
     assert_eq!(
-        owner(Some("ada@example.com"), None).as_deref(),
+        owner(Some("ada@example.com"), Some("ada@example.com")).as_deref(),
         Some("ada@example.com")
     );
-    assert_eq!(
-        owner(Some("ada@example.com"), Some("bob@example.com")).as_deref(),
-        Some("ada@example.com")
-    );
-    assert_eq!(
-        owner(
-            Some("c_1@group.calendar.google.com"),
+    for calendar in [
+        "c_1@group.calendar.google.com",
+        "c_1@resource.calendar.google.com",
+    ] {
+        assert_eq!(
+            owner(Some(calendar), Some("bob@example.com")).as_deref(),
             Some("bob@example.com")
-        )
-        .as_deref(),
-        Some("bob@example.com")
-    );
+        );
+    }
     for (organizer, creator) in [
+        (Some("ada@example.com"), None),
+        (Some("ada@example.com"), Some("bob@example.com")),
+        (Some("ada@example.com"), Some("ADA@example.com")),
+        (Some("o'neil@example.com"), Some("o'neil@example.com")),
+        (Some("a%b@example.com"), Some("a%b@example.com")),
         (Some("ada@other.example"), Some("bob@example.com")),
         (Some("ada@Example.com"), None),
         (Some("ada@example.com.other"), None),
@@ -820,7 +884,7 @@ fn meet_responses_are_validated_name_by_name() {
         artifacts(
             Collection::Recordings,
             serde_json::json!([{"name":"conferenceRecords/rec1/recordings/r1","state":"FILE_GENERATED",
-                "driveDestination":{"file":"files/1abc_DEF-2"}}])
+                "driveDestination":{"file":"1abc_DEF-2"}}])
         )
         .unwrap()
         .0[0]
@@ -863,6 +927,16 @@ fn meet_responses_are_validated_name_by_name() {
             "a Drive destination on a smart note",
             Collection::SmartNotes,
             serde_json::json!([{"name":"conferenceRecords/rec1/smartNotes/n1","state":"ENDED","driveDestination":{"file":"f"}}]),
+        ),
+        (
+            "a prefixed file ID",
+            Collection::Recordings,
+            serde_json::json!([{"name":"conferenceRecords/rec1/recordings/r1","state":"FILE_GENERATED","driveDestination":{"file":"files/1abc"}}]),
+        ),
+        (
+            "a prefixed document ID",
+            Collection::Transcripts,
+            serde_json::json!([{"name":"conferenceRecords/rec1/transcripts/t1","state":"FILE_GENERATED","docsDestination":{"document":"documents/1abc"}}]),
         ),
         (
             "a file ID with a path",
@@ -920,6 +994,25 @@ fn a_meet_refusal_is_classified_from_its_status_and_reason() {
             error(
                 serde_json::json!({"code":403,"status":"PERMISSION_DENIED","details":[
                 {"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED"}]})
+            )
+            .as_bytes()
+        ),
+        Failure::Denied
+    );
+    assert_eq!(
+        calendar::forbidden(
+            error(serde_json::json!({"code":403,"status":"PERMISSION_DENIED","details":[
+                {"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RESOURCE_QUOTA_EXCEEDED"}]}))
+            .as_bytes()
+        ),
+        Failure::RateLimited
+    );
+    // Only an ErrorInfo detail's reason is read.
+    assert_eq!(
+        calendar::forbidden(
+            error(
+                serde_json::json!({"code":403,"status":"PERMISSION_DENIED","details":[
+                {"@type":"type.googleapis.com/google.rpc.Help","reason":"RATE_LIMIT_EXCEEDED"}]})
             )
             .as_bytes()
         ),

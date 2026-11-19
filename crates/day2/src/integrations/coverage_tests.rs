@@ -515,6 +515,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                             "2026-01-05T12:00:00Z",
                         )),
                         organizer: Some("ada@coverage.test".into()),
+                        creator: Some("ada@coverage.test".into()),
                         conference_id: Some("abc-defg-hij".into()),
                         conference_type: Some("hangoutsMeet".into()),
                         ..Default::default()
@@ -568,6 +569,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                 },
             )]),
             drive_files: BTreeMap::new(),
+            meet_record_pages: Vec::new(),
         },
     }
 }

@@ -88,6 +88,10 @@ pub enum SimulatedFault {
     /// HTTP 403 for a rate or quota limit, as Google reports
     /// `rateLimitExceeded` with a 403 rather than a 429.
     RateLimitForbidden,
+    /// HTTP 404 for something the same client was just shown: a Meet
+    /// conference record deleted between its listing and a read of its
+    /// artifacts. Google Workspace only.
+    Gone,
     /// HTTP 500. Classified as `Incomplete`, and leaves a write outcome unknown.
     ServerError,
     /// The response never arrives. Dispatched, so a write outcome is unknown.
@@ -239,6 +243,12 @@ pub struct GoogleWorkspaceWorld {
     /// Drive files Meet generated, by ID. Step 4 adds their permissions.
     #[serde(default)]
     pub drive_files: BTreeMap<String, GoogleDriveFile>,
+    /// How many records each conference-record page holds, in order, where
+    /// Meet serves it short: fewer than asked or none at all, still with a
+    /// continuation while records remain, as AIP-158 allows. Later pages are
+    /// full.
+    #[serde(default)]
+    pub meet_record_pages: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1576,6 +1586,7 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
                 },
             ),
         ]),
+        meet_record_pages: Vec::new(),
     }
 }
 
@@ -1869,6 +1880,7 @@ fn google_fault(
                     ("PERMISSION_DENIED", Some("RATE_LIMIT_EXCEEDED"))
                 }
                 403 => ("PERMISSION_DENIED", None),
+                404 => ("NOT_FOUND", None),
                 429 => ("RESOURCE_EXHAUSTED", Some("RATE_LIMIT_EXCEEDED")),
                 _ => ("INTERNAL", None),
             };
@@ -1887,6 +1899,7 @@ fn google_fault(
         }
         SimulatedFault::Denied => failed(403, "forbidden", "Forbidden"),
         SimulatedFault::BadRequest => failed(400, "badRequest", "Bad Request"),
+        SimulatedFault::Gone => failed(404, "notFound", "Requested entity was not found."),
         SimulatedFault::ServerError => failed(500, "backendError", "Backend Error"),
         SimulatedFault::NotJson => Reply {
             status: 200,
@@ -2354,23 +2367,34 @@ fn google_meet_reply(
             None,
         ));
     };
-    let page = |binding: String, items: Vec<Value>, key: &str, size: usize| -> Result<_> {
-        let offset = match query("pageToken") {
-            None => 0,
-            Some(token) => match google_page_offset(world, &binding, token) {
-                Some(offset) => offset,
+    // Each continuation names the page it leads to, so a page can be short.
+    let page = |binding: String,
+                items: Vec<Value>,
+                key: &str,
+                size: usize,
+                short: &[usize]|
+     -> Result<_> {
+        let (index, offset) = match query("pageToken") {
+            None => (0, 0),
+            Some(token) => match google_page_cursor(world, &binding, token) {
+                Some(cursor) => cursor,
                 None => {
                     return Ok(error(400, "INVALID_ARGUMENT", "Invalid page token", None));
                 }
             },
         };
+        let size = short.get(index).copied().unwrap_or(size).min(size);
         let mut body = json!({});
         let slice: Vec<Value> = items.iter().skip(offset).take(size).cloned().collect();
         if !slice.is_empty() {
             body[key] = json!(slice);
         }
         if offset + size < items.len() {
-            body["nextPageToken"] = json!(google_page_token(world, &binding, offset + size)?);
+            body["nextPageToken"] = json!(google_page_token(
+                world,
+                &format!("{binding}#{}", index + 1),
+                offset + size
+            )?);
         }
         Ok(reply(200, body))
     };
@@ -2418,6 +2442,7 @@ fn google_meet_reply(
                 items,
                 collection.segment(),
                 ARTIFACT_PAGE_SIZE as usize,
+                &[],
             )
         }
         _ => {
@@ -2458,6 +2483,7 @@ fn google_meet_reply(
                 items,
                 "conferenceRecords",
                 RECORD_PAGE_SIZE as usize,
+                &world.meet_record_pages,
             )
         }
     }
@@ -2474,6 +2500,29 @@ fn google_page_token(world: &GoogleWorkspaceWorld, binding: &str, offset: usize)
         &payload,
     ))?);
     Ok(format!("page.{payload}.{}", &tag[7..39]))
+}
+
+/// A continuation's page number and offset, for a list whose page sizes vary:
+/// its binding is the query's, followed by `#` and the page it leads to.
+fn google_page_cursor(
+    world: &GoogleWorkspaceWorld,
+    binding: &str,
+    token: &str,
+) -> Option<(usize, usize)> {
+    let payload = token.strip_prefix("page.")?.split('.').next()?;
+    let value: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?,
+    )
+    .ok()?;
+    let bound = value["b"].as_str()?;
+    let page = bound
+        .strip_prefix(binding)?
+        .strip_prefix('#')?
+        .parse()
+        .ok()?;
+    Some((page, google_page_offset(world, bound, token)?))
 }
 
 fn google_page_offset(world: &GoogleWorkspaceWorld, binding: &str, token: &str) -> Option<usize> {
@@ -2783,6 +2832,7 @@ fn fault_response(
         SimulatedFault::Denied => http(403),
         SimulatedFault::BadRequest => http(400),
         SimulatedFault::RateLimitForbidden => http(403),
+        SimulatedFault::Gone => http(404),
         SimulatedFault::ServerError => http(500),
         SimulatedFault::ConnectionLost => Some(Err(TransportError {
             kind: AdapterError::TransportUnavailable,

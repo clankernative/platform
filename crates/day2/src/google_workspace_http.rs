@@ -402,7 +402,7 @@ mod tests {
             "POST /token HTTP/1.1",
         ];
         let event = format!(
-            r#"{{"id":"standup0001","status":"confirmed","start":{{"dateTime":"2026-01-05T17:00:00Z"}},"end":{{"dateTime":"2026-01-05T17:30:00Z"}},"organizer":{{"email":"{OWNER}"}},"conferenceData":{{"conferenceId":"abc-defg-hij","conferenceSolution":{{"key":{{"type":"hangoutsMeet"}}}}}}}}"#
+            r#"{{"id":"standup0001","status":"confirmed","start":{{"dateTime":"2026-01-05T17:00:00Z"}},"end":{{"dateTime":"2026-01-05T17:30:00Z"}},"organizer":{{"email":"{OWNER}"}},"creator":{{"email":"{OWNER}"}},"conferenceData":{{"conferenceId":"abc-defg-hij","conferenceSolution":{{"key":{{"type":"hangoutsMeet"}}}}}}}}"#
         );
         // (request line, the bearer it must carry, the reply).
         let api: Vec<(String, &str, String)> = vec![

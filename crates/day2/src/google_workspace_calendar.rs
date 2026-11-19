@@ -54,12 +54,13 @@ pub const EVENTS_QUERY: [(&str, &str); 4] = [
 /// Google's 403 reasons that mean a rate or quota was reached, not that access
 /// was refused: the legacy `errors[].reason` values, and the `ErrorInfo`
 /// reason newer APIs give.
-pub const RATE_REASONS: [&str; 5] = [
+pub const RATE_REASONS: [&str; 6] = [
     "rateLimitExceeded",
     "userRateLimitExceeded",
     "quotaExceeded",
     "dailyLimitExceeded",
     "RATE_LIMIT_EXCEEDED",
+    "RESOURCE_QUOTA_EXCEEDED",
 ];
 
 fn optional(value: Option<String>) -> OptionalText {
@@ -362,10 +363,11 @@ pub fn parse_reader_rule(body: &[u8], reader: &str) -> Result<bool, Failure> {
 }
 
 /// Classify a `403` by Google's error reasons, from either error envelope:
-/// Calendar's and the Directory's `error.errors[].reason`, or the
-/// `error.details[].reason` of an `ErrorInfo` with `error.status` that Meet and
-/// other newer APIs send. A rate or quota reason is `RateLimited`; any other
-/// reason, or a status with no reason, is `Denied`; a body with neither is
+/// Calendar's and the Directory's `error.errors[].reason`, or, beside the
+/// `error.status` that Meet and other newer APIs send, the `reason` of an
+/// `error.details[]` entry whose `@type` is `google.rpc.ErrorInfo`; no other
+/// detail is read. A rate or quota reason is `RateLimited`; any other reason,
+/// or a status with no reason, is `Denied`; a body with neither is
 /// `ResponseInvalid`. No reason or status ever leaves this function.
 pub fn forbidden(body: &[u8]) -> Failure {
     #[derive(Deserialize)]
@@ -392,13 +394,12 @@ pub fn forbidden(body: &[u8]) -> Failure {
         .errors
         .iter()
         .map(|error| error.reason.as_str())
-        .chain(
-            envelope
-                .error
-                .details
-                .iter()
-                .filter_map(|detail| detail.get("reason")?.as_str()),
-        )
+        .chain(envelope.error.details.iter().filter_map(|detail| {
+            // Only an ErrorInfo detail carries a reason.
+            (detail.get("@type")?.as_str()? == "type.googleapis.com/google.rpc.ErrorInfo")
+                .then(|| detail.get("reason")?.as_str())
+                .flatten()
+        }))
         .peekable();
     if reasons.peek().is_none() && envelope.error.status.is_none() {
         return Failure::ResponseInvalid;

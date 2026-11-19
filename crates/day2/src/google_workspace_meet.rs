@@ -6,6 +6,7 @@
 use crate::carta::OptionalText;
 use crate::google_workspace::Failure;
 use crate::google_workspace_calendar::{self as calendar, Event, Times};
+use day2_capabilities::resources::google_workspace_address;
 use serde::{Deserialize, Serialize};
 
 /// The one scope an event's owner is impersonated with.
@@ -139,26 +140,24 @@ fn text(value: &OptionalText) -> Option<&str> {
     }
 }
 
-/// The person an event's conferences are read as. The organizer if it is a
-/// person in `email_domain`; otherwise, when the organizer is a group or
-/// resource calendar, the creator if it is one. A person in `email_domain` is
-/// an address whose domain is exactly `email_domain`. Anyone else is never
-/// impersonated.
+/// The person an event's conferences are read as: always its creator, which
+/// Google sets and nobody can write, and only when the creator is a person in
+/// `email_domain` and either is the organizer too, or the organizer is a
+/// group or resource calendar.
+///
+/// The organizer alone is never trusted: Google lets `events.import` set any
+/// organizer, so a writer on a calendar in play could name anyone in the
+/// domain. A person in `email_domain` is an exact Workspace address
+/// (`google_workspace_address`, the rule `calendar_reader` follows) whose
+/// domain is exactly `email_domain`. Everyone else, including an assistant
+/// who created an event for someone else, is no owner: this fails closed.
 pub fn owner(event: &Event, email_domain: &str) -> Option<String> {
-    let person = |address: &str| {
-        address
-            .rsplit_once('@')
-            .is_some_and(|(local, domain)| !local.is_empty() && domain == email_domain)
-    };
     let organizer = text(&event.organizer)?;
-    if person(organizer) {
-        return Some(organizer.to_owned());
-    }
+    let creator = text(&event.creator)?;
+    let person = google_workspace_address(creator).is_ok_and(|(_, domain)| domain == email_domain);
     let calendar = organizer.ends_with("@group.calendar.google.com")
         || organizer.ends_with("@resource.calendar.google.com");
-    text(&event.creator)
-        .filter(|creator| calendar && person(creator))
-        .map(str::to_owned)
+    (person && (organizer == creator || calendar)).then(|| creator.to_owned())
 }
 
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
@@ -256,28 +255,30 @@ pub fn artifact_name(name: &str, record: &str, collection: Collection) -> bool {
         .is_some_and(meet_id)
 }
 
-/// A Drive file or Docs document ID, without a `files/` or `documents/`
-/// prefix if Google gives one.
-fn file_id(value: &str, prefix: &str) -> Option<String> {
-    let id = value.strip_prefix(prefix).unwrap_or(value);
-    ((1..=MAX_FILE_ID_BYTES).contains(&id.len())
-        && id
+/// A bare Drive file or Docs document ID, as the reference gives one.
+fn file_id(value: &str) -> bool {
+    (1..=MAX_FILE_ID_BYTES).contains(&value.len())
+        && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
-    .then(|| id.to_owned())
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
+
+/// One page of a Meet list: its items and the continuation, if any.
+pub type Page<T> = (Vec<T>, Option<String>);
+
+/// A listed conference record and its ID, which the requests that follow put
+/// in their path.
+pub type Listed = (String, ConferenceRecord);
 
 fn optional(value: Option<String>) -> OptionalText {
     value.map_or(OptionalText::None, OptionalText::Some)
 }
 
-/// One page of conference records for a filter. Each record is validated and
-/// must start inside `window`: a record outside it means Google did not apply
-/// the filter, so the page is refused rather than filtered.
-pub fn parse_records_page(
-    body: &[u8],
-    window: (i64, i64),
-) -> Result<(Vec<ConferenceRecord>, Option<String>), Failure> {
+/// One page of conference records for a filter, each with its ID for the
+/// requests that follow. Each record is validated and must start inside
+/// `window`: a record outside it means Google did not apply the filter, so the
+/// page is refused rather than filtered.
+pub fn parse_records_page(body: &[u8], window: (i64, i64)) -> Result<Page<Listed>, Failure> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct RecordDto {
@@ -309,22 +310,27 @@ pub fn parse_records_page(
             Some(end) => Some(meet_timestamp(end).ok_or(Failure::ResponseInvalid)?),
             None => None,
         };
-        if record_id(&record.name).is_none()
-            || !space_name(&record.space)
+        let id = record_id(&record.name)
+            .ok_or(Failure::ResponseInvalid)?
+            .to_owned();
+        if !space_name(&record.space)
             || !(window.0..=window.1).contains(&start)
             || end.is_some_and(|end| end < start)
         {
             return Err(Failure::ResponseInvalid);
         }
-        records.push(ConferenceRecord {
-            name: record.name,
-            space: record.space,
-            start_time: record.start_time,
-            end_time: optional(record.end_time),
-            recordings: Vec::new(),
-            smart_notes: Vec::new(),
-            transcripts: Vec::new(),
-        });
+        records.push((
+            id,
+            ConferenceRecord {
+                name: record.name,
+                space: record.space,
+                start_time: record.start_time,
+                end_time: optional(record.end_time),
+                recordings: Vec::new(),
+                smart_notes: Vec::new(),
+                transcripts: Vec::new(),
+            },
+        ));
     }
     Ok((records, page.next_page_token))
 }
@@ -343,7 +349,7 @@ pub fn parse_artifact_page(
     body: &[u8],
     record: &str,
     collection: Collection,
-) -> Result<(Vec<Artifact>, Option<String>), Failure> {
+) -> Result<Page<Artifact>, Failure> {
     #[derive(Deserialize)]
     struct Drive {
         file: Option<String>,
@@ -399,15 +405,9 @@ pub fn parse_artifact_page(
             }
             _ => return Err(Failure::ResponseInvalid),
         };
-        let prefix = match collection {
-            Collection::Recordings => "files/",
-            _ => "documents/",
-        };
-        let id = match id {
-            Some(id) => Some(file_id(&id, prefix).ok_or(Failure::ResponseInvalid)?),
-            None => None,
-        };
-        if !artifact_name(&item.name, record, collection) {
+        if id.as_deref().is_some_and(|id| !file_id(id))
+            || !artifact_name(&item.name, record, collection)
+        {
             return Err(Failure::ResponseInvalid);
         }
         artifacts.push(Artifact {
@@ -451,8 +451,9 @@ pub fn attach(record: &mut ConferenceRecord, collection: Collection, artifacts: 
 }
 
 /// The finished outcome. Every field is bounded to characters JSON never
-/// escapes, so the largest admissible outcome journals within one observation;
-/// it is still measured, never assumed to fit.
+/// escapes, so the largest admissible outcome journals within one observation
+/// (a test proves it). As `parse_events_page` does for an events page, the
+/// outcome is still measured, never assumed to fit.
 pub fn found(conferences: EventConferences) -> Result<EventConferencesOutcome, Failure> {
     let outcome = EventConferencesOutcome::Found(conferences);
     let encoded = crate::google_workspace::encode(&outcome);
