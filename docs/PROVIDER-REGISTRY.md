@@ -90,7 +90,7 @@ SQLite worlds against an independent seeded oracle; see
 coverage and replay limits. This does not establish live-provider conformance.
 
 `GoogleWorkspace` is served at a request-level port: the native port's metadata,
-IAM (direct and `signJwt`), token, Directory and Calendar requests are answered
+IAM (direct and `signJwt`), token, Directory, Calendar and Meet requests are answered
 by its own world, so its token flow, routes and parser run in the offline lane; see
 [GOOGLE-WORKSPACE.md](GOOGLE-WORKSPACE.md).
 

@@ -4,7 +4,9 @@
 //! sends exactly the exchange or request it is given over one fixed-origin
 //! client that follows no redirect, retries nothing and uses no proxy.
 use crate::google_auth::{self, AccessToken, Exchange, Origins, Reply, Unreached};
-use crate::google_workspace::{ApiRequest, CALENDAR_ORIGIN, DIRECTORY_ORIGIN, GooglePort, Service};
+use crate::google_workspace::{
+    ApiRequest, CALENDAR_ORIGIN, DIRECTORY_ORIGIN, GooglePort, MEET_ORIGIN, Service,
+};
 use anyhow::Result;
 
 pub struct NativeGooglePort {
@@ -12,6 +14,7 @@ pub struct NativeGooglePort {
     origins: Origins,
     directory: reqwest::Url,
     calendar: reqwest::Url,
+    meet: reqwest::Url,
 }
 
 impl NativeGooglePort {
@@ -27,6 +30,7 @@ impl NativeGooglePort {
             origins: Origins::production()?,
             directory: reqwest::Url::parse(DIRECTORY_ORIGIN)?,
             calendar: reqwest::Url::parse(CALENDAR_ORIGIN)?,
+            meet: reqwest::Url::parse(MEET_ORIGIN)?,
         })
     }
 
@@ -44,7 +48,8 @@ impl NativeGooglePort {
             client: google_auth::native_client(false)?,
             origins: Origins::fixture(url.clone(), url.clone(), url.join("/token")?),
             directory: url.clone(),
-            calendar: url,
+            calendar: url.clone(),
+            meet: url,
         })
     }
 }
@@ -73,6 +78,7 @@ impl GooglePort for NativeGooglePort {
         let mut url = match request.service {
             Service::Directory => self.directory.clone(),
             Service::Calendar => self.calendar.clone(),
+            Service::Meet => self.meet.clone(),
         };
         url.path_segments_mut()
             .map_err(|_| Unreached::default())?
@@ -376,6 +382,178 @@ mod tests {
             serde_json::json!({"Some":"abc-defg-hij"})
         );
         assert_eq!(results[2]["Found"]["id"], "standup0001");
+        Ok(())
+    }
+
+    /// An event's conferences: the reader's exchanges, rule and event; then
+    /// exchanges for the event's organizer alone, with Meet's read scope alone;
+    /// then the pinned records filter and each record's three artifact lists.
+    #[test]
+    fn native_event_conferences_delegate_to_the_reader_then_only_the_owner() -> Result<()> {
+        use base64::Engine;
+        use std::{net::TcpListener, thread};
+        const READER: &str = "calendar-reader@synthetic.example";
+        const OWNER: &str = "ada@synthetic.example";
+        const CALENDAR: &str = "GET /calendar/v3/calendars/c_engineering@group.calendar.google.com";
+        const RECORD: &str = "GET /v2/conferenceRecords/conf-1";
+        let auth = [
+            "GET /computeMetadata/v1/instance/service-accounts/default/token HTTP/1.1",
+            "POST /v1/projects/-/serviceAccounts/workspace-reader@synthetic-project.iam.gserviceaccount.com:signJwt HTTP/1.1",
+            "POST /token HTTP/1.1",
+        ];
+        let event = format!(
+            r#"{{"id":"standup0001","status":"confirmed","start":{{"dateTime":"2026-01-05T17:00:00Z"}},"end":{{"dateTime":"2026-01-05T17:30:00Z"}},"organizer":{{"email":"{OWNER}"}},"creator":{{"email":"{OWNER}"}},"conferenceData":{{"conferenceId":"abc-defg-hij","conferenceSolution":{{"key":{{"type":"hangoutsMeet"}}}}}}}}"#
+        );
+        // (request line, the bearer it must carry, the reply).
+        let api: Vec<(String, &str, String)> = vec![
+            (
+                format!("{CALENDAR}/acl/user:{READER}?fields=scope%28type%2Cvalue%29%2Crole&prettyPrint=false HTTP/1.1"),
+                READER,
+                format!(r#"{{"scope":{{"type":"user","value":"{READER}"}},"role":"writer"}}"#),
+            ),
+            (
+                format!("{CALENDAR}/events/standup0001?fields=id%2CoriginalStartTime%2Cstart%2Cend%2Cstatus%2Cvisibility%2Ccreator%2Femail%2Corganizer%2Femail%2CconferenceData%28conferenceId%2CconferenceSolution%2Fkey%2Ftype%29%2ChangoutLink&prettyPrint=false HTTP/1.1"),
+                READER,
+                event,
+            ),
+            (
+                "GET /v2/conferenceRecords?pageSize=5&filter=space.meeting_code+%3D+%22abc-defg-hij%22+AND+start_time+%3E%3D+%222026-01-05T16%3A30%3A00Z%22+AND+start_time+%3C%3D+%222026-01-05T18%3A00%3A00Z%22&fields=conferenceRecords%28name%2Cspace%2CstartTime%2CendTime%29%2CnextPageToken&prettyPrint=false HTTP/1.1".into(),
+                OWNER,
+                r#"{"conferenceRecords":[{"name":"conferenceRecords/conf-1","space":"spaces/space1","startTime":"2026-01-05T17:01:00.123Z","endTime":"2026-01-05T17:29:00Z"}]}"#.into(),
+            ),
+            (
+                format!("{RECORD}/recordings?pageSize=5&fields=recordings%28name%2Cstate%2CdriveDestination%28file%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                r#"{"recordings":[{"name":"conferenceRecords/conf-1/recordings/rec-1","state":"FILE_GENERATED","driveDestination":{"file":"1fileId"}}]}"#.into(),
+            ),
+            (
+                format!("{RECORD}/smartNotes?pageSize=5&fields=smartNotes%28name%2Cstate%2CdocsDestination%28document%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                "{}".into(),
+            ),
+            (
+                format!("{RECORD}/transcripts?pageSize=5&fields=transcripts%28name%2Cstate%2CdocsDestination%28document%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                r#"{"transcripts":[{"name":"conferenceRecords/conf-1/transcripts/tr-1","state":"STARTED"}]}"#.into(),
+            ),
+        ];
+        let expected: Vec<String> = auth
+            .iter()
+            .map(|line| (*line).to_owned())
+            .chain(api[..2].iter().map(|(line, ..)| line.clone()))
+            .chain(auth.iter().map(|line| (*line).to_owned()))
+            .chain(api[2..].iter().map(|(line, ..)| line.clone()))
+            .collect();
+        // Exactly these subjects and scopes, in this order.
+        let delegations = [
+            (
+                READER,
+                "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.acls.readonly",
+            ),
+            (
+                OWNER,
+                "https://www.googleapis.com/auth/meetings.space.readonly",
+            ),
+        ];
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        let count = expected.len();
+        let server = thread::spawn(move || -> Result<Vec<String>> {
+            let mut lines = Vec::new();
+            let mut api = api.into_iter();
+            let mut delegations = delegations.into_iter();
+            let (mut signed, mut subject) = (String::new(), "");
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept()?;
+                let request = http_request(&mut stream)?;
+                let first = request.lines().next().unwrap_or_default().to_owned();
+                let body = request
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body)
+                    .unwrap_or_default();
+                if first.starts_with("GET /computeMetadata/") {
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        "Metadata-Flavor: Google\r\n",
+                        r#"{"access_token":"workload-token","token_type":"Bearer","expires_in":3600}"#,
+                    )?;
+                } else if first.starts_with("POST /v1/projects/") {
+                    let (sub, scope) = delegations
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("an unplanned delegation"))?;
+                    let input: serde_json::Value = serde_json::from_str(body)?;
+                    let payload = input["payload"].as_str().unwrap_or_default();
+                    anyhow::ensure!(
+                        serde_json::from_str::<serde_json::Value>(payload)?
+                            == serde_json::json!({
+                                "iss":"workspace-reader@synthetic-project.iam.gserviceaccount.com",
+                                "sub":sub,"aud":"https://oauth2.googleapis.com/token",
+                                "iat":100,"exp":400,"scope":scope}),
+                        "delegated claims invalid: {payload}"
+                    );
+                    subject = sub;
+                    let part = |bytes: &[u8]| {
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+                    };
+                    signed = format!(
+                        "{}.{}.{}",
+                        part(br#"{"alg":"RS256","kid":"key-1"}"#),
+                        part(payload.as_bytes()),
+                        part(&[7; 64])
+                    );
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({"keyId":"key-1","signedJwt":signed}).to_string(),
+                    )?;
+                } else if first.starts_with("POST /token ") {
+                    anyhow::ensure!(
+                        body == crate::google_auth::assertion_form(&signed),
+                        "assertion form invalid"
+                    );
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({"access_token":format!("token-for-{subject}"),
+                            "token_type":"Bearer","expires_in":3600})
+                        .to_string(),
+                    )?;
+                } else {
+                    let (_, bearer, reply) = api
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("unexpected request: {first}"))?;
+                    anyhow::ensure!(
+                        request.contains(&format!("Bearer token-for-{bearer}")),
+                        "{first} carried another subject's token"
+                    );
+                    respond(&mut stream, "200 OK", "", &reply)?;
+                }
+                lines.push(first);
+            }
+            Ok(lines)
+        });
+        let plan = crate::google_workspace::tests::plan_for(
+            day2_capabilities::resources::Action::GoogleWorkspaceEventConferences,
+            r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","event_id":"standup0001"}"#,
+        )?;
+        let mut port = NativeGooglePort::transport_fixture(&origin)?;
+        let (result, meter) = crate::google_workspace::observe(&plan, &mut port, 100);
+        let lines = server.join().expect("fixture server panicked")?;
+        assert_eq!(lines, expected);
+        assert_eq!(meter.calls, 12);
+        let found: serde_json::Value = serde_json::from_str(&result?)?;
+        assert_eq!(found["Found"]["owner"], OWNER);
+        assert_eq!(
+            found["Found"]["records"][0]["recordings"][0]["file_id"],
+            serde_json::json!({"Some":"1fileId"})
+        );
+        assert_eq!(
+            found["Found"]["records"][0]["transcripts"][0]["state"],
+            "Started"
+        );
         Ok(())
     }
 }

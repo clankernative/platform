@@ -85,7 +85,12 @@ of at most 31 days, and one event, by domain-wide delegation as the resource's
 `calendar_reader` with exactly each action's Calendar scopes. A calendar is in
 play only when its ACL gives the reader its own `writer` or `owner` rule, which
 every Calendar action reads first; visibility through a group, the domain or
-the public is `NotShared`. The token flow is
+the public is `NotShared`. `google_workspace.event_conferences.v1` reads one
+such event, derives its owner (the organizer, or for a group or resource
+calendar the creator, when that is a person in the resource's `email_domain`),
+and lists that owner's Meet conference records for the event with their
+recordings, smart notes and transcripts, delegated with Meet's read scope
+alone. The token flow is
 the shared `google_auth` module Workspace Directory also uses; the adapter reaches
 Google through a request-level port, and the simulated port answers the same
 requests from `google_workspace.simulated.sqlite`. See

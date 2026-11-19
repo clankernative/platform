@@ -52,12 +52,15 @@ pub const EVENTS_QUERY: [(&str, &str); 4] = [
     ("maxResults", "25"),
 ];
 /// Google's 403 reasons that mean a rate or quota was reached, not that access
-/// was refused.
-pub const RATE_REASONS: [&str; 4] = [
+/// was refused: the legacy `errors[].reason` values, and the `ErrorInfo`
+/// reason newer APIs give.
+pub const RATE_REASONS: [&str; 6] = [
     "rateLimitExceeded",
     "userRateLimitExceeded",
     "quotaExceeded",
     "dailyLimitExceeded",
+    "RATE_LIMIT_EXCEEDED",
+    "RESOURCE_QUOTA_EXCEEDED",
 ];
 
 fn optional(value: Option<String>) -> OptionalText {
@@ -359,9 +362,13 @@ pub fn parse_reader_rule(body: &[u8], reader: &str) -> Result<bool, Failure> {
     Ok(matches!(role, GroupRole::Writer | GroupRole::Owner))
 }
 
-/// Classify a `403` by Google's error reasons: a rate or quota reason is
-/// `RateLimited`, any other reason is `Denied`, and a body without reasons is
-/// `ResponseInvalid`. No reason string ever leaves this function.
+/// Classify a `403` by Google's error reasons, from either error envelope:
+/// Calendar's and the Directory's `error.errors[].reason`, or, beside the
+/// `error.status` that Meet and other newer APIs send, the `reason` of an
+/// `error.details[]` entry whose `@type` is `google.rpc.ErrorInfo`; no other
+/// detail is read. A rate or quota reason is `RateLimited`; any other reason,
+/// or a status with no reason, is `Denied`; a body with neither is
+/// `ResponseInvalid`. No reason or status ever leaves this function.
 pub fn forbidden(body: &[u8]) -> Failure {
     #[derive(Deserialize)]
     struct Reason {
@@ -369,26 +376,38 @@ pub fn forbidden(body: &[u8]) -> Failure {
     }
     #[derive(Deserialize)]
     struct Detail {
+        #[serde(default)]
         errors: Vec<Reason>,
+        #[serde(default)]
+        details: Vec<serde_json::Value>,
+        status: Option<String>,
     }
     #[derive(Deserialize)]
     struct Envelope {
         error: Detail,
     }
-    match crate::json::decode::<Envelope>(body) {
-        Ok(envelope) if !envelope.error.errors.is_empty() => {
-            if envelope
-                .error
-                .errors
-                .iter()
-                .any(|error| RATE_REASONS.contains(&error.reason.as_str()))
-            {
-                Failure::RateLimited
-            } else {
-                Failure::Denied
-            }
-        }
-        _ => Failure::ResponseInvalid,
+    let Ok(envelope) = crate::json::decode::<Envelope>(body) else {
+        return Failure::ResponseInvalid;
+    };
+    let mut reasons = envelope
+        .error
+        .errors
+        .iter()
+        .map(|error| error.reason.as_str())
+        .chain(envelope.error.details.iter().filter_map(|detail| {
+            // Only an ErrorInfo detail carries a reason.
+            (detail.get("@type")?.as_str()? == "type.googleapis.com/google.rpc.ErrorInfo")
+                .then(|| detail.get("reason")?.as_str())
+                .flatten()
+        }))
+        .peekable();
+    if reasons.peek().is_none() && envelope.error.status.is_none() {
+        return Failure::ResponseInvalid;
+    }
+    if reasons.any(|reason| RATE_REASONS.contains(&reason)) {
+        Failure::RateLimited
+    } else {
+        Failure::Denied
     }
 }
 

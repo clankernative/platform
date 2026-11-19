@@ -56,6 +56,34 @@ GoogleWorkspace :: [].{
 
 	EventOutcome : [Found(Event), AllDay, NotShared, NotFound]
 
+	# Where a recording, smart note or transcript is in Meet's progression.
+	ArtifactState : [Started, Ended, FileGenerated]
+
+	# `file_id` is the Drive file Meet saved the recording to, once it has.
+	Recording : { name : Str, state : ArtifactState, file_id : OptionalText }
+
+	# A smart note or transcript; `document_id` is its Docs document, once saved.
+	Document : { name : Str, state : ArtifactState, document_id : OptionalText }
+
+	# One conference in the event's space; a rejoin is another. `end_time` is unset while it is ongoing.
+	ConferenceRecord : {
+		name : Str,
+		space : Str,
+		start_time : Str,
+		end_time : OptionalText,
+		recordings : List(Recording),
+		smart_notes : List(Document),
+		transcripts : List(Document),
+	}
+
+	# Read as `owner`, the event's organizer or, for a group or resource calendar's event, its creator, when that
+	# is a person in the grant's email domain. Records are latest start first.
+	EventConferences : { owner : Str, meeting_code : Str, records : List(ConferenceRecord) }
+
+	# `NoOwner`: nobody in the grant's email domain owns the event. `NoMeeting`: it has no Meet code. `Conflict`: the
+	# code's records in the event's window are in more than one space.
+	EventConferencesOutcome : [Found(EventConferences), NoOwner, NoMeeting, Conflict, AllDay, NotShared, NotFound]
+
 	group : Context, Str -> Observe(GroupOutcome)
 	group = |context, group_email| Resource.bind(context, "google_workspace").and_then(
 		|resource| group_with(resource, group_email),
@@ -141,6 +169,24 @@ GoogleWorkspace :: [].{
 			parsed : Try(EventOutcome, _)
 			parsed = Json.parse(raw)
 			Observe.from_host(parsed.map_err(|_| "invalid_google_workspace_event"))
+		},
+	)
+
+	# An event's Meet conferences, with their recordings, smart notes and transcripts.
+	event_conferences : Context, Str, Str -> Observe(EventConferencesOutcome)
+	event_conferences = |context, calendar_id, event_id| Resource.bind(context, "google_workspace").and_then(
+		|resource| event_conferences_with(resource, calendar_id, event_id),
+	)
+
+	event_conferences_with : Resource, Str, Str -> Observe(EventConferencesOutcome)
+	event_conferences_with = |resource, calendar_id, event_id| Observe.capability(
+		"google_workspace.event_conferences.v1",
+		Json.to_str({ handle: Resource.token(resource), calendar_id, event_id }),
+	).and_then(
+		|raw| {
+			parsed : Try(EventConferencesOutcome, _)
+			parsed = Json.parse(raw)
+			Observe.from_host(parsed.map_err(|_| "invalid_google_workspace_event_conferences"))
 		},
 	)
 }

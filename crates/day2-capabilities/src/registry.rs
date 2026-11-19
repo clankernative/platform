@@ -184,6 +184,9 @@ providers! {
             GoogleWorkspaceCalendar => "google_workspace.calendar.v1" (read, data),
             GoogleWorkspaceCalendarEvents => "google_workspace.calendar_events.v1" (read, data),
             GoogleWorkspaceCalendarEvent => "google_workspace.calendar_event.v1" (read, data),
+            // The event's conferences in Meet, read as the event's derived
+            // owner in the grant's email domain.
+            GoogleWorkspaceEventConferences => "google_workspace.event_conferences.v1" (read, data),
         },
     },
     // App-to-app delegation. The "provider" is another application in this same

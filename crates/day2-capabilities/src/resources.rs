@@ -140,15 +140,18 @@ pub enum ResourceTarget {
     /// What a `GoogleWorkspace` grant may reach in its organization.
     ///
     /// `calendar_reader` is the one person Calendar is read as, by domain-wide
-    /// delegation: the calendars shared with that account are the calendars in
-    /// play. `grantee_domains` are the domains a group may belong to in order
-    /// to be looked up, tested for membership or named in a calendar's ACL. An
-    /// application never names a subject, scope or URL. The domain whose people
-    /// may be impersonated arrives with impersonation; see
+    /// delegation: the calendars that give that account its own writer or
+    /// owner rule are the calendars in play. `email_domain` is the only domain
+    /// whose people may be impersonated, the reader and an event's derived
+    /// owner alike. `grantee_domains` are the domains a group may belong to in
+    /// order to be looked up, tested for membership or named in a calendar's
+    /// ACL. An application never names a subject, scope or URL; see
     /// docs/GOOGLE-WORKSPACE.md.
     GoogleWorkspaceDomain {
-        /// An exact lowercase address, never normalised.
+        /// An exact lowercase address in `email_domain`, never normalised.
         calendar_reader: String,
+        /// Lowercase ASCII, never normalised on the way in.
+        email_domain: String,
         /// Strictly sorted and unique, never normalised on the way in.
         grantee_domains: Vec<String>,
     },
@@ -401,10 +404,18 @@ impl ResourceTarget {
             Self::WorkspaceDirectory { customer_id } => bounded_text(customer_id, 256),
             Self::GoogleWorkspaceDomain {
                 calendar_reader,
+                email_domain,
                 grantee_domains,
             } => {
-                google_workspace_address(calendar_reader)
+                email_domain_text(email_domain)?;
+                let (_, reader_domain) = google_workspace_address(calendar_reader)
                     .map_err(|_| anyhow::anyhow!("invalid_google_workspace_calendar_reader"))?;
+                // The reader is impersonated too, so it is one of the people
+                // the grant may impersonate.
+                ensure!(
+                    reader_domain == email_domain,
+                    "invalid_google_workspace_calendar_reader"
+                );
                 ensure!(
                     (1..=32).contains(&grantee_domains.len())
                         && grantee_domains.is_sorted_by(|left, right| left < right),
@@ -534,19 +545,22 @@ impl ResourceTarget {
                     customer_id: parent,
                 },
             ) => customer_id == parent,
-            // The same Calendar reader; a narrower grant may only drop grantee
-            // domains, never add one.
+            // The same Calendar reader and impersonation domain; a narrower
+            // grant may only drop grantee domains, never add one.
             (
                 Self::GoogleWorkspaceDomain {
                     calendar_reader,
+                    email_domain,
                     grantee_domains,
                 },
                 Self::GoogleWorkspaceDomain {
                     calendar_reader: parent_reader,
+                    email_domain: parent_domain,
                     grantee_domains: parent_grantees,
                 },
             ) => {
                 calendar_reader == parent_reader
+                    && email_domain == parent_domain
                     && grantee_domains
                         .iter()
                         .all(|domain| parent_grantees.contains(domain))
