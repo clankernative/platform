@@ -193,7 +193,8 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::GoogleWorkspaceGroupMember
         | Action::GoogleWorkspaceCalendar
         | Action::GoogleWorkspaceCalendarEvents
-        | Action::GoogleWorkspaceCalendarEvent => Demonstration::WorkspaceRead,
+        | Action::GoogleWorkspaceCalendarEvent
+        | Action::GoogleWorkspaceEventConferences => Demonstration::WorkspaceRead,
     }
 }
 
@@ -470,6 +471,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
             delegated_scopes: BTreeSet::from([
                 crate::google_workspace_calendar::CALENDAR_ACL_READ_SCOPE.into(),
                 crate::google_workspace_calendar::CALENDAR_READ_SCOPE.into(),
+                crate::google_workspace_meet::MEET_READ_SCOPE.into(),
             ]),
             directory_reader: true,
             users: BTreeSet::from(["ada@coverage.test".into(), GOOGLE_COVERAGE_READER.into()]),
@@ -537,6 +539,35 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                     aliases: BTreeSet::new(),
                 },
             )]),
+            suspended: BTreeSet::new(),
+            // The event's conference and its recording's progress differ too.
+            spaces: BTreeMap::from([(
+                "spaceCoverage".into(),
+                crate::integrations::simulated::GoogleSpace {
+                    meeting_code: "abc-defg-hij".into(),
+                    owner: "ada@coverage.test".into(),
+                },
+            )]),
+            conference_records: BTreeMap::from([(
+                "conf-coverage".into(),
+                crate::integrations::simulated::GoogleConferenceRecord {
+                    space: "spaceCoverage".into(),
+                    start_time: "2026-01-05T11:05:00Z".into(),
+                    end_time: Some("2026-01-05T11:50:00Z".into()),
+                    recordings: vec![crate::integrations::simulated::GoogleArtifact {
+                        id: "rec-coverage".into(),
+                        state: if variant == Variant::A {
+                            "ENDED"
+                        } else {
+                            "STARTED"
+                        }
+                        .into(),
+                        file: None,
+                    }],
+                    ..Default::default()
+                },
+            )]),
+            drive_files: BTreeMap::new(),
         },
     }
 }
@@ -565,8 +596,9 @@ fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed
         Action::GoogleWorkspaceCalendarEvents => json!({"handle":"coverage",
             "calendar_id":GOOGLE_COVERAGE_CALENDAR,"time_min":"2026-01-01T00:00:00Z",
             "time_max":"2026-01-31T00:00:00Z","page_token":"None"}),
-        Action::GoogleWorkspaceCalendarEvent => json!({"handle":"coverage",
-            "calendar_id":GOOGLE_COVERAGE_CALENDAR,"event_id":"coverage1"}),
+        Action::GoogleWorkspaceCalendarEvent | Action::GoogleWorkspaceEventConferences => {
+            json!({"handle":"coverage","calendar_id":GOOGLE_COVERAGE_CALENDAR,"event_id":"coverage1"})
+        }
         _ => anyhow::bail!("not a Google Workspace read"),
     };
     let (plan, _) = crate::google_workspace::Plan::authorize(
@@ -576,6 +608,7 @@ fn observe_google_workspace(action: Action, variant: Variant) -> Result<Observed
         },
         &ResourceTarget::GoogleWorkspaceDomain {
             calendar_reader: GOOGLE_COVERAGE_READER.into(),
+            email_domain: "coverage.test".into(),
             grantee_domains: vec!["coverage.test".into()],
         },
         &request.to_string(),

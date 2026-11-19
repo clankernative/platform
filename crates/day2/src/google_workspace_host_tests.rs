@@ -23,11 +23,13 @@ const MEMBER: &str = "google_workspace.group_member.v1";
 const CALENDAR: &str = "google_workspace.calendar.v1";
 const EVENTS: &str = "google_workspace.calendar_events.v1";
 const EVENT: &str = "google_workspace.calendar_event.v1";
+const CONFERENCES: &str = "google_workspace.event_conferences.v1";
 
 struct Setup {
     simulated: bool,
     max_request_bytes: u64,
     max_response_bytes: u64,
+    max_calls: u64,
 }
 
 impl Default for Setup {
@@ -36,6 +38,7 @@ impl Default for Setup {
             simulated: true,
             max_request_bytes: crate::google_workspace::MAX_ACTION_REQUEST_BYTES,
             max_response_bytes: crate::google_workspace::MAX_RESPONSE_BYTES as u64,
+            max_calls: 32,
         }
     }
 }
@@ -59,20 +62,23 @@ fn runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
     };
     let target = serde_json::to_value(ResourceTarget::GoogleWorkspaceDomain {
         calendar_reader: GOOGLE_DEVELOPMENT_CALENDAR_READER.into(),
+        email_domain: "synthetic.example".into(),
         grantee_domains: vec!["synthetic.example".into()],
     })?;
     let operation = |observations: &[&str]| json!({"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]});
     let policy = json!({"version":1,"admins":[],"operations":{
-        "lookup":operation(&[CALENDAR, EVENT, EVENTS, GROUP, MEMBER]),
+        "lookup":operation(&[CALENDAR, EVENT, EVENTS, CONFERENCES, GROUP, MEMBER]),
         "lookup_other":operation(&[GROUP]),
-        "directory":operation(&[CALENDAR, GROUP, "workspace_directory.user_path.v1"])}});
+        "directory":operation(&[CALENDAR, CONFERENCES, GROUP, "workspace_directory.user_path.v1"])}});
     let slot = |resource: &str| {
         json!({"google_workspace":{"kind":"google_workspace_domain",
             "allowed_resources":[{"id":resource,"revision":1}],
             "actions":["google_workspace_calendar","google_workspace_calendar_event",
-                "google_workspace_calendar_events","google_workspace_group","google_workspace_group_member"],
+                "google_workspace_calendar_events","google_workspace_event_conferences",
+                "google_workspace_group","google_workspace_group_member"],
             "limits":{"max_request_bytes":setup.max_request_bytes,
-                "max_response_bytes":setup.max_response_bytes,"max_calls_per_invocation":16},
+                "max_response_bytes":setup.max_response_bytes,
+                "max_calls_per_invocation":setup.max_calls},
             "budgets":[{"id":"workspace_budget","revision":1}]}})
     };
     let catalog = json!({"version":1,
@@ -710,5 +716,208 @@ fn the_source_is_frozen_at_authorization_and_a_simulated_host_never_goes_native(
         crate::google_workspace::Source::Native
     );
     assert!(calls(&native)?.is_empty());
+    Ok(())
+}
+
+fn conferences(handle: &str) -> Value {
+    json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,"event_id":"standup0001"})
+}
+
+/// Who each signJwt the world served asked to sign for, in order.
+fn impersonated(runtime: &Runtime) -> Result<Vec<String>> {
+    Ok(calls(runtime)?
+        .iter()
+        .filter(|call| call.starts_with("google_workspace.iam.sign_jwt"))
+        .map(|call| call.rsplit(':').next().unwrap_or_default().to_owned())
+        .collect())
+}
+
+/// An event's conferences reserve both delegations and every page the
+/// ceilings admit, settle what was read, and impersonate only the reader and
+/// the owner derived from the event: never an organizer outside the grant's
+/// email domain.
+#[test]
+fn event_conferences_are_reserved_settled_and_delegated_only_to_the_derived_owner() -> Result<()> {
+    let (_native_directory, native) = runtime(Setup {
+        simulated: false,
+        ..Setup::default()
+    })?;
+    let (_directory, runtime) = runtime(Setup::default())?;
+    let read = admitted(
+        &runtime,
+        "lookup",
+        "conferences-read",
+        CONFERENCES,
+        conferences,
+    )?;
+    let found: Value = serde_json::from_str(
+        read.result
+            .as_deref()
+            .map_err(|code| anyhow::anyhow!("{code}"))?,
+    )?;
+    assert_eq!(found["Found"]["owner"], "ada@synthetic.example");
+    assert_eq!(found["Found"]["records"].as_array().map(Vec::len), Some(2));
+    // The reader's exchanges, rule and event; the owner's exchanges; one page
+    // of records; three artifact lists for each of two records.
+    assert_eq!(read.usage.calls, 15);
+    assert!(read.usage.known && read.usage.response_bytes < read.reserved.response_bytes);
+    assert_eq!(budget(&runtime)?["calls"], (15, 0));
+    assert_eq!(
+        impersonated(&runtime)?,
+        [GOOGLE_DEVELOPMENT_CALENDAR_READER, "ada@synthetic.example"]
+    );
+    // An event organized from outside the grant's email domain is read, and
+    // its organizer is never asked for.
+    crate::integrations::simulated::update_google_workspace(runtime.db(), SCOPE, |state| {
+        let calendar = state
+            .world
+            .calendars
+            .get_mut(GOOGLE_DEVELOPMENT_CALENDAR)
+            .context("calendar")?;
+        calendar
+            .events
+            .push(crate::integrations::simulated::GoogleEvent {
+                id: "outside0001".into(),
+                status: "confirmed".into(),
+                start: Some(crate::integrations::simulated::GoogleTime::at(
+                    "2026-01-05T17:00:00Z",
+                )),
+                end: Some(crate::integrations::simulated::GoogleTime::at(
+                    "2026-01-05T17:30:00Z",
+                )),
+                organizer: Some("ada@other.example".into()),
+                conference_id: Some("abc-defg-hij".into()),
+                conference_type: Some("hangoutsMeet".into()),
+                ..Default::default()
+            });
+        Ok(())
+    })?;
+    let outside = admitted(
+        &runtime,
+        "lookup",
+        "conferences-outside",
+        CONFERENCES,
+        |handle| json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,"event_id":"outside0001"}),
+    )?;
+    assert_eq!(outside.result, Ok(r#""NoOwner""#.into()));
+    assert_eq!(outside.usage.calls, 5);
+    assert!(
+        !impersonated(&runtime)?
+            .iter()
+            .any(|subject| subject == "ada@other.example")
+    );
+    // Another provider's grant cannot carry the action, and the source is
+    // frozen with the plan.
+    let refused = authorize(
+        &runtime,
+        "directory",
+        "conferences-other-provider",
+        CONFERENCES,
+        conferences,
+    )
+    .err()
+    .context("another provider's grant was accepted")?;
+    assert!(matches!(
+        refused.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceForbidden)
+    ));
+    let (.., authorized, _) = authorize(
+        &native,
+        "lookup",
+        "native-conferences",
+        CONFERENCES,
+        conferences,
+    )?;
+    assert_eq!(
+        authorized
+            .google_workspace_plan()
+            .context("a Google Workspace plan")?
+            .source(),
+        crate::google_workspace::Source::Native
+    );
+    assert!(calls(&native)?.is_empty());
+    Ok(())
+}
+
+/// A grant whose call limit is below the action's reserved calls is refused
+/// before any exchange or reservation; Calendar reads still fit it.
+#[test]
+fn a_grant_below_the_conferences_calls_is_refused_before_any_exchange() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup {
+        max_calls: 24,
+        ..Setup::default()
+    })?;
+    let refused = admitted(
+        &runtime,
+        "lookup",
+        "conferences-short",
+        CONFERENCES,
+        conferences,
+    )
+    .err()
+    .context("a grant below the envelope was accepted")?;
+    assert!(matches!(
+        refused.downcast_ref::<crate::error::Failure>(),
+        Some(crate::error::Failure::ResourceLimitExceeded)
+    ));
+    assert!(calls(&runtime)?.is_empty());
+    assert!(budget(&runtime)?.is_empty(), "nothing was reserved");
+    let event = admitted(
+        &runtime,
+        "lookup",
+        "event-fits",
+        EVENT,
+        |handle| json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,"event_id":"standup0001"}),
+    )?;
+    assert!(event.result.is_ok());
+    Ok(())
+}
+
+/// A failed Meet read keeps its Meet phase and status, and a refused owner
+/// its token phase, as correlation; nothing Google said is kept.
+#[test]
+fn a_failed_conferences_read_correlates_its_final_phase() -> Result<()> {
+    let (_directory, runtime) = runtime(Setup::default())?;
+    crate::integrations::simulated::schedule_faults(
+        runtime.db(),
+        SCOPE,
+        crate::integrations::simulated::GOOGLE_WORKSPACE_WORLD,
+        vec![ScheduledFault {
+            endpoint: crate::integrations::simulated::GOOGLE_MEET_RECORDS_ENDPOINT.into(),
+            remaining: 1,
+            fault: SimulatedFault::ServerError,
+        }],
+    )?;
+    let failed = admitted(
+        &runtime,
+        "lookup",
+        "records-unavailable",
+        CONFERENCES,
+        conferences,
+    )?;
+    assert_eq!(failed.result, Err("google_workspace_unavailable".into()));
+    assert_eq!(
+        serde_json::to_value(&failed.correlation)?,
+        json!([{"phase":"google_workspace_meet","http_status":500,"request_id":null,
+            "statement_handle":null}])
+    );
+    assert_eq!(failed.usage.calls, 9);
+    crate::integrations::simulated::update_google_workspace(runtime.db(), SCOPE, |state| {
+        state.world.suspended.insert("ada@synthetic.example".into());
+        Ok(())
+    })?;
+    let refused = admitted(
+        &runtime,
+        "lookup",
+        "owner-refused",
+        CONFERENCES,
+        conferences,
+    )?;
+    assert_eq!(refused.result, Err("google_workspace_owner_refused".into()));
+    assert_eq!(
+        serde_json::to_value(&refused.correlation)?,
+        json!([{"phase":"google_workspace_token","http_status":400,"request_id":null,
+            "statement_handle":null}])
+    );
     Ok(())
 }

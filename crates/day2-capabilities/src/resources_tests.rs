@@ -803,6 +803,7 @@ mod narrowing {
             },
             ResourceKind::GoogleWorkspaceDomain => ResourceTarget::GoogleWorkspaceDomain {
                 calendar_reader: "calendar@example.com".into(),
+                email_domain: "example.com".into(),
                 grantee_domains: vec!["example.com".into(), "groups.example.com".into()],
             },
             ResourceKind::LinearOrganization => ResourceTarget::LinearOrganization {
@@ -969,11 +970,13 @@ mod narrowing {
     fn a_workspace_grant_narrows_only_by_dropping_grantee_domains() {
         let parent = sample(ResourceKind::GoogleWorkspaceDomain);
         parent.validate().unwrap();
-        let target = |reader: &str, grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
-            calendar_reader: reader.into(),
-            grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
-        };
-        let fewer = target("calendar@example.com", &["example.com"]);
+        let target =
+            |reader: &str, domain: &str, grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
+                calendar_reader: reader.into(),
+                email_domain: domain.into(),
+                grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
+            };
+        let fewer = target("calendar@example.com", "example.com", &["example.com"]);
         fewer.validate().unwrap();
         assert!(fewer.is_subset_of(&parent));
         assert!(
@@ -981,9 +984,15 @@ mod narrowing {
             "a grant added a grantee domain"
         );
         for other in [
-            target("calendar@example.com", &["other.example"]),
+            target("calendar@example.com", "example.com", &["other.example"]),
             // The Calendar reader is the grant's identity: it never narrows.
-            target("someone@example.com", &["example.com"]),
+            target("someone@example.com", "example.com", &["example.com"]),
+            // Nor does the domain whose people it may impersonate.
+            target(
+                "calendar@groups.example.com",
+                "groups.example.com",
+                &["example.com"],
+            ),
         ] {
             other.validate().unwrap();
             assert!(!other.is_subset_of(&parent), "{other:?}");
@@ -994,13 +1003,25 @@ mod narrowing {
     fn a_workspace_target_is_exact_lowercase_and_strictly_sorted() {
         let target = |grantees: &[&str]| ResourceTarget::GoogleWorkspaceDomain {
             calendar_reader: "calendar@example.com".into(),
+            email_domain: "example.com".into(),
             grantee_domains: grantees.iter().map(|value| (*value).to_owned()).collect(),
         };
         target(&["a.example", "example.com"]).validate().unwrap();
-        for reader in ["Calendar@example.com", "calendar", "a b@example.com", ""] {
+        // The reader must be someone the grant may impersonate: a person in
+        // `email_domain`, compared exactly.
+        for reader in [
+            "Calendar@example.com",
+            "calendar",
+            "a b@example.com",
+            "",
+            "calendar@other.example",
+            "calendar@sub.example.com",
+            "calendar@Example.com",
+        ] {
             assert_eq!(
                 ResourceTarget::GoogleWorkspaceDomain {
                     calendar_reader: reader.into(),
+                    email_domain: "example.com".into(),
                     grantee_domains: vec!["example.com".into()],
                 }
                 .validate()
@@ -1022,6 +1043,14 @@ mod narrowing {
             ),
             (target(&["Example.com"]), "invalid_resource_email_domain"),
             (target(&["example"]), "invalid_resource_email_domain"),
+            (
+                ResourceTarget::GoogleWorkspaceDomain {
+                    calendar_reader: "calendar@example.com".into(),
+                    email_domain: "Example.com".into(),
+                    grantee_domains: vec!["example.com".into()],
+                },
+                "invalid_resource_email_domain",
+            ),
         ] {
             assert_eq!(
                 invalid.validate().unwrap_err().to_string(),
@@ -1031,11 +1060,13 @@ mod narrowing {
         }
         for refused in [
             json!({"kind":"google_workspace_domain","calendar_reader":"calendar@example.com",
-                "grantee_domains":["example.com"],"subject":"anyone@example.com"}),
-            // The impersonation domain arrives with impersonation.
+                "email_domain":"example.com","grantee_domains":["example.com"],
+                "subject":"anyone@example.com"}),
+            // Impersonation needs its domain: there is no default.
             json!({"kind":"google_workspace_domain","calendar_reader":"calendar@example.com",
-                "grantee_domains":["example.com"],"email_domain":"example.com"}),
-            json!({"kind":"google_workspace_domain","grantee_domains":["example.com"]}),
+                "grantee_domains":["example.com"]}),
+            json!({"kind":"google_workspace_domain","email_domain":"example.com",
+                "grantee_domains":["example.com"]}),
         ] {
             assert!(
                 serde_json::from_value::<ResourceTarget>(refused).is_err(),

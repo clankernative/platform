@@ -312,8 +312,8 @@ fn iam_and_token_endpoint_replies_are_classified_without_provider_content() {
         )
         .0
     };
-    // The delegation client is not authorized for a scope, or the subject is
-    // not a user: Google refuses at the token endpoint.
+    // The delegation client is not authorized for a scope: Google refuses at
+    // the token endpoint, and that is the operator's configuration.
     assert_eq!(
         delegated(json(
             400,
@@ -321,6 +321,30 @@ fn iam_and_token_endpoint_replies_are_classified_without_provider_content() {
         )),
         Err(Failure::AuthenticationFailed)
     );
+    // A subject that is not an active person (suspended, deleted or unknown)
+    // is `invalid_grant`, kept distinct; its description is never read.
+    assert_eq!(
+        delegated(json(
+            400,
+            serde_json::json!({"error":"invalid_grant","error_description":"Invalid email or User ID"})
+        )),
+        Err(Failure::SubjectRefused)
+    );
+    // Only a 400 with exactly that code is a refused subject.
+    for (status, body) in [
+        (401, serde_json::json!({"error":"invalid_grant"})),
+        (400, serde_json::json!({"error":"invalid_request"})),
+        (
+            400,
+            serde_json::json!({"error_description":"invalid_grant"}),
+        ),
+    ] {
+        assert_eq!(
+            delegated(json(status, body.clone())),
+            Err(Failure::AuthenticationFailed),
+            "{status} {body}"
+        );
+    }
     assert_eq!(
         delegated(json(
             200,

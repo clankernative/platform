@@ -901,6 +901,7 @@ fn google_plan(action: Action) -> Result<crate::google_workspace::Plan> {
 fn google_target() -> ResourceTarget {
     ResourceTarget::GoogleWorkspaceDomain {
         calendar_reader: "calendar@example.com".into(),
+        email_domain: "example.com".into(),
         grantee_domains: vec!["example.com".into()],
     }
 }
@@ -1169,10 +1170,14 @@ const GOOGLE_EVENT: RecordedBase = RecordedBase::from_repository(
 /// the adapter checks every claim, so a recorded JWT for another subject could
 /// never be exchanged.
 fn google_signed(scopes: &[&str]) -> Result<Vec<u8>> {
+    google_signed_as("calendar@example.com", scopes)
+}
+
+fn google_signed_as(subject: &str, scopes: &[&str]) -> Result<Vec<u8>> {
     use base64::Engine as _;
     let claims = crate::google_auth::delegated_claims(
         "reader@example-project.iam.gserviceaccount.com",
-        "calendar@example.com",
+        subject,
         scopes,
         100,
     )
@@ -1531,53 +1536,56 @@ fn mutating_the_calendar_responses_is_rejected_in_the_named_way() -> Result<()> 
     Ok(())
 }
 
+/// Records every reply a simulated port serves, so the simulation's own
+/// bodies can be compared with the published shapes.
+struct Recording<'a> {
+    inner: crate::google_workspace::SimulatedGooglePort,
+    bodies: &'a mut Vec<Vec<u8>>,
+}
+impl crate::google_workspace::GooglePort for Recording<'_> {
+    fn authenticate(
+        &mut self,
+        exchange: &crate::google_auth::Exchange<'_>,
+        max_bytes: usize,
+    ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+        let reply = self.inner.authenticate(exchange, max_bytes)?;
+        self.bodies.push(reply.body.clone());
+        Ok(reply)
+    }
+
+    fn call(
+        &mut self,
+        request: &crate::google_workspace::ApiRequest,
+        token: &crate::google_auth::AccessToken,
+        max_bytes: usize,
+    ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
+        let reply = self.inner.call(request, token, max_bytes)?;
+        self.bodies.push(reply.body.clone());
+        Ok(reply)
+    }
+}
+fn keys(value: &Value, path: &str, into: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let path = format!("{path}.{key}");
+                into.insert(path.clone());
+                keys(child, &path, into);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                keys(item, &format!("{path}[]"), into);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The simulated world answers every Calendar route with only the fields the
 /// published shapes carry, at every level of the response.
 #[test]
 fn the_google_calendar_simulation_emits_only_documented_fields() -> Result<()> {
-    struct Recording<'a> {
-        inner: crate::google_workspace::SimulatedGooglePort,
-        bodies: &'a mut Vec<Vec<u8>>,
-    }
-    impl crate::google_workspace::GooglePort for Recording<'_> {
-        fn authenticate(
-            &mut self,
-            exchange: &crate::google_auth::Exchange<'_>,
-            max_bytes: usize,
-        ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
-            let reply = self.inner.authenticate(exchange, max_bytes)?;
-            self.bodies.push(reply.body.clone());
-            Ok(reply)
-        }
-
-        fn call(
-            &mut self,
-            request: &crate::google_workspace::ApiRequest,
-            token: &crate::google_auth::AccessToken,
-            max_bytes: usize,
-        ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
-            let reply = self.inner.call(request, token, max_bytes)?;
-            self.bodies.push(reply.body.clone());
-            Ok(reply)
-        }
-    }
-    fn keys(value: &Value, path: &str, into: &mut std::collections::BTreeSet<String>) {
-        match value {
-            Value::Object(map) => {
-                for (key, child) in map {
-                    let path = format!("{path}.{key}");
-                    into.insert(path.clone());
-                    keys(child, &path, into);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    keys(item, &format!("{path}[]"), into);
-                }
-            }
-            _ => {}
-        }
-    }
     let documented = |bases: &[&RecordedBase]| -> Result<std::collections::BTreeSet<String>> {
         let mut into = std::collections::BTreeSet::new();
         for base in bases {
@@ -1738,6 +1746,407 @@ fn google_calendar_bases_cite_the_published_reference_they_follow() {
         &GOOGLE_ACL,
         &GOOGLE_EVENTS,
         &GOOGLE_EVENT,
+    ] {
+        assert!(base.claim.len() > 20, "claim is not a real sentence");
+        assert!(base.origin.starts_with("https://"));
+        assert!(!base.bytes.is_empty());
+    }
+}
+
+const GOOGLE_MEET_RECORDS: RecordedBase = RecordedBase::from_repository(
+    "conferenceRecords.list with the name/space/startTime/endTime mask returns records latest start first, an ongoing one without endTime",
+    "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.meet.conference_records.list.json"
+    ),
+);
+
+const GOOGLE_MEET_RECORDINGS: RecordedBase = RecordedBase::from_repository(
+    "recordings.list with the name/state/driveDestination(file) mask names each recording's state and, once saved, its Drive file",
+    "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.recordings/list",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.meet.recordings.list.json"),
+);
+
+const GOOGLE_MEET_SMART_NOTES: RecordedBase = RecordedBase::from_repository(
+    "smartNotes.list with the name/state/docsDestination(document) mask names each smart note's state and Docs document",
+    "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.smartNotes/list",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.meet.smart_notes.list.json"),
+);
+
+const GOOGLE_MEET_TRANSCRIPTS: RecordedBase = RecordedBase::from_repository(
+    "transcripts.list with the name/state/docsDestination(document) mask names each transcript's state and Docs document",
+    "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts/list",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.meet.transcripts.list.json"),
+);
+
+const GOOGLE_MEET_PERMISSION_DENIED: RecordedBase = RecordedBase::from_repository(
+    "Meet refuses in the newer error envelope: a code, a message and a status name, with no errors[] reasons",
+    "https://cloud.google.com/apis/design/errors",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.meet.error.permission_denied.json"
+    ),
+);
+
+const GOOGLE_MEET_RATE_LIMIT: RecordedBase = RecordedBase::from_repository(
+    "a rate limit in the newer envelope is 429 RESOURCE_EXHAUSTED with an ErrorInfo detail whose reason is RATE_LIMIT_EXCEEDED",
+    "https://cloud.google.com/apis/design/errors",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.meet.error.rate_limit.json"),
+);
+
+/// The Meet replies of an event's conferences in order: the records, then
+/// for the rejoin (listed first) no artifacts, then the first call's.
+fn meet_bases() -> Vec<Vec<u8>> {
+    let mut bases = vec![GOOGLE_MEET_RECORDS.bytes.to_vec()];
+    bases.extend((0..3).map(|_| b"{}".to_vec()));
+    bases.extend(
+        [
+            &GOOGLE_MEET_RECORDINGS,
+            &GOOGLE_MEET_SMART_NOTES,
+            &GOOGLE_MEET_TRANSCRIPTS,
+        ]
+        .iter()
+        .map(|base| base.bytes.to_vec()),
+    );
+    bases
+}
+
+/// The event's conferences against the published bases: the reader's
+/// exchanges, rule and event, then the owner's exchanges and `meet`.
+fn meet_replies(meet: Vec<(u16, Vec<u8>)>) -> Result<String> {
+    let mut replay = GoogleReplay::ok(vec![
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        google_signed(&CALENDAR_SCOPES)?,
+        GOOGLE_OAUTH_TOKEN.bytes.to_vec(),
+        GOOGLE_ACL_RULE.bytes.to_vec(),
+        GOOGLE_EVENT.bytes.to_vec(),
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        google_signed_as(
+            "person@example.com",
+            &[crate::google_workspace_meet::MEET_READ_SCOPE],
+        )?,
+        GOOGLE_OAUTH_TOKEN.bytes.to_vec(),
+    ]);
+    replay.replies.extend(meet);
+    let action = Action::GoogleWorkspaceEventConferences;
+    let (result, _) = crate::google_workspace::observe(
+        &calendar_plan(
+            action,
+            calendar_request(Action::GoogleWorkspaceCalendarEvent),
+        )?,
+        &mut replay,
+        100,
+    );
+    result
+}
+
+fn meet_against(meet: Vec<Vec<u8>>) -> Result<String> {
+    meet_replies(meet.into_iter().map(|body| (200, body)).collect())
+}
+
+#[test]
+fn google_meet_parses_the_published_provider_responses() -> Result<()> {
+    let found: Value = serde_json::from_str(&meet_against(meet_bases())?)?;
+    let found = &found["Found"];
+    // The event's organizer is a person in the grant's email domain.
+    assert_eq!(found["owner"], "person@example.com");
+    assert_eq!(found["meeting_code"], "abc-defg-hij");
+    let records = found["records"].as_array().context("records")?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["name"], "conferenceRecords/rejoin-5678");
+    assert_eq!(records[0]["end_time"], "None");
+    assert_eq!(records[0]["recordings"], json!([]));
+    assert_eq!(records[1]["space"], "spaces/jQCFfuBOdN5z");
+    assert_eq!(records[1]["start_time"], "2026-01-05T17:01:02.345Z");
+    assert_eq!(
+        records[1]["recordings"],
+        json!([
+            {"name":"conferenceRecords/first-1234/recordings/rec-1","state":"FileGenerated",
+                "file_id":{"Some":"1kuceFZohVoCh6FulBHxwy6I15Ogpc4hP"}},
+            {"name":"conferenceRecords/first-1234/recordings/rec-2","state":"Ended","file_id":"None"}
+        ])
+    );
+    assert_eq!(
+        records[1]["smart_notes"][0]["document_id"],
+        json!({"Some":"1kuceFZohVoCh6FulBHxwy6I15Ogpc4hP"})
+    );
+    assert_eq!(records[1]["transcripts"][0]["state"], "Started");
+    assert_eq!(records[1]["transcripts"][0]["document_id"], "None");
+    // Records in two spaces for one code are a conflict, not a choice.
+    let mut bases: Vec<Value> = meet_bases()
+        .iter()
+        .map(|bytes| serde_json::from_slice(bytes))
+        .collect::<serde_json::Result<_>>()?;
+    bases[0]["conferenceRecords"][1]["space"] = json!("spaces/other");
+    assert_eq!(
+        meet_against(vec![bases[0].to_string().into_bytes()])?,
+        r#""Conflict""#
+    );
+    Ok(())
+}
+
+/// Each mutation of a Meet base names the failure it must produce.
+#[test]
+fn mutating_the_meet_responses_is_rejected_in_the_named_way() -> Result<()> {
+    type Mutation = fn(&mut Value);
+    let cases: [(usize, &str, Mutation); 10] = [
+        (0, "a record name with a path", |page| {
+            page["conferenceRecords"][0]["name"] = json!("conferenceRecords/a/b")
+        }),
+        (0, "a space that is not a space", |page| {
+            page["conferenceRecords"][0]["space"] = json!("rooms/jQCFfuBOdN5z")
+        }),
+        (0, "a record starting after the window", |page| {
+            page["conferenceRecords"][0]["startTime"] = json!("2026-01-05T18:00:01Z")
+        }),
+        (0, "a record starting before the window", |page| {
+            page["conferenceRecords"][1]["startTime"] = json!("2026-01-05T16:29:59.999Z")
+        }),
+        (0, "an offset timestamp", |page| {
+            page["conferenceRecords"][1]["startTime"] = json!("2026-01-05T09:01:02-08:00")
+        }),
+        (4, "another record's recording", |page| {
+            page["recordings"][0]["name"] = json!("conferenceRecords/rejoin-5678/recordings/rec-1")
+        }),
+        (4, "an unspecified state", |page| {
+            page["recordings"][1]["state"] = json!("STATE_UNSPECIFIED")
+        }),
+        (4, "a file ID that is a path", |page| {
+            page["recordings"][0]["driveDestination"]["file"] = json!("../1kuce")
+        }),
+        (5, "a Drive destination on a smart note", |page| {
+            page["smartNotes"][0]["driveDestination"] = json!({"file":"1kuce"})
+        }),
+        (6, "more transcripts than a page admits", |page| {
+            let item = page["transcripts"][0].clone();
+            page["transcripts"] = json!(vec![item; 6]);
+        }),
+    ];
+    for (index, name, mutate) in cases {
+        let mut bases: Vec<Value> = meet_bases()
+            .iter()
+            .map(|bytes| serde_json::from_slice(bytes))
+            .collect::<serde_json::Result<_>>()?;
+        mutate(&mut bases[index]);
+        let outcome = meet_against(
+            bases
+                .iter()
+                .map(|base| base.to_string().into_bytes())
+                .collect(),
+        );
+        assert_eq!(
+            outcome.err().map(|error| error.to_string()).as_deref(),
+            Some("google_workspace_response_invalid"),
+            "mutation was not rejected as expected: {name}"
+        );
+    }
+    Ok(())
+}
+
+/// Meet's published refusals: a status alone is a refusal, and the newer
+/// envelope's rate limit is a limit, at the records and at an artifact list.
+#[test]
+fn google_meet_classifies_the_published_errors() -> Result<()> {
+    for position in [0, 4] {
+        let answered = |status: u16, error: &RecordedBase| -> Vec<(u16, Vec<u8>)> {
+            meet_bases()[..position]
+                .iter()
+                .map(|body| (200, body.clone()))
+                .chain([(status, error.bytes.to_vec())])
+                .collect()
+        };
+        for (status, error, expected) in [
+            (
+                403,
+                &GOOGLE_MEET_PERMISSION_DENIED,
+                "google_workspace_denied",
+            ),
+            (
+                429,
+                &GOOGLE_MEET_RATE_LIMIT,
+                "google_workspace_rate_limited",
+            ),
+            (
+                403,
+                &GOOGLE_MEET_RATE_LIMIT,
+                "google_workspace_rate_limited",
+            ),
+        ] {
+            assert_eq!(
+                meet_replies(answered(status, error))
+                    .err()
+                    .map(|error| error.to_string())
+                    .as_deref(),
+                Some(expected),
+                "{position} {status}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The simulated world answers every Meet route, and its refusals, with only
+/// the fields the published shapes carry.
+#[test]
+fn the_google_meet_simulation_emits_only_documented_fields() -> Result<()> {
+    use super::simulated::{GoogleArtifact, GoogleConferenceRecord, GoogleSpace};
+    let documented = |bases: &[&RecordedBase]| -> Result<std::collections::BTreeSet<String>> {
+        let mut into = std::collections::BTreeSet::new();
+        for base in bases {
+            keys(&base.value()?, "", &mut into);
+        }
+        Ok(into)
+    };
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("app.sqlite");
+    let mut world = super::simulated::google_workspace_development_fixture();
+    world.service_account = "reader@example-project.iam.gserviceaccount.com".into();
+    world.domain = "example.com".into();
+    world
+        .users
+        .extend(["calendar@example.com".into(), "person@example.com".into()]);
+    world.calendars = std::collections::BTreeMap::from([(
+        "c_team@group.calendar.google.com".into(),
+        super::simulated::GoogleCalendar {
+            summary: "Team".into(),
+            acl: vec![super::simulated::GoogleAclRule {
+                scope_type: "user".into(),
+                scope_value: Some("calendar@example.com".into()),
+                role: "writer".into(),
+            }],
+            events: vec![super::simulated::GoogleEvent {
+                id: "abc123def456ghi789jkl012mn".into(),
+                status: "confirmed".into(),
+                start: Some(super::simulated::GoogleTime::at("2026-01-05T17:00:00Z")),
+                end: Some(super::simulated::GoogleTime::at("2026-01-05T17:30:00Z")),
+                organizer: Some("person@example.com".into()),
+                conference_id: Some("abc-defg-hij".into()),
+                conference_type: Some("hangoutsMeet".into()),
+                ..Default::default()
+            }],
+        },
+    )]);
+    world.spaces = std::collections::BTreeMap::from([(
+        "jQCFfuBOdN5z".into(),
+        GoogleSpace {
+            meeting_code: "abc-defg-hij".into(),
+            owner: "person@example.com".into(),
+        },
+    )]);
+    let artifact = |id: &str, state: &str, file: Option<&str>| GoogleArtifact {
+        id: id.into(),
+        state: state.into(),
+        file: file.map(str::to_owned),
+    };
+    world.conference_records = std::collections::BTreeMap::from([
+        (
+            "first-1234".into(),
+            GoogleConferenceRecord {
+                space: "jQCFfuBOdN5z".into(),
+                start_time: "2026-01-05T17:01:02.345Z".into(),
+                end_time: Some("2026-01-05T17:20:00Z".into()),
+                recordings: vec![
+                    artifact("rec-1", "FILE_GENERATED", Some("1kuce")),
+                    artifact("rec-2", "ENDED", None),
+                ],
+                smart_notes: vec![artifact("note-1", "FILE_GENERATED", Some("1note"))],
+                transcripts: vec![artifact("tr-1", "STARTED", None)],
+            },
+        ),
+        (
+            "rejoin-5678".into(),
+            GoogleConferenceRecord {
+                space: "jQCFfuBOdN5z".into(),
+                start_time: "2026-01-05T17:22:01Z".into(),
+                ..Default::default()
+            },
+        ),
+    ]);
+    super::simulated::seed(
+        &database,
+        "parity/app",
+        &super::simulated::SimulatedFixture {
+            slack: super::simulated::SlackWorld {
+                workspace_id: "TPARITY".into(),
+                ..Default::default()
+            },
+            snowflake: super::simulated::SnowflakeWorld {
+                account: "parity".into(),
+                ..Default::default()
+            },
+            openai: super::simulated::OpenAiWorld {
+                project_id: "proj_parity".into(),
+                model: "model-parity".into(),
+                max_input_tokens: 1,
+                ..Default::default()
+            },
+            google_workspace: world,
+            ..Default::default()
+        },
+    )?;
+    let action = Action::GoogleWorkspaceEventConferences;
+    let plan = calendar_plan(
+        action,
+        calendar_request(Action::GoogleWorkspaceCalendarEvent),
+    )?;
+    let mut bodies = Vec::new();
+    let mut port = Recording {
+        inner: crate::google_workspace::SimulatedGooglePort::new(&database, "parity/app")?,
+        bodies: &mut bodies,
+    };
+    let (result, _) = crate::google_workspace::observe(&plan, &mut port, 100);
+    let found: Value = serde_json::from_str(&result?)?;
+    assert_eq!(found["Found"]["records"].as_array().map(Vec::len), Some(2));
+    // Two delegations, the rule and the event, then Meet.
+    let mut emitted = std::collections::BTreeSet::new();
+    for body in &bodies[8..] {
+        keys(&serde_json::from_slice(body)?, "", &mut emitted);
+    }
+    let listed = documented(&[
+        &GOOGLE_MEET_RECORDS,
+        &GOOGLE_MEET_RECORDINGS,
+        &GOOGLE_MEET_SMART_NOTES,
+        &GOOGLE_MEET_TRANSCRIPTS,
+    ])?;
+    let extra: Vec<_> = emitted.difference(&listed).collect();
+    assert!(extra.is_empty(), "Meet emits undocumented {extra:?}");
+    let errors = documented(&[&GOOGLE_MEET_PERMISSION_DENIED, &GOOGLE_MEET_RATE_LIMIT])?;
+    for fault in [
+        super::simulated::SimulatedFault::Denied,
+        super::simulated::SimulatedFault::RateLimited,
+    ] {
+        super::simulated::schedule_faults(
+            &database,
+            "parity/app",
+            super::simulated::GOOGLE_WORKSPACE_WORLD,
+            vec![super::simulated::ScheduledFault {
+                endpoint: super::simulated::GOOGLE_MEET_RECORDS_ENDPOINT.into(),
+                remaining: 1,
+                fault,
+            }],
+        )?;
+        let mut bodies = Vec::new();
+        let mut port = Recording {
+            inner: crate::google_workspace::SimulatedGooglePort::new(&database, "parity/app")?,
+            bodies: &mut bodies,
+        };
+        let _ = crate::google_workspace::observe(&plan, &mut port, 100);
+        let mut emitted = std::collections::BTreeSet::new();
+        keys(&serde_json::from_slice(&bodies[8])?, "", &mut emitted);
+        let extra: Vec<_> = emitted.difference(&errors).collect();
+        assert!(extra.is_empty(), "{fault:?} emits undocumented {extra:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn google_meet_bases_cite_the_published_reference_they_follow() {
+    for base in [
+        &GOOGLE_MEET_RECORDS,
+        &GOOGLE_MEET_RECORDINGS,
+        &GOOGLE_MEET_SMART_NOTES,
+        &GOOGLE_MEET_TRANSCRIPTS,
+        &GOOGLE_MEET_PERMISSION_DENIED,
+        &GOOGLE_MEET_RATE_LIMIT,
     ] {
         assert!(base.claim.len() > 20, "claim is not a real sentence");
         assert!(base.origin.starts_with("https://"));

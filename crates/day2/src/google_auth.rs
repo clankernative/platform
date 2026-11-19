@@ -155,6 +155,11 @@ pub enum Failure {
     WorkloadIdentityUnavailable,
     /// IAM or the token endpoint refused, or answered outside the plan.
     AuthenticationFailed,
+    /// The token endpoint refused the delegated subject with OAuth's
+    /// `invalid_grant`: Google's answer for a subject that is not an active
+    /// person in the organization, such as a suspended or deleted user. Every
+    /// claim is checked before the exchange, so this names the subject.
+    SubjectRefused,
     /// IAM or the token endpoint answered 429.
     RateLimited,
     /// No complete reply, or a 5xx.
@@ -230,6 +235,16 @@ pub fn assertion_form(jwt: &str) -> String {
         .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
         .append_pair("assertion", jwt)
         .finish()
+}
+
+/// Whether a token-endpoint error is OAuth's `invalid_grant`. Only the
+/// standard error code is read; Google's description never is.
+fn invalid_grant(body: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct OAuthError {
+        error: String,
+    }
+    crate::json::decode::<OAuthError>(body).is_ok_and(|refusal| refusal.error == "invalid_grant")
 }
 
 /// Every claim of the signed JWT is checked against the plan before it is
@@ -345,6 +360,9 @@ pub fn acquire(
             let reply = wire
                 .exchange(&Exchange::Token { form: &form }, max)
                 .map_err(Unreached::failure)?;
+            if reply.status == 400 && invalid_grant(&reply.body) {
+                return Err(Failure::SubjectRefused);
+            }
             accept(&reply, max)?;
             #[derive(Deserialize)]
             struct OAuthToken {

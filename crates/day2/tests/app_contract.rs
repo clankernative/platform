@@ -688,6 +688,7 @@ fn native_google_workspace_calendar_outcomes_decode_through_public_sdk() -> Resu
         },
         &day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
             calendar_reader: "calendar@example.com".into(),
+            email_domain: "example.com".into(),
             grantee_domains: vec!["example.com".into()],
         },
         events_request,
@@ -877,6 +878,230 @@ expect match read_event(EVENT_NOT_SHARED_JSON) {
     ensure!(
         output.status.success() && diagnostics.contains("All (9) tests passed"),
         "native Google Workspace Calendar contracts ({}): {diagnostics}",
+        output.status
+    );
+    Ok(())
+}
+
+#[test]
+fn native_google_workspace_event_conferences_decode_through_public_sdk() -> Result<()> {
+    use day2::carta::OptionalText;
+    use day2::google_workspace::encode;
+    use day2::google_workspace_meet::{
+        ArtifactState, ConferenceRecord, Document, EventConferences, EventConferencesOutcome,
+        Recording,
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    fs::create_dir(stage.join("app"))?;
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    let first = ConferenceRecord {
+        name: "conferenceRecords/first-1".into(),
+        space: "spaces/space-1".into(),
+        start_time: "2026-01-05T17:01:02.345Z".into(),
+        end_time: OptionalText::Some("2026-01-05T17:20:00Z".into()),
+        recordings: vec![Recording {
+            name: "conferenceRecords/first-1/recordings/rec-1".into(),
+            state: ArtifactState::FileGenerated,
+            file_id: OptionalText::Some("1fileId".into()),
+        }],
+        smart_notes: vec![Document {
+            name: "conferenceRecords/first-1/smartNotes/note-1".into(),
+            state: ArtifactState::Ended,
+            document_id: OptionalText::None,
+        }],
+        transcripts: vec![],
+    };
+    let rejoin = ConferenceRecord {
+        name: "conferenceRecords/rejoin-2".into(),
+        start_time: "2026-01-05T17:22:00Z".into(),
+        end_time: OptionalText::None,
+        recordings: vec![],
+        smart_notes: vec![],
+        ..first.clone()
+    };
+    let found = encode(&EventConferencesOutcome::Found(EventConferences {
+        owner: "person@example.com".into(),
+        meeting_code: "abc-defg-hij".into(),
+        records: vec![rejoin, first],
+    }));
+    // The exact request the SDK sends, which the adapter authorizes as the
+    // event it names.
+    let request = r#"{"calendar_id":"c_team@group.calendar.google.com","event_id":"e1","handle":"fixture-handle"}"#;
+    let (plan, handle) = day2::google_workspace::Plan::authorize(
+        day2_capabilities::registry::Action::GoogleWorkspaceEventConferences,
+        &day2_capabilities::integrations::LiveConnection::GoogleWorkspace {
+            service_account: "reader@example-project.iam.gserviceaccount.com".into(),
+        },
+        &day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
+            calendar_reader: "calendar@example.com".into(),
+            email_domain: "example.com".into(),
+            grantee_domains: vec!["example.com".into()],
+        },
+        request,
+        day2::google_workspace::Source::Simulated,
+    )?;
+    ensure!(handle == "fixture-handle", "handle not carried");
+    ensure!(
+        *plan.read()
+            == day2::google_workspace::Read::EventConferences {
+                calendar: "c_team@group.calendar.google.com".into(),
+                event: "e1".into(),
+            },
+        "the SDK's request was not authorized as the event it names: {:?}",
+        plan.read()
+    );
+    let source = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.GoogleWorkspace
+import pf.Resource
+import pf.Observe
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+answer = |program, raw| {
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+handle = Resource.decode("{\"token\":\"fixture-handle\"}")
+read = |raw| answer(
+    handle.and_then(|resource| GoogleWorkspace.event_conferences_with(resource, "c_team@group.calendar.google.com", "e1"))
+        .program(),
+    raw,
+)
+requested = |program| {
+    match Tx.evaluate(program, []) {
+        Pending(request) => request.instruction.model == CAPABILITY and request.instruction.data == REQUEST
+        _ => Bool.False
+    }
+}
+generated = |state| {
+    match state {
+        FileGenerated => Bool.True
+        _ => Bool.False
+    }
+}
+ended = |state| {
+    match state {
+        Ended => Bool.True
+        _ => Bool.False
+    }
+}
+expect requested(handle.and_then(|resource| GoogleWorkspace.event_conferences_with(resource,
+    "c_team@group.calendar.google.com", "e1")).program())
+expect match read(FOUND_JSON) {
+    Done(result) => match result.value {
+        Found(found) => found.owner == "person@example.com" and found.meeting_code == "abc-defg-hij"
+            and found.records.len() == 2
+            and found.records.any(|record| record.end_time == None and record.recordings.len() == 0)
+            and found.records.any(|record| record.space == "spaces/space-1"
+                and record.end_time == Some("2026-01-05T17:20:00Z")
+                and record.recordings.any(|recording| generated(recording.state) and recording.file_id == Some("1fileId"))
+                and record.smart_notes.any(|note| ended(note.state) and note.document_id == None)
+                and record.transcripts.len() == 0)
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read(NO_OWNER_JSON) {
+    Done(result) => match result.value {
+        NoOwner => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read(NO_MEETING_JSON) {
+    Done(result) => match result.value {
+        NoMeeting => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read(CONFLICT_JSON) {
+    Done(result) => match result.value {
+        Conflict => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read(ALL_DAY_JSON) {
+    Done(result) => match result.value {
+        AllDay => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read(NOT_SHARED_JSON) {
+    Done(result) => match result.value {
+        NotShared => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+expect match read(NOT_FOUND_JSON) {
+    Done(result) => match result.value {
+        NotFound => Bool.True
+        _ => Bool.False
+    }
+    _ => Bool.False
+}
+"#
+    .replace(
+        "NOT_FOUND_JSON",
+        &serde_json::to_string(&encode(&EventConferencesOutcome::NotFound))?,
+    )
+    .replace("FOUND_JSON", &serde_json::to_string(&found)?)
+    .replace(
+        "NO_OWNER_JSON",
+        &serde_json::to_string(&encode(&EventConferencesOutcome::NoOwner))?,
+    )
+    .replace(
+        "NO_MEETING_JSON",
+        &serde_json::to_string(&encode(&EventConferencesOutcome::NoMeeting))?,
+    )
+    .replace(
+        "CONFLICT_JSON",
+        &serde_json::to_string(&encode(&EventConferencesOutcome::Conflict))?,
+    )
+    .replace(
+        "ALL_DAY_JSON",
+        &serde_json::to_string(&encode(&EventConferencesOutcome::AllDay))?,
+    )
+    .replace(
+        "NOT_SHARED_JSON",
+        &serde_json::to_string(&encode(&EventConferencesOutcome::NotShared))?,
+    )
+    .replace("REQUEST", &serde_json::to_string(request)?)
+    .replace(
+        "CAPABILITY",
+        &serde_json::to_string(
+            &day2_capabilities::registry::Action::GoogleWorkspaceEventConferences.capability(),
+        )?,
+    );
+    fs::write(stage.join("app/main.roc"), source)?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .arg("test")
+        .arg(stage.join("app/main.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (8) tests passed"),
+        "native Google Workspace event conferences contracts ({}): {diagnostics}",
         output.status
     );
     Ok(())

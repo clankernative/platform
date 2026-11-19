@@ -225,6 +225,7 @@ fn requests_outside_the_grant_or_malformed_are_refused_before_any_exchange() {
     // question Google refuses for nested groups, so it is never asked.
     let two_domains = ResourceTarget::GoogleWorkspaceDomain {
         calendar_reader: simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER.into(),
+        email_domain: "synthetic.example".into(),
         grantee_domains: vec![
             "groups.synthetic.example".into(),
             "synthetic.example".into(),
@@ -443,6 +444,9 @@ fn every_simulated_endpoint_has_a_scheduled_fault_case() {
                 .iter()
                 .any(|(case, ..)| *case == endpoint)
                 || calendar_fault_cases()
+                    .iter()
+                    .any(|(case, ..)| *case == endpoint)
+                || meet::meet_fault_cases()
                     .iter()
                     .any(|(case, ..)| *case == endpoint)
                 || delegation_fault_cases()
@@ -682,13 +686,21 @@ fn delegation_succeeds_only_for_an_authorized_scope_and_a_person_in_the_organiza
             .err(),
         Some(google_auth::Failure::AuthenticationFailed)
     );
-    // Neither someone outside the organization nor a group can be impersonated.
-    for subject in ["ada@other.example", "engineering@synthetic.example"] {
+    // Neither someone outside the organization, nor a group, nor a suspended
+    // person can be impersonated: the token endpoint refuses the subject.
+    let mut suspended = simulated::google_workspace_development_fixture();
+    suspended.suspended.insert("ada@synthetic.example".into());
+    let suspended = World::new(suspended);
+    for (world, subject) in [
+        (&world, "ada@other.example"),
+        (&world, "engineering@synthetic.example"),
+        (&suspended, "ada@synthetic.example"),
+    ] {
         assert_eq!(
             world
                 .token(google_auth::Identity::Delegated(subject), &[CALENDAR_SCOPE])
                 .err(),
-            Some(google_auth::Failure::AuthenticationFailed),
+            Some(google_auth::Failure::SubjectRefused),
             "{subject}"
         );
     }
@@ -834,6 +846,11 @@ fn every_failure_is_produced_through_an_action() {
         )),
         &calendar_read("engineering@synthetic.example"),
     );
+    // An event's owner the token endpoint refuses, and records or artifacts
+    // past their bounds.
+    for (world, plan) in meet::failing_worlds() {
+        record(&World::new(world), &plan);
+    }
     let expected: std::collections::BTreeSet<_> = Failure::ALL
         .iter()
         .map(|failure| failure.code().to_owned())
@@ -1814,3 +1831,6 @@ fn the_largest_admissible_page_fits_one_observation() {
         );
     }
 }
+
+#[path = "google_workspace_meet_tests.rs"]
+mod meet;

@@ -18,6 +18,7 @@ use serde::Deserialize;
 use std::fmt;
 
 use crate::google_workspace_calendar as calendar;
+use crate::google_workspace_meet::{self as meet, EventConferencesOutcome};
 use calendar::{
     ACL_FIELDS, ACL_PAGE_CEILING, ACL_PAGE_SIZE, CALENDAR_ACL_READ_SCOPE, CALENDAR_FIELDS,
     CALENDAR_READ_SCOPE, CalendarOutcome, EVENT_FIELDS, EVENTS_FIELDS, EVENTS_QUERY, EventOutcome,
@@ -29,6 +30,7 @@ pub const GROUP_MEMBER_READ_SCOPE: &str =
     "https://www.googleapis.com/auth/admin.directory.group.member.readonly";
 pub const DIRECTORY_ORIGIN: &str = "https://admin.googleapis.com";
 pub const CALENDAR_ORIGIN: &str = "https://www.googleapis.com";
+pub const MEET_ORIGIN: &str = "https://meet.googleapis.com";
 /// One Directory response. A group or a membership answer is a few hundred bytes.
 pub const MAX_DIRECTORY_RESPONSE_BYTES: usize = 16 * 1024;
 /// The largest single response any action reads; each plan states its own
@@ -81,6 +83,14 @@ failures! {
     /// A calendar's ACL has more pages than an action reads, so the group's
     /// role is not answered from a partial list.
     AclPageBudget => "google_workspace_acl_page_budget",
+    /// The token endpoint refused the event's derived owner as a delegated
+    /// subject (`invalid_grant`): for example a suspended or deleted person.
+    OwnerRefused => "google_workspace_owner_refused",
+    /// An event has more conference records than an action reads.
+    ConferenceRecordBudget => "google_workspace_conference_record_budget",
+    /// A conference record has more recordings, smart notes or transcripts of
+    /// one kind than an action reads.
+    ArtifactBudget => "google_workspace_artifact_budget",
 }
 
 impl fmt::Display for Failure {
@@ -95,7 +105,12 @@ impl From<google_auth::Failure> for Failure {
     fn from(failure: google_auth::Failure) -> Self {
         match failure {
             google_auth::Failure::WorkloadIdentityUnavailable => Self::WorkloadIdentityUnavailable,
-            google_auth::Failure::AuthenticationFailed => Self::AuthenticationFailed,
+            // The Calendar reader is configuration: a refused reader is a
+            // failed authentication. A refused owner is mapped where the
+            // owner is delegated to.
+            google_auth::Failure::AuthenticationFailed | google_auth::Failure::SubjectRefused => {
+                Self::AuthenticationFailed
+            }
             google_auth::Failure::RateLimited => Self::RateLimited,
             google_auth::Failure::Unavailable => Self::Unavailable,
             google_auth::Failure::ResponseTooLarge => Self::ResponseTooLarge,
@@ -127,6 +142,10 @@ pub enum Read {
         calendar: String,
         event: String,
     },
+    EventConferences {
+        calendar: String,
+        event: String,
+    },
 }
 
 /// Where an action's exchanges go. Chosen when the capability is authorized,
@@ -140,13 +159,14 @@ pub enum Source {
 }
 
 /// One action, frozen when the capability is authorized: its source, the
-/// connection's service account, the grant's Calendar reader and grantee
-/// domains, and the in-grant inputs.
+/// connection's service account, the grant's Calendar reader, impersonation
+/// domain and grantee domains, and the in-grant inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     source: Source,
     service_account: String,
     calendar_reader: String,
+    email_domain: String,
     grantee_domains: Vec<String>,
     read: Read,
 }
@@ -209,6 +229,7 @@ impl Plan {
         };
         let ResourceTarget::GoogleWorkspaceDomain {
             calendar_reader,
+            email_domain,
             grantee_domains,
         } = target
         else {
@@ -302,7 +323,7 @@ impl Plan {
                     input.handle,
                 )
             }
-            Action::GoogleWorkspaceCalendarEvent => {
+            Action::GoogleWorkspaceCalendarEvent | Action::GoogleWorkspaceEventConferences => {
                 let input: CalendarEventRequest =
                     crate::json::decode(request.as_bytes()).map_err(invalid)?;
                 calendar_id(&input.calendar_id)?;
@@ -310,10 +331,12 @@ impl Plan {
                     calendar::event_id(&input.event_id),
                     "google_workspace_request_invalid"
                 );
+                let (calendar, event) = (input.calendar_id, input.event_id);
                 (
-                    Read::CalendarEvent {
-                        calendar: input.calendar_id,
-                        event: input.event_id,
+                    if action == Action::GoogleWorkspaceCalendarEvent {
+                        Read::CalendarEvent { calendar, event }
+                    } else {
+                        Read::EventConferences { calendar, event }
                     },
                     input.handle,
                 )
@@ -325,6 +348,7 @@ impl Plan {
                 source,
                 service_account: service_account.clone(),
                 calendar_reader: calendar_reader.clone(),
+                email_domain: email_domain.clone(),
                 grantee_domains: grantee_domains.clone(),
                 read,
             },
@@ -340,19 +364,21 @@ impl Plan {
         self.source
     }
 
-    /// Directory reads run as the service account itself; Calendar reads by
-    /// domain-wide delegation as the grant's Calendar reader.
+    /// Directory reads run as the service account itself; Calendar and Meet
+    /// reads by domain-wide delegation.
     fn delegated(&self) -> bool {
-        matches!(
-            self.read,
-            Read::Calendar { .. } | Read::CalendarEvents { .. } | Read::CalendarEvent { .. }
-        )
+        !matches!(self.read, Read::Group { .. } | Read::GroupMember { .. })
     }
 
     /// Authentication exchanges: metadata and IAM, plus the token exchange
-    /// when delegated.
+    /// when delegated, once for the Calendar reader and, for an event's
+    /// conferences, again for its owner.
     fn authentication_calls(&self) -> u64 {
-        if self.delegated() { 3 } else { 2 }
+        match self.read {
+            Read::Group { .. } | Read::GroupMember { .. } => 2,
+            Read::EventConferences { .. } => 6,
+            _ => 3,
+        }
     }
 
     /// Calls to the API itself: one per Directory question. Every Calendar
@@ -365,6 +391,15 @@ impl Plan {
             Read::GroupMember { .. } => 2,
             Read::Calendar { .. } => 2 + ACL_PAGE_CEILING,
             Read::CalendarEvents { .. } | Read::CalendarEvent { .. } => 2,
+            // The reader's rule and the event, then every page of records
+            // and, for each record the ceiling admits, every artifact page of
+            // each kind.
+            Read::EventConferences { .. } => {
+                2 + meet::RECORD_PAGE_CEILING
+                    + meet::MAX_RECORDS as u64
+                        * meet::Collection::ALL.len() as u64
+                        * meet::ARTIFACT_PAGE_CEILING
+            }
         }
     }
 
@@ -398,6 +433,7 @@ impl Plan {
 pub enum Service {
     Directory,
     Calendar,
+    Meet,
 }
 
 /// An API request as the wire sends it: a fixed service, path segments built
@@ -448,6 +484,10 @@ impl ApiRequest {
             segments,
             query,
         )
+    }
+
+    fn meet(endpoint: &'static str, segments: &[&str], query: &[(&'static str, &str)]) -> Self {
+        Self::new(Service::Meet, endpoint, &["v2"], segments, query)
     }
 
     fn calendar(endpoint: &'static str, segments: &[&str], query: &[(&'static str, &str)]) -> Self {
@@ -501,6 +541,7 @@ pub enum Phase {
     Token,
     Directory,
     Calendar,
+    Meet,
 }
 
 /// The most recent exchange, kept for correlation. No body or header.
@@ -594,20 +635,31 @@ fn access_token(
     scopes: &[&str],
     now: i64,
 ) -> Result<AccessToken, Failure> {
+    let identity = if plan.delegated() {
+        google_auth::Identity::Delegated(&plan.calendar_reader)
+    } else {
+        google_auth::Identity::ServiceAccount
+    };
+    token_for(plan, port, meter, identity, scopes, now).map_err(Failure::from)
+}
+
+fn token_for(
+    plan: &Plan,
+    port: &mut dyn GooglePort,
+    meter: &mut Meter,
+    identity: google_auth::Identity<'_>,
+    scopes: &[&str],
+    now: i64,
+) -> Result<AccessToken, google_auth::Failure> {
     google_auth::acquire(
         &mut MeteredWire { port, meter },
         &google_auth::TokenRequest {
             service_account: &plan.service_account,
-            identity: if plan.delegated() {
-                google_auth::Identity::Delegated(&plan.calendar_reader)
-            } else {
-                google_auth::Identity::ServiceAccount
-            },
+            identity,
             scopes,
         },
         now,
     )
-    .map_err(Failure::from)
 }
 
 fn send(
@@ -621,6 +673,7 @@ fn send(
         match request.service {
             Service::Directory => Phase::Directory,
             Service::Calendar => Phase::Calendar,
+            Service::Meet => Phase::Meet,
         },
         request.request_bytes(),
     );
@@ -848,24 +901,179 @@ fn run(
                 &[CALENDAR_READ_SCOPE, CALENDAR_ACL_READ_SCOPE],
                 now,
             )?;
-            match reader_access(plan, port, meter, &token, calendar)? {
-                Access::Shared => {}
-                Access::NotShared => return Ok(encode(&EventOutcome::NotShared)),
-                Access::NotFound => return Ok(encode(&EventOutcome::NotFound)),
-            }
-            let request = ApiRequest::calendar(
-                "calendar_event",
-                &["calendars", calendar, "events", event],
-                &[("fields", EVENT_FIELDS)],
-            );
-            let reply = send(port, meter, &request, &token, MAX_CALENDAR_RESPONSE_BYTES)?;
-            if matches!(reply.status, 404 | 410) {
-                return Ok(encode(&EventOutcome::NotFound));
-            }
-            accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
-            Ok(encode(&calendar::parse_event(&reply.body, event)?))
+            Ok(encode(&event_outcome(
+                plan, port, meter, &token, calendar, event,
+            )?))
+        }
+        Read::EventConferences { calendar, event } => Ok(encode(&event_conferences(
+            plan, port, meter, calendar, event, now,
+        )?)),
+    }
+}
+
+/// One event read as the Calendar reader, inside the reader's bound.
+fn event_outcome(
+    plan: &Plan,
+    port: &mut dyn GooglePort,
+    meter: &mut Meter,
+    token: &AccessToken,
+    calendar: &str,
+    event: &str,
+) -> Result<EventOutcome, Failure> {
+    match reader_access(plan, port, meter, token, calendar)? {
+        Access::Shared => {}
+        Access::NotShared => return Ok(EventOutcome::NotShared),
+        Access::NotFound => return Ok(EventOutcome::NotFound),
+    }
+    let request = ApiRequest::calendar(
+        "calendar_event",
+        &["calendars", calendar, "events", event],
+        &[("fields", EVENT_FIELDS)],
+    );
+    let reply = send(port, meter, &request, token, MAX_CALENDAR_RESPONSE_BYTES)?;
+    if matches!(reply.status, 404 | 410) {
+        return Ok(EventOutcome::NotFound);
+    }
+    accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
+    calendar::parse_event(&reply.body, event)
+}
+
+/// An event's conferences. The event is read as the Calendar reader, inside
+/// the reader's bound; its owner is derived from it, and only that owner is
+/// ever impersonated, with Meet's read scope alone.
+fn event_conferences(
+    plan: &Plan,
+    port: &mut dyn GooglePort,
+    meter: &mut Meter,
+    calendar: &str,
+    event: &str,
+    now: i64,
+) -> Result<EventConferencesOutcome, Failure> {
+    use calendar::EventStatus;
+    let token = access_token(
+        plan,
+        port,
+        meter,
+        &[CALENDAR_READ_SCOPE, CALENDAR_ACL_READ_SCOPE],
+        now,
+    )?;
+    let event = match event_outcome(plan, port, meter, &token, calendar, event)? {
+        EventOutcome::Found(event) => event,
+        EventOutcome::AllDay => return Ok(EventConferencesOutcome::AllDay),
+        EventOutcome::NotShared => return Ok(EventConferencesOutcome::NotShared),
+        EventOutcome::NotFound => return Ok(EventConferencesOutcome::NotFound),
+    };
+    drop(token);
+    // A cancelled event that still has its times is read like any other: the
+    // meeting may have happened, and whether to act on it is the
+    // application's policy. One with no times has no window to search.
+    let times = match &event.status {
+        EventStatus::Confirmed(times)
+        | EventStatus::Tentative(times)
+        | EventStatus::Cancelled(times) => times,
+        EventStatus::CancelledUntimed => return Ok(EventConferencesOutcome::NotFound),
+    };
+    let crate::carta::OptionalText::Some(code) = &event.meeting_code else {
+        return Ok(EventConferencesOutcome::NoMeeting);
+    };
+    let Some(owner) = meet::owner(&event, &plan.email_domain) else {
+        return Ok(EventConferencesOutcome::NoOwner);
+    };
+    let window = meet::record_window(times).ok_or(Failure::ResponseInvalid)?;
+    let filter = meet::record_filter(code, window).ok_or(Failure::ResponseInvalid)?;
+    let token = token_for(
+        plan,
+        port,
+        meter,
+        google_auth::Identity::Delegated(&owner),
+        &[meet::MEET_READ_SCOPE],
+        now,
+    )
+    .map_err(|failure| match failure {
+        google_auth::Failure::SubjectRefused => Failure::OwnerRefused,
+        failure => Failure::from(failure),
+    })?;
+    let page_size = meet::RECORD_PAGE_SIZE.to_string();
+    let mut records = Vec::new();
+    let mut continuation: Option<String> = None;
+    let mut complete = false;
+    for _ in 0..meet::RECORD_PAGE_CEILING {
+        let mut query = vec![
+            ("pageSize", page_size.as_str()),
+            ("filter", filter.as_str()),
+        ];
+        if let Some(page_token) = &continuation {
+            query.push(("pageToken", page_token.as_str()));
+        }
+        query.push(("fields", meet::RECORDS_FIELDS));
+        let request = ApiRequest::meet("meet_conference_records", &["conferenceRecords"], &query);
+        let reply = send(port, meter, &request, &token, MAX_CALENDAR_RESPONSE_BYTES)?;
+        accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
+        let (page, next) = meet::parse_records_page(&reply.body, window)?;
+        records.extend(page);
+        if records.len() > meet::MAX_RECORDS {
+            return Err(Failure::ConferenceRecordBudget);
+        }
+        continuation = next;
+        if continuation.is_none() {
+            complete = true;
+            break;
         }
     }
+    if !complete {
+        return Err(Failure::ConferenceRecordBudget);
+    }
+    // One meeting code names one space. Records in two mean the code was
+    // reused or reassigned inside the window: not this event's to choose.
+    let spaces: std::collections::BTreeSet<&str> =
+        records.iter().map(|record| record.space.as_str()).collect();
+    if spaces.len() > 1 {
+        return Ok(EventConferencesOutcome::Conflict);
+    }
+    let artifact_size = meet::ARTIFACT_PAGE_SIZE.to_string();
+    for record in &mut records {
+        let id = meet::record_id(&record.name)
+            .ok_or(Failure::ResponseInvalid)?
+            .to_owned();
+        for collection in meet::Collection::ALL {
+            let mut artifacts = Vec::new();
+            let mut continuation: Option<String> = None;
+            let mut complete = false;
+            for _ in 0..meet::ARTIFACT_PAGE_CEILING {
+                let mut query = vec![("pageSize", artifact_size.as_str())];
+                if let Some(page_token) = &continuation {
+                    query.push(("pageToken", page_token.as_str()));
+                }
+                query.push(("fields", collection.fields()));
+                let request = ApiRequest::meet(
+                    collection.endpoint(),
+                    &["conferenceRecords", &id, collection.segment()],
+                    &query,
+                );
+                let reply = send(port, meter, &request, &token, MAX_CALENDAR_RESPONSE_BYTES)?;
+                accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
+                let (page, next) = meet::parse_artifact_page(&reply.body, &id, collection)?;
+                artifacts.extend(page);
+                if artifacts.len() > meet::MAX_ARTIFACTS {
+                    return Err(Failure::ArtifactBudget);
+                }
+                continuation = next;
+                if continuation.is_none() {
+                    complete = true;
+                    break;
+                }
+            }
+            if !complete {
+                return Err(Failure::ArtifactBudget);
+            }
+            meet::attach(record, collection, artifacts);
+        }
+    }
+    meet::found(meet::EventConferences {
+        owner,
+        meeting_code: code.clone(),
+        records,
+    })
 }
 
 /// Whether a calendar is in play for this grant.

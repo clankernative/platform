@@ -519,7 +519,8 @@ pub(crate) fn authorized(
         | "google_workspace.group_member.v1"
         | "google_workspace.calendar.v1"
         | "google_workspace.calendar_events.v1"
-        | "google_workspace.calendar_event.v1" => {
+        | "google_workspace.calendar_event.v1"
+        | "google_workspace.event_conferences.v1" => {
             ensure!(
                 resource.grant.provider == Provider::GoogleWorkspace,
                 crate::error::Failure::ResourceForbidden
@@ -975,6 +976,7 @@ impl ProviderResult {
                     Phase::Token => ExchangePhase::GoogleWorkspaceToken,
                     Phase::Directory => ExchangePhase::GoogleWorkspaceDirectory,
                     Phase::Calendar => ExchangePhase::GoogleWorkspaceCalendar,
+                    Phase::Meet => ExchangePhase::GoogleWorkspaceMeet,
                 },
                 http_status: last.http_status,
                 request_id: None,

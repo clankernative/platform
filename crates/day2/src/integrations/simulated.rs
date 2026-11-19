@@ -225,6 +225,66 @@ pub struct GoogleWorkspaceWorld {
     /// domain's or the default) with `reader` or more; otherwise not found.
     #[serde(default)]
     pub calendars: BTreeMap<String, GoogleCalendar>,
+    /// People who exist but cannot be delegated to, such as suspended
+    /// accounts: the token endpoint refuses them as it refuses a stranger.
+    #[serde(default)]
+    pub suspended: BTreeSet<String>,
+    /// Meet spaces, by ID: the meeting code that names each, and its owner.
+    #[serde(default)]
+    pub spaces: BTreeMap<String, GoogleSpace>,
+    /// Conference records, by ID. A rejoin is another record in the same
+    /// space. Only the space's owner can list them.
+    #[serde(default)]
+    pub conference_records: BTreeMap<String, GoogleConferenceRecord>,
+    /// Drive files Meet generated, by ID. Step 4 adds their permissions.
+    #[serde(default)]
+    pub drive_files: BTreeMap<String, GoogleDriveFile>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleSpace {
+    pub meeting_code: String,
+    /// The person who owns the space and its conference records.
+    pub owner: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleConferenceRecord {
+    /// The space's ID.
+    pub space: String,
+    /// Meet timestamps: UTC with `Z`, optionally fractional.
+    pub start_time: String,
+    /// Unset while the conference is ongoing.
+    #[serde(default)]
+    pub end_time: Option<String>,
+    #[serde(default)]
+    pub recordings: Vec<GoogleArtifact>,
+    #[serde(default)]
+    pub smart_notes: Vec<GoogleArtifact>,
+    #[serde(default)]
+    pub transcripts: Vec<GoogleArtifact>,
+}
+
+/// A recording, smart note or transcript. It advances `STARTED` → `ENDED` →
+/// `FILE_GENERATED`, and generating it saves its Drive file or Docs document.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleArtifact {
+    pub id: String,
+    pub state: String,
+    /// The Drive file or Docs document ID, once Meet has saved one.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleDriveFile {
+    pub name: String,
+    pub mime_type: String,
+    pub owner: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1336,6 +1396,7 @@ const GOOGLE_DEVELOPMENT_DOMAIN: &str = "synthetic.example";
 pub fn google_workspace_development_target() -> day2_capabilities::resources::ResourceTarget {
     day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
         calendar_reader: GOOGLE_DEVELOPMENT_CALENDAR_READER.into(),
+        email_domain: GOOGLE_DEVELOPMENT_DOMAIN.into(),
         grantee_domains: vec![GOOGLE_DEVELOPMENT_DOMAIN.into()],
     }
 }
@@ -1437,7 +1498,148 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
                 ],
             },
         )]),
+        suspended: BTreeSet::new(),
+        // The stand-up's space is ada's: its first call was recorded,
+        // transcribed and noted, and a rejoin is still being recorded. The
+        // review's space is grace's, who created it on the group calendar.
+        spaces: BTreeMap::from([
+            (
+                "spaceStandup01".into(),
+                GoogleSpace {
+                    meeting_code: "abc-defg-hij".into(),
+                    owner: address("ada"),
+                },
+            ),
+            (
+                "spaceReview001".into(),
+                GoogleSpace {
+                    meeting_code: "klm-nopq-rst".into(),
+                    owner: address("grace"),
+                },
+            ),
+        ]),
+        conference_records: BTreeMap::from([
+            (
+                "conf-standup-1".into(),
+                GoogleConferenceRecord {
+                    space: "spaceStandup01".into(),
+                    start_time: "2026-01-05T17:01:02.345Z".into(),
+                    end_time: Some("2026-01-05T17:20:00Z".into()),
+                    recordings: vec![artifact(
+                        "rec-1",
+                        "FILE_GENERATED",
+                        Some("1recStandupFile01"),
+                    )],
+                    smart_notes: vec![artifact("note-1", "ENDED", None)],
+                    transcripts: vec![artifact(
+                        "tr-1",
+                        "FILE_GENERATED",
+                        Some("1docStandupTranscript"),
+                    )],
+                },
+            ),
+            (
+                "conf-standup-2".into(),
+                GoogleConferenceRecord {
+                    space: "spaceStandup01".into(),
+                    start_time: "2026-01-05T17:22:00Z".into(),
+                    end_time: None,
+                    recordings: vec![artifact("rec-2", "STARTED", None)],
+                    ..GoogleConferenceRecord::default()
+                },
+            ),
+            (
+                "conf-review-1".into(),
+                GoogleConferenceRecord {
+                    space: "spaceReview001".into(),
+                    start_time: "2026-01-06T15:00:30.123456Z".into(),
+                    end_time: Some("2026-01-06T15:58:00Z".into()),
+                    ..GoogleConferenceRecord::default()
+                },
+            ),
+        ]),
+        drive_files: BTreeMap::from([
+            (
+                "1recStandupFile01".into(),
+                GoogleDriveFile {
+                    name: "Standup recording".into(),
+                    mime_type: "video/mp4".into(),
+                    owner: address("ada"),
+                },
+            ),
+            (
+                "1docStandupTranscript".into(),
+                GoogleDriveFile {
+                    name: "Standup transcript".into(),
+                    mime_type: "application/vnd.google-apps.document".into(),
+                    owner: address("ada"),
+                },
+            ),
+        ]),
     }
+}
+
+fn artifact(id: &str, state: &str, file: Option<&str>) -> GoogleArtifact {
+    GoogleArtifact {
+        id: id.into(),
+        state: state.into(),
+        file: file.map(str::to_owned),
+    }
+}
+
+/// Advance one Meet artifact, named as Meet names it: `STARTED` → `ENDED` →
+/// `FILE_GENERATED`. Generating it saves its Drive file or Docs document,
+/// owned by the space's owner, and records the ID on the artifact, as Meet
+/// does. A generated artifact does not advance further.
+pub fn google_meet_advance(world: &mut GoogleWorkspaceWorld, name: &str) -> Result<()> {
+    let parts: Vec<&str> = name.split('/').collect();
+    let ["conferenceRecords", record_id, collection, artifact_id] = parts.as_slice() else {
+        anyhow::bail!("simulated_meet_artifact_unknown");
+    };
+    let record = world
+        .conference_records
+        .get_mut(*record_id)
+        .context("simulated_meet_artifact_unknown")?;
+    let owner = world
+        .spaces
+        .get(&record.space)
+        .context("simulated_meet_artifact_unknown")?
+        .owner
+        .clone();
+    let (artifacts, mime_type) = match *collection {
+        "recordings" => (&mut record.recordings, "video/mp4"),
+        "smartNotes" => (
+            &mut record.smart_notes,
+            "application/vnd.google-apps.document",
+        ),
+        "transcripts" => (
+            &mut record.transcripts,
+            "application/vnd.google-apps.document",
+        ),
+        _ => anyhow::bail!("simulated_meet_artifact_unknown"),
+    };
+    let artifact = artifacts
+        .iter_mut()
+        .find(|artifact| artifact.id == *artifact_id)
+        .context("simulated_meet_artifact_unknown")?;
+    match artifact.state.as_str() {
+        "STARTED" => artifact.state = "ENDED".into(),
+        "ENDED" => {
+            let file = format!("1{}", &crate::digest(name.as_bytes())[7..40]);
+            artifact.state = "FILE_GENERATED".into();
+            artifact.file = Some(file.clone());
+            world.drive_files.insert(
+                file,
+                GoogleDriveFile {
+                    name: format!("{collection} {artifact_id}"),
+                    mime_type: mime_type.into(),
+                    owner,
+                },
+            );
+        }
+        _ => anyhow::bail!("simulated_meet_artifact_final"),
+    }
+    Ok(())
 }
 
 /// Validate that the Google Workspace world is seeded for this scope, without a
@@ -1468,8 +1670,12 @@ pub const GOOGLE_ACL_ENDPOINT: &str = "google_workspace.calendar.acl.list";
 pub const GOOGLE_ACL_RULE_ENDPOINT: &str = "google_workspace.calendar.acl.get";
 pub const GOOGLE_EVENTS_ENDPOINT: &str = "google_workspace.calendar.events.list";
 pub const GOOGLE_EVENT_ENDPOINT: &str = "google_workspace.calendar.events.get";
+pub const GOOGLE_MEET_RECORDS_ENDPOINT: &str = "google_workspace.meet.conference_records.list";
+pub const GOOGLE_MEET_RECORDINGS_ENDPOINT: &str = "google_workspace.meet.recordings.list";
+pub const GOOGLE_MEET_SMART_NOTES_ENDPOINT: &str = "google_workspace.meet.smart_notes.list";
+pub const GOOGLE_MEET_TRANSCRIPTS_ENDPOINT: &str = "google_workspace.meet.transcripts.list";
 /// Every endpoint a scenario can schedule a fault against.
-pub const GOOGLE_ENDPOINTS: [&str; 11] = [
+pub const GOOGLE_ENDPOINTS: [&str; 15] = [
     GOOGLE_METADATA_ENDPOINT,
     GOOGLE_IAM_TOKEN_ENDPOINT,
     GOOGLE_IAM_SIGN_ENDPOINT,
@@ -1481,6 +1687,10 @@ pub const GOOGLE_ENDPOINTS: [&str; 11] = [
     GOOGLE_ACL_RULE_ENDPOINT,
     GOOGLE_EVENTS_ENDPOINT,
     GOOGLE_EVENT_ENDPOINT,
+    GOOGLE_MEET_RECORDS_ENDPOINT,
+    GOOGLE_MEET_RECORDINGS_ENDPOINT,
+    GOOGLE_MEET_SMART_NOTES_ENDPOINT,
+    GOOGLE_MEET_TRANSCRIPTS_ENDPOINT,
 ];
 /// The key the simulated IAM signs with. Its "signature" is derived from the
 /// signed bytes, so the token endpoint can tell its own assertions from others.
@@ -1528,6 +1738,23 @@ pub(crate) fn google_workspace_serve(
             GoogleRequest::Api { request, .. } => google_api_endpoint(request),
         };
         state.calls.push(match &request {
+            // A signJwt request is logged with the subject it asks to sign
+            // for, so a campaign can see exactly who was impersonated.
+            GoogleRequest::Auth(Exchange::Iam {
+                service_account,
+                method: IamMethod::SignJwt,
+                body,
+                ..
+            }) => {
+                let subject = serde_json::from_slice::<Value>(body)
+                    .ok()
+                    .and_then(|body| {
+                        let claims: Value = serde_json::from_str(body["payload"].as_str()?).ok()?;
+                        claims["sub"].as_str().map(str::to_owned)
+                    })
+                    .unwrap_or_default();
+                format!("{endpoint}:{service_account}:{subject}")
+            }
             GoogleRequest::Auth(Exchange::Iam {
                 service_account, ..
             }) => {
@@ -1541,7 +1768,11 @@ pub(crate) fn google_workspace_serve(
             GoogleRequest::Auth(_) => endpoint.to_owned(),
         });
         if let Some(fault) = take_fault_named(state, endpoint) {
-            return Ok(google_fault(fault, max));
+            return Ok(google_fault(
+                fault,
+                max,
+                endpoint.starts_with("google_workspace.meet."),
+            ));
         }
         Ok(Ok(google_reply(&state.world, &request)?))
     });
@@ -1626,19 +1857,37 @@ fn google_query_is(
 fn google_fault(
     fault: SimulatedFault,
     max: usize,
+    meet: bool,
 ) -> std::result::Result<crate::google_auth::Reply, crate::google_auth::Unreached> {
     use crate::google_auth::{Reply, Unreached};
+    // Meet answers in the newer envelope: a status and an ErrorInfo reason.
+    let failed = |status: u16, reason: &str, message: &str| {
+        if meet {
+            let (name, reason) = match status {
+                400 => ("INVALID_ARGUMENT", None),
+                403 if reason == "rateLimitExceeded" => {
+                    ("PERMISSION_DENIED", Some("RATE_LIMIT_EXCEEDED"))
+                }
+                403 => ("PERMISSION_DENIED", None),
+                429 => ("RESOURCE_EXHAUSTED", Some("RATE_LIMIT_EXCEEDED")),
+                _ => ("INTERNAL", None),
+            };
+            google_rpc_error(status, name, message, reason)
+        } else {
+            google_error(status, reason, message)
+        }
+    };
     Ok(match fault {
         SimulatedFault::RateLimited => Reply {
             retry_after_seconds: Some(30),
-            ..google_error(429, "rateLimitExceeded", "Rate Limit Exceeded")
+            ..failed(429, "rateLimitExceeded", "Rate Limit Exceeded")
         },
         SimulatedFault::RateLimitForbidden => {
-            google_error(403, "rateLimitExceeded", "Rate Limit Exceeded")
+            failed(403, "rateLimitExceeded", "Rate Limit Exceeded")
         }
-        SimulatedFault::Denied => google_error(403, "forbidden", "Forbidden"),
-        SimulatedFault::BadRequest => google_error(400, "badRequest", "Bad Request"),
-        SimulatedFault::ServerError => google_error(500, "backendError", "Backend Error"),
+        SimulatedFault::Denied => failed(403, "forbidden", "Forbidden"),
+        SimulatedFault::BadRequest => failed(400, "badRequest", "Bad Request"),
+        SimulatedFault::ServerError => failed(500, "backendError", "Backend Error"),
         SimulatedFault::NotJson => Reply {
             status: 200,
             metadata_flavor: false,
@@ -1863,7 +2112,7 @@ fn google_reply(
             }
             let Some(subject) = claims["sub"]
                 .as_str()
-                .filter(|sub| world.users.contains(*sub))
+                .filter(|sub| world.users.contains(*sub) && !world.suspended.contains(*sub))
             else {
                 return Ok(reply(
                     400,
@@ -1892,6 +2141,9 @@ fn google_reply(
             };
             if request.service == crate::google_workspace::Service::Calendar {
                 return google_calendar_reply(world, request, &issued);
+            }
+            if request.service == crate::google_workspace::Service::Meet {
+                return google_meet_reply(world, request, &issued);
             }
             let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
             let (required, group, member) = match segments.as_slice() {
@@ -1985,6 +2237,229 @@ fn google_api_endpoint(request: &crate::google_workspace::ApiRequest) -> &'stati
         (Service::Calendar, [.., "events"]) => GOOGLE_EVENTS_ENDPOINT,
         (Service::Calendar, [.., "events", _]) => GOOGLE_EVENT_ENDPOINT,
         (Service::Calendar, _) => GOOGLE_CALENDAR_ENDPOINT,
+        (Service::Meet, [.., "recordings"]) => GOOGLE_MEET_RECORDINGS_ENDPOINT,
+        (Service::Meet, [.., "smartNotes"]) => GOOGLE_MEET_SMART_NOTES_ENDPOINT,
+        (Service::Meet, [.., "transcripts"]) => GOOGLE_MEET_TRANSCRIPTS_ENDPOINT,
+        (Service::Meet, _) => GOOGLE_MEET_RECORDS_ENDPOINT,
+    }
+}
+
+/// An error in the envelope Meet and other newer Google APIs send: a status
+/// name and, for a reason, an `ErrorInfo` detail.
+fn google_rpc_error(
+    code: u16,
+    status: &str,
+    message: &str,
+    reason: Option<&str>,
+) -> crate::google_auth::Reply {
+    let mut error = json!({"code":code,"message":message,"status":status});
+    if let Some(reason) = reason {
+        error["details"] = json!([{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+            "reason":reason,"domain":"googleapis.com"}]);
+    }
+    google_json(code, json!({ "error": error }))
+}
+
+/// The reviewed conference-record filter, exactly: a Meet code and a
+/// start-time window in whole UTC seconds. Anything else is not parsed.
+fn google_meet_filter(filter: &str) -> Option<(&str, i64, i64)> {
+    use crate::google_workspace_calendar::{meeting_code, rfc3339_seconds};
+    let rest = filter.strip_prefix("space.meeting_code = \"")?;
+    let (code, rest) = rest.split_once('"')?;
+    let rest = rest.strip_prefix(" AND start_time >= \"")?;
+    let (from, rest) = rest.split_once('"')?;
+    let to = rest
+        .strip_prefix(" AND start_time <= \"")?
+        .strip_suffix('"')?;
+    let instant = |value: &str| {
+        (value.len() == 20 && value.ends_with('Z'))
+            .then(|| rfc3339_seconds(value))
+            .flatten()
+    };
+    meeting_code(code).then_some(())?;
+    Some((code, instant(from)?, instant(to)?))
+}
+
+/// Serve one Meet route as the token's delegated subject. Conference records
+/// and their artifacts are visible only to the space's owner: another person
+/// lists no records and is refused a record's artifacts. Every route admits
+/// only its reviewed query.
+fn google_meet_reply(
+    world: &GoogleWorkspaceWorld,
+    request: &crate::google_workspace::ApiRequest,
+    grant: &GoogleGrant,
+) -> Result<crate::google_auth::Reply> {
+    use crate::google_workspace_meet::{
+        ARTIFACT_PAGE_SIZE, Collection, MEET_READ_SCOPE, RECORD_PAGE_SIZE, RECORDS_FIELDS,
+        meet_timestamp,
+    };
+    let reply = google_json;
+    let error = google_rpc_error;
+    let query = |name: &str| google_query(request, name);
+    let compact = ("prettyPrint", "false");
+    let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
+    let record_size = RECORD_PAGE_SIZE.to_string();
+    let artifact_size = ARTIFACT_PAGE_SIZE.to_string();
+    let (record, collection) = match segments.as_slice() {
+        ["v2", "conferenceRecords"] => (None, None),
+        ["v2", "conferenceRecords", record, segment] => {
+            let Some(collection) = Collection::ALL
+                .into_iter()
+                .find(|collection| collection.segment() == *segment)
+            else {
+                return Ok(error(404, "NOT_FOUND", "Not found", None));
+            };
+            (Some(*record), Some(collection))
+        }
+        _ => return Ok(error(404, "NOT_FOUND", "Not found", None)),
+    };
+    let admitted = match collection {
+        None => {
+            google_query_is(
+                request,
+                &[
+                    ("pageSize", record_size.as_str()),
+                    ("fields", RECORDS_FIELDS),
+                    compact,
+                ],
+                &["filter", "pageToken"],
+            ) && query("filter").and_then(google_meet_filter).is_some()
+        }
+        Some(collection) => google_query_is(
+            request,
+            &[
+                ("pageSize", artifact_size.as_str()),
+                ("fields", collection.fields()),
+                compact,
+            ],
+            &["pageToken"],
+        ),
+    };
+    if !admitted {
+        return Ok(error(400, "INVALID_ARGUMENT", "Unreviewed query", None));
+    }
+    if !grant.scopes.contains(MEET_READ_SCOPE) {
+        return Ok(error(
+            403,
+            "PERMISSION_DENIED",
+            "Request had insufficient authentication scopes.",
+            Some("ACCESS_TOKEN_SCOPE_INSUFFICIENT"),
+        ));
+    }
+    let Some(subject) = grant.subject.as_deref() else {
+        return Ok(error(
+            403,
+            "PERMISSION_DENIED",
+            "The caller does not have permission",
+            None,
+        ));
+    };
+    let page = |binding: String, items: Vec<Value>, key: &str, size: usize| -> Result<_> {
+        let offset = match query("pageToken") {
+            None => 0,
+            Some(token) => match google_page_offset(world, &binding, token) {
+                Some(offset) => offset,
+                None => {
+                    return Ok(error(400, "INVALID_ARGUMENT", "Invalid page token", None));
+                }
+            },
+        };
+        let mut body = json!({});
+        let slice: Vec<Value> = items.iter().skip(offset).take(size).cloned().collect();
+        if !slice.is_empty() {
+            body[key] = json!(slice);
+        }
+        if offset + size < items.len() {
+            body["nextPageToken"] = json!(google_page_token(world, &binding, offset + size)?);
+        }
+        Ok(reply(200, body))
+    };
+    match (record, collection) {
+        (Some(record), Some(collection)) => {
+            let Some(found) = world.conference_records.get(record) else {
+                return Ok(error(404, "NOT_FOUND", "Conference record not found", None));
+            };
+            if world
+                .spaces
+                .get(&found.space)
+                .is_none_or(|space| space.owner != subject)
+            {
+                return Ok(error(
+                    403,
+                    "PERMISSION_DENIED",
+                    "The caller does not have permission",
+                    None,
+                ));
+            }
+            let artifacts = match collection {
+                Collection::Recordings => &found.recordings,
+                Collection::SmartNotes => &found.smart_notes,
+                Collection::Transcripts => &found.transcripts,
+            };
+            let items = artifacts
+                .iter()
+                .map(|artifact| {
+                    let mut item = json!({
+                        "name": format!("conferenceRecords/{record}/{}/{}", collection.segment(), artifact.id),
+                        "state": artifact.state,
+                    });
+                    if let Some(file) = &artifact.file {
+                        if collection == Collection::Recordings {
+                            item["driveDestination"] = json!({ "file": file });
+                        } else {
+                            item["docsDestination"] = json!({ "document": file });
+                        }
+                    }
+                    item
+                })
+                .collect();
+            page(
+                format!("{}:{record}", collection.segment()),
+                items,
+                collection.segment(),
+                ARTIFACT_PAGE_SIZE as usize,
+            )
+        }
+        _ => {
+            let filter = query("filter").unwrap_or_default();
+            let Some((code, from, to)) = google_meet_filter(filter) else {
+                return Ok(error(400, "INVALID_ARGUMENT", "Invalid filter", None));
+            };
+            let mut selected: Vec<(i64, &String, &GoogleConferenceRecord)> = world
+                .conference_records
+                .iter()
+                .filter_map(|(id, record)| {
+                    let space = world.spaces.get(&record.space)?;
+                    let start = meet_timestamp(&record.start_time)?;
+                    (space.meeting_code == code
+                        && space.owner == subject
+                        && (from..=to).contains(&start))
+                    .then_some((start, id, record))
+                })
+                .collect();
+            // Meet lists records latest start first.
+            selected.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(right.1)));
+            let items = selected
+                .iter()
+                .map(|(_, id, record)| {
+                    let mut item = json!({
+                        "name": format!("conferenceRecords/{id}"),
+                        "space": format!("spaces/{}", record.space),
+                        "startTime": record.start_time,
+                    });
+                    if let Some(end) = &record.end_time {
+                        item["endTime"] = json!(end);
+                    }
+                    item
+                })
+                .collect();
+            page(
+                format!("records:{subject}:{filter}"),
+                items,
+                "conferenceRecords",
+                RECORD_PAGE_SIZE as usize,
+            )
+        }
     }
 }
 

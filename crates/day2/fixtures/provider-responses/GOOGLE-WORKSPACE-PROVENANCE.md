@@ -56,5 +56,39 @@ adapter or its simulation.
   same item mask,
   https://developers.google.com/workspace/calendar/api/v3/reference/events/get
 
+- `google_workspace.meet.conference_records.list.json`: Meet
+  `conferenceRecords.list` with the adapter's
+  `conferenceRecords(name,space,startTime,endTime),nextPageToken` mask: a
+  rejoin still in progress (no `endTime`) and the first call, latest start
+  first as the reference orders them, both in one space. Timestamps follow
+  protobuf's JSON mapping (`Z`, 0, 3, 6 or 9 fractional digits). The
+  `ConferenceRecord` resource: "`name` … Format:
+  `conferenceRecords/{conferenceRecord}`", "`endTime` … Unset if the conference
+  is ongoing", "`space` … The space where the conference was held",
+  https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list
+  and https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords
+- `google_workspace.meet.recordings.list.json`: `recordings.list` with
+  `recordings(name,state,driveDestination(file)),nextPageToken`: a generated
+  recording with its Drive file and an ended one without. The reference names
+  the states `STARTED`, `ENDED` and `FILE_GENERATED` ("Recording file is
+  generated and ready to download") and describes `driveDestination.file` as
+  "The `fileId` for the underlying MP4 file"; it does not say the file is set
+  only once generated, so the adapter keeps it optional. The file ID is the
+  reference's own example,
+  https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.recordings
+- `google_workspace.meet.smart_notes.list.json` and
+  `google_workspace.meet.transcripts.list.json`: `smartNotes.list` and
+  `transcripts.list` with `{smartNotes|transcripts}(name,state,docsDestination(document)),nextPageToken`.
+  `DocsDestination.document` is "The document ID for the underlying Google
+  Docs transcript file",
+  https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.smartNotes/list,
+  https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts/list
+  and https://developers.google.com/workspace/meet/api/reference/rest/v2/DocsDestination
+- `google_workspace.meet.error.permission_denied.json` and
+  `google_workspace.meet.error.rate_limit.json`: the error envelope Google's
+  newer APIs send, a `status` name and, for a rate limit, an `ErrorInfo`
+  detail with its `reason`. The message and metadata are illustrative,
+  https://cloud.google.com/apis/design/errors
+
 These establish field names and types only. The live qualification recipe
 replaces them with redacted recordings.

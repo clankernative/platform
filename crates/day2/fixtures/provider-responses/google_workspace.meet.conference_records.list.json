@@ -1,0 +1,15 @@
+{
+  "conferenceRecords": [
+    {
+      "name": "conferenceRecords/rejoin-5678",
+      "startTime": "2026-01-05T17:22:01.123456Z",
+      "space": "spaces/jQCFfuBOdN5z"
+    },
+    {
+      "name": "conferenceRecords/first-1234",
+      "startTime": "2026-01-05T17:01:02.345Z",
+      "endTime": "2026-01-05T17:20:00Z",
+      "space": "spaces/jQCFfuBOdN5z"
+    }
+  ]
+}
