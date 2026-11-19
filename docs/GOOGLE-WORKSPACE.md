@@ -110,29 +110,49 @@ calendar at a time:
   `NotShared`.
 
 Meet runs as **the owner of a calendar event**, and Drive will too (step 4).
-The adapter derives the owner from the event it reads as `calendar_reader`:
+The adapter derives the owner from the event it reads as `calendar_reader`,
+and the owner is always the event's **creator**:
 
-- the organizer, if it is a person in `email_domain`;
-- otherwise, when the organizer is a group or resource calendar
-  (`@group.calendar.google.com`, `@resource.calendar.google.com`), the creator,
-  if that is a person in `email_domain`;
+- the creator, when the creator is a person in `email_domain` and is also the
+  organizer, exactly;
+- the creator, when the creator is a person in `email_domain` and the
+  organizer is a group or resource calendar (`@group.calendar.google.com`,
+  `@resource.calendar.google.com`);
 - otherwise there is no owner, the outcome is `NoOwner`, and nothing is
   impersonated.
 
-A person in `email_domain` is an address whose domain is exactly
-`email_domain`: not a subdomain, not another case. The owner is delegated to
-with `meetings.space.readonly` alone. No other subject is ever asked for: a
-test checks every `signJwt` the world served, and an event organized from
-outside the domain produces no token request for its organizer.
+The organizer alone is never trusted. Google's Events reference makes
+`organizer` read-only *except when importing an event*, and `conferenceData`
+is writable, so a writer on any calendar in play could `events.import` an
+event naming anyone in the domain as organizer, with that person's meeting
+code. `creator` is set by Google and cannot be written. Reading a group or
+resource calendar's event as its creator is safe for the same reason: Meet
+lists only the conferences that creator owns.
 
-So an application can only act as someone who organized a meeting on a calendar
+This fails closed. An assistant who creates an event on an executive's
+calendar is its creator but not its organizer, so the event has no owner and
+its conferences are not read.
+
+A person in `email_domain` is an exact Workspace address, the rule
+`calendar_reader` follows (lowercase letters, digits and `._+-`), whose domain
+is exactly `email_domain`: not a subdomain, not another case. The owner is
+delegated to with `meetings.space.readonly` alone. No other subject is ever
+asked for: a test checks every `signJwt` the world served, and neither an
+event organized from outside the domain nor one whose in-domain organizer did
+not create it produces a token request for its organizer.
+
+So an application can only act as someone who created a meeting on a calendar
 in play, and only for that meeting.
 
 When the token endpoint refuses the owner with OAuth's `invalid_grant`, as
 Google does for a suspended, deleted or unknown person, the action fails with
-`google_workspace_owner_refused`. It is a failure rather than an outcome
-because `invalid_grant` alone cannot say which of those it is, and only its
-standard code is read, never Google's description. A refused reader stays
+`google_workspace_owner_refused`. Google also answers `invalid_grant` for an
+assertion it will not accept, such as one outside its time window or with a
+bad signature; the owner's exchange follows the reader's, which has just
+succeeded with the same signer and clock, so the refusal is attributed to the
+owner. It is a failure rather than an outcome because `invalid_grant` alone
+cannot say which of those it is, and only its standard code is read, never
+Google's description. A refused reader stays
 `google_workspace_authentication_failed`: the reader is configuration.
 
 ## Actions
@@ -250,11 +270,16 @@ validated inputs.
   `{name, state, file_id?}` or `{name, state, document_id?}` with `state` one of
   `Started`, `Ended`, `FileGenerated`. The Meet reference does not say a file
   or document ID is set only once `FILE_GENERATED`, so it is optional at every
-  state. `STATE_UNSPECIFIED` is refused. A `files/` or `documents/` prefix on
-  an ID is stripped. Names are checked exactly: `conferenceRecords/{id}`,
+  state. `STATE_UNSPECIFIED` is refused. File and document IDs are bare, as
+  the reference gives them; a prefixed one (`files/…`, `documents/…`) is
+  `response_invalid`. Names are checked exactly: `conferenceRecords/{id}`,
   `spaces/{id}` and `conferenceRecords/{record}/{collection}/{id}` for exactly
   the record listed, with IDs of at most 128 letters, digits, `-` and `_`.
-  Timestamps are UTC with `Z` and 0, 3, 6 or 9 fractional digits.
+  Timestamps are UTC with `Z` and 0, 3, 6 or 9 fractional digits. A `404` on
+  an artifact list means the record was deleted after it was listed (Meet
+  deletes a record 30 days after it ends), and the action fails with
+  `google_workspace_conference_record_gone`: reading the event again lists its
+  records as they are now.
 - **share_artifact** — for one event, one artifact name and one group: the
   adapter re-reads the event, re-derives its owner, confirms through Meet that
   the artifact belongs to one of that event's conference records and has
@@ -308,14 +333,15 @@ simulation.
 An event's conferences are bounded the same way, and past a bound the action
 fails rather than truncates:
 
-- At most five conference records: two pages of five, so a short first page
-  can continue. A sixth record, or a continuation after the second page, is
-  `google_workspace_conference_record_budget`.
+- At most five conference records: two pages of five, so a short or empty
+  first page can continue. A sixth record, or a continuation after the second
+  page, is `google_workspace_conference_record_budget`.
 - At most five recordings, five smart notes and five transcripts per record:
   one page of five each. A sixth, or any continuation, is
   `google_workspace_artifact_budget`.
-- Every name and ID is at most 128 characters JSON does not escape, the owner
-  at most 254, and a timestamp at most 30.
+- Every ID is at most 128 characters JSON does not escape, so a record name
+  is at most 146 characters and an artifact name at most 287. The owner is at
+  most 254, and a timestamp at most 30.
 
 The largest outcome, five records each with five of every artifact at those
 bounds, encodes to 38,193 bytes, 39,377 journaled. That is under the 56 KiB
@@ -345,16 +371,19 @@ strings, receipts or correlation. Failure codes are stable and redacted
 
 Google reports rate and quota limits as `403` as well as `429`. A `403` is
 classified by its reasons: Calendar's and the Directory's `error.errors[].reason`,
-or Meet's `error.details[].reason` (an `ErrorInfo`) beside `error.status`.
+or, beside Meet's `error.status`, the `reason` of an `error.details[]` entry
+whose `@type` is `google.rpc.ErrorInfo`; no other detail's fields are read.
 
 - `rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded`,
-  `dailyLimitExceeded` or `RATE_LIMIT_EXCEEDED` is `rate_limited`;
+  `dailyLimitExceeded`, `RATE_LIMIT_EXCEEDED` or `RESOURCE_QUOTA_EXCEEDED` is
+  `rate_limited`;
 - any other reason, such as a usage limit or a disabled API, or a status with
   no reason (`PERMISSION_DENIED`), is `denied`;
 - a body with neither is `response_invalid`.
 
 The reason itself never leaves the classifier. Only `404`, and `410` on
-`events.get`, mean not found.
+`events.get`, mean not found; on a Meet artifact list a `404` is a record
+gone since it was listed.
 
 ## Simulation
 
@@ -406,7 +435,8 @@ Who can see a calendar is its ACL, resolved as Google resolves it:
 Who can see a conference record is its space's owner. Another person lists no
 records for the code and is refused (`403 PERMISSION_DENIED`) a record's
 artifacts. Whether co-hosts and participants see them too is a live
-qualification item.
+qualification item. A scenario can make the records list serve short or empty
+pages that still continue, as AIP-158 allows (`meet_record_pages`).
 
 Events cover:
 
@@ -447,6 +477,7 @@ Scenarios schedule per-endpoint faults on every endpoint:
 
 - `400`;
 - `403` refused, and `403 rateLimitExceeded`;
+- `404` for something just listed, such as an expired conference record;
 - `429` with `Retry-After`;
 - `5xx`;
 - a lost connection;
@@ -495,26 +526,36 @@ What the simulation assumes and only Google can settle:
       serve it today. Decide whether to model it and how to report it.
 - [ ] Page tokens: whether `events.list` binds a token to the query that issued
       it, and short or empty pages that still carry a `nextPageToken`, on
-      `events.list` and `acl.list`. A short ACL page still spends one of the
-      four, so fewer than 400 rules may be covered.
+      `events.list`, `acl.list` and `conferenceRecords.list` under a filter.
+      A short ACL page still spends one of the four, so fewer than 400 rules
+      may be covered; two empty record pages reach the records ceiling.
 - [ ] `conferenceSolution.key.type` values for Meet, add-on and third-party
       conferences, and which of them carry a `hangoutLink`.
 - [ ] Conference record visibility: whether `conferenceRecords.list` and the
       artifact lists show a space's records to co-hosts and participants, or
-      to the owner alone as the simulation models it, and whether a refusal
-      is `403` or `404`.
+      to the owner alone as the simulation models it, and whether artifacts
+      are refused with `403` or `404`.
+- [ ] Who Meet treats as a meeting's organizer for `conferenceRecords.list`:
+      the event's organizer or its creator, for an event a delegate created on
+      someone else's calendar and for a group calendar's event.
+- [ ] Forged organizers: the `creator` Google reports on an event created with
+      `events.import`, and whether an external invitation whose `ORGANIZER`
+      names an in-domain person appears with that organizer.
 - [ ] The filter: that Meet accepts whole-second `Z` times (its examples use
       milliseconds), the spacing around operators, and a query string that
       encodes spaces as `+`.
 - [ ] Artifact state progression and timing: how long `ENDED` lasts before
-      `FILE_GENERATED`, whether a file or document ID ever appears before it,
-      and whether IDs carry a `files/` or `documents/` prefix.
+      `FILE_GENERATED`, and whether a file or document ID ever appears before
+      it.
+- [ ] A prefix on artifact IDs: whether `driveDestination.file` or
+      `docsDestination.document` ever carries `files/` or `documents/`, which
+      the adapter refuses.
 - [ ] `smartNotes` availability on v2 for the organization's licence, and its
       answer where smart notes are off.
 - [ ] Owner delegation: the token endpoint's answer for a suspended, deleted
       and archived person, all `invalid_grant` in the simulation.
 - [ ] Meet's `403` and `429` bodies, and the `ErrorInfo` reasons it gives for
-      a rate or quota limit.
+      each: which reasons come with `403` and which with `429`.
 - [ ] Meet ID lengths and character sets for records, spaces and artifacts,
       against the 128-character bound.
 
@@ -550,7 +591,7 @@ role, or an API is off), `rate_limited` (a `429`, or a `403` with a rate or
 quota reason), `unavailable`,
 `request_refused`, `response_invalid`, `response_too_large`,
 `group_outside_grant`, `acl_page_budget`, `owner_refused`,
-`conference_record_budget` or `artifact_budget`. Malformed application input is
+`conference_record_budget`, `artifact_budget` or `conference_record_gone`. Malformed application input is
 `google_workspace_request_invalid`, and an address outside the grant is
 refused as a resource authorization; neither reaches the network.
 
