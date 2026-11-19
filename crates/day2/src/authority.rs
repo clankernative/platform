@@ -133,6 +133,18 @@ pub struct Change<'a> {
 }
 
 impl Policy {
+    /// [`admits`], plus the [`OWNERS`] entry: an actor who is one of this
+    /// policy's own `admins` and an [`individual`] person.
+    ///
+    /// It is a method so the owners always come from the policy that is making
+    /// the decision. The caller passes the app's active document, read in the
+    /// decision's own transaction, so the entry follows owner changes
+    /// immediately and never resolves against another application's owners.
+    pub(crate) fn admits_owners(&self, entries: &BTreeSet<String>, actor: &str) -> bool {
+        admits(entries, actor)
+            || (entries.contains(OWNERS) && self.admins.contains(actor) && individual(actor))
+    }
+
     fn owned_fields(&self) -> Result<BTreeMap<&str, &str>> {
         let mut fields = BTreeMap::new();
         for operation in self.operations.values() {
@@ -178,7 +190,7 @@ impl Policy {
                 .iter()
                 .find(|operation| operation.name == *name)
                 .with_context(|| format!("authority policy unknown operation: {name}"))?;
-            for actor in &policy.actors {
+            for actor in policy.actors.iter().filter(|actor| *actor != OWNERS) {
                 entry_domain(actor)?;
             }
             ensure!(
@@ -375,11 +387,17 @@ impl Policy {
         named.context(crate::error::Failure::Forbidden)
     }
 
+    /// Whether `operation` grants `actor`, by name, by a `domain:` entry, or by
+    /// [`OWNERS`] resolved against this policy's own `admins`.
+    ///
+    /// This policy is the app's active document, read in the decision's own
+    /// transaction, so an owner added or removed by `day2 platform owners` is
+    /// admitted or refused on the next call without a policy apply.
     pub fn authorize(&self, operation: &str, actor: &str) -> Result<()> {
         ensure!(
             self.operations
                 .get(operation)
-                .is_some_and(|policy| admits(&policy.actors, actor)),
+                .is_some_and(|policy| self.admits_owners(&policy.actors, actor)),
             crate::error::Failure::Forbidden
         );
         Ok(())
@@ -575,12 +593,55 @@ impl Policy {
 /// delegation rules and the audit always name the one person the edge verified.
 pub const DOMAIN_PREFIX: &str = "domain:";
 
+/// The entry that admits this application's owners instead of one person.
+///
+/// `owners` may appear in an operation's `actors` and in a non-delegation
+/// resource grant's `actors`, and nowhere else. It admits exactly the policy's
+/// current `admins` that are [`individual`] people, read from the app's active
+/// authority when the decision is made (see [`Policy::admits_owners`]), so an owner
+/// change takes effect on the next call without rewriting operation grants.
+/// It takes no argument and has no prefix because it always means the owners
+/// of the application whose policy names it, never another application's. Like
+/// `domain:`, it names a set, so it is never a principal: it cannot be an
+/// owner, a member, either side of a delegation, or who acted.
+pub const OWNERS: &str = "owners";
+
+/// Whether `entry` reads like [`OWNERS`] without being it, or is it.
+///
+/// A near miss such as `owner`, `Owners` or `owners:` must not silently become
+/// a principal that admits nobody (or a development actor of that name), so
+/// every spelling that folds to the entry is reserved.
+fn resembles_owners(entry: &str) -> bool {
+    let folded = entry.trim().to_ascii_lowercase();
+    ["owners", "owner"].iter().any(|word| {
+        folded == *word
+            || folded
+                .strip_prefix(word)
+                .is_some_and(|rest| rest.starts_with(':'))
+    })
+}
+
+/// One individual principal: the only kind of actor that can be an app owner.
+///
+/// Not a set (`domain:`, [`OWNERS`], `credential_client:`), not a service
+/// (`app:`, `svc:`, a managed `client/` key or a Google service account).
+/// `day2 platform owners add` refuses everyone else, and the [`OWNERS`] entry
+/// never admits an administrator outside this rule, even one a full policy
+/// activation placed in `admins`.
+pub(crate) fn individual(actor: &str) -> bool {
+    valid_actor(actor).is_ok()
+        && !actor.contains(':')
+        && !actor.starts_with("client/")
+        && !actor.ends_with(".gserviceaccount.com")
+}
+
 /// A principal the platform can record: one person's address, an `app:` or
 /// `svc:` name, or a development name.
 ///
 /// A `domain:` entry is refused here because it names a set of people, not one
 /// of them: it cannot own a row, administer an app, take part in a delegation
-/// or appear in the audit as who acted.
+/// or appear in the audit as who acted. [`OWNERS`] and its look-alikes are
+/// refused for the same reason.
 pub(crate) fn valid_actor(actor: &str) -> Result<()> {
     ensure!(
         !actor.starts_with("credential_client:"),
@@ -590,6 +651,11 @@ pub(crate) fn valid_actor(actor: &str) -> Result<()> {
         !actor.starts_with(DOMAIN_PREFIX),
         "a {DOMAIN_PREFIX} entry names a set of people, not one principal, and is accepted only \
          in readers, writers, operation actors and non-delegation resource grant actors: {actor}"
+    );
+    ensure!(
+        !resembles_owners(actor),
+        "`{OWNERS}` names this app's owners, not one principal, and is accepted only exactly so \
+         in operation actors and non-delegation resource grant actors: {actor:?}"
     );
     ensure!(
         !actor.is_empty()
@@ -660,6 +726,7 @@ fn entry_domain(entry: &str) -> Result<Option<&str>> {
 pub(crate) fn admits(entries: &BTreeSet<String>, actor: &str) -> bool {
     !actor.starts_with(DOMAIN_PREFIX)
         && !actor.starts_with("credential_client:")
+        && !resembles_owners(actor)
         && (entries.contains(actor)
             || client_family(actor)
                 .is_some_and(|family| entries.contains(&format!("credential_client:{family}")))
@@ -669,11 +736,12 @@ pub(crate) fn admits(entries: &BTreeSet<String>, actor: &str) -> bool {
 }
 
 /// Whether `entries` admit everyone `entry` admits: a principal as [`admits`]
-/// decides, and a `domain:` entry only by that same entry, since no list of
-/// names covers a whole domain. Used where one membership list must stay within
-/// another, as a resource grant's actors within its operation and membership.
+/// decides, and a `domain:` or [`OWNERS`] entry only by that same entry, since
+/// no list of names covers a whole domain or every future owner. Used where one
+/// membership list must stay within another, as a resource grant's actors
+/// within its operation.
 pub(crate) fn covers(entries: &BTreeSet<String>, entry: &str) -> bool {
-    if entry.starts_with(DOMAIN_PREFIX) {
+    if entry.starts_with(DOMAIN_PREFIX) || entry == OWNERS {
         entries.contains(entry)
     } else {
         admits(entries, entry)
@@ -854,5 +922,145 @@ mod domain_tests {
         let error = valid_actor("domain:wonderly.com").unwrap_err();
         assert!(error.to_string().contains("readers, writers"), "{error}");
         assert!(valid_actor("ada@wonderly.com").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod owners_tests {
+    use super::*;
+
+    fn set(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    /// A policy whose only meaningful part is its administrators.
+    fn admins(values: &[&str]) -> Policy {
+        Policy {
+            version: 1,
+            admins: set(values),
+            operations: BTreeMap::new(),
+            constraints: BTreeMap::new(),
+            delegations: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_owners_entry_and_its_look_alikes_are_never_principals() {
+        for reserved in [
+            "owners",
+            "owner",
+            "Owners",
+            "OWNERS",
+            "Owner",
+            " owners",
+            "owners ",
+            "owners:",
+            "owners:ada",
+            "owner:",
+            "Owners:x",
+        ] {
+            let error = valid_actor(reserved).unwrap_err();
+            assert!(
+                error.to_string().contains("owners"),
+                "{reserved:?}: {error}"
+            );
+            assert!(!individual(reserved), "{reserved:?}");
+            // Spelled as the entry, an actor is never admitted, even by it.
+            assert!(
+                !admins(&[reserved]).admits_owners(&set(&["owners"]), reserved),
+                "{reserved:?}"
+            );
+            assert!(!admits(&set(&[reserved]), reserved), "{reserved:?}");
+        }
+        // Ordinary principals that merely contain the word stay principals.
+        for principal in [
+            "owners@wonderly.com",
+            "owner@wonderly.com",
+            "ownership",
+            "co-owner",
+        ] {
+            assert!(valid_actor(principal).is_ok(), "{principal}");
+        }
+        // Membership lists never accept it: it is not a member of anything.
+        assert!(valid_entry("owners", Some("wonderly.com")).is_err());
+        assert!(valid_entry("owners", None).is_err());
+    }
+
+    #[test]
+    fn the_owners_entry_admits_only_this_policys_individual_admins() {
+        let entries = set(&["owners"]);
+        let service = "deployer@tools.iam.gserviceaccount.com";
+        let client = format!("client/client_keys/{}", "a".repeat(64));
+        let policy = admins(&[
+            "ada@wonderly.com",
+            "admin",
+            service,
+            "app:peer",
+            "svc:gateway",
+            client.as_str(),
+        ]);
+        assert!(policy.admits_owners(&entries, "ada@wonderly.com"));
+        assert!(policy.admits_owners(&entries, "admin"));
+        for refused in [
+            service,
+            "app:peer",
+            "svc:gateway",
+            client.as_str(),
+            "bob@wonderly.com",
+            "domain:wonderly.com",
+            "owners",
+        ] {
+            assert!(!policy.admits_owners(&entries, refused), "{refused}");
+        }
+        // Another application's owners are another set of admins.
+        let other_app = admins(&["bob@wonderly.com"]);
+        assert!(!other_app.admits_owners(&entries, "ada@wonderly.com"));
+        assert!(other_app.admits_owners(&entries, "bob@wonderly.com"));
+        // Without the entry, admins gain no operation grant at all.
+        assert!(!policy.admits_owners(&set(&["alice"]), "ada@wonderly.com"));
+        assert!(!policy.admits_owners(&BTreeSet::new(), "ada@wonderly.com"));
+        // The entry composes with names and domains; each admits independently.
+        let mixed = set(&["owners", "alice", "domain:wonderly.com"]);
+        let nobody = admins(&[]);
+        assert!(nobody.admits_owners(&mixed, "alice"));
+        assert!(nobody.admits_owners(&mixed, "newhire@wonderly.com"));
+    }
+
+    #[test]
+    fn the_owners_entry_is_covered_only_by_itself() {
+        assert!(covers(&set(&["owners"]), "owners"));
+        for entries in [
+            set(&["ada@wonderly.com"]),
+            set(&["domain:wonderly.com"]),
+            set(&["owner"]),
+            BTreeSet::new(),
+        ] {
+            assert!(!covers(&entries, "owners"), "{entries:?}");
+        }
+        // Owners never stand in for a named person either.
+        assert!(!covers(&set(&["owners"]), "ada@wonderly.com"));
+    }
+
+    #[test]
+    fn individuals_are_exactly_who_owner_management_accepts() {
+        for person in ["ada@wonderly.com", "admin", "alice"] {
+            assert!(individual(person), "{person}");
+        }
+        for other in [
+            "domain:wonderly.com",
+            "credential_client:client_keys",
+            "app:peer",
+            "svc:gateway",
+            "group:owners@wonderly.com",
+            "deployer@tools.iam.gserviceaccount.com",
+            "",
+            " ada@wonderly.com",
+        ] {
+            assert!(!individual(other), "{other:?}");
+        }
+        assert!(!individual(&format!(
+            "client/client_keys/{}",
+            "a".repeat(64)
+        )));
     }
 }

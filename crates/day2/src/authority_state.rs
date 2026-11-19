@@ -6,7 +6,7 @@
 use crate::security_epoch::restore_authority::PreparedRestoreFence;
 use crate::{
     artifact::{AppBinding, Instance, LoadedArtifact, Operation},
-    authority::{DOMAIN_PREFIX, Policy, admits, covers},
+    authority::{DOMAIN_PREFIX, OWNERS, Policy, admits, covers, individual},
     error::Failure,
     store::{Runtime, open},
 };
@@ -191,10 +191,15 @@ impl AuthorityDocument {
                 bindings.clear();
                 continue;
             };
+            let admins = &self
+                .policy
+                .as_ref()
+                .context("missing_authority_policy")?
+                .admins;
             bindings.retain(|_, grant| {
                 grant.actors.retain(|actor| {
                     covers(&approved.actors, actor)
-                        && covered(&self.readers, &self.writers, operation, actor)
+                        && covered(&self.readers, &self.writers, operation, actor, admins)
                 });
                 grant.actions.retain(|action| {
                     if action.is_write() {
@@ -289,6 +294,20 @@ impl AuthorityDocument {
                             .any(|actor| actor.starts_with(DOMAIN_PREFIX)),
                     "a {DOMAIN_PREFIX} entry cannot be granted app delegation"
                 );
+                // App delegation carries one named person's request across an
+                // application boundary, and a set of owners is not one person.
+                // Freetool execution grants already accept `domain:` and use the
+                // same owner-resolving handle gates; refusing `owners` there is a
+                // deliberate over-restriction until a follow-up allows it with
+                // its own Freetool test.
+                ensure!(
+                    !matches!(
+                        grant.provider,
+                        day2_capabilities::resources::Provider::LocalDelegation
+                            | day2_capabilities::resources::Provider::FreetoolExecutor
+                    ) || !grant.actors.contains(OWNERS),
+                    "the `{OWNERS}` entry cannot be granted app delegation or Freetool execution"
+                );
                 ensure!(
                     grant
                         .actors
@@ -301,7 +320,8 @@ impl AuthorityDocument {
                         &self.readers,
                         &self.writers,
                         operation,
-                        actor
+                        actor,
+                        &policy.admins
                     )),
                     "resource_actors_exceed_membership"
                 );
@@ -436,13 +456,26 @@ fn member(
 }
 
 /// [`member`] for a membership entry rather than a person: a `domain:` entry
-/// is within membership only where membership names that same domain.
+/// is within membership only where membership names that same domain, and the
+/// [`OWNERS`] entry only while every owner it currently admits is a member.
+///
+/// `admins` are the policy's current administrators. Membership stays the
+/// outer gate on every request regardless; this keeps an activated grant from
+/// naming more than membership allows, so adding an owner who is not a member
+/// is refused while such a grant exists, and removing one never is.
 fn covered(
     readers: &BTreeSet<String>,
     writers: &BTreeSet<String>,
     operation: &Operation,
     entry: &str,
+    admins: &BTreeSet<String>,
 ) -> bool {
+    if entry == OWNERS {
+        return admins
+            .iter()
+            .filter(|admin| individual(admin))
+            .all(|admin| member(readers, writers, operation, admin));
+    }
     covers(writers, entry) || (operation.kind == "query" && covers(readers, entry))
 }
 
