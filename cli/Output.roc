@@ -235,6 +235,11 @@ checked_json = |request, path, spec| {
 							id: bound.id,
 							delivery: bound.delivery,
 							sdk: bound.sdk,
+							owners: bound.owners,
+							size: bound.size,
+							verification: bound.verification,
+							schedules: bound.schedules,
+							extension: bound.extension,
 							repository: bound.repository,
 							hostname: bound.hostname,
 							namespace: bound.namespace,
@@ -266,6 +271,18 @@ checked_text = |request, path, spec| {
 						Str.join_with(
 							[
 								"  ${bound.id}  /  ${bound.delivery}  /  ${bound.sdk}",
+								row("  owners", Str.join_with(bound.owners, ", ")),
+								row(
+									"  runtime",
+									"${
+										bound
+											.size
+									} / ${
+										bound
+											.verification
+											.to_str()
+									} verification cases / schedules ${bound.schedules}",
+								),
 								row("  repository", bound.repository),
 								row("  hostname", bound.hostname),
 								row("  namespace", bound.namespace),
@@ -273,7 +290,17 @@ checked_text = |request, path, spec| {
 								row("  state", "${bound.state_bucket} / ${bound.state_prefix}"),
 								row("  edge state", "${names.tofu_state_bucket} / ${bound.edge_state_prefix}"),
 								row("  backups", bound.backup_bucket),
-							],
+							].concat(
+								match bound.extension {
+									Ok(extension) => [
+										row("  extension", extension.id),
+										row("  update URL", extension.update_url),
+										row("  downloads", Str.join_with(extension.downloads, ", ")),
+										row("  signing key", extension.signing_secret),
+									]
+									Err(_) => [row("  extension", "none")]
+								},
+							),
 							"\n",
 						),
 				),
