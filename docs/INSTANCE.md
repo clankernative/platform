@@ -8,10 +8,12 @@ in their `day2.json` values.
 
 ```console
 day2 instance check DIRECTORY [--agent]
+day2 instance render DIRECTORY [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
-name. It reads no other file. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the
+name. It reads no other file. `instance render` validates the same file and
+prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the
 parser and the derivation; there is no second schema.
 
 ## The spec
@@ -85,6 +87,7 @@ Nothing below can be configured, restated or overridden.
 | Required app check | `<org>/app-ci: day2 / verification (pull_request)` |
 | SDK image registry | `<region>-docker.pkg.dev/<project>/day2` |
 | Shared OpenTofu state bucket | `<project>-tofu-state` |
+| Platform root state | bucket `<project>-tofu-state`, prefixes `foundation` (project), `platform/cluster`, `platform/tenancy` |
 | App repository | `<org>/<id>` |
 | App hostname | `<id>.<domains.apps>` |
 | App namespace | `app-<id>` |
@@ -114,12 +117,35 @@ apply cannot set or read the registration and it is a manual precondition.
 The forge org belongs to the instance: its repositories are exactly `instance`,
 `app-ci` and one repository per app.
 
+## Rendered inputs
+
+`instance render` lists the core roots every instance applies to serve apps, in
+apply order, with each root's platform stack and state backend:
+
+| Root | Stack | State |
+| --- | --- | --- |
+| `project` | `deploy/gke/stacks/project` | `<project>-tofu-state` / `foundation` |
+| `cluster` | `deploy/gke/stacks/cluster` | `<project>-tofu-state` / `platform/cluster` |
+| `tenancy` | `deploy/gke/stacks/tenancy` | `<project>-tofu-state` / `platform/tenancy` |
+| `app-edge`, per app | `deploy/gke/stacks/app-edge` | `<project>-tofu-state` / `platform/app/<id>` |
+| `day2-app`, per app | `deploy/gke/stacks/day2-app` | `<project>-<id>-state` / `day2-app/<id>` |
+
+Every value is a derived name. `foundation` predates the `platform/<root>`
+scheme and stays because moving it is a state move. The renderer emits no root
+the spec cannot yet describe: the installation security shell
+(`security-shell-edge`, `security-shell`), opt-in integrations under
+`deploy/integrations/` (such as `gitea-instance-ci`), optional stacks (such as
+`qualification-runner`) and roots an instance owns itself. Variables follow
+backends; authority access policy is not an OpenTofu input and is rendered at
+release activation (step 3).
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
    `day2 instance check`. Nothing consumes the spec yet.
-2. **Render inputs.** The platform renders every OpenTofu input (variables and
-   backends) from the spec, and instance repositories stop committing them.
+2. **Render inputs (started: core-root backends).** The platform renders every
+   OpenTofu input (variables and backends) from the spec, and instance
+   repositories stop committing them.
    Fields are added only for real choices (size presets, verification cases,
    schedules), never to restate a derived name.
 3. **Platform-owned control.** Deployment, promotion, webhook and artifact

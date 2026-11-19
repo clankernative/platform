@@ -4,6 +4,7 @@ import Source
 import Problem
 import Names
 import InstanceSpec
+import InstanceRender
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
@@ -11,7 +12,8 @@ Output :: { outcome : Outcome }.{
 		Help(Cli.Format),
 		Version(Cli.Format),
 		Described(Source),
-		Checked(Cli.Check, Names.LocalPath, InstanceSpec),
+		Checked(Cli.Instance, Names.LocalPath, InstanceSpec),
+		Rendered(Cli.Instance, Names.LocalPath, InstanceSpec),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -40,6 +42,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Version(_) => "day2 ${version}"
 			Outcome.Described(loaded) => description_text(loaded)
 			Outcome.Checked(request, path, spec) => checked_text(request, path, spec)
+			Outcome.Rendered(request, path, spec) => rendered_text(request, path, spec)
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
@@ -63,7 +66,7 @@ format : Output.Outcome -> Cli.Format
 format = |outcome| match outcome {
 	Output.Outcome.Help(value) | Output.Outcome.Version(value) | Output.Outcome.Failed(_, value, _) => value
 	Output.Outcome.Described(loaded) => loaded.request().parts().format
-	Output.Outcome.Checked(request, _, _) => request.parts().format
+	Output.Outcome.Checked(request, _, _) | Output.Outcome.Rendered(request, _, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -117,6 +120,7 @@ json : Output.Outcome -> Str
 json = |outcome| match outcome {
 	Output.Outcome.Described(loaded) => success_json(loaded)
 	Output.Outcome.Checked(request, path, spec) => checked_json(request, path, spec)
+	Output.Outcome.Rendered(request, path, spec) => rendered_json(request, path, spec)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -180,28 +184,39 @@ success_json = |loaded| {
 	})
 }
 
-check_actions : Cli.Check -> List(Cli.Action)
-check_actions = |request| {
-	parts = request.parts()
-	[
-		Cli.Action.new(
-			match parts.format {
-				Cli.Format.Json => "Read the same derived names as text."
-				Cli.Format.Text => "Get the same derived names as structured JSON."
-			},
-			Cli.Request.Check(
-				request.with_format(
-					match parts.format {
-						Cli.Format.Json => Cli.Format.Text
-						Cli.Format.Text => Cli.Format.Json
-					},
-				),
-			),
-		),
-	]
-}
+check_actions : Cli.Instance -> List(Cli.Action)
+check_actions = |request| [
+	Cli.Action.new(
+		match request.parts().format {
+			Cli.Format.Json => "Read the same derived names as text."
+			Cli.Format.Text => "Get the same derived names as structured JSON."
+		},
+		Cli.Request.Check(toggled(request)),
+	),
+	Cli.Action.new("Render the OpenTofu inputs this spec implies.", Cli.Request.Render(request)),
+]
 
-checked_json : Cli.Check, Names.LocalPath, InstanceSpec -> Str
+render_actions : Cli.Instance -> List(Cli.Action)
+render_actions = |request| [
+	Cli.Action.new(
+		match request.parts().format {
+			Cli.Format.Json => "Read the same OpenTofu inputs as text."
+			Cli.Format.Text => "Get the same OpenTofu inputs as structured JSON."
+		},
+		Cli.Request.Render(toggled(request)),
+	),
+	Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request)),
+]
+
+toggled : Cli.Instance -> Cli.Instance
+toggled = |request| request.with_format(
+	match request.parts().format {
+		Cli.Format.Json => Cli.Format.Text
+		Cli.Format.Text => Cli.Format.Json
+	},
+)
+
+checked_json : Cli.Instance, Names.LocalPath, InstanceSpec -> Str
 # Keep the wire record concrete, as success_json does for the same compiler reason.
 checked_json = |request, path, spec| {
 	names = spec.derived()
@@ -225,6 +240,7 @@ checked_json = |request, path, spec| {
 			required_check: names.required_check,
 			sdk_registry: names.sdk_registry,
 			tofu_state_bucket: names.tofu_state_bucket,
+			platform_state_prefixes: names.platform_state_prefixes,
 			apps: names
 				.apps
 				.map(
@@ -256,7 +272,7 @@ checked_json = |request, path, spec| {
 	})
 }
 
-checked_text : Cli.Check, Names.LocalPath, InstanceSpec -> Str
+checked_text : Cli.Instance, Names.LocalPath, InstanceSpec -> Str
 checked_text = |request, path, spec| {
 	names = spec.derived()
 	row = |label, value| "  ${label}${Str.repeat(" ", 22 - label.count_utf8_bytes())}${Output.safe(value)}"
@@ -331,9 +347,92 @@ checked_text = |request, path, spec| {
 			row("Required app check", names.required_check),
 			row("SDK registry", names.sdk_registry),
 			row("OpenTofu state", names.tofu_state_bucket),
+			row(
+				"Platform state",
+				"project ${names.platform_state_prefixes.project} / cluster ${
+					names.platform_state_prefixes.cluster
+				} / tenancy ${names.platform_state_prefixes.tenancy}",
+			),
 			"",
 			"APPS  /  ${names.apps.len().to_str()}",
 			apps,
+			"",
+			"NEXT",
+			next,
+		],
+		"\n",
+	)
+}
+
+rendered_json : Cli.Instance, Names.LocalPath, InstanceSpec -> Str
+# Keep the wire record concrete, as success_json does for the same compiler reason.
+rendered_json = |request, path, spec| {
+	names = spec.derived()
+	null : Try({}, [Null])
+	null = Err(Null)
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: "instance.render",
+		exit_code: 0.I32,
+		context: { spec_path: path.to_str(), spec_validation: "checked" },
+		result: {
+			installation: names.installation,
+			roots: InstanceRender.roots(spec)
+				.map(
+					|
+						root,
+					| {
+						backend = root.backend(names)
+						{
+							root: root.name(),
+							app_id: root.app_id(),
+							stack: root.stack(),
+							backend: { bucket: backend.bucket, prefix: backend.prefix },
+						}
+					},
+				),
+		},
+		error: null,
+		next_actions: render_actions(request).map(|action| action.dto()),
+	})
+}
+
+rendered_text : Cli.Instance, Names.LocalPath, InstanceSpec -> Str
+rendered_text = |request, path, spec| {
+	names = spec.derived()
+	roots = InstanceRender.roots(spec)
+	# The label column fits the longest label (app IDs reach 20 bytes) with two spaces to spare.
+	width = roots.fold(
+		24,
+		|widest, root| {
+			needed = root.label().count_utf8_bytes() + 2
+			if needed > widest needed else widest
+		},
+	)
+	row = |root| {
+		label = root.label()
+		backend = root.backend(names)
+		"  ${Output.safe(label)}${Str.repeat(" ", width - label.count_utf8_bytes())}${Output.safe(backend.bucket)} / ${
+			Output.safe(backend.prefix)
+		}"
+	}
+	next =
+		Str.join_with(
+			render_actions(request)
+				.map(|action| action.dto())
+				.map(|action| "  ${Output.safe(action.description)}\n    ${Output.safe(action.command)}"),
+			"\n\n",
+		)
+	Str.join_with(
+		[
+			"DAY2  /  instance ${names.installation}  /  OpenTofu inputs",
+			"",
+			"SPEC",
+			"  ${Output.safe(path.to_str())}",
+			"",
+			"STATE BACKENDS  /  ${roots.len().to_str()} core roots, in apply order",
+			Str.join_with(roots.map(row), "\n"),
 			"",
 			"NEXT",
 			next,
@@ -371,7 +470,7 @@ info_json = |is_help| {
 		result: {
 			text: if is_help Cli.help else Output.version,
 			version: Output.version,
-			implemented_commands: ["app.describe", "instance.check"],
+			implemented_commands: ["app.describe", "instance.check", "instance.render"],
 			platform_commands: [
 				"platform.build",
 				"platform.check",

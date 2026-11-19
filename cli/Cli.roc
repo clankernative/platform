@@ -9,23 +9,24 @@ Cli :: [].{
 
 	Source := [Demo, Instance(Names.LocalPath), Environment]
 
-	Request := [Help(Format), Version(Format), Describe(Describe), Check(Check)]
+	Request := [Help(Format), Version(Format), Describe(Describe), Check(Instance), Render(Instance)]
 
 	## The command a response reports, including failures before a request exists.
-	Command := [AppDescribe, InstanceCheck].{
+	Command := [AppDescribe, InstanceCheck, InstanceRender].{
 		name : Command -> Str
 		name = |command| match command {
 			AppDescribe => "app.describe"
 			InstanceCheck => "instance.check"
+			InstanceRender => "instance.render"
 		}
 	}
 
-	## day2 instance check DIRECTORY reads exactly DIRECTORY/day2.json.
-	Check :: { directory : Names.LocalPath, format : Format }.{
-		parts : Check -> { directory : Names.LocalPath, format : Format }
+	## day2 instance check|render DIRECTORY reads exactly DIRECTORY/day2.json.
+	Instance :: { directory : Names.LocalPath, format : Format }.{
+		parts : Instance -> { directory : Names.LocalPath, format : Format }
 		parts = |request| { directory: request.directory, format: request.format }
 
-		with_format : Check, Format -> Check
+		with_format : Instance, Format -> Instance
 		with_format = |request, format| { ..request, format }
 	}
 
@@ -88,8 +89,11 @@ Cli :: [].{
 					)
 				}
 				match raw.positionals {
-					[] | ["app", "describe"] | ["instance", "check"] => Ok(Request.Help(raw.format))
-					["instance", "check", _] => Ok(Request.Help(raw.format))
+					[]
+					| ["app", "describe"]
+					| ["instance", "check"]
+					| ["instance", "render"] => Ok(Request.Help(raw.format))
+					["instance", "check", _] | ["instance", "render", _] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -99,22 +103,9 @@ Cli :: [].{
 			}
 			Run => match raw.positionals {
 				[] => if has_options(raw) Err(Problem.MissingCommand) else Ok(Request.Help(raw.format))
-				["app", "describe"] | ["instance", "check"] => Err(Problem.MissingArgument)
-				["instance", "check", value] => {
-					if has_options(raw) {
-						return Err(
-							Problem.ConflictingOptions("instance check accepts only --agent or --json."),
-						)
-					}
-					directory =
-						Names.LocalPath.from_str(value)
-							.map_err(
-								|
-									_,
-								| Problem.InvalidArguments("instance check requires a directory of at most 4096 bytes"),
-							)?
-					Ok(Request.Check(Check.{ directory, format: raw.format }))
-				}
+				["app", "describe"] | ["instance", "check"] | ["instance", "render"] => Err(Problem.MissingArgument)
+				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
+				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
 					app_name = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 					source = match raw.source {
@@ -138,7 +129,7 @@ Cli :: [].{
 	requested : List(Str) -> Command
 	requested = |args| match args {
 		["--instance", _, .. as rest] | ["--operation", _, .. as rest] => requested(rest)
-		["instance", ..] => InstanceCheck
+		["instance", .. as rest] => instance_command(rest)
 		[arg, .. as rest] if arg.starts_with("-") => requested(rest)
 		_ => AppDescribe
 	}
@@ -150,7 +141,7 @@ Cli :: [].{
 	request_format = |request| match request {
 		Request.Help(format) | Request.Version(format) => format
 		Request.Describe(value) => value.format
-		Request.Check(value) => value.format
+		Request.Check(value) | Request.Render(value) => value.format
 	}
 
 	quote : Str -> Str
@@ -180,6 +171,7 @@ Cli :: [].{
 				["day2", "app", "describe", value.app_name.to_str()].concat(source).concat(filter)
 			}
 			Request.Check(value) => ["day2", "instance", "check", value.directory.to_str()]
+			Request.Render(value) => ["day2", "instance", "render", value.directory.to_str()]
 		}
 		base.concat(
 			match request_format(request) {
@@ -198,6 +190,26 @@ Raw : {
 	intent : [Run, Help, Version],
 	format : Cli.Format,
 	positionals : List(Str),
+}
+
+instance : Str, Str, Raw -> Try(Cli.Instance, Problem)
+instance = |verb, value, raw| {
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("instance ${verb} accepts only --agent or --json."))
+	}
+	directory =
+		Names.LocalPath.from_str(value)
+			.map_err(|_| Problem.InvalidArguments("instance ${verb} requires a directory of at most 4096 bytes"))?
+	Ok(Cli.Instance.{ directory, format: raw.format })
+}
+
+## The instance verb follows the family, after any flags.
+instance_command : List(Str) -> Cli.Command
+instance_command = |args| match args {
+	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => instance_command(rest)
+	["render", ..] => Cli.Command.InstanceRender
+	[arg, .. as rest] if arg.starts_with("-") => instance_command(rest)
+	_ => Cli.Command.InstanceCheck
 }
 
 has_options : Raw -> Bool
@@ -308,4 +320,18 @@ expect match Cli.parse(["instance", "check"]) {
 	_ => Bool.False
 }
 expect Cli.requested(["--agent", "instance", "check", "."]).name() == "instance.check"
+expect Cli.requested(["instance", "--agent", "render", "."]).name() == "instance.render"
+expect Cli.requested(["instance", "--operation", "render", "check", "."]).name() == "instance.check"
+expect match Cli.parse(["instance", "render", "../acme", "--json"]) {
+	Ok(Cli.Request.Render(value)) => value.parts().directory.to_str() == "../acme"
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "render", ".", "--operation", "x"]) {
+	Err(Problem.ConflictingOptions(_)) => Bool.True
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "render"]) {
+	Err(Problem.MissingArgument) => Bool.True
+	_ => Bool.False
+}
 expect Cli.requested(["--operation", "instance", "app", "describe", "links"]).name() == "app.describe"
