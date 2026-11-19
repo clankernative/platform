@@ -1871,3 +1871,6 @@ mod meet;
 
 #[path = "google_workspace_share_tests.rs"]
 mod share;
+
+#[path = "google_workspace_campaign_tests.rs"]
+mod campaign;

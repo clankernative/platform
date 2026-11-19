@@ -579,11 +579,43 @@ route the share reads:
 - The `ReplyLost` fault serves a request, so a create lands, and drops its
   reply, as a lost connection after Google acted would.
 
-Planned: a seeded campaign of meetings, recordings, rejoins, faults and
-duplicate deliveries against an independent model. That model checks that
-every share lands only on an artifact of the named event, to a group in
-`grantee_domains`, as reader and as the event's owner, and that a retried share
-never creates a second permission.
+A seeded campaign drives the share against an independent ordered model, as
+the [Linear campaign](LINEAR-SIMULATION.md) does:
+
+- Six fixed seeds each run thirty logical steps, and every history runs twice
+  and must match.
+- Each history opens with a fixed prefix that witnesses every outcome, then
+  composes seeded steps over a meeting and its rejoin and a group calendar's
+  review.
+- Steps cover:
+  - artifacts advancing `STARTED` → `ENDED` → `FILE_GENERATED`;
+  - shares to three groups;
+  - duplicate deliveries;
+  - a forged organizer;
+  - another event's artifacts;
+  - the calendar leaving and re-entering play;
+  - faults on the create: a reply lost after the permission landed, a `5xx`
+    before it, and a refusal.
+- The model knows each artifact's state, whether the calendar is in play and
+  which shares have landed. It predicts every answer, and after every step the
+  world's group permissions must equal its prediction exactly:
+  - each is a group `reader` in a grantee domain;
+  - it is on the file Meet named for that artifact of that event;
+  - it was created as that event's derived owner;
+  - none is created twice;
+  - none exists for a forged, not-shared or foreign-event share.
+- A failure saves a bundle of only the format, the campaign source digest and
+  the seed under `artifacts/google-workspace-share-simulation/`.
+
+To replay a saved bundle:
+
+```console
+DAY2_GOOGLE_WORKSPACE_SHARE_REPLAY=<failure.json> bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib google_workspace::tests::campaign::replay_saved_share_history --exact
+```
+
+The campaign runs the real pipeline against the simulated port; host
+admission, reservation and settlement are covered by the host tests. It is not
+published as a CI receipt the way the Linear campaign is.
 
 ## Live qualification
 

@@ -220,6 +220,7 @@
     "crates/day2/src/google_auth_tests.rs",
     "crates/day2/src/google_workspace.rs",
     "crates/day2/src/google_workspace_calendar.rs",
+    "crates/day2/src/google_workspace_campaign_tests.rs",
     "crates/day2/src/google_workspace_drive.rs",
     "crates/day2/src/google_workspace_host_tests.rs",
     "crates/day2/src/google_workspace_http.rs",
