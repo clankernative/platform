@@ -1328,8 +1328,14 @@ mod tests {
         assert_eq!(result["tofu_state_bucket"], "exampleco-tools-tofu-state");
         assert_eq!(
             result["platform_state_prefixes"],
-            json!({"project": "foundation", "cluster": "platform/cluster", "tenancy": "platform/tenancy"})
+            json!({"project": "foundation", "cluster": "platform/cluster", "tenancy": "platform/tenancy",
+                   "app_edge": "platform/app", "day2": "day2"})
         );
+        assert_eq!(
+            result["cluster"],
+            json!({"name": "day2", "kube_context": "gke_exampleco-tools_us-central1-a_day2"})
+        );
+        assert_eq!(result["app_namespace_prefix"], "app-");
         assert_eq!(
             result["operators"],
             json!(["ada@example.com", "grace@example.com"])
@@ -1358,7 +1364,10 @@ mod tests {
                     "state_bucket": "exampleco-tools-go-state",
                     "state_prefix": "day2-app/go",
                     "edge_state_prefix": "platform/app/go",
-                    "backup_bucket": "exampleco-tools-go-backups"
+                    "backup_bucket": "exampleco-tools-go-backups",
+                    "runtime_resources": {"memory_mib": 512, "cpu_millis": 1000, "process_limit": 1024,
+                                          "http_concurrency": 4, "shutdown_seconds": 30},
+                    "sqlite_storage_gb": 5
                 },
                 {
                     "id": "home",
@@ -1376,7 +1385,10 @@ mod tests {
                     "state_bucket": "exampleco-tools-home-state",
                     "state_prefix": "day2-app/home",
                     "edge_state_prefix": "platform/app/home",
-                    "backup_bucket": "exampleco-tools-home-backups"
+                    "backup_bucket": "exampleco-tools-home-backups",
+                    "runtime_resources": {"memory_mib": 2048, "cpu_millis": 1000, "process_limit": 1024,
+                                          "http_concurrency": 4, "shutdown_seconds": 30},
+                    "sqlite_storage_gb": 5
                 }
             ])
         );
@@ -1558,8 +1570,13 @@ mod tests {
             json!({"root": root, "app_id": app, "stack": stack,
                    "backend": {"bucket": bucket, "prefix": prefix}})
         };
+        let mut roots = value["result"]["roots"].clone();
+        for entry in roots.as_array_mut().unwrap() {
+            assert!(entry["tfvars_json"].is_string(), "{entry}");
+            entry.as_object_mut().unwrap().remove("tfvars_json");
+        }
         assert_eq!(
-            value["result"]["roots"],
+            roots,
             json!([
                 root(
                     "project",
@@ -1676,6 +1693,215 @@ mod tests {
             )),
             "{stdout}"
         );
+    }
+
+    #[test]
+    fn instance_render_derives_each_root_variable_from_the_spec() {
+        let scratch = Scratch::new();
+        fs::write(scratch.0.join("day2.json"), SPEC).unwrap();
+        let directory = scratch.0.to_str().unwrap();
+        let value = envelope(&run(&["instance", "render", directory, "--agent"], None), 0);
+        let variables = |label: &str| -> Value {
+            let entry = value["result"]["roots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| match entry["app_id"].as_str() {
+                    Some(app) => format!("{}/{app}", entry["root"].as_str().unwrap()) == label,
+                    None => entry["root"] == label,
+                })
+                .unwrap_or_else(|| panic!("{label}"));
+            serde_json::from_str(entry["tfvars_json"].as_str().unwrap()).unwrap()
+        };
+        let context = "gke_exampleco-tools_us-central1-a_day2";
+        let operators = json!(["user:ada@example.com", "user:grace@example.com"]);
+        assert_eq!(
+            variables("project"),
+            json!({
+                "project_id": "exampleco-tools",
+                "region": "us-central1",
+                "state_bucket_name": "exampleco-tools-tofu-state",
+                "state_prefixes": {"foundation": "foundation/", "cluster": "platform/cluster/",
+                                   "tenancy": "platform/tenancy/", "app": "platform/app/", "day2": "day2/"}
+            })
+        );
+        assert_eq!(
+            variables("cluster"),
+            json!({
+                "project_id": "exampleco-tools",
+                "region": "us-central1",
+                "zone": "us-central1-a",
+                "cluster_name": "day2",
+                "cluster_labels": {"managed_by": "opentofu", "stack": "platform-cluster", "environment": "day2"},
+                "subnet_cidr": "10.10.0.0/20",
+                "pod_cidr": "10.20.0.0/16",
+                "service_cidr": "10.30.0.0/20",
+                "shared_node_pod_pids_limit": 1024
+            })
+        );
+        assert_eq!(
+            variables("tenancy"),
+            json!({"kube_context": context, "app_namespace_prefix": "app-"})
+        );
+        // Operators reach every app and hold its off-site backups. Lists that may name the instance's CI
+        // service accounts stay with the instance, so owners grant nothing yet.
+        let edge = variables("app-edge/home");
+        assert!(edge.get("deployer_subjects").is_none(), "{edge}");
+        assert_eq!(edge["domain"], "home.apps.example.com");
+        assert_eq!(edge["kube_context"], context);
+        assert_eq!(
+            edge["iap_members"],
+            json!([
+                "domain:example.com",
+                "user:ada@example.com",
+                "user:grace@example.com"
+            ])
+        );
+        assert_eq!(edge["offsite_backup_readers"], operators);
+        assert_eq!(edge["kube_dns_service_ip"], "10.30.0.10");
+        assert_eq!(
+            edge["cluster_cidrs"],
+            json!(["10.20.0.0/16", "10.30.0.0/20", "10.10.0.0/20"])
+        );
+        // The size preset sets memory; every other limit and the volume are shared.
+        let standard = variables("day2-app/go");
+        let large = variables("day2-app/home");
+        assert_eq!(standard["runtime_resources"]["memory_mib"], 512);
+        assert_eq!(large["runtime_resources"]["memory_mib"], 2048);
+        assert_eq!(
+            large,
+            json!({
+                "kube_context": context,
+                "app_id": "home",
+                "namespace": "app-home",
+                "installation": "exampleco",
+                "environment": "production",
+                "hosted_domain": "example.com",
+                "edge_origin": "https://home.apps.example.com",
+                "runtime_resources": {"memory_mib": 2048, "cpu_millis": 1000, "process_limit": 1024,
+                                      "http_concurrency": 4, "shutdown_seconds": 30},
+                "pod_pids_limit": 1024,
+                "backup_bucket": "exampleco-tools-home-backups"
+            })
+        );
+        // Text lists each root's variables as tfvars lines.
+        let text = run(&["instance", "render", directory], None);
+        let stdout = String::from_utf8(text.stdout).unwrap();
+        assert!(
+            stdout.contains("VARIABLES  /  rendered from the spec"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(
+                "  tenancy\n    kube_context = \"gke_exampleco-tools_us-central1-a_day2\"\n"
+            ),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn instance_render_variables_are_declared_by_their_stacks() {
+        let scratch = Scratch::new();
+        fs::write(scratch.0.join("day2.json"), SPEC).unwrap();
+        let directory = scratch.0.to_str().unwrap();
+        let value = envelope(&run(&["instance", "render", directory, "--agent"], None), 0);
+        let platform = root().parent().unwrap().to_owned();
+        for entry in value["result"]["roots"].as_array().unwrap() {
+            let stack = entry["stack"].as_str().unwrap();
+            let mut declared = String::new();
+            for file in fs::read_dir(platform.join(stack)).unwrap() {
+                let path = file.unwrap().path();
+                if path.extension().is_some_and(|extension| extension == "tf") {
+                    declared.push('\n');
+                    declared.push_str(&fs::read_to_string(&path).unwrap());
+                }
+            }
+            let variables: Value =
+                serde_json::from_str(entry["tfvars_json"].as_str().unwrap()).unwrap();
+            for name in variables.as_object().unwrap().keys() {
+                assert!(
+                    declared.contains(&format!("\nvariable \"{name}\" {{")),
+                    "{stack} does not declare {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn instance_render_variables_pass_their_stacks_declarations() {
+        let configuration = std::env::var_os("DAY2_TEST_TOFU_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root().join("../.cache/tofu.json"));
+        let pinned: Value = serde_json::from_slice(&fs::read(configuration).unwrap()).unwrap();
+        let tofu = PathBuf::from(pinned["engine"]["path"].as_str().unwrap());
+        let scratch = Scratch::new();
+        fs::write(scratch.0.join("day2.json"), SPEC).unwrap();
+        let directory = scratch.0.to_str().unwrap();
+        let value = envelope(&run(&["instance", "render", directory, "--agent"], None), 0);
+        let platform = root().parent().unwrap().to_owned();
+        for (index, entry) in value["result"]["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let stack = entry["stack"].as_str().unwrap();
+            let document = entry["tfvars_json"].as_str().unwrap();
+            let rendered: Value = serde_json::from_str(document).unwrap();
+            let names: Vec<&String> = rendered.as_object().unwrap().keys().collect();
+            // A module of exactly the stack's own declarations of the rendered variables, so OpenTofu applies
+            // their types, defaults and validation blocks to the rendered document.
+            let mut module = String::new();
+            for file in fs::read_dir(platform.join(stack)).unwrap() {
+                let path = file.unwrap().path();
+                if path.extension().is_none_or(|extension| extension != "tf") {
+                    continue;
+                }
+                let mut copying = false;
+                for line in fs::read_to_string(&path).unwrap().lines() {
+                    copying = copying
+                        || names
+                            .iter()
+                            .any(|name| line == format!("variable \"{name}\" {{"));
+                    if copying {
+                        module.push_str(line);
+                        module.push('\n');
+                        copying = line != "}";
+                    }
+                }
+            }
+            let work = scratch.0.join(format!("root-{index}"));
+            fs::create_dir(&work).unwrap();
+            fs::write(work.join("variables.tf"), module).unwrap();
+            fs::write(work.join("rendered.tfvars.json"), document).unwrap();
+            let fields: Vec<String> = names
+                .iter()
+                .map(|name| format!("{name}=var.{name}"))
+                .collect();
+            fs::write(
+                work.join("expression"),
+                format!("jsonencode({{{}}})\n", fields.join(",")),
+            )
+            .unwrap();
+            let output = Command::new(&tofu)
+                .args(["console", "-no-color", "-var-file=rendered.tfvars.json"])
+                .current_dir(&work)
+                .stdin(Stdio::from(
+                    fs::File::open(work.join("expression")).unwrap(),
+                ))
+                .output()
+                .unwrap();
+            let printed = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stack}: {printed}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let encoded: String =
+                serde_json::from_str(printed.trim().lines().last().unwrap()).unwrap();
+            let evaluated: Value = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(evaluated, rendered, "{stack}");
+        }
     }
 
     #[test]

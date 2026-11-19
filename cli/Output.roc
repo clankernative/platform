@@ -241,6 +241,8 @@ checked_json = |request, path, spec| {
 			sdk_registry: names.sdk_registry,
 			tofu_state_bucket: names.tofu_state_bucket,
 			platform_state_prefixes: names.platform_state_prefixes,
+			cluster: names.cluster,
+			app_namespace_prefix: names.app_namespace_prefix,
 			apps: names
 				.apps
 				.map(
@@ -264,6 +266,8 @@ checked_json = |request, path, spec| {
 							state_prefix: bound.state_prefix,
 							edge_state_prefix: bound.edge_state_prefix,
 							backup_bucket: bound.backup_bucket,
+							runtime_resources: bound.runtime_resources,
+							sqlite_storage_gb: bound.sqlite_storage_gb,
 						},
 				),
 		},
@@ -306,6 +310,14 @@ checked_text = |request, path, spec| {
 								row("  state", "${bound.state_bucket} / ${bound.state_prefix}"),
 								row("  edge state", "${names.tofu_state_bucket} / ${bound.edge_state_prefix}"),
 								row("  backups", bound.backup_bucket),
+								row(
+									"  resources",
+									"${bound.runtime_resources.memory_mib.to_str()} MiB / ${
+										bound.runtime_resources.cpu_millis.to_str()
+									}m CPU / ${bound.runtime_resources.process_limit.to_str()} processes / ${
+										bound.sqlite_storage_gb.to_str()
+									} GiB SQLite",
+								),
 							].concat(
 								match bound.extension {
 									Ok(extension) => [
@@ -351,8 +363,12 @@ checked_text = |request, path, spec| {
 				"Platform state",
 				"project ${names.platform_state_prefixes.project} / cluster ${
 					names.platform_state_prefixes.cluster
-				} / tenancy ${names.platform_state_prefixes.tenancy}",
+				} / tenancy ${names.platform_state_prefixes.tenancy} / app edges ${
+					names.platform_state_prefixes.app_edge
+				}/<id> / opt-in roots ${names.platform_state_prefixes.day2}/<root>",
 			),
+			row("Cluster", "${names.cluster.name} / ${names.cluster.kube_context}"),
+			row("App namespaces", "${names.app_namespace_prefix}<id>"),
 			"",
 			"APPS  /  ${names.apps.len().to_str()}",
 			apps,
@@ -389,6 +405,7 @@ rendered_json = |request, path, spec| {
 							app_id: root.app_id(),
 							stack: root.stack(),
 							backend: { bucket: backend.bucket, prefix: backend.prefix },
+							tfvars_json: root.tfvars_json(names),
 						}
 					},
 				),
@@ -417,6 +434,15 @@ rendered_text = |request, path, spec| {
 			Output.safe(backend.prefix)
 		}"
 	}
+	variables = |root|
+		Str.join_with(
+			["  ${Output.safe(root.label())}"].concat(
+				root
+					.variables(names)
+					.map(variable_line),
+			),
+			"\n",
+		)
 	next =
 		Str.join_with(
 			render_actions(request)
@@ -434,12 +460,19 @@ rendered_text = |request, path, spec| {
 			"STATE BACKENDS  /  ${roots.len().to_str()} core roots, in apply order",
 			Str.join_with(roots.map(row), "\n"),
 			"",
+			"VARIABLES  /  rendered from the spec; the instance commits every other input",
+			Str.join_with(roots.map(variables), "\n\n"),
+			"",
 			"NEXT",
 			next,
 		],
 		"\n",
 	)
 }
+
+## One rendered variable as a tfvars line: its JSON value is also a valid OpenTofu expression.
+variable_line : (Str, InstanceRender.Value) -> Str
+variable_line = |pair| "    ${Output.safe(pair.0)} = ${Output.safe(pair.1.json())}"
 
 error_json : Problem, Cli.Command -> Str
 error_json = |problem, command| {

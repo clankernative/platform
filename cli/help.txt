@@ -34,7 +34,8 @@ COMMANDS
                   OpenTofu inputs the platform renders from it: the core roots
                   (project, cluster, tenancy, then app-edge and day2-app per
                   app) in apply order, each with the state bucket and prefix it
-                  initializes against. Reads one file only; writes nothing.
+                  initializes against and the variables derived for it, as
+                  .tfvars.json. Reads one file only; writes nothing.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
