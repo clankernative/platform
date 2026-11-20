@@ -104,6 +104,43 @@ Google through a request-level port, and the simulated port answers the same
 requests from `google_workspace.simulated.sqlite`. See
 [Google Workspace](GOOGLE-WORKSPACE.md) for the contract, bounds and codes.
 
+`bazel run //crates/xtask:xtask -- google-workspace-qualify PROFILE TOKEN_FILE NEW_EVIDENCE_DIRECTORY`
+is the explicit operator qualification. It is not part of any verification
+recipe. The private
+[`ops/GoogleWorkspaceQualification.roc`](../ops/GoogleWorkspaceQualification.roc)
+recipe owns its step order and runs through `ops/Runner.roc`:
+
+1. open the inputs;
+2. run every read probe;
+3. make the one write and check that it is listed;
+4. drop the run;
+5. publish the receipt.
+
+The native session supplies only those steps. It refuses them out of order,
+with arguments or replayed, and drops the run if any step fails.
+
+The profile names the grant and the live fixtures by role, and expires within
+a week. Every probe's request must pass the adapter's own authorization
+before the token is read. The token file holds the operator's own
+short-lived access token and must be owner-private. It stands in for the
+metadata server's workload token and for nothing else: IAM and the
+delegated token exchange run unchanged, and no service-account key is
+accepted. The evidence directory must be new.
+
+Every probe is an ordinary action through the native port. A recording layer
+keeps only statuses, byte counts, reviewed error reasons and counts of
+reviewed field forms, and fences writes, so a run creates at most one
+permission. The receipt names fixtures by role and carries the profile's
+digest. Before publishing, the session refuses a receipt that claims
+`provider_qualified`, or that contains the token or any profile value. Every
+receipt reports `provider_qualified: false` until a reviewer accepts it.
+
+Nothing is deleted. The operator removes the one permission by hand
+afterwards. See
+[Google Workspace](GOOGLE-WORKSPACE.md#live-qualification) for the
+credential's authority, the profile, the fixtures an administrator creates
+first, and which checklist items a run settles.
+
 ## Carta issuer captures
 
 A resource on a live `carta` connection makes `carta.snapshot.v2` collect one
@@ -382,6 +419,12 @@ A live qualification requires explicitly approved nonproduction targets:
   client-secret file and an expiring `carta-qualify` profile. Its receipt must
   settle the granted scopes, the playground API origin, end-of-pagination form,
   page sizes and which fields Carta omits or nulls before production cut-over.
+- Google Workspace test fixtures in the organization (the
+  [live fixture setup](GOOGLE-WORKSPACE.md#live-fixture-setup)), Token Creator
+  on the connection's service account for the operator, conditioned to
+  expire, an owner-private operator token and an expiring
+  `google-workspace-qualify` profile. Its receipt settles the checklist items
+  marked automated; the rest stay manual.
 
 Live credentials and account evidence must be provided before those checks can
 be completed. Installing an adapter or mounting a credential does not assert
