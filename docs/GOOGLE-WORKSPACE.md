@@ -702,27 +702,44 @@ It follows the [Carta qualification](CARTA.md#remaining-qualification). The
 private [`ops/GoogleWorkspaceQualification.roc`](../ops/GoogleWorkspaceQualification.roc)
 recipe owns the step order and runs through `ops/Runner.roc`:
 
-1. open the inputs;
-2. run every read probe;
-3. make the one write and check that it is listed;
-4. drop the run;
-5. publish the receipt.
+1. `open` the inputs;
+2. the read steps: `directory`, `calendars`, `events`, `event`, `conferences`
+   and `share-alias`;
+3. `share`, the one write;
+4. `check`, repeated until the permission is listed or seven checks have
+   run;
+5. `discard` the run;
+6. publish the `receipt`.
 
-The native session
+Every step is a closed native operation with an empty input. The native
+session
 ([`crates/xtask/src/google_workspace_qualify.rs`](../crates/xtask/src/google_workspace_qualify.rs))
-supplies only those steps. It refuses them out of order, with arguments or
-replayed. A failed step closes the session and drops the run, with its port,
-its copy of the token and every provider value it held. Nothing is retried:
-the recipe stops at the first failure, the adapter never retries, and the
-session cannot run a step twice.
+and the run
+([`google_workspace_qualification`](../crates/day2/src/google_workspace_qualification.rs))
+enforce what must hold whatever order the recipe chooses:
 
-- **Inputs.** The profile is admitted before the token is read: a format, the
-  fixtures, and an expiry no more than a week away. Every probe's request
-  must pass the adapter's own `Plan::authorize`, so a profile naming a group
-  outside the grant, or a malformed calendar, event or artifact, is refused
-  before anything is sent. Both files are read through `NOFOLLOW` as regular
-  files of at most 16 KiB. The token file must be owner-private. The
-  evidence directory must be new; it is created `0700`.
+- `open` first, then the run's steps, then `discard`, then `receipt`;
+- each read step once, and all of them before the share;
+- the share once;
+- checks only after a share whose outcome leaves something to check (`Shared`
+  or `share_outcome_unknown`), only until one finds the permission, and at
+  most seven, each after its minimum wait.
+
+A step out of order, with arguments, unknown or replayed is refused before
+anything is sent. A failed step closes the session and drops the run, with its
+port, its copy of the token and every provider value it held. Nothing is
+retried: the recipe stops at the first failure, the adapter never retries, and
+no step can run twice.
+
+- **Inputs.** The profile is admitted from its exact bytes before the token is
+  read: a format, the fixtures, and an expiry no more than a week away. Every
+  probe's request must pass the adapter's own `Plan::authorize`, so a profile
+  naming a group outside the grant, or a malformed calendar, event or
+  artifact, is refused before anything is sent. The token's shape is checked
+  next, before the evidence directory exists: one token of printable ASCII,
+  not JSON. Both files are read through `NOFOLLOW` as regular files of at most
+  16 KiB, and the token file must be owner-private. The evidence directory
+  must be new; it is created `0700`.
 - **Probes.** Every probe is an ordinary action, planned by `Plan::authorize`
   and run by `google_workspace::observe` through the native port: the same
   pipeline, bounds and classification the host runs. Between the adapter and
@@ -732,19 +749,33 @@ session cannot run a step twice.
   - reviewed error reasons and statuses (anything else is counted as
     `reason_other`);
   - counts of reviewed field forms, such as an event's conference type or a
-    permission's role.
-  Authentication replies are classified only when they refuse.
-- **One write.** The recording layer also fences writes. The read probes may
-  send none, the share probe one, and every later probe none. A refused
-  create is never sent, and is recorded as `fenced`. A run therefore
-  creates at most one permission whatever any probe does. The receipt's
-  `creates_sent` and `creates_fenced` count both.
+    permission's role. An unknown form is counted as `*_other`.
+
+  A successful authentication reply is never parsed: it holds a token. A
+  refusal's reason is classified.
+- **One write.** The recording layer also fences requests. It passes:
+  - a request without a body to one of the reviewed read endpoints;
+  - the one permission create, during the share step only.
+
+  Anything else, such as a create during a read step or a check, or a request
+  to any other endpoint, is refused unsent and recorded as `fenced`. A run
+  therefore creates at most one permission whatever any probe does. The
+  receipt's `creates_sent` and `requests_fenced` count both.
+- **Marker.** Before the share step can send its create, the session writes
+  `share-started.json` (`0600`, create-new) into the evidence directory. A run
+  killed afterwards still shows that a permission may exist.
 - **Receipt.** `receipt.json` is created `0600`. It names each fixture by its
-  role in the profile, never by its address or ID, and carries the profile's
-  digest so a reviewer can match the two. Before publishing, the session
+  role in the profile, never by its address or ID. Its `profile_digest` is
+  `sha256:` followed by the SHA-256 of the exact profile bytes, as
+  `sha256sum profile.json` prints it. `adapter` names the receipt's format,
+  not a code revision. `recipe_sources` is the digest of the private recipe
+  sources the run was built with, which does not cover the adapter's Rust, so
+  record the platform commit with the receipt. Before publishing, the session
   refuses a receipt that claims `provider_qualified`, contains the token or
-  contains any string value of the profile. Every receipt reports
-  `provider_qualified: false` until a reviewer accepts it.
+  contains any string value of the profile. A profile value that happens to
+  occur in the receipt's own text, such as inside a digest, blocks publishing;
+  run again. Every receipt reports `provider_qualified: false` until a
+  reviewer accepts it.
 
 A simulated rehearsal of the whole session, through the same probes, fences
 and guards, runs in the unit tests
@@ -767,7 +798,7 @@ The run therefore exercises the same keyless chain and the same delegation
 client authorization.
 
 ```console
-gcloud auth print-access-token > token && chmod 600 token
+(umask 077 && gcloud auth print-access-token > token)
 ```
 
 **Authority.** The operator's principal needs
@@ -790,21 +821,32 @@ it; on the shared qualification runner, that means every CI job. It also
 needs a host in the organization's project. The operator's token instead:
 
 - expires within an hour;
-- is attributed to a person in the IAM Credentials audit logs;
-- never leaves the operator's machine.
+- is attributed to a person in the IAM Data Access audit logs for
+  `iamcredentials.googleapis.com`, when those logs are on (see the fixture
+  setup);
+- is sent only to IAM.
 
-**Where the substitution can run.** It is sealed by type privacy:
+**Where the substitution can run.** What holds:
 
 - `OperatorWorkload` is a private type of
   [`google_workspace_qualification`](../crates/day2/src/google_workspace_qualification.rs).
   It answers only the metadata exchange and passes every other exchange
   through.
-- Only `Qualification::native` and the simulated constructor build it, and a
-  `Qualification` runs nothing but the fixed probes.
+- Only `Qualification`'s two constructors build it, and a `Qualification`
+  runs nothing but its fixed steps.
+- `Qualification::native` is an architecture hazard: every call site needs
+  its own reviewed allowance in `architecture-rules.json`, and the only one is
+  `xtask google-workspace-qualify`. A call anywhere else, in the runtime or
+  another crate, fails `architecture-check`.
 - The runtime's `NativeGooglePort::new()` takes no token, and
   `google_auth::acquire` is unchanged.
-- The only read of a bearer from a file is the reviewed architecture
-  allowance on the xtask session.
+- The only reads of a bearer from a file are the reviewed allowances of the
+  shared qualification input module in xtask.
+
+What does not hold: `GooglePort`, `Reply` and `google_workspace::observe` are
+public, so Rust does not stop other code in the crate from writing its own port
+that answers the metadata exchange. Such a port is new code that only review
+catches.
 
 ### The profile
 
@@ -844,7 +886,9 @@ instance checklist for a live run:
    - a delegation client authorized for exactly `calendar.readonly`,
      `calendar.acls.readonly`, `meetings.space.readonly` and `drive`.
 2. **The operator's authority.** Token Creator for the operator on that service
-   account, conditioned to expire with the profile.
+   account, conditioned to expire with the profile. Turn on IAM Data Access
+   audit logs (`DATA_READ`) for `iamcredentials.googleapis.com` in the
+   project, so each token the run mints is attributed to the operator.
 3. **The reader.** `calendar_reader`, a user in `email_domain` that nobody
    signs in as.
 4. **The in-play calendar** (`calendars.in_play`). A secondary calendar on
@@ -865,16 +909,21 @@ instance checklist for a live run:
      - an all-day recurring event with one instance deleted;
      - one event created and then deleted.
 
-     That is more than one page of 25 events, so the token probe runs, and
-     it exercises Google's cancelled and deleted shapes. An event with an
-     add-on or third-party conference is optional.
+     That is more than one page of 25 events, so the paging and token probes
+     run, and it exercises Google's cancelled and deleted shapes. Place the
+     deleted event and the deleted instances after the 25th event by start
+     time. Google may report a deleted event by its ID alone, which the
+     adapter refuses; on the first page that would leave the paging and token
+     probes unsettled. An event with an add-on or third-party conference is
+     optional.
 5. **The free/busy calendar** (`calendars.free_busy`). Shared with the reader
    as "See only free/busy".
 6. **The unshared calendar** (`calendars.unshared`). Not shared with the
    reader in any way.
 7. **The group** (`group`), in a grantee domain:
-   - an alias added in the Admin console (`group_alias`);
-   - one direct member (`group_member`);
+   - an alias added in the Admin console (`group_alias`), also in a grantee
+     domain;
+   - one direct member (`group_member`) in the group's own domain;
    - no permission on the artifact's file.
 8. **The artifact** (`artifact`). The recorded event's recording, by its exact
    Meet name, read with the Meet API's `conferenceRecords.list` and
@@ -892,14 +941,17 @@ The run never deletes anything. Remove its one permission by hand:
 3. Delete the token file.
 
 A second run needs the permission removed first: otherwise the share finds it,
-answers `AlreadyShared`, and no create is exercised (`creates_sent: 0`).
+answers `AlreadyShared`, and no create is exercised (`creates_sent: 0`). An
+evidence directory holding `share-started.json` but no receipt is a run killed
+after the share step began: check the file's permissions by hand.
 
-### Qualify live (step 5)
+### Qualify live (step 6)
 
-What the simulation assumes and only Google can settle. Each item names the
-receipt field that settles it, as `probe` → field, or is **manual**: a person
-must set it up or judge it, and the doc says why. "Shape" is an exchange's
-`shape` counts.
+What the simulation assumes and only Google can settle. A reviewer settles
+each item; a receipt only records evidence. Each item names the receipt field
+that records it, as `probe` → field, or is **manual**: a person must set it
+up or judge it, and the doc says why. "Shape" is an exchange's `shape`
+counts.
 
 - [ ] `403` versus `404` for a calendar the reader has no access to, and for
       one shared with it as free/busy only, on `acl.get`, `calendars.get`,
@@ -921,15 +973,24 @@ must set it up or judge it, and the doc says why. "Shape" is an exchange's
       adapter refuses that as `response_invalid`, and the simulation cannot
       serve it today. Decide whether to model it and how to report it.
       **Automated**: `events_page` → shape `cancelled`, `id_only`,
-      `all_day`, and the page's outcome (`Found` or `response_invalid`). The
-      decision stays with the reviewer.
+      `all_day`, and each page's outcome (`Found` or `response_invalid`). The
+      decision stays with the reviewer. A refused first page leaves the
+      paging and token probes unsettled, and the receipt says so
+      (`events_token_other_query` → `unsettled_first_page_refused`).
 - [ ] Page tokens: whether `events.list` binds a token to the query that issued
       it, and short or empty pages that still carry a `nextPageToken`, on
       `events.list`, `acl.list` and `conferenceRecords.list` under a filter.
       A short ACL page still spends one of the four, so fewer than 400 rules
       may be covered; two empty record pages reach the records ceiling.
-      **Automated**: `events_token_other_query` → its outcome (`Found` means
-      not bound, `google_workspace_request_refused` means bound). The page
+      **Automated**, with no documented rule to check it against: Google
+      documents no binding rule for `pageToken`. `events_token_other_query`
+      sends the first page's token with another query, the same calendar and
+      start and a window one day long. `google_workspace_request_refused`
+      means Google refuses the mix. `Found` with
+      `events_at_or_after_time_max` above zero means Google kept the token's
+      original query and ignored the new window; `Found` with zero means it
+      applied the new window. `unsettled_single_page` and
+      `unsettled_first_page_refused` mean the probe could not run. The page
       forms are observed, not forced: every list exchange's shape `items` and
       `next_page_token_present` / `_empty`.
 - [ ] `conferenceSolution.key.type` values for Meet, add-on and third-party
@@ -1038,11 +1099,14 @@ must set it up or judge it, and the doc says why. "Shape" is an exchange's
 - [ ] Permission propagation: how soon after a create the permission appears
       in the list. A delay longer than the attempt makes a reconcilable
       outcome unknown.
-      **Automated**: `visible_after_seconds`, and each `share_again` probe's
-      `waited_seconds`. Checks run at 0, 1, 3, 7, 15, 31 and 63 seconds.
-      Each check is the share with the fence closed: it answers
-      `AlreadyShared` once Drive lists the permission, and any create it
-      would send instead is refused unsent.
+      **Automated**: `visible_after_ms`, and each `share_again` probe's
+      `elapsed_ms`: monotonic time from the create's reply to that check's
+      first permission list, so it includes the exchanges each check makes
+      before it lists. Each check first waits its minimum delay,
+      `check_delays_seconds` (0, 1, 2, 4, 8, 16 and 32 seconds), recorded as
+      its `delay_seconds`. Each check is the share with the fence closed: it
+      answers `AlreadyShared` once Drive lists the permission, and any create
+      it would send instead is refused unsent.
 - [ ] Drive's reply to the create echoes the request as the adapter requires.
       **Automated**: `share` → the `drive_permission_create` exchange's shape
       `echo_type_group`, `echo_role_reader` and `echo_address_exact` (or
