@@ -53,7 +53,9 @@ GoogleWorkspace :: [].{
 
 	# One page of single events overlapping the window, ordered by start, cancelled ones included. All-day
 	# events, including cancelled instances of an all-day series, carry no time and are omitted;
-	# `all_day_omitted` counts them. Persist `next_page_token`.
+	# `all_day_omitted` counts them. `next_page_token` is opaque and bound to the calendar and window that issued
+	# it: persist it, and send it back only with exactly those. Any other continuation is refused with
+	# `google_workspace_request_invalid` before anything is sent; start the query again without a token.
 	EventsPage : { events : List(Event), next_page_token : OptionalText, all_day_omitted : U64 }
 
 	EventsOutcome : [Found(EventsPage), NotShared, NotFound]
@@ -163,7 +165,8 @@ GoogleWorkspace :: [].{
 		},
 	)
 
-	# One page of events in a window of at most 31 days. Bounds are RFC 3339 with an offset and whole seconds.
+	# One page of events in a window of at most 31 days. Bounds are RFC 3339 with an offset and whole seconds. A
+	# `page_token` must be the `next_page_token` this same calendar and window returned.
 	calendar_events : Context, Str, Str, Str, OptionalText -> Observe(EventsOutcome)
 	calendar_events = |context, calendar_id, time_min, time_max, page_token| Resource.bind(
 		context,

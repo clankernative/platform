@@ -739,8 +739,18 @@ fn native_google_workspace_calendar_outcomes_decode_through_public_sdk() -> Resu
         all_day_omitted: 1,
     }));
     // The exact request the SDK sends for a continued page, which the adapter
-    // must authorize as that page: the page token is `Some("next")`.
-    let events_request = r#"{"calendar_id":"c_team@group.calendar.google.com","handle":"fixture-handle","page_token":{"Some":"next"},"time_max":"2026-01-31T00:00:00Z","time_min":"2026-01-01T00:00:00Z"}"#;
+    // must authorize as that page: the token is Google's "next", bound to this
+    // calendar and window, and Google is sent "next" alone.
+    let bound = day2::google_workspace_calendar::EventsQuery {
+        calendar: "c_team@group.calendar.google.com",
+        time_min: "2026-01-01T00:00:00Z",
+        time_max: "2026-01-31T00:00:00Z",
+    }
+    .bind("next");
+    let events_request = format!(
+        r#"{{"calendar_id":"c_team@group.calendar.google.com","handle":"fixture-handle","page_token":{{"Some":"{bound}"}},"time_max":"2026-01-31T00:00:00Z","time_min":"2026-01-01T00:00:00Z"}}"#
+    );
+    let events_request = events_request.as_str();
     let (plan, handle) = day2::google_workspace::Plan::authorize(
         day2_capabilities::registry::Action::GoogleWorkspaceCalendarEvents,
         &day2_capabilities::integrations::LiveConnection::GoogleWorkspace {
@@ -821,7 +831,7 @@ moved = |status, start, end| {
     }
 }
 expect requested(handle.and_then(|resource| GoogleWorkspace.calendar_events_with(resource, "c_team@group.calendar.google.com",
-    "2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z", Some("next"))).program())
+    "2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z", Some("BOUND_TOKEN"))).program())
 expect match read_calendar(CALENDAR_JSON) {
     Done(result) => match result.value {
         Found(calendar) => calendar.summary == "Team" and calendar.group_role == FreeBusyReader
@@ -913,6 +923,7 @@ expect match read_event(EVENT_NOT_SHARED_JSON) {
         &serde_json::to_string(&encode(&EventOutcome::AllDay))?,
     )
     .replace("EVENTS_REQUEST", &serde_json::to_string(events_request)?)
+    .replace("BOUND_TOKEN", &bound)
     .replace(
         "EVENTS_CAPABILITY",
         &serde_json::to_string(

@@ -589,6 +589,24 @@ fn calendar_reads_are_delegated_reserved_and_settled_like_any_read() -> Result<(
     assert_eq!(page["Found"]["events"].as_array().map(Vec::len), Some(2));
     assert_eq!(page["Found"]["all_day_omitted"], 1);
     assert_eq!(events.usage.calls, 5);
+    // A continuation bound to another window is refused at authorization:
+    // nothing is reserved and no Calendar request is made.
+    let served = calls(&runtime)?.len();
+    let elsewhere = crate::google_workspace_calendar::EventsQuery {
+        calendar: GOOGLE_DEVELOPMENT_CALENDAR,
+        time_min: "2026-01-02T00:00:00Z",
+        time_max: "2026-01-31T00:00:00Z",
+    }
+    .bind("page");
+    let refused = authorize(&runtime, "lookup", "events-elsewhere", EVENTS, |handle| {
+        json!({"handle":handle,"calendar_id":GOOGLE_DEVELOPMENT_CALENDAR,
+            "time_min":"2026-01-01T00:00:00Z","time_max":"2026-01-31T00:00:00Z",
+            "page_token":{"Some":elsewhere}})
+    })
+    .err()
+    .context("a continuation for another window was authorized")?;
+    assert!(format!("{refused:#}").contains("google_workspace_request_invalid"));
+    assert_eq!(calls(&runtime)?.len(), served);
     let event = admitted(
         &runtime,
         "lookup",

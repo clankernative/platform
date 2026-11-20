@@ -371,9 +371,19 @@ mod tests {
                 Action::GoogleWorkspaceCalendar,
                 r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","group_email":"engineering@synthetic.example"}"#,
             )?,
+            // Google is sent its own token, "next", unwrapped from the bound one.
             plan(
                 Action::GoogleWorkspaceCalendarEvents,
-                r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","time_min":"2026-01-01T00:00:00Z","time_max":"2026-01-31T00:00:00Z","page_token":{"Some":"next"}}"#,
+                &serde_json::json!({"handle":"h",
+                    "calendar_id":"c_engineering@group.calendar.google.com",
+                    "time_min":"2026-01-01T00:00:00Z","time_max":"2026-01-31T00:00:00Z",
+                    "page_token":{"Some":crate::google_workspace_calendar::EventsQuery {
+                        calendar: "c_engineering@group.calendar.google.com",
+                        time_min: "2026-01-01T00:00:00Z",
+                        time_max: "2026-01-31T00:00:00Z",
+                    }
+                    .bind("next")}})
+                .to_string(),
             )?,
             plan(
                 Action::GoogleWorkspaceCalendarEvent,

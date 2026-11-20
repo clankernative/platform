@@ -9,7 +9,7 @@
 //! committed world, so both lanes run the same token flow, the same requests and
 //! the same parser.
 use crate::google_auth::{self, AccessToken, Exchange, Reply, Unreached};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     integrations::LiveConnection,
     resources::{Action, ResourceTarget, google_workspace_address},
@@ -149,6 +149,8 @@ pub enum Read {
         calendar: String,
         time_min: String,
         time_max: String,
+        /// Google's own token, taken from a continuation bound to exactly
+        /// this calendar and window.
         page_token: Option<String>,
     },
     CalendarEvent {
@@ -339,12 +341,29 @@ impl Plan {
                 let input: CalendarEventsRequest =
                     crate::json::decode(request.as_bytes()).map_err(invalid)?;
                 calendar_id(&input.calendar_id)?;
-                let page_token = calendar::optional_value(input.page_token);
                 ensure!(
-                    calendar::window(&input.time_min, &input.time_max)
-                        && page_token.as_deref().is_none_or(calendar::page_token),
+                    calendar::window(&input.time_min, &input.time_max),
                     "google_workspace_request_invalid"
                 );
+                // A continuation must carry this exact query's binding: Google
+                // would apply another query's position to this window and
+                // silently answer a short or empty page. Refused here, before
+                // anything is reserved or sent.
+                let query = calendar::EventsQuery {
+                    calendar: &input.calendar_id,
+                    time_min: &input.time_min,
+                    time_max: &input.time_max,
+                };
+                let page_token = match calendar::optional_value(input.page_token) {
+                    None => None,
+                    Some(token) => Some(
+                        calendar::page_token(&token)
+                            .then(|| query.continuation(&token))
+                            .flatten()
+                            .context("google_workspace_request_invalid")?
+                            .to_owned(),
+                    ),
+                };
                 (
                     Read::CalendarEvents {
                         calendar: input.calendar_id,
@@ -994,6 +1013,11 @@ fn run(
             accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
             Ok(encode(&EventsOutcome::Found(calendar::parse_events_page(
                 &reply.body,
+                &calendar::EventsQuery {
+                    calendar,
+                    time_min,
+                    time_max,
+                },
             )?)))
         }
         Read::CalendarEvent { calendar, event } => {
@@ -1035,6 +1059,8 @@ fn group_permission(
     group: &str,
 ) -> Result<Shared, Failure> {
     let page_size = drive::PERMISSION_PAGE_SIZE.to_string();
+    // Google does not bind a page token to its query. This one never leaves
+    // the action and is sent back only with the identical request.
     let mut continuation: Option<String> = None;
     for _ in 0..drive::PERMISSION_PAGE_CEILING {
         let mut query = vec![
@@ -1480,6 +1506,8 @@ impl MeetLists<'_> {
     ) -> Result<Vec<T>, Failure> {
         let page_size = list.page_size.to_string();
         let mut items = Vec::new();
+        // Google does not bind a page token to its query. This one never leaves
+        // the action and is sent back only with the identical request.
         let mut continuation: Option<String> = None;
         for _ in 0..list.ceiling {
             let mut query = vec![("pageSize", page_size.as_str())];
@@ -1614,6 +1642,8 @@ fn calendar_with_role(
     accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
     let summary = calendar::parse_calendar(&reply.body, calendar)?;
     let page_size = ACL_PAGE_SIZE.to_string();
+    // Google does not bind a page token to its query. This one never leaves
+    // the action and is sent back only with the identical request.
     let mut continuation: Option<String> = None;
     for _ in 0..ACL_PAGE_CEILING {
         let mut query = vec![("maxResults", page_size.as_str())];

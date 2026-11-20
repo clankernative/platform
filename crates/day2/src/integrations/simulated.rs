@@ -2756,8 +2756,10 @@ fn google_meet_reply(
     }
 }
 
-/// An opaque continuation bound to the query it continues: another query's
-/// token is refused, as Google refuses one.
+/// An opaque continuation bound to `binding`: a token issued for another
+/// binding, or forged, is refused. ACL and record lists bind their whole query,
+/// an assumption the adapter never tests (it resends a token only with the
+/// identical request); events lists bind only their calendar, as Google does.
 fn google_page_token(world: &GoogleWorkspaceWorld, binding: &str, offset: usize) -> Result<String> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&json!({"b":binding,"o":offset}))?);
@@ -2982,11 +2984,10 @@ fn google_calendar_reply(
                 return Ok(error(400, "Bad Request"));
             };
             let size = EVENT_PAGE_SIZE as usize;
-            let binding = format!(
-                "events:{calendar_id}:{}:{}",
-                query("timeMin").unwrap_or_default(),
-                query("timeMax").unwrap_or_default()
-            );
+            // Google does not bind an events token to its window: given
+            // another window's token it applies the token's position to the
+            // new window (observed 2026-11-20). Only the calendar is bound.
+            let binding = format!("events:{calendar_id}");
             let offset = match query("pageToken") {
                 None => 0,
                 Some(token) => match google_page_offset(world, &binding, token) {

@@ -229,13 +229,36 @@ validated inputs.
   path of a `https://meet.google.com/{code}` `hangoutLink`. Either way it is
   kept only in Meet's `xxx-xxxx-xxx` shape. An all-day event carries no time and
   is omitted, and so is a cancelled instance of an all-day series (a date
-  `originalStartTime` and no `start`). `all_day_omitted` counts both. The
-  application persists the page token, which continues only the query that
-  issued it. **Contradicted live (2026-11-20 UTC):** Google does not enforce
-  that: it accepted another query's token and answered an empty page (see
-  [Qualify live (step 6)](#qualify-live-step-6)), and the adapter checks only
-  the token's shape. Until the adapter binds tokens itself, an application
-  must send a token only with the query that issued it.
+  `originalStartTime` and no `start`). `all_day_omitted` counts both.
+
+  The application persists `next_page_token` and sends it back only with the
+  calendar, `time_min` and `time_max` that issued it, as exact strings. Google
+  does not enforce that: given another query's token it applies the token's
+  position to the new window and answers a short or empty page (observed
+  2026-11-20, see [Qualify live (step 6)](#qualify-live-step-6)). So the
+  adapter binds every token it hands out:
+
+  - The token is `v1.{binding}.{google}`. `binding` is the first 32 hex digits
+    of the SHA-256 of the query: the calendar, the window and the request's
+    reviewed constants (its fixed parameters and field mask). `google` is
+    Google's own token, at most 988 bytes, so the whole token stays within
+    the 1,024-byte bound; a longer one is `google_workspace_response_invalid`.
+  - A continuation is sent to Google, unwrapped, only when its binding is this
+    request's. Anything else is `google_workspace_request_invalid`, refused
+    when the capability is authorized, before anything is reserved or sent:
+    another window's or calendar's token, a token from before a reviewed
+    constant changed, a bare Google token, or a token of another shape.
+  - That is the code for every application input the adapter refuses before
+    the network. A mismatched token is input for the wrong query, and the
+    remedy is the same as for any invalid input: start the query again
+    without a token. A distinct code would invite repairing a token instead.
+  - The digest is unkeyed. It catches a mistake, not a forger: an application
+    can only send a token for a calendar its grant already lets it read, so a
+    forged token gains nothing the grant does not already allow.
+
+  Tokens of internal paging (ACL pages, conference records, artifact and
+  permission lists) never leave the action, and each is sent back only with
+  the identical request.
 - **calendar_event** — after the reader's rule, `GET …/events/{event}` with the
   same item mask. `Found(Event)`; `AllDay` for an all-day event or a cancelled
   instance of an all-day series; `NotShared`; or `NotFound` (`404` or `410`).
@@ -367,7 +390,8 @@ reported field is bounded to characters JSON does not escape:
   and one `@`;
 - IDs are at most 1,024 bytes of letters, digits and `_`;
 - times are at most 25 bytes;
-- page tokens are at most 1,024 printable bytes other than `"` and `\`.
+- page tokens are at most 1,024 printable bytes other than `"` and `\`, and
+  Google's events token at most 988, so that its binding fits.
 
 Anything else is `google_workspace_response_invalid`. The largest event
 encodes to 1,803 bytes. Twenty-five of them with the longest token come to
@@ -579,11 +603,13 @@ Events cover:
 filter is parsed for exactly the pinned grammar; Meet records are listed latest
 start first. Every route answers `400` to any query, filter or fields mask
 other than the reviewed constants, `prettyPrint=false` included, so the
-simulation cannot serve a request the adapter was not reviewed to send. Page tokens are opaque and bound to the
-query that issued them, and another query's token, even a real one, is
-`400`. That binding is a simulation assumption that live qualification
-checks. **Contradicted live (2026-11-20 UTC):** Google answered another
-query's token with `200` and an empty page.
+simulation cannot serve a request the adapter was not reviewed to send. Page
+tokens are opaque and tagged, so a forged one is `400`. An events token is
+bound only to its calendar: another window's token is accepted and its
+position applied to the new window, a short or empty page, as Google did on
+2026-11-20. ACL and record tokens stay bound to their whole query, another
+query's being `400`; that is an assumption the adapter never tests, since it
+resends those tokens only with the identical request.
 
 Simulated tokens are self-describing and verified by recomputing their tag:
 
@@ -1195,8 +1221,9 @@ real organization, from platform commit `cfa04a9c` with `recipe_sources`
 Its receipt was reviewed: one share was created and nothing was fenced. Two
 probes contradicted the simulation: Google accepted another query's page
 token and answered an empty page, and a free/busy calendar answered `403`
-then `200` rather than `404`. Both are follow-ups (bind page tokens in the
-adapter; correct the simulation and its tests). The items ticked in
+then `200` rather than `404`. Both are fixed: the adapter binds each events
+page token to its query, and the simulation answers both as Google did. The
+items ticked in
 [Qualify live (step 6)](#qualify-live-step-6) are settled; the provider is
 not yet qualified.
 
@@ -1248,5 +1275,5 @@ qualification receipt settles the real ones (`crates/day2/fixtures/provider-resp
 5. Live qualification: the `google-workspace-qualify` session, its profile,
    receipt and fixture checklist. (Done.)
 6. A live run against an instance's fixtures, and review of its receipt.
-   (First run reviewed 2026-11-20; page-token binding and the simulation's
-   free/busy and token answers are its follow-ups.)
+   (First run reviewed 2026-11-20; its follow-ups, page-token binding and the
+   simulation's free/busy and token answers, are done.)

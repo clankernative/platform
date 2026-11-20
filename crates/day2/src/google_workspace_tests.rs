@@ -1484,11 +1484,8 @@ fn event_pages_continue_only_the_query_that_issued_them() {
         .clone();
     assert_eq!(second["events"].as_array().unwrap().len(), 5);
     assert_eq!(second["next_page_token"], "None");
-    // The same token on another window is refused by Google, not reinterpreted.
-    let (result, _) =
-        world.observe(&events_read("2026-01-02T00:00:00Z", window.1, Some(&token)).unwrap());
-    assert_eq!(code(&result), "google_workspace_request_refused");
-    // A real token another calendar's query issued is refused here too.
+    // The token on another window, another calendar's token and Google's own
+    // token unbound are each refused before anything is reserved or sent.
     let elsewhere = decoded(
         world
             .observe(&events_on(second_calendar, window.0, window.1, None).unwrap())
@@ -1497,9 +1494,38 @@ fn event_pages_continue_only_the_query_that_issued_them() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert_ne!(elsewhere, token);
-    let (result, _) = world.observe(&events_read(window.0, window.1, Some(&elsewhere)).unwrap());
-    assert_eq!(code(&result), "google_workspace_request_refused");
+    let january = calendar::EventsQuery {
+        calendar: CALENDAR,
+        time_min: window.0,
+        time_max: window.1,
+    };
+    let google = january.continuation(&token).unwrap();
+    let later = "2026-01-02T00:00:00Z";
+    for refused in [
+        events_read(later, window.1, Some(&token)),
+        events_read(window.0, window.1, Some(&elsewhere)),
+        events_read(window.0, window.1, Some(google)),
+    ] {
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "google_workspace_request_invalid"
+        );
+    }
+    // Google itself applies a token's position to another window, as it did
+    // live: bound to the later window, January's position skips 25 of its 28
+    // events and the page is short, with no error.
+    let rebound = calendar::EventsQuery {
+        calendar: CALENDAR,
+        time_min: later,
+        time_max: window.1,
+    }
+    .bind(google);
+    let short = decoded(
+        world
+            .observe(&events_read(later, window.1, Some(&rebound)).unwrap())
+            .0,
+    );
+    assert_eq!(short["Found"]["events"].as_array().unwrap().len(), 3);
 }
 
 #[test]
@@ -1824,13 +1850,34 @@ fn the_largest_admissible_page_fits_one_observation() {
                 "conferenceSolution": {"key": {"type": "hangoutsMeet"}}},
         })
     };
-    let body = serde_json::json!({
-        "items": (0..calendar::EVENT_PAGE_SIZE as usize).map(item).collect::<Vec<_>>(),
-        "nextPageToken": "t".repeat(calendar::MAX_PAGE_TOKEN_BYTES),
-    })
-    .to_string();
-    let page = calendar::parse_events_page(body.as_bytes()).unwrap();
+    // The longest token Google may send binds to the longest an application
+    // may send back; one byte more is refused.
+    let query = calendar::EventsQuery {
+        calendar: CALENDAR,
+        time_min: time,
+        time_max: time,
+    };
+    let page_with = |token: usize| {
+        serde_json::json!({
+            "items": (0..calendar::EVENT_PAGE_SIZE as usize).map(item).collect::<Vec<_>>(),
+            "nextPageToken": "t".repeat(token),
+        })
+        .to_string()
+    };
+    assert_eq!(
+        calendar::parse_events_page(
+            page_with(calendar::MAX_GOOGLE_EVENTS_TOKEN_BYTES + 1).as_bytes(),
+            &query
+        ),
+        Err(Failure::ResponseInvalid)
+    );
+    let body = page_with(calendar::MAX_GOOGLE_EVENTS_TOKEN_BYTES);
+    let page = calendar::parse_events_page(body.as_bytes(), &query).unwrap();
     assert_eq!(page.events.len(), calendar::EVENT_PAGE_SIZE as usize);
+    let crate::carta::OptionalText::Some(bound) = &page.next_page_token else {
+        panic!("a bound token")
+    };
+    assert_eq!(bound.len(), calendar::MAX_PAGE_TOKEN_BYTES);
     let result = encode(&calendar::EventsOutcome::Found(page));
     // The largest request the adapter admits, padded through its handle.
     let mut request = serde_json::json!({"handle":"","calendar_id":address('x', calendar::MAX_ADDRESS_BYTES),
@@ -1866,7 +1913,7 @@ fn the_largest_admissible_page_fits_one_observation() {
         let mut escaped = serde_json::from_str::<serde_json::Value>(&body).unwrap();
         escaped["items"][0]["creator"]["email"] = serde_json::json!(email);
         assert_eq!(
-            calendar::parse_events_page(escaped.to_string().as_bytes()),
+            calendar::parse_events_page(escaped.to_string().as_bytes(), &query),
             Err(Failure::ResponseInvalid),
             "{email}"
         );
