@@ -31,7 +31,7 @@ Helpers become operations only through this root.
 
 Every public command and query declares who it serves: `audience: Employees`,
 `Owners` or `Closed`. The application chooses the class; the company installing
-it will bind each class to principals: `Employees` to the installation's people
+it binds each class to principals: `Employees` to the installation's people
 domain, `Owners` to the app's owners, and `Closed` to no one. An artifact
 therefore never names a person, and the same artifact serves another company
 with that company's people. The audience is a required constructor field, so a
@@ -39,8 +39,8 @@ public operation without one, or an internal command with one, does not
 compile. Admission refuses an internal command with one, and a contract in
 which some public operations declare one and others do not. An application
 built before audiences existed declares none: its artifact still loads, backs
-up and migrates, so the running app can upgrade, and the planned policy
-renderer will refuse it until it is rebuilt. The artifact format is unchanged
+up and migrates, so the running app can upgrade, and the policy renderer
+refuses it until it is rebuilt. The artifact format is unchanged
 because an upgrade's recovery backup is taken by the target build's tooling,
 which refuses an incumbent artifact of an older format.
 
@@ -57,17 +57,28 @@ or admission refuses the artifact.
 A model whose rows belong to a person declares that column on its table, as
 `owned_by: Table.owner({ owner: row.owner })` (see
 [tables and keys](STORAGE-INDEXES.md)). An `Employees` command that updates or
-soft-deletes rows of that model is meant for their owner; admins are not
-scoped. A command that writes those rows whatever their owner, such as a visit
-counter on someone else's link, declares `.any_owner(Data.links)`. Admission
-refuses that declaration on an `Owners` or `Closed` command, for a model that
-declares no owner, or for a model the command does not update or soft-delete.
-Other grants are not narrowed: every operation may read every model.
+soft-deletes rows of that model reaches only the caller's rows, and so does an
+internal command; admins are not scoped. A command that writes those rows
+whatever their owner, such as a visit counter on someone else's link, declares
+`.any_owner(Data.links)`. Admission refuses that declaration on an `Owners` or
+`Closed` command, for a model that declares no owner, or for a model the command
+does not update or soft-delete. It also refuses an update that names the owner
+column, since a row's owner never changes, and an `Employees` or internal command
+that requires every row of an owned model it may update only for the caller
+without `.any_owner`. Every operation may read every model, except that a
+command narrowed to its caller's rows reads only those rows of that model. A
+create always names its actor as the owner.
 
-These declarations are the input to company policy; today the company still
-writes every grant itself (see [authority](AUTHORITY.md)). Rendering that
-policy from audiences, owner columns and `.any_owner`, and refusing an artifact
-whose public operations lack an audience, is planned.
+These declarations are the company's policy. An installation that binds the app
+with `rendered_authority` names only its administrators, and activation renders
+every grant from the artifact it activates: actors from audiences, owner rows
+from `owned_by` and `.any_owner`, and exactly the requests, observations and
+external effects each operation declares (see
+[rendered authority](AUTHORITY.md#rendered-authority)). A requested public
+command keeps its own audience, so a request it does not cover, such as an
+`Employees` command requesting an `Owners` one, is refused when the application
+is built. An explicit policy is still possible, for local development and
+applications built before audiences.
 
 The compiler checks required root fields, callback signatures, exact nested
 description records, typed examples and selectors. Both mandatory final profiles

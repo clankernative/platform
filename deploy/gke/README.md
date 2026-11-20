@@ -388,9 +388,14 @@ native admission checks its complete evidence, platform inventory and executing
 supervisor/sandbox. A mocked Terraform plan is not qualification. Null keeps
 existing installations unchanged and does not claim security approval.
 
-Fill workload tfvars with the image digest, artifact ID, hosted domain, initial
-principals and the **complete authority policy for that artifact**. The template
-intentionally has an empty policy and is refused until filled. Match the node
+Fill workload tfvars with the image digest, artifact ID, hosted domain and the
+app's `admins`: at activation day2 renders the operation policy, readers and
+writers from the artifact's declared audiences (see
+[rendered authority](../../docs/AUTHORITY.md#rendered-authority)). The admins
+need a runtime built from this platform version or later; an older runtime
+refuses an instance that names them, so an app pinned to an older SDK keeps an
+explicit `authority` policy with `readers` and `writers` until it is rebuilt.
+The root refuses both forms together, and neither. Match the node
 pool's actual PID bound; a declared value is not a substitute for checking it.
 Initialize, plan and apply `day2-app` with its separate backend. Confirm rollout,
 readiness, authenticated access, denial for an unauthorized account, app operation

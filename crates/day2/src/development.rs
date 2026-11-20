@@ -2,7 +2,7 @@
 //! return pure values; only the ordinary command runtime can apply them.
 use crate::{
     artifact::{AppBinding, Instance, LoadedArtifact},
-    authority::{Mode, ModelGrant, OperationPolicy, Policy, Rows, TextConstraint},
+    authority::{Mode, OperationPolicy, Policy},
     properties,
     store::{Fault, Runtime},
     worker::Worker,
@@ -1041,37 +1041,6 @@ fn failure_verification_actor<'a>(
     }
 }
 
-fn local_model_grant(
-    command: bool,
-    model: &str,
-    record: &crate::schema::Record,
-    effects: &[crate::app_contract::Effect],
-) -> ModelGrant {
-    let declared: Vec<_> = effects
-        .iter()
-        .filter(|effect| effect.model == model)
-        .collect();
-    // Native soft deletion uses the existing model update authority. The app's
-    // execution contract still independently forbids undeclared field updates.
-    let deletion = command && declared.iter().any(|effect| effect.kind == "soft_delete");
-    ModelGrant {
-        read: true,
-        create: command && declared.iter().any(|effect| effect.kind == "create"),
-        update_fields: if deletion {
-            record.fields.keys().cloned().collect()
-        } else if command {
-            declared
-                .iter()
-                .filter(|effect| matches!(effect.kind.as_str(), "update" | "update_created"))
-                .flat_map(|effect| effect.fields.iter().cloned())
-                .collect()
-        } else {
-            BTreeSet::new()
-        },
-        rows: Rows::All,
-    }
-}
-
 pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy> {
     let mut operations = BTreeMap::new();
     let app_definition = artifact.contract().app_contract.as_ref();
@@ -1133,7 +1102,12 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
             .map(|(name, model)| {
                 (
                     name.clone(),
-                    local_model_grant(operation.kind == "command", name, model, effects),
+                    crate::authority_render::declared_grant(
+                        operation.kind == "command",
+                        name,
+                        model,
+                        effects,
+                    ),
                 )
             })
             .collect();
@@ -1245,6 +1219,7 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
         );
     }
     let policy = Policy {
+        row_owners: Default::default(),
         version: 1,
         // The development actor owns a disposable instance, which is what lets
         // it read that instance's platform audit log. Rows are granted to every
@@ -1255,29 +1230,7 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
         // by a production runtime.
         delegations,
         operations,
-        constraints: artifact
-            .contract()
-            .schema
-            .models
-            .iter()
-            .filter_map(|(name, model)| {
-                let fields: BTreeMap<_, _> = model
-                    .fields
-                    .iter()
-                    .filter(|(_, kind)| matches!(kind, crate::schema::Kind::TextDomain { .. }))
-                    .map(|(field, _)| {
-                        (
-                            field.clone(),
-                            TextConstraint {
-                                nonempty: false,
-                                max_bytes: 16_384,
-                            },
-                        )
-                    })
-                    .collect();
-                (!fields.is_empty()).then(|| (name.clone(), fields))
-            })
-            .collect(),
+        constraints: crate::authority_render::text_constraints(&artifact.contract().schema),
     };
     policy.validate(&artifact.contract().operations, &artifact.contract().schema)?;
     Ok(policy)
@@ -2425,12 +2378,14 @@ mod people_resource_tests {
             effect("create", "history", &[]),
             effect("update", "items", &["name"]),
         ];
-        let target = local_model_grant(true, "items", &record, &effects);
-        assert!(target.read && !target.create && matches!(target.rows, Rows::All));
+        let target = crate::authority_render::declared_grant(true, "items", &record, &effects);
+        assert!(
+            target.read && !target.create && matches!(target.rows, crate::authority::Rows::All)
+        );
         assert_eq!(target.update_fields, BTreeSet::from(["name".into()]));
-        let history = local_model_grant(true, "history", &record, &effects);
+        let history = crate::authority_render::declared_grant(true, "history", &record, &effects);
         assert!(history.create && history.update_fields.is_empty());
-        let update_created = local_model_grant(
+        let update_created = crate::authority_render::declared_grant(
             true,
             "items",
             &record,
@@ -2441,10 +2396,10 @@ mod people_resource_tests {
             BTreeSet::from(["owner".into()])
         );
         for (command, name) in [(false, "items"), (true, "unrelated")] {
-            let grant = local_model_grant(command, name, &record, &effects);
+            let grant = crate::authority_render::declared_grant(command, name, &record, &effects);
             assert!(grant.read && !grant.create && grant.update_fields.is_empty());
         }
-        let deletion = local_model_grant(
+        let deletion = crate::authority_render::declared_grant(
             true,
             "items",
             &record,
@@ -2606,6 +2561,7 @@ mod people_resource_tests {
             effects: BTreeSet::new(),
         };
         let mut policy = Policy {
+            row_owners: Default::default(),
             version: 1,
             admins: BTreeSet::from(["developer".into()]),
             delegations: BTreeMap::new(),
@@ -2686,6 +2642,7 @@ mod people_resource_tests {
             effects: BTreeSet::new(),
         };
         let selected = Policy {
+            row_owners: Default::default(),
             version: 1,
             admins: BTreeSet::new(),
             delegations: BTreeMap::new(),
@@ -2824,6 +2781,7 @@ mod people_resource_tests {
             effects: effects.iter().map(|name| (*name).into()).collect(),
         };
         let policy = Policy {
+            row_owners: Default::default(),
             version: 1,
             admins: BTreeSet::new(),
             delegations: Default::default(),
@@ -2881,6 +2839,7 @@ mod people_resource_tests {
     fn local_provider_fixture_seeds_selected_directory_actor_and_complete_hierarchy() -> Result<()>
     {
         let policy = Policy {
+            row_owners: Default::default(),
             version: 1,
             admins: BTreeSet::new(),
             delegations: Default::default(),
@@ -3085,6 +3044,7 @@ fn instance_for_artifact(
                     .into(),
                 readers,
                 writers,
+                rendered_authority: None,
                 authority: Some(authority),
                 resource_policies: Vec::new(),
                 credential_families: Default::default(),

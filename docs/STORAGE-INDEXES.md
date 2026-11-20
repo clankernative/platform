@@ -34,10 +34,10 @@ A model whose rows belong to a person names that column in the same declaration,
 as the entry `owned_by: Table.owner({ owner: row.owner })`. It selects exactly
 one text column, labelled with the column it reads, and a model has at most one.
 It is authority metadata, not storage: it creates no index, does not change the
-schema digest, and is what the planned policy renderer uses to scope an
-`Employees` command that writes these rows to their owner unless it declares
-`.any_owner` (see [audiences](APP-CONTRACT.md#audiences)). `owned_by` names
-nothing else.
+schema digest, and is what the policy renderer uses to scope an `Employees`
+or internal command that writes these rows to their owner unless it declares
+`.any_owner` (see [audiences](APP-CONTRACT.md#audiences)). The column itself is
+never updatable. `owned_by` names nothing else.
 
 A model without keys writes nothing. `table` is a type witness, not data: the
 platform reads the row model and every key from its type. Because the selector

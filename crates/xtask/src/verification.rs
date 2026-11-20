@@ -1834,10 +1834,13 @@ fn configure_tests(
         ]);
     }
     if !fixtures.contains_key("audiences") {
-        command.args([
-            "--skip",
+        // Every rendered-authority test reads the audiences artifact.
+        for test in [
             "app_contract::admitted_audiences_and_row_owner_reach_the_artifact_and_pages_refuse_mixtures",
-        ]);
+            "authority_render::",
+        ] {
+            command.args(["--skip", test]);
+        }
     }
     if !fixtures.contains_key("chart-live") {
         for test in [

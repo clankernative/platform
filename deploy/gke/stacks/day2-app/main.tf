@@ -61,10 +61,10 @@ locals {
     }, local.cli_desktop_client == null ? {} : { cli_desktop_client = local.cli_desktop_client })
     apps = {
       (var.app_id) = merge({
-        artifact  = "artifacts/${var.artifact_id}"
-        readers   = sort(distinct(var.readers))
-        writers   = sort(distinct(var.writers))
-        authority = var.authority
+        artifact = "artifacts/${var.artifact_id}"
+        # A rendered authority derives membership from the artifact.
+        readers = var.admins == null && var.readers != null ? sort(distinct(var.readers)) : []
+        writers = var.admins == null && var.writers != null ? sort(distinct(var.writers)) : []
         runtime = {
           kind = var.rolling_deploys ? "linux_sqlite_rwo_v1" : "linux_sqlite_single_v1"
           resources = {
@@ -85,6 +85,8 @@ locals {
           iap_audience = local.iap_audience
         }
         },
+        var.admins == null ? { authority = var.authority } : {},
+        var.admins == null ? {} : { rendered_authority = { admins = sort(distinct(var.admins)) } },
         var.security_requirements == null ? {} : { security = var.security_requirements },
         length(var.resource_policies) == 0 ? {} : { resource_policies = var.resource_policies },
         length(var.schedules) == 0 ? {} : { schedules = var.schedules },
@@ -186,13 +188,20 @@ resource "kubernetes_config_map_v1" "instance" {
     }
 
     precondition {
-      condition     = alltrue([for actor in concat(var.readers, var.writers) : !startswith(actor, "domain:") || actor == "domain:${var.hosted_domain}"])
+      condition     = alltrue([for actor in concat(var.readers == null ? [] : var.readers, var.writers == null ? [] : var.writers) : !startswith(actor, "domain:") || actor == "domain:${var.hosted_domain}"])
       error_message = "A domain: entry in readers or writers must be exactly domain:${var.hosted_domain}. Day2 admits a domain only when it is the hosted_domain its identity provider verifies, and refuses the instance otherwise."
     }
 
     precondition {
-      condition     = try(var.authority.version == 1 && length(keys(var.authority.operations)) > 0, false)
-      error_message = "authority must be a version 1 day2 authority policy that lists the artifact's operations; the placeholder has not been replaced."
+      condition     = var.admins == null || alltrue([for actor in var.admins : endswith(actor, ".gserviceaccount.com") || endswith(actor, "@${var.hosted_domain}")])
+      error_message = "Every person in admins must be at the hosted domain (${var.hosted_domain}): the rendered membership admits only that domain, so anyone else could never run an Owners operation."
+    }
+
+    precondition {
+      condition = (var.admins == null
+        ? var.readers != null && var.writers != null && try(var.authority.version == 1 && length(keys(var.authority.operations)) > 0, false)
+      : var.authority == null && var.readers == null && var.writers == null)
+      error_message = "Give either admins, and day2 renders the app's authority from its artifact, or an explicit version 1 authority policy that lists the artifact's operations with readers and writers. Not both, and not a placeholder."
     }
 
     precondition {

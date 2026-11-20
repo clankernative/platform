@@ -56,6 +56,7 @@ impl World {
                     schedules: Default::default(),
                     ingress: Default::default(),
                     runtime: None,
+                    rendered_authority: None,
                     authority: Some(serde_json::from_str(include_str!(
                         "../../../fixtures/authority-policies/relational-conformance.json"
                     ))?),

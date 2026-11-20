@@ -216,6 +216,57 @@ fn activated_credential_selection_pins_policy_family_and_artifact() -> Result<()
 }
 
 #[test]
+fn a_rendered_authority_fingerprint_covers_its_admins_and_bound_actors() -> Result<()> {
+    let operator = LocalOperator::assert_local("operator")?;
+    let explicit: Instance = serde_json::from_value(serde_json::json!({
+        "installation":"test","environment":"test",
+        "apps":{"app":{"artifact":"/admitted/one","readers":["viewer"],"writers":["alice"],
+            "authority":document().policy}}
+    }))?;
+    // An explicit binding hashes the tuple it always has.
+    let binding = &explicit.apps["app"];
+    assert_eq!(
+        desired_fingerprint(&explicit, "app", &operator, &None, None)?,
+        crate::digest(&serde_json::to_vec(&(
+            "day2-desired-authority-request-v1",
+            explicit.scope("app")?,
+            &operator.name,
+            &None::<AuthorityStamp>,
+            AuthorityDocument::from_binding(binding, explicit.hosted_domain()),
+            &binding.resource_policies,
+            None::<day2_capabilities::resources::Catalog>,
+            None::<(&str, &Path)>,
+        ))?)
+    );
+    let mut rendered: Instance = serde_json::from_value(serde_json::json!({
+        "installation":"test","environment":"test",
+        "apps":{"app":{"artifact":"/admitted/one","readers":[],"writers":[],
+            "rendered_authority":{"admins":["ada@example.com"]},
+            "schedules":{"nightly":{"actor":"automation@app.invalid"}}}}
+    }))?;
+    let source = desired_fingerprint(&rendered, "app", &operator, &None, None)?;
+    let app = rendered.apps.get_mut("app").unwrap();
+    app.schedules.get_mut("nightly").unwrap().actor = "other@app.invalid".into();
+    let actor_changed = desired_fingerprint(&rendered, "app", &operator, &None, None)?;
+    assert_ne!(
+        actor_changed, source,
+        "a schedule actor is a rendering input"
+    );
+    let app = rendered.apps.get_mut("app").unwrap();
+    app.rendered_authority
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("bob@example.com".into());
+    assert_ne!(
+        desired_fingerprint(&rendered, "app", &operator, &None, None)?,
+        actor_changed,
+        "the admins are a rendering input"
+    );
+    Ok(())
+}
+
+#[test]
 fn desired_receipts_survive_expiry_and_artifact_changes_without_reactivating_grants() -> Result<()>
 {
     let mut original_document = document();
@@ -1068,6 +1119,7 @@ fn document() -> AuthorityDocument {
         readers: BTreeSet::from(["viewer".into()]),
         writers: BTreeSet::from(["alice".into()]),
         policy: Some(Policy {
+            row_owners: Default::default(),
             version: 1,
             admins: BTreeSet::from(["auditor".into()]),
             delegations: Default::default(),

@@ -60,8 +60,9 @@ The requirements also appear in generated docs and OpenAPI. See the
 Chain `.observes("workspace_directory.hierarchy.v2")` onto a command or query
 definition to declare a read dependency. It selects disposable verification
 fixtures, and build verification grants the operation exactly the observations
-it declares. The company's policy still grants production reads; rendering it
-from declarations is planned. `.observes("audit.history.v1")` declares a read of the
+it declares, and so does a production policy rendered from the artifact (see
+[rendered authority](../docs/AUTHORITY.md#rendered-authority)). An undeclared
+read is refused. `.observes("audit.history.v1")` declares a read of the
 application's own history (see [Audit](contracts/Audit.roc)). Declare
 `workspace_directory.page.v2` when paging the delivered hierarchy
 (`WorkspaceDirectory.deliver_hierarchy_with` / `delivery_page_with`: the

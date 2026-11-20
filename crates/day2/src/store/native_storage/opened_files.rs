@@ -175,6 +175,7 @@ mod tests {
             readers: BTreeSet::new(),
             writers: BTreeSet::new(),
             policy: Some(crate::authority::Policy {
+                row_owners: Default::default(),
                 version: 1,
                 admins: BTreeSet::from([admin.to_owned()]),
                 operations: Default::default(),

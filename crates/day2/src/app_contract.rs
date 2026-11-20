@@ -188,17 +188,22 @@ impl Operation {
         Ok(())
     }
 
-    /// Each model is declared once, is owned (`owned_by: Table.owner`), and is one
-    /// this command writes. An exemption that matches nothing is refused rather
-    /// than kept as a silent grant for some later effect.
-    fn validate_any_owner(&self, name: &str, schema: &Schema) -> Result<()> {
+    /// How this operation meets owned models (`owned_by: Table.owner`).
+    ///
+    /// A rendered policy narrows every update or soft deletion of an owned model
+    /// to the caller's rows unless the command declares `.any_owner(model)`
+    /// (see [`crate::authority_render`]). Each exempted model is declared once,
+    /// is owned, and is one this command writes: an exemption that matches
+    /// nothing is refused rather than kept as a silent grant for some later
+    /// effect. An owner column is never updated, and a narrowed command cannot
+    /// also require every row of the model it narrows.
+    fn validate_owned_rows(&self, name: &str, schema: &Schema) -> Result<()> {
         // Only an employees write is narrowed to the row's owner (admins never
         // are), so an exemption anywhere else would grant nothing today and
         // silently widen the command if its audience later became `Employees`.
+        let narrowed = self.execution.internal || self.audience == Some(Audience::Employees);
         ensure!(
-            self.any_owner.is_empty()
-                || self.execution.internal
-                || self.audience == Some(Audience::Employees),
+            self.any_owner.is_empty() || narrowed,
             "any_owner applies only to an Employees or internal command: {name}"
         );
         let mut seen = BTreeSet::new();
@@ -212,15 +217,28 @@ impl Operation {
                 "any_owner names {model}, which declares no owned_by column: {name}"
             );
             ensure!(
-                self.execution
+                crate::authority_render::writes(&self.execution.effects, model),
+                "any_owner names {model}, which {name} does not update or soft-delete"
+            );
+        }
+        for (model, column) in &schema.owners {
+            ensure!(
+                !self
+                    .execution
                     .effects
                     .iter()
                     .any(|effect| effect.model == *model
-                        && matches!(
-                            effect.kind.as_str(),
-                            "update" | "update_created" | "soft_delete"
-                        )),
-                "any_owner names {model}, which {name} does not update or soft-delete"
+                        && matches!(effect.kind.as_str(), "update" | "update_created")
+                        && effect.fields.contains(column)),
+                "{name} updates {model}.{column}, its owner column: a row's owner never changes"
+            );
+            ensure!(
+                !narrowed
+                    || !self.required_all_rows.contains(model)
+                    || !crate::authority_render::writes(&self.execution.effects, model)
+                    || self.any_owner.contains(model),
+                "{name} requires every row of {model} but may update only the caller's: declare \
+                 .any_owner({model}) or drop the requirement"
             );
         }
         Ok(())
@@ -750,7 +768,7 @@ impl Definition {
                 "internal command cannot be a cross-app export: {name}"
             );
             definition.validate_audience(name)?;
-            definition.validate_any_owner(name, &artifact.schema)?;
+            definition.validate_owned_rows(name, &artifact.schema)?;
             definition.validate_required_all_rows(&artifact.schema)?;
             definition.validate_observations()?;
             definition.validate_verification_delegation()?;
@@ -758,6 +776,7 @@ impl Definition {
         }
         if self.declares_audiences()? {
             self.validate_page_audiences(&artifact.pages, &artifact.redirects)?;
+            crate::authority_render::check(artifact)?;
         }
         for (path, media) in [
             (&self.presentation.stylesheet, "text/css; charset=utf-8"),
@@ -782,7 +801,7 @@ impl Definition {
     /// operation declares one; an application built before audiences existed
     /// declares none. Anything between is refused, so no current build serves a
     /// public operation without an audience.
-    fn declares_audiences(&self) -> Result<bool> {
+    pub(crate) fn declares_audiences(&self) -> Result<bool> {
         let public = || {
             self.operations
                 .iter()
@@ -2303,7 +2322,7 @@ mod selector_tests {
     }
 
     #[test]
-    fn any_owner_names_an_owned_model_the_command_writes_once() -> Result<()> {
+    fn owned_rows_take_one_exemption_per_written_model_and_never_move_an_owner() -> Result<()> {
         let (_, mut schema, _) = fixture();
         let (_, _, contracts) = shared_failure_fixture()?;
         let mut operation = contracts["create"].clone();
@@ -2318,7 +2337,7 @@ mod selector_tests {
         operation.execution.effects = vec![write("update")];
         assert_eq!(
             operation
-                .validate_any_owner("create", &schema)
+                .validate_owned_rows("create", &schema)
                 .unwrap_err()
                 .to_string(),
             "any_owner names rows, which declares no owned_by column: create"
@@ -2326,12 +2345,12 @@ mod selector_tests {
         schema.owners.insert("rows".into(), "owner".into());
         for kind in ["update", "update_created", "soft_delete"] {
             operation.execution.effects = vec![write(kind)];
-            operation.validate_any_owner("create", &schema)?;
+            operation.validate_owned_rows("create", &schema)?;
         }
         operation.execution.effects = vec![write("create")];
         assert_eq!(
             operation
-                .validate_any_owner("create", &schema)
+                .validate_owned_rows("create", &schema)
                 .unwrap_err()
                 .to_string(),
             "any_owner names rows, which create does not update or soft-delete"
@@ -2340,7 +2359,7 @@ mod selector_tests {
         operation.any_owner = vec!["rows".into(), "rows".into()];
         assert_eq!(
             operation
-                .validate_any_owner("create", &schema)
+                .validate_owned_rows("create", &schema)
                 .unwrap_err()
                 .to_string(),
             "duplicate any_owner model: create rows"
@@ -2352,7 +2371,7 @@ mod selector_tests {
             operation.audience = Some(audience);
             assert_eq!(
                 operation
-                    .validate_any_owner("create", &schema)
+                    .validate_owned_rows("create", &schema)
                     .unwrap_err()
                     .to_string(),
                 "any_owner applies only to an Employees or internal command: create"
@@ -2360,7 +2379,40 @@ mod selector_tests {
         }
         operation.audience = None;
         operation.execution.internal = true;
-        operation.validate_any_owner("create", &schema)?;
+        operation.validate_owned_rows("create", &schema)?;
+
+        // An owner column never changes, whoever writes it.
+        operation.any_owner.clear();
+        for kind in ["update", "update_created"] {
+            let mut owner = write(kind);
+            owner.fields = vec!["owner".into()];
+            operation.execution.effects = vec![owner];
+            assert_eq!(
+                operation
+                    .validate_owned_rows("create", &schema)
+                    .unwrap_err()
+                    .to_string(),
+                "create updates rows.owner, its owner column: a row's owner never changes"
+            );
+        }
+        // A narrowed write cannot also need every row of the model it narrows.
+        operation.execution.effects = vec![write("update")];
+        operation.required_all_rows = vec!["rows".into()];
+        assert_eq!(
+            operation
+                .validate_owned_rows("create", &schema)
+                .unwrap_err()
+                .to_string(),
+            "create requires every row of rows but may update only the caller's: declare \
+             .any_owner(rows) or drop the requirement"
+        );
+        operation.any_owner = vec!["rows".into()];
+        operation.validate_owned_rows("create", &schema)?;
+        // Owners are administrators, who reach every row.
+        operation.any_owner.clear();
+        operation.execution.internal = false;
+        operation.audience = Some(Audience::Owners);
+        operation.validate_owned_rows("create", &schema)?;
         Ok(())
     }
 

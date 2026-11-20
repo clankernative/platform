@@ -11,7 +11,8 @@ import LinkScenarios
 
 EditLink :: [].{
 	# Proves an exemption reaches the admitted contract. The base fixture's
-	# explicit policies, not this declaration, still grant the edit.
+	# explicit policies, not this declaration, still grant the edit. Unlike the
+	# base, it declares no update of `owner`: an owner column never changes.
 	definition =
 		Api.command({
 			audience: Employees,
@@ -26,7 +27,6 @@ EditLink :: [].{
 						Data.links,
 						[
 							Api.field(Selectors.links_title),
-							Api.field(Selectors.links_owner),
 							Api.field(Selectors.links_destination),
 						],
 					),

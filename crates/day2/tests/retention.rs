@@ -55,6 +55,7 @@ impl World {
                     runtime: None,
                     retention,
                     journal: None,
+                    rendered_authority: None,
                     authority: Some(serde_json::from_str(include_str!(
                         "../../../fixtures/authority-policies/owned-links.json"
                     ))?),
