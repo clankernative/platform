@@ -34,8 +34,8 @@ adapter or its simulation.
   `google_workspace.calendar.error.forbidden.json`: Google's error envelope for
   a `403`, with `errors[].reason`. The rate limit follows the Calendar errors
   guide's `rateLimitExceeded` example. The refusal's `forbidden` reason is
-  illustrative: the reason Google gives a reader without access is a live
-  qualification item,
+  the one Google gave on 2026-11-20 to the reader's rule on a calendar shared
+  with it as free/busy only,
   https://developers.google.com/workspace/calendar/api/guides/errors
 - `google_workspace.calendars.get.json`: Calendar `calendars.get` with the
   adapter's `fields=id,summary` mask,
