@@ -821,9 +821,8 @@ it; on the shared qualification runner, that means every CI job. It also
 needs a host in the organization's project. The operator's token instead:
 
 - expires within an hour;
-- is attributed to a person in the IAM Data Access audit logs for
-  `iamcredentials.googleapis.com`, when those logs are on (see the fixture
-  setup);
+- can be attributed to a person in the Data Access audit logs, when those
+  logs are on and a sink stores them (see the fixture setup);
 - is sent only to IAM.
 
 **Where the substitution can run.** What holds:
@@ -886,9 +885,13 @@ instance checklist for a live run:
    - a delegation client authorized for exactly `calendar.readonly`,
      `calendar.acls.readonly`, `meetings.space.readonly` and `drive`.
 2. **The operator's authority.** Token Creator for the operator on that service
-   account, conditioned to expire with the profile. Turn on IAM Data Access
-   audit logs (`DATA_READ`) for `iamcredentials.googleapis.com` in the
-   project, so each token the run mints is attributed to the operator.
+   account, conditioned to expire with the profile. Turn on Data Access
+   audit logs (`DATA_READ`) for the IAM API, `iam.googleapis.com`, in the
+   project: Google refuses `iamcredentials.googleapis.com` as an audit-config
+   service. Data Access logs are kept only where a sink stores them, and a
+   project whose `_Default` sink is disabled keeps none. Confirm that the
+   run's `generateAccessToken` and `signJwt` calls appear in a stored
+   `data_access` log before relying on that attribution.
 3. **The reader.** `calendar_reader`, a user in `email_domain` that nobody
    signs in as.
 4. **The in-play calendar** (`calendars.in_play`). A secondary calendar on
@@ -903,6 +906,12 @@ instance checklist for a live run:
    - **The imported event** (`events.imported`). Made with `events.import`
      on the calendar, naming another in-domain person as organizer, so that
      its creator is not its organizer.
+     The calendar must be the event's organizer or an attendee, or Google
+     refuses the import (`participantIsNeitherOrganizerNorAttendee`), so
+     list the in-play calendar as an attendee. Copy the recorded event's
+     `conferenceData` onto it (`conferenceDataVersion=1`): without a Meet
+     code the action answers `NoMeeting` before it derives an owner, and
+     `conferences_imported` cannot show `NoOwner`.
    - **Within the window**:
      - a daily timed recurring event of at least 26 instances, with one
        instance deleted;
@@ -953,7 +962,7 @@ that records it, as `probe` → field, or is **manual**: a person must set it
 up or judge it, and the doc says why. "Shape" is an exchange's `shape`
 counts.
 
-- [ ] `403` versus `404` for a calendar the reader has no access to, and for
+- [x] `403` versus `404` for a calendar the reader has no access to, and for
       one shared with it as free/busy only, on `acl.get`, `calendars.get`,
       `acl.list`, `events.list` and `events.get`. Record the `403` reasons
       seen.
@@ -963,11 +972,14 @@ counts.
       status and reasons. The adapter never sends `acl.list`, `events.list`
       or `events.get` to such a calendar, so their answers there cannot
       affect it.
+      **Live, 2026-11-20:** Unshared: `acl.get` `404` and `calendars.get`
+      `404`, so `NotFound`. Free/busy only: `acl.get` `403` with reason
+      `forbidden` and `calendars.get` `200`, so `NotShared`.
 - [ ] Private-event detail hiding for `reader`: which fields a private event
       reports to a reader below `writer`.
       **Manual, and moot for the adapter**: it never reads a calendar as
       less than `writer`.
-- [ ] Cancelled and deleted shapes under `singleEvents=true&showDeleted=true`:
+- [x] Cancelled and deleted shapes under `singleEvents=true&showDeleted=true`:
       cancelled exceptions of timed and all-day series, and deleted events.
       Google may report a deleted item by `id` alone, without `status`. The
       adapter refuses that as `response_invalid`, and the simulation cannot
@@ -977,6 +989,10 @@ counts.
       decision stays with the reviewer. A refused first page leaves the
       paging and token probes unsettled, and the receipt says so
       (`events_token_other_query` → `unsettled_first_page_refused`).
+      **Live, 2026-11-20:** A cancelled timed instance, a cancelled all-day
+      instance and a deleted event all came back with a status and times
+      (`cancelled` 3, no `id_only`), and both pages were `Found`. Modelling
+      id-only items stays a reviewer's choice.
 - [ ] Page tokens: whether `events.list` binds a token to the query that issued
       it, and short or empty pages that still carry a `nextPageToken`, on
       `events.list`, `acl.list` and `conferenceRecords.list` under a filter.
@@ -993,24 +1009,33 @@ counts.
       `unsettled_first_page_refused` mean the probe could not run. The page
       forms are observed, not forced: every list exchange's shape `items` and
       `next_page_token_present` / `_empty`.
+      **Live, 2026-11-20:** `events_token_other_query` was `Found` with
+      `events_at_or_after_time_max` 0: Google applied the new window, so the
+      token is not bound to `timeMax` and the adapter's own binding is what
+      holds. Pages were full (25) or final; no short page with a token was
+      seen.
 - [ ] `conferenceSolution.key.type` values for Meet, add-on and third-party
       conferences, and which of them carry a `hangoutLink`.
       **Automated** for the events in the window: `events_page` → shape
       `conference_*`, `hangout_link` and `hangout_link_without_conference`.
       An add-on or third-party conference needs its optional fixture.
+      **Live, 2026-11-20:** Two `hangoutsMeet` conferences, each with a
+      `hangoutLink`. Add-on and third-party conferences were not exercised.
 - [ ] Conference record visibility: whether `conferenceRecords.list` and the
       artifact lists show a space's records to co-hosts and participants, or
       to the owner alone as the simulation models it, and whether artifacts
       are refused with `403` or `404`.
       **Manual**: the adapter reads only as the owner. Read the same lists
       as a participant in the Meet API explorer.
-- [ ] Who Meet treats as a meeting's organizer for `conferenceRecords.list`:
+- [x] Who Meet treats as a meeting's organizer for `conferenceRecords.list`:
       the event's organizer or its creator, for an event a delegate created on
       someone else's calendar and for a group calendar's event.
       **Automated** for a group calendar's event: `event_recorded` →
       `organizer` (`group_calendar`), with `conferences_recorded` → `records`
       and `artifact_listed`. **Moot** for a delegate's event: it has no owner
       (`NoOwner`), so the adapter never asks Meet.
+      **Live, 2026-11-20:** For a group calendar's event, Meet lists the
+      record to the event's creator, with its artifacts.
 - [ ] Forged organizers: the `creator` Google reports on an event created with
       `events.import`, and whether an external invitation whose `ORGANIZER`
       names an in-domain person appears with that organizer.
@@ -1018,26 +1043,40 @@ counts.
       (`person_in_domain` when the creator differs) and `creator_in_domain`,
       and `conferences_imported` → `NoOwner`. **Manual** for an external
       invitation, which needs a sender outside the organization.
-- [ ] The filter: that Meet accepts whole-second `Z` times (its examples use
+      **Live, 2026-11-20:** `events.import` keeps the importer as `creator`
+      and reports the organizer it was given, a person in the domain. The
+      adapter answered `NoOwner` and asked for no owner token. The external
+      invitation is still open.
+- [x] The filter: that Meet accepts whole-second `Z` times (its examples use
       milliseconds), the spacing around operators, and a query string that
       encodes spaces as `+`.
       **Automated**: `conferences_recorded` → `Found` with `records` above
       zero. A refused filter is `google_workspace_request_refused`.
+      **Live, 2026-11-20:** Accepted: one record found by meeting code and
+      window.
 - [ ] Artifact state progression and timing: how long `ENDED` lasts before
       `FILE_GENERATED`, and whether a file or document ID ever appears before
       it.
       **Partly automated**: the artifact lists' shape `state_*` and
       `destination_*` at run time. **Manual** timing: watch the lists in the
       hours after a meeting.
-- [ ] A prefix on artifact IDs: whether `driveDestination.file` or
+      **Live, 2026-11-20:** At run time the recording, transcript and smart
+      notes were `FILE_GENERATED` with bare destinations. Seen once by hand:
+      the recording had no file ID while `ENDED`, and became
+      `FILE_GENERATED` about six minutes after the conference ended.
+- [x] A prefix on artifact IDs: whether `driveDestination.file` or
       `docsDestination.document` ever carries `files/` or `documents/`, which
       the adapter refuses.
       **Automated**: shape `destination_prefixed` versus
       `destination_bare`.
-- [ ] `smartNotes` availability on v2 for the organization's licence, and its
+      **Live, 2026-11-20:** Bare (`destination_bare` on every artifact list
+      and the artifact `GET`).
+- [x] `smartNotes` availability on v2 for the organization's licence, and its
       answer where smart notes are off.
       **Automated**: `conferences_recorded` → the `meet_smart_notes`
       exchange's status and reasons.
+      **Live, 2026-11-20:** Available: `200`, and a `FILE_GENERATED` note
+      with a bare document ID.
 - [ ] Owner delegation: the token endpoint's answer for a suspended, deleted
       and archived person, all `invalid_grant` in the simulation.
       **Manual**: it needs an event whose creator an administrator has
@@ -1048,10 +1087,11 @@ counts.
       each: which reasons come with `403` and which with `429`.
       **Observed** when they occur: every Meet exchange's reasons. Forcing
       them is manual.
-- [ ] Meet ID lengths and character sets for records, spaces and artifacts,
+- [x] Meet ID lengths and character sets for records, spaces and artifacts,
       against the 128-character bound.
       **Automated**: shape `ids_outside_bound` on records and artifacts
       (absent when every ID fits).
+      **Live, 2026-11-20:** Every ID fit the bound (no `ids_outside_bound`).
 - [ ] Drive's answer to creating a permission a group already has: `200` with
       the existing permission, as simulated, a `409`, or an error. And for a
       group that already holds `writer`: whether the create changes its role.
@@ -1067,6 +1107,9 @@ counts.
         the alias before Drive.
 
       **Manual** in Drive itself.
+      **Live, 2026-11-20:** The Directory resolved the alias to its group's
+      primary address, and `share_alias` was `GroupNotPrimary` with no Drive
+      call. Drive itself is still open.
 - [ ] Drive's refusal when the organization restricts sharing to trusted
       domains: `400 invalidSharingRequest`, as simulated, or a `403` with
       which reason. Also whether `invalidSharingRequest` can follow a create
@@ -1096,7 +1139,7 @@ counts.
       permissions a shared drive adds or inherits.
       **Manual**. A `role_organizer` or `role_file_organizer` count in the
       `drive_permissions` shape is a hint.
-- [ ] Permission propagation: how soon after a create the permission appears
+- [x] Permission propagation: how soon after a create the permission appears
       in the list. A delay longer than the attempt makes a reconcilable
       outcome unknown.
       **Automated**: `visible_after_ms`, and each `share_again` probe's
@@ -1107,10 +1150,14 @@ counts.
       its `delay_seconds`. Each check is the share with the fence closed: it
       answers `AlreadyShared` once Drive lists the permission, and any create
       it would send instead is refused unsent.
-- [ ] Drive's reply to the create echoes the request as the adapter requires.
+      **Live, 2026-11-20:** Listed at the first check, 2,177 ms after the
+      create's reply (one observation).
+- [x] Drive's reply to the create echoes the request as the adapter requires.
       **Automated**: `share` → the `drive_permission_create` exchange's shape
       `echo_type_group`, `echo_role_reader` and `echo_address_exact` (or
       `_case_only`, `_other`, `_absent`).
+      **Live, 2026-11-20:** Exact: `echo_type_group`, `echo_role_reader`,
+      `echo_address_exact`.
 
 ## Status
 
@@ -1118,8 +1165,12 @@ counts.
 `event_conferences` and `share_artifact` are implemented. Addresses are
 exact lowercase ASCII and are never normalised on the way in, so an application
 lowercases what it stores. The operator qualification
-(`google-workspace-qualify`) exists; no live receipt has been reviewed yet, so
-the provider is not qualified.
+(`google-workspace-qualify`) has run once, on 2026-11-20, against a real
+organization. Its receipt was reviewed: one share was created, nothing was
+fenced, and every automated probe answered as the adapter assumes. The items
+ticked in [Qualify live (step 6)](#qualify-live-step-6) are settled by it.
+The open items need a person to set up or judge them, so the provider is
+qualified for the automated items only.
 
 A Directory action reserves three or four calls: metadata, IAM, then one call
 per question. A Calendar action reserves the three delegated authentication
