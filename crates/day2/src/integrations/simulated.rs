@@ -1464,35 +1464,25 @@ pub fn google_workspace_development_target() -> day2_capabilities::resources::Re
 
 /// Move a seeded development world's meetings to the days before `at`, Unix
 /// seconds, so the window an application derives from its invocation time
-/// finds them: the latest day any event ends becomes `at`'s UTC day.
+/// finds them: every event ends by `at`, the latest less than a day before it.
 ///
 /// A disposable instance seeds the world before its campaign chooses a clock,
 /// so the campaign dates it once its clock is known. Whole days keep every
 /// event's clock time and all-day dates intact. Dating to the same day again
-/// changes nothing, and an instance without a Google Workspace world is left
-/// alone.
+/// changes nothing. An instance without a seeded world is refused.
 pub fn date_google_workspace_development(database: &Path, scope: &str, at: i64) -> Result<()> {
-    if !database.with_file_name(GOOGLE_WORKSPACE_WORLD).is_file() {
-        return Ok(());
-    }
     update_google_workspace(database, scope, |state| {
-        let Some(latest) = state.world.latest_event_day()? else {
+        let Some(latest) = state.world.latest_event_end()? else {
             return Ok(());
         };
-        let target = time::OffsetDateTime::from_unix_timestamp(at)
-            .context("google_workspace_development_clock")?
-            .date()
-            .to_julian_day();
-        state
-            .world
-            .shift_days(i64::from(target) - i64::from(latest.to_julian_day()))
+        state.world.shift_days((at - latest).div_euclid(86_400))
     })
 }
 
 impl GoogleWorkspaceWorld {
-    /// The latest UTC day on which any event ends: an all-day event's
-    /// exclusive end date, or the date of a timed end.
-    fn latest_event_day(&self) -> Result<Option<time::Date>> {
+    /// The latest instant any event ends, in Unix seconds: a timed end, or
+    /// midnight UTC starting an all-day event's exclusive end date.
+    fn latest_event_end(&self) -> Result<Option<i64>> {
         let mut latest = None;
         for event in self
             .calendars
@@ -1500,8 +1490,19 @@ impl GoogleWorkspaceWorld {
             .flat_map(|calendar| &calendar.events)
         {
             if let Some(end) = &event.end {
-                let day = day_prefix(end.date_time.as_deref().or(end.date.as_deref()))?;
-                latest = latest.max(Some(day));
+                let at = match (&end.date_time, &end.date) {
+                    (Some(date_time), _) => time::OffsetDateTime::parse(
+                        date_time,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .context("google_workspace_development_time")?
+                    .unix_timestamp(),
+                    (None, date) => day_prefix(date.as_deref())?
+                        .midnight()
+                        .assume_utc()
+                        .unix_timestamp(),
+                };
+                latest = latest.max(Some(at));
             }
         }
         Ok(latest)

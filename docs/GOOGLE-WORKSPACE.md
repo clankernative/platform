@@ -744,11 +744,14 @@ verification and local development create, grants an application's
 operations what they declare and nothing more:
 
 - each operation that observes a Google Workspace read gets exactly those
-  actions, and each that declares `GoogleWorkspace.share_effect` gets the
-  share;
+  actions, and each command that declares `GoogleWorkspace.share_effect` gets
+  the share; the development authority's other default writes never include
+  it;
 - a slot that grants the share charges one budget of concurrency 1 on the
-  connection, the serial budget an installation must give shares; reads
-  charge none;
+  connection, the serial budget an installation must give shares. An
+  operation has one slot for the provider, so one that both reads and shares
+  charges its reads to that budget too; an operation that only reads charges
+  none. Keep shares in a command of their own, as an installation should;
 - the target is the development organization's (`synthetic.example`, read as
   `calendar-reader@synthetic.example`), served from the simulated world.
 
