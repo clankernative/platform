@@ -378,6 +378,9 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
         fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
             Ok("/Engineering".into())
         }
+        fn named_user_org_unit_path(&mut self, actor: &str) -> Result<Option<String>> {
+            Ok((actor != "gone@example.test").then(|| "/Engineering".into()))
+        }
         fn list_org_units(&mut self) -> Result<day2::workspace_directory::ProviderPage> {
             Ok(day2::workspace_directory::ProviderPage {
                 units: self.0.clone(),
@@ -398,9 +401,21 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
     let delivery_json = serde_json::to_string(&delivery)?;
     let delivery_page = staged.pages[0].clone();
     let user_path = serde_json::to_string(&day2::workspace_directory::collect_user_path(
-        input,
-        &mut NativeFixturePort(units),
+        input.clone(),
+        &mut NativeFixturePort(units.clone()),
     )?)?;
+    let named = |actor: &str| -> Result<String> {
+        Ok(serde_json::to_string(
+            &day2::workspace_directory::collect_named_user_path(
+                day2::workspace_directory::CaptureInput {
+                    actor: actor.into(),
+                    ..input.clone()
+                },
+                &mut NativeFixturePort(units.clone()),
+            )?,
+        )?)
+    };
+    let (named_found, named_missing) = (named("bob@example.test")?, named("gone@example.test")?);
     let source = r#"app [step] { pf: platform "../sdk/main.roc" }
 import pf.WorkspaceDirectory
 import pf.Resource
@@ -428,6 +443,34 @@ read_user_path = |raw| answer(
     Resource.decode("{\"token\":\"fixture-handle\"}").and_then(WorkspaceDirectory.user_path_with).program(),
     raw,
 )
+read_named_user_path = |raw| answer(
+    Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| WorkspaceDirectory.named_user_path_with(resource, "bob@example.test"))
+        .program(),
+    raw,
+)
+found_bob = |value| match value {
+    Found(user) => user.actor == "bob@example.test" and user.user_path == "/Engineering" and user.captured_at == 200
+    NotFound => Bool.False
+}
+not_found = |value| match value {
+    Found(_) => Bool.False
+    NotFound => Bool.True
+}
+requested_named_user = |_| {
+    program = Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| WorkspaceDirectory.named_user_path_with(resource, "bob@example.test"))
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => {
+            parsed : Try({ handle : Str, actor : Str }, _)
+            parsed = Json.parse(request.instruction.data)
+            request.instruction.model == NAMED_CAPABILITY
+                and parsed == Ok({ handle: "fixture-handle", actor: "bob@example.test" })
+        }
+        _ => Bool.False
+    }
+}
 requested_delivery_action = |resource_json| {
     program = Resource.decode(resource_json)
         .and_then(WorkspaceDirectory.deliver_hierarchy_with)
@@ -455,10 +498,27 @@ expect match read_user_path(USER_PATH_JSON) {
         and result.value.actor == "alice@example.test" and result.value.captured_at == 200
     _ => Bool.False
 }
+expect requested_named_user({})
+expect match read_named_user_path(NAMED_FOUND_JSON) {
+    Done(result) => result.consumed == 1 and found_bob(result.value)
+    _ => Bool.False
+}
+expect match read_named_user_path(NAMED_MISSING_JSON) {
+    Done(result) => result.consumed == 1 and not_found(result.value)
+    _ => Bool.False
+}
 "#
         .replace("DELIVERY_JSON", &serde_json::to_string(&delivery_json)?)
         .replace("STAGED_DELIVERY_ROWS", &serde_json::to_string(&delivery_page)?)
         .replace("USER_PATH_JSON", &serde_json::to_string(&user_path)?)
+        .replace("NAMED_FOUND_JSON", &serde_json::to_string(&named_found)?)
+        .replace("NAMED_MISSING_JSON", &serde_json::to_string(&named_missing)?)
+        .replace(
+            "NAMED_CAPABILITY",
+            &serde_json::to_string(
+                &day2_capabilities::registry::Action::WorkspaceDirectoryNamedUserPath.capability(),
+            )?,
+        )
         .replace(
             "DELIVERY_CAPABILITY",
             &serde_json::to_string(
@@ -482,7 +542,7 @@ expect match read_user_path(USER_PATH_JSON) {
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (4) tests passed"),
+        output.status.success() && diagnostics.contains("All (7) tests passed"),
         "native Directory contracts ({}): {diagnostics}",
         output.status
     );

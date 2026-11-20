@@ -1111,9 +1111,20 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
     const ACTOR: &str = "directory-reader@coverage.test";
     const NEWHIRE: &str = "newhire@coverage.test";
     const CONTRACTOR: &str = "contractor@partner.test";
+    const SUSPENDED: &str = "suspended@coverage.test";
+    const ELSEWHERE: &str = "elsewhere@coverage.test";
     const CUSTOMER: &str = "Ccoverage";
     const SCOPE: &str = "hybridco/test/app";
     const NOW: i64 = 1_700_000_001;
+
+    /// How the fixture grants the named read: in both the operation's policy
+    /// and the resource slot, in the policy only, or not at all.
+    #[derive(Clone, Copy, PartialEq)]
+    enum NamedGrant {
+        Granted,
+        PolicyOnly,
+        Absent,
+    }
 
     fn fixture_runtime(
         with_world: bool,
@@ -1121,7 +1132,14 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         allow_hierarchy: bool,
         response_limit: u64,
     ) -> Result<(tempfile::TempDir, Runtime)> {
-        fixture_runtime_in(with_world, with_user, allow_hierarchy, response_limit, None)
+        fixture_runtime_in(
+            with_world,
+            with_user,
+            allow_hierarchy,
+            response_limit,
+            None,
+            NamedGrant::Granted,
+        )
     }
 
     /// With a hosted domain, the resource policy names only `domain:D`, while
@@ -1132,6 +1150,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         allow_hierarchy: bool,
         response_limit: u64,
         hosted_domain: Option<&str>,
+        named: NamedGrant,
     ) -> Result<(tempfile::TempDir, Runtime)> {
         let domain_entry = hosted_domain.map(|domain| format!("domain:{domain}"));
         let (members, granted) = match &domain_entry {
@@ -1155,13 +1174,19 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             customer_id: CUSTOMER.into(),
         })?;
         let mut actions = vec![Action::WorkspaceDirectoryUserPath];
+        if named == NamedGrant::Granted {
+            actions.push(Action::WorkspaceDirectoryNamedUserPath);
+        }
         if allow_hierarchy {
             actions.extend([
                 Action::WorkspaceDirectoryHierarchyDelivery,
                 Action::WorkspaceDirectoryDeliveryPage,
             ]);
         }
-        let observations: Vec<_> = actions.iter().map(|action| action.capability()).collect();
+        let mut observations: Vec<_> = actions.iter().map(|action| action.capability()).collect();
+        if named == NamedGrant::PolicyOnly {
+            observations.push(Action::WorkspaceDirectoryNamedUserPath.capability());
+        }
         let policy = json!({"version":1,"admins":[],"operations":{"run":{"actors":members,
             "mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]}}});
         let catalog = json!({"version":1,
@@ -1233,10 +1258,20 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
                         .map(|person| {
                             (
                                 person.into(),
-                                json!({"customerId":CUSTOMER,
-                                "orgUnitPath":"/Engineering","primaryEmail":person,"kind":"admin#directory#user"}),
+                                json!({"customerId":CUSTOMER,"orgUnitPath":"/Engineering","suspended":false,
+                                "primaryEmail":person,"kind":"admin#directory#user"}),
                             )
                         })
+                        .chain([
+                            (
+                                SUSPENDED.into(),
+                                json!({"customerId":CUSTOMER,"orgUnitPath":"/Engineering","suspended":true}),
+                            ),
+                            (
+                                ELSEWHERE.into(),
+                                json!({"customerId":"Cother","orgUnitPath":"/Engineering","suspended":false}),
+                            ),
+                        ])
                         .collect()
                 } else {
                     BTreeMap::new()
@@ -1291,6 +1326,70 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         invocation: &str,
         now: i64,
     ) -> Result<String> {
+        let (result, usage) = admitted(
+            runtime,
+            actor,
+            invocation,
+            "workspace_directory.hierarchy.v2",
+            None,
+            None,
+            now,
+        )?;
+        // Every delivery reads the provider and settles its whole envelope,
+        // whether or not it succeeds.
+        assert!(usage.calls > 0);
+        assert_eq!(
+            usage.response_bytes,
+            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+        );
+        assert_eq!(
+            usage.request_bytes,
+            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+        );
+        assert!(usage.dispatched);
+        result
+    }
+
+    /// The same for `workspace_directory.named_user_path.v1` naming `named`.
+    fn admitted_named(
+        runtime: &Runtime,
+        invocation: &str,
+        named: &str,
+        now: i64,
+    ) -> Result<String> {
+        let (result, usage) = admitted(
+            runtime,
+            ACTOR,
+            invocation,
+            "workspace_directory.named_user_path.v1",
+            Some(named),
+            None,
+            now,
+        )?;
+        // A found user, a missing one and a failed read all settle the whole
+        // authentication envelope.
+        assert_eq!(usage.calls, 3);
+        assert_eq!(
+            usage.response_bytes,
+            crate::workspace_directory::MAX_USER_LOOKUP_RESPONSE_BYTES
+        );
+        assert_eq!(
+            usage.request_bytes,
+            crate::workspace_directory::MAX_USER_LOOKUP_REQUEST_BYTES
+        );
+        assert!(usage.dispatched);
+        result
+    }
+
+    fn admitted(
+        runtime: &Runtime,
+        actor: &str,
+        invocation: &str,
+        model: &str,
+        named: Option<&str>,
+        forged: Option<&str>,
+        now: i64,
+    ) -> Result<(Result<String>, crate::resources::ProviderUsage)> {
         runtime.accept("run", actor, invocation, &json!({}), now)?;
         let mut connection = open(runtime.db())?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1317,11 +1416,16 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             .as_str()
             .context("opaque directory handle")?
             .to_owned();
+        let handle = forged.map_or(handle, str::to_owned);
         let active = authority_state::current(&tx)?;
+        let data = match named {
+            Some(named) => json!({"handle":handle,"actor":named}),
+            None => json!({"handle":handle}),
+        };
         let instruction = Instruction {
             kind: "observe".into(),
-            model: "workspace_directory.hierarchy.v2".into(),
-            data: json!({"handle":handle}).to_string(),
+            model: model.into(),
+            data: data.to_string(),
             ..Default::default()
         };
         let capability = crate::capabilities::authorized(
@@ -1344,22 +1448,10 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         )?;
         tx.commit()?;
         let outcome = crate::capabilities::observe(runtime, capability, "hybrid-directory-test");
-        // Every delivery reads the provider and settles its whole envelope,
-        // whether or not it succeeds.
-        assert!(outcome.usage.calls > 0);
-        assert_eq!(
-            outcome.usage.response_bytes,
-            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
-        );
-        assert_eq!(
-            outcome.usage.request_bytes,
-            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
-        );
-        assert!(outcome.usage.dispatched);
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         crate::resources::settle_in(&tx, &reservation, outcome.usage)?;
         tx.commit()?;
-        outcome.result
+        Ok((outcome.result, outcome.usage))
     }
 
     let response_limit = crate::workspace_directory::MAX_RESPONSE_BYTES as u64;
@@ -1468,8 +1560,15 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
 
     // A grant naming only the verified domain reads the Directory for someone
     // nobody listed by name, and binds nothing for a member of another domain.
-    let (_directory, runtime) =
-        fixture_runtime_in(true, true, true, response_limit, Some("coverage.test"))?;
+    let (_directory, runtime) = fixture_runtime_in(
+        true,
+        true,
+        true,
+        response_limit,
+        Some("coverage.test"),
+        // A domain never holds the named read; activation refuses it.
+        NamedGrant::Absent,
+    )?;
     let delivery: Value = serde_json::from_str(&admitted_delivery_as(
         &runtime,
         NEWHIRE,
@@ -1483,6 +1582,141 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             .to_string(),
         crate::error::Failure::ResourceForbidden.to_string()
     );
+
+    // A named read returns one other person's path. Only the Directory's own
+    // answer -- no such user, another customer, a suspended account -- reads as
+    // NotFound, and nothing says which.
+    let (_directory, runtime) = fixture_runtime(true, true, false, response_limit)?;
+    let found: Value = serde_json::from_str(&admitted_named(&runtime, "named", NEWHIRE, NOW)?)?;
+    assert_eq!(
+        found,
+        json!({"Found":{"customer_id":CUSTOMER,"actor":NEWHIRE,"user_path":"/Engineering","captured_at":NOW}})
+    );
+    for (invocation, person) in [
+        ("named-missing", "departed@coverage.test"),
+        ("named-suspended", SUSPENDED),
+        ("named-elsewhere", ELSEWHERE),
+    ] {
+        assert_eq!(
+            admitted_named(&runtime, invocation, person, NOW)?,
+            "\"NotFound\"",
+            "{person}"
+        );
+    }
+    // A name that could select another route or user is refused before any
+    // reservation or provider call.
+    let calls = || -> Result<usize> {
+        let mut count = 0;
+        crate::integrations::simulated::update_workspace_directory(runtime.db(), SCOPE, |world| {
+            count = world.calls.len();
+            Ok(serde_json::to_value(world)?)
+        })?;
+        Ok(count)
+    };
+    let uses =
+        || -> Result<i64> {
+            Ok(open(runtime.db())?.query_row(
+                "SELECT COUNT(*) FROM day2_resource_uses",
+                [],
+                |row| row.get(0),
+            )?)
+        };
+    let (before, used) = (calls()?, uses()?);
+    for (index, person) in [
+        "",
+        "no-at-sign",
+        "two@at@coverage.test",
+        "dot@coverage.test/../users/x",
+        "query@coverage.test?fields=*",
+        " padded@coverage.test",
+        "encoded%40@coverage.test",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            admitted_named(&runtime, &format!("named-invalid-{index}"), person, NOW)
+                .unwrap_err()
+                .to_string(),
+            "workspace_directory_named_user_invalid",
+            "{person:?}"
+        );
+    }
+    assert_eq!((calls()?, uses()?), (before, used));
+    // An outage is a failure, never a departure.
+    crate::integrations::simulated::schedule_faults(
+        runtime.db(),
+        SCOPE,
+        day2_capabilities::resources::Provider::WorkspaceDirectory
+            .world()
+            .unwrap(),
+        vec![crate::integrations::simulated::ScheduledFault {
+            endpoint: String::new(),
+            remaining: 1,
+            fault: crate::integrations::simulated::SimulatedFault::Denied,
+        }],
+    )?;
+    assert_eq!(
+        admitted_named(&runtime, "named-denied", NEWHIRE, NOW)
+            .unwrap_err()
+            .to_string(),
+        "workspace_directory_user_lookup_failed"
+    );
+    // The provider's own 404 for someone it held a moment ago is NotFound, as
+    // natively.
+    crate::integrations::simulated::schedule_faults(
+        runtime.db(),
+        SCOPE,
+        day2_capabilities::resources::Provider::WorkspaceDirectory
+            .world()
+            .unwrap(),
+        vec![crate::integrations::simulated::ScheduledFault {
+            endpoint: String::new(),
+            remaining: 1,
+            fault: crate::integrations::simulated::SimulatedFault::Gone,
+        }],
+    )?;
+    assert_eq!(
+        admitted_named(&runtime, "named-gone", NEWHIRE, NOW)?,
+        "\"NotFound\""
+    );
+    // The current actor's read does not imply the named one.
+    let (_directory, runtime) =
+        fixture_runtime_in(true, true, false, response_limit, None, NamedGrant::Absent)?;
+    assert_eq!(
+        admitted_named(&runtime, "named-ungranted", NEWHIRE, NOW)
+            .unwrap_err()
+            .to_string(),
+        crate::error::Failure::CapabilityForbidden.to_string()
+    );
+    // Declared and granted by the operation's policy, but the resource slot
+    // does not list the action: the slot refuses it.
+    let (_directory, runtime) = fixture_runtime_in(
+        true,
+        true,
+        false,
+        response_limit,
+        None,
+        NamedGrant::PolicyOnly,
+    )?;
+    assert_eq!(
+        admitted_named(&runtime, "named-slot-ungranted", NEWHIRE, NOW)
+            .unwrap_err()
+            .to_string(),
+        crate::error::Failure::ResourceForbidden.to_string()
+    );
+    // A handle this invocation was not issued names nothing.
+    let (_directory, runtime) = fixture_runtime(true, true, false, response_limit)?;
+    let forged = admitted(
+        &runtime,
+        ACTOR,
+        "named-forged-handle",
+        "workspace_directory.named_user_path.v1",
+        Some(NEWHIRE),
+        Some("forged-handle"),
+        NOW,
+    );
+    assert!(forged.is_err(), "a forged handle was authorized");
     Ok(())
 }
 

@@ -90,7 +90,7 @@ pub enum SimulatedFault {
     RateLimitForbidden,
     /// HTTP 404 for something the same client was just shown: a Meet
     /// conference record deleted between its listing and a read of its
-    /// artifacts. Google Workspace only.
+    /// artifacts, or a Directory user deleted since Home last read them.
     Gone,
     /// The request is served and lands, and its reply is dropped: a write
     /// takes effect and its caller cannot know it. Google Workspace only;
@@ -1191,13 +1191,14 @@ pub(crate) enum DirectoryRead<'a> {
 }
 
 /// Provider source state is independent of capture time and adapter caching.
-/// Commit request/fault bookkeeping even when the request itself fails.
+/// Commit request/fault bookkeeping even when the request itself fails. A user
+/// the world does not hold answers `None`, as the Directory's 404 does.
 pub(crate) fn workspace_directory_read(
     database: &Path,
     scope: &str,
     customer_id: &str,
     read: DirectoryRead<'_>,
-) -> Result<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let path =
         database.with_file_name(crate::simulations::simulation(Provider::WorkspaceDirectory));
     let (endpoint, max) = match read {
@@ -1226,6 +1227,10 @@ pub(crate) fn workspace_directory_read(
                 let response = fault_response(fault, max as u64)
                     .context("workspace_directory_simulated_fault_unsupported")?
                     .map_err(|_| anyhow::anyhow!("workspace_directory_provider_unavailable"))?;
+                // As natively: a user the provider says it does not have.
+                if matches!(read, DirectoryRead::User(_)) && response.status == 404 {
+                    return Ok(None);
+                }
                 ensure!(
                     (200..300).contains(&response.status),
                     "workspace_directory_provider_refused"
@@ -1234,19 +1239,18 @@ pub(crate) fn workspace_directory_read(
                     response.body.len() <= max,
                     "workspace_directory_response_too_large"
                 );
-                return Ok(response.body);
+                return Ok(Some(response.body));
             }
             let response = match read {
-                DirectoryRead::User(actor) => state
-                    .world
-                    .users
-                    .get(actor)
-                    .context("simulated_directory_user_unconfigured")?,
+                DirectoryRead::User(actor) => match state.world.users.get(actor) {
+                    Some(user) => user,
+                    None => return Ok(None),
+                },
                 DirectoryRead::Hierarchy => &state.world.hierarchy,
             };
             let bytes = serde_json::to_vec(response)?;
             ensure!(bytes.len() <= max, "workspace_directory_response_too_large");
-            Ok(bytes)
+            Ok(Some(bytes))
         })())
     })?
 }

@@ -86,6 +86,13 @@ struct WorkspaceDirectoryUserPathRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorkspaceDirectoryNamedUserPathRequest {
+    handle: String,
+    actor: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Recipient {
     actor: String,
     #[serde(rename = "handle")]
@@ -176,6 +183,8 @@ enum Action {
     /// One Google Workspace read, frozen with its in-grant inputs.
     GoogleWorkspace(crate::google_workspace::Plan),
     WorkspaceDirectoryUserPath(crate::workspace_directory::CaptureInput),
+    /// One named person's path; the actor is the application's checked input.
+    WorkspaceDirectoryNamedUserPath(crate::workspace_directory::CaptureInput),
     /// A fresh complete hierarchy staged for this invocation only.
     WorkspaceDirectoryDelivery {
         input: crate::workspace_directory::CaptureInput,
@@ -390,6 +399,7 @@ pub(crate) fn authorized(
             Action::Live(call)
         }
         "workspace_directory.user_path.v1"
+        | "workspace_directory.named_user_path.v1"
         | "workspace_directory.hierarchy.v2"
         | "workspace_directory.page.v2" => {
             ensure!(
@@ -409,11 +419,22 @@ pub(crate) fn authorized(
                 crate::error::Failure::ResourceForbidden
             );
             match instruction.model.as_str() {
-                "workspace_directory.user_path.v1" => {
-                    let input: WorkspaceDirectoryUserPathRequest =
-                        serde_json::from_str(&instruction.data)?;
+                "workspace_directory.user_path.v1" | "workspace_directory.named_user_path.v1" => {
+                    // The current actor's read names nobody; the named read
+                    // names one person, checked before any reservation.
+                    let (handle, named) = if instruction.model == "workspace_directory.user_path.v1"
+                    {
+                        let input: WorkspaceDirectoryUserPathRequest =
+                            serde_json::from_str(&instruction.data)?;
+                        (input.handle, None)
+                    } else {
+                        let input: WorkspaceDirectoryNamedUserPathRequest =
+                            serde_json::from_str(&instruction.data)?;
+                        crate::workspace_directory::validate_named_actor(&input.actor)?;
+                        (input.handle, Some(input.actor))
+                    };
                     ensure!(
-                        input.handle == resource.handle,
+                        handle == resource.handle,
                         crate::error::Failure::ResourceForbidden
                     );
                     ensure!(
@@ -435,7 +456,7 @@ pub(crate) fn authorized(
                             "{}@{}",
                             resource.grant.connection.id, resource.grant.connection.revision
                         ),
-                        actor: resource.actor.clone(),
+                        actor: named.clone().unwrap_or_else(|| resource.actor.clone()),
                         captured_at: request.context.now,
                     };
                     let connection = resource
@@ -451,7 +472,11 @@ pub(crate) fn authorized(
                     quote.request_bytes = crate::workspace_directory::MAX_USER_LOOKUP_REQUEST_BYTES;
                     quote.response_bytes =
                         crate::workspace_directory::MAX_USER_LOOKUP_RESPONSE_BYTES;
-                    Action::WorkspaceDirectoryUserPath(input)
+                    if named.is_some() {
+                        Action::WorkspaceDirectoryNamedUserPath(input)
+                    } else {
+                        Action::WorkspaceDirectoryUserPath(input)
+                    }
                 }
                 "workspace_directory.hierarchy.v2" => {
                     let input: WorkspaceDirectoryCaptureRequest =
@@ -942,15 +967,17 @@ impl ProviderResult {
         }
     }
 
-    /// A user-path read reserves and settles the whole authentication envelope.
+    /// A user-path read, of the current actor or a named person, reserves and
+    /// settles the whole authentication envelope, whatever it found.
     fn workspace_directory_user_path(
         runtime: &Runtime,
         resource: &crate::resources::ResourceUse,
         input: &crate::workspace_directory::CaptureInput,
+        named: bool,
         request_bytes: u64,
     ) -> Self {
         Self {
-            result: workspace_directory_user_path(runtime, resource, input),
+            result: workspace_directory_user_path(runtime, resource, input, named),
             correlation: Vec::new(),
             pending: false,
             usage: crate::resources::ProviderUsage {
@@ -1067,6 +1094,7 @@ fn workspace_directory_user_path(
     runtime: &Runtime,
     resource: &crate::resources::ResourceUse,
     input: &crate::workspace_directory::CaptureInput,
+    named: bool,
 ) -> Result<String> {
     let mut port: Box<dyn crate::workspace_directory::DirectoryReadPort> =
         if runtime.integrations().uses_simulated_providers() {
@@ -1090,6 +1118,11 @@ fn workspace_directory_user_path(
                 CaptureMode::UserPath,
             )?)
         };
+    if named {
+        let observed =
+            crate::workspace_directory::collect_named_user_path(input.clone(), port.as_mut())?;
+        return Ok(serde_json::to_string(&observed)?);
+    }
     let observed = crate::workspace_directory::collect_user_path(input.clone(), port.as_mut())?;
     Ok(serde_json::to_string(&observed)?)
 }
@@ -1342,6 +1375,16 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
                 runtime,
                 &capability.resource,
                 &input,
+                false,
+                request_bytes,
+            );
+        }
+        Action::WorkspaceDirectoryNamedUserPath(input) => {
+            return ProviderResult::workspace_directory_user_path(
+                runtime,
+                &capability.resource,
+                &input,
+                true,
                 request_bytes,
             );
         }

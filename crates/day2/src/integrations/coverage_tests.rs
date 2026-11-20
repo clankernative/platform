@@ -182,6 +182,7 @@ fn demonstration(action: Action) -> Demonstration {
             Demonstration::NotificationsAdapter
         }
         Action::WorkspaceDirectoryUserPath
+        | Action::WorkspaceDirectoryNamedUserPath
         | Action::WorkspaceDirectoryHierarchyDelivery
         | Action::WorkspaceDirectoryDeliveryPage => Demonstration::NativeAdapterRead,
         // The live capture pipeline against Carta's own wire world, then a
@@ -437,7 +438,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
             customer_id: "Ccoverage".into(),
             users: BTreeMap::from([(
                 "directory-reader@coverage.test".into(),
-                json!({"customerId":"Ccoverage","orgUnitPath":directory_path,
+                json!({"customerId":"Ccoverage","orgUnitPath":directory_path,"suspended":false,
                     "primaryEmail":"alias@coverage.test","kind":"admin#directory#user"}),
             )]),
             hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
@@ -1316,6 +1317,7 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         matches!(
             action,
             Action::WorkspaceDirectoryUserPath
+                | Action::WorkspaceDirectoryNamedUserPath
                 | Action::WorkspaceDirectoryHierarchyDelivery
                 | Action::WorkspaceDirectoryDeliveryPage
         ),
@@ -1340,6 +1342,17 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
     };
     if action == Action::WorkspaceDirectoryUserPath {
         let result = serde_json::to_string(&crate::workspace_directory::collect_user_path(
+            input, &mut port,
+        )?)?;
+        let after = worlds(&database)?;
+        return Ok(Observed {
+            result,
+            before,
+            after,
+        });
+    }
+    if action == Action::WorkspaceDirectoryNamedUserPath {
+        let result = serde_json::to_string(&crate::workspace_directory::collect_named_user_path(
             input, &mut port,
         )?)?;
         let after = worlds(&database)?;

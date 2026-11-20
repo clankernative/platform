@@ -263,6 +263,10 @@ impl crate::workspace_directory::DirectoryReadPort for Units {
         anyhow::bail!("a hierarchy read never looks up a user")
     }
 
+    fn named_user_org_unit_path(&mut self, _actor: &str) -> Result<Option<String>> {
+        anyhow::bail!("a hierarchy read never looks up a user")
+    }
+
     fn list_org_units(&mut self) -> Result<crate::workspace_directory::ProviderPage> {
         Ok(crate::workspace_directory::ProviderPage {
             units: self.0.clone(),

@@ -164,6 +164,9 @@ providers! {
         world: "workspace_directory.simulated.sqlite",
         actions: {
             WorkspaceDirectoryUserPath => "workspace_directory.user_path.v1" (read, data),
+            // Another person's user path, named by the application. A grant
+            // lists it separately from the current actor's own read.
+            WorkspaceDirectoryNamedUserPath => "workspace_directory.named_user_path.v1" (read, data),
             // A complete hierarchy handed to the reading invocation, with no
             // host cache or expiry; its pages exist only for that invocation.
             WorkspaceDirectoryHierarchyDelivery => "workspace_directory.hierarchy.v2" (read, data),
