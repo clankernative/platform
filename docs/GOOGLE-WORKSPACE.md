@@ -737,6 +737,36 @@ admission, reservation and settlement are covered by the host tests. It is not
 published as a CI receipt the way the Linear campaign is. These are synthetic
 adapter checks, not host, live-provider or production qualification.
 
+### Applications in development and build verification
+
+A disposable instance, the one `platform check`, a build's required
+verification and local development create, grants an application's
+operations what they declare and nothing more:
+
+- each operation that observes a Google Workspace read gets exactly those
+  actions, and each command that declares `GoogleWorkspace.share_effect` gets
+  the share; the development authority's other default writes never include
+  it;
+- a slot that grants the share charges one budget of concurrency 1 on the
+  connection, the serial budget an installation must give shares. An
+  operation has one slot for the provider, so one that both reads and shares
+  charges its reads to that budget too; an operation that only reads charges
+  none. Keep shares in a command of their own, as an installation should;
+- the target is the development organization's (`synthetic.example`, read as
+  `calendar-reader@synthetic.example`), served from the simulated world.
+
+That world's meetings are dated January 2026, and a verification campaign's
+clock is fixed in November 2023, so an application that reads a window around
+its invocation time would find nothing. When a campaign starts its clock, it
+moves every event and conference record by whole days so that the latest day
+an event ends is the campaign's own day: the stand-up and the review fall on
+the days just before it. Clock times, fractions and offsets are kept byte for
+byte, and dating to the same day again changes nothing. The provider's own
+tests read the fixture undated.
+
+Production loading never infers a grant from these declarations; an
+installation authors its connection, resource, policies and budgets.
+
 ## Live qualification
 
 `google-workspace-qualify` is the explicit operator qualification. It is not

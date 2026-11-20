@@ -1151,9 +1151,23 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                     .map(Into::into)
                     .collect(),
                 effects: if operation.kind == "command" {
+                    // The Google Workspace share, like its reads, needs a
+                    // declaration: its fixture grant charges a serial budget,
+                    // so an undeclared one would serialize every command.
                     crate::capabilities::WRITES
                         .iter()
-                        .map(|name| (*name).into())
+                        .copied()
+                        .filter(|name| !google_workspace_capability(name))
+                        .map(Into::into)
+                        .chain(
+                            effects
+                                .iter()
+                                .filter(|effect| {
+                                    effect.kind == "external"
+                                        && google_workspace_capability(&effect.command)
+                                })
+                                .map(|effect| effect.command.clone()),
+                        )
                         .collect()
                 } else {
                     BTreeSet::new()
@@ -1380,18 +1394,57 @@ pub fn create(artifact_path: &Path, directory: &Path, policy: Option<Policy>) ->
     create_for(artifact_path, directory, policy, ACTOR)
 }
 
-/// Explicit read permissions select a provider fixture for any app namespace.
-/// This is used only by disposable setup, never production authority loading.
-fn reads_provider(policy: &Policy, provider: day2_capabilities::resources::Provider) -> bool {
+fn google_workspace_capability(name: &str) -> bool {
+    day2_capabilities::resources::Action::ALL
+        .iter()
+        .any(|action| {
+            action.provider() == day2_capabilities::resources::Provider::GoogleWorkspace
+                && action.capability() == name
+        })
+}
+
+/// Whether the artifact declares a Google Workspace read or the share. Only such
+/// an application reads the development world, which every disposable instance
+/// seeds, so only its campaign dates it.
+fn uses_google_workspace(artifact: &LoadedArtifact) -> bool {
+    use day2_capabilities::resources::{Action, Provider};
+    artifact
+        .contract()
+        .app_contract
+        .as_ref()
+        .is_some_and(|definition| {
+            definition.operations.values().any(|operation| {
+                Action::ALL
+                    .iter()
+                    .filter(|action| action.provider() == Provider::GoogleWorkspace)
+                    .any(|action| {
+                        operation
+                            .observations
+                            .iter()
+                            .any(|name| name == action.capability())
+                            || operation.execution.effects.iter().any(|effect| {
+                                effect.kind == "external" && effect.command == action.capability()
+                            })
+                    })
+            })
+        })
+}
+
+/// Explicit read or write permissions select a provider fixture for any app
+/// namespace. This is used only by disposable setup, never production
+/// authority loading.
+fn uses_provider(policy: &Policy, provider: day2_capabilities::resources::Provider) -> bool {
     day2_capabilities::resources::Action::ALL
         .iter()
         .any(|action| {
             action.provider() == provider
-                && !action.is_write()
-                && policy
-                    .operations
-                    .values()
-                    .any(|operation| operation.observations.contains(action.capability()))
+                && policy.operations.values().any(|operation| {
+                    if action.is_write() {
+                        operation.effects.contains(action.capability())
+                    } else {
+                        operation.observations.contains(action.capability())
+                    }
+                })
         })
 }
 
@@ -1856,10 +1909,13 @@ fn provider_resource_fixture(
             "google_workspace",
             Provider::GoogleWorkspace,
             crate::integrations::simulated::google_workspace_development_target(),
-            vec![
-                Action::GoogleWorkspaceGroup,
-                Action::GoogleWorkspaceGroupMember,
-            ],
+            // Every action the provider registers; each operation keeps only
+            // what it declares.
+            Action::ALL
+                .iter()
+                .copied()
+                .filter(|action| action.provider() == Provider::GoogleWorkspace)
+                .collect(),
         ),
         (
             "linear",
@@ -1909,6 +1965,30 @@ fn provider_resource_fixture(
             let resource = VersionRef {
                 id: (*name).into(),
                 revision: 1,
+            };
+            // Drive applies only the last of concurrent permission changes, so
+            // a slot that grants the share charges a serial budget on the
+            // connection, as an installation's must.
+            let budgets = if actions.contains(&Action::GoogleWorkspaceShareArtifact) {
+                let budget = VersionRef {
+                    id: "google_workspace_shares".into(),
+                    revision: 1,
+                };
+                catalog.budgets.insert(
+                    budget.id.clone(),
+                    BudgetDefinition {
+                        revision: 1,
+                        scope: BudgetScope::Connection,
+                        period_seconds: 3_600,
+                        limits: BudgetLimits {
+                            concurrency: Some(1),
+                            ..BudgetLimits::default()
+                        },
+                    },
+                );
+                vec![budget]
+            } else {
+                Vec::new()
             };
             catalog.connections.insert(
                 (*name).into(),
@@ -1970,7 +2050,7 @@ fn provider_resource_fixture(
                         },
                         max_calls_per_invocation: 256,
                     },
-                    budgets: Vec::new(),
+                    budgets,
                 },
             );
             bindings.insert((*name).into(), resource);
@@ -2137,7 +2217,7 @@ fn resource_fixture_for_artifact_with_imports(
         attachments.extend(work_attachments);
     }
     for provider in [Provider::WorkspaceDirectory, Provider::GoogleWorkspace] {
-        if reads_provider(policy, provider) {
+        if uses_provider(policy, provider) {
             let (directory, directory_attachments) =
                 provider_resource_fixture(app, policy, &[provider])?;
             catalog.connections.extend(directory.connections);
@@ -2662,7 +2742,7 @@ mod people_resource_tests {
                 ),
             ]),
         };
-        assert!(reads_provider(
+        assert!(uses_provider(
             &selected,
             day2_capabilities::resources::Provider::WorkspaceDirectory
         ));
@@ -2695,7 +2775,7 @@ mod people_resource_tests {
             )]),
             ..selected
         };
-        assert!(reads_provider(
+        assert!(uses_provider(
             &unrelated,
             day2_capabilities::resources::Provider::WorkspaceDirectory
         ));
@@ -2712,7 +2792,7 @@ mod people_resource_tests {
             BTreeSet::from([Action::WorkspaceDirectoryHierarchyDelivery])
         );
         let default_policy = local_policy_for(&artifact, "developer")?;
-        assert!(!reads_provider(
+        assert!(!uses_provider(
             &default_policy,
             day2_capabilities::resources::Provider::WorkspaceDirectory
         ));
@@ -2767,6 +2847,200 @@ mod people_resource_tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn google_workspace_fixture_grants_what_each_operation_declares_and_serializes_shares()
+    -> Result<()> {
+        use day2_capabilities::resources::{Action, BudgetScope, Provider};
+        let directory = tempfile::tempdir()?;
+        let base = LoadedArtifact::from_contract_for_tests(
+            "google-workspace-fixture-test".into(),
+            directory.path().to_path_buf(),
+            serde_json::from_value(serde_json::json!({
+                "format": crate::artifact::CURRENT_FORMAT,
+                "verification_limits": crate::artifact::VerificationLimits::QUALIFIED,
+                "roc_version": "google-workspace-fixture-test",
+                "worker_digest": "google-workspace-fixture-test",
+                "schema_digest": "google-workspace-fixture-test",
+                "schema": {"models": {}, "inputs": {}, "foreign_keys": []},
+                "operations": [
+                    {"name":"recordings.scan","kind":"command","input_type":"input","output_type":"output"},
+                    {"name":"recordings.share","kind":"command","input_type":"input","output_type":"output"},
+                    {"name":"recordings.note","kind":"command","input_type":"input","output_type":"output"},
+                    {"name":"recordings.page","kind":"query","input_type":"input","output_type":"output"}
+                ],
+                "sources": {}, "admission": "local-spike-only"
+            }))?,
+        );
+        let declared = |name: &str, observations: &[&str], external: &[&str]| {
+            serde_json::json!({
+                "intent": {"target":{"operation":name,"input_type":"input","output_type":"output"},
+                    "title":"Recordings", "usage":{"purpose":"Share", "use_when":[], "avoid_when":[], "preconditions":[], "effects":[], "result":"Shared"},
+                    "inputs":[], "outputs":[], "input_sources":[], "follow_ups":[]},
+                "request_example":"{}", "response_example":"{}", "deprecated":false,
+                "execution":{"model":"","id_field":"","version_field":"",
+                    "effects": external.iter().map(|command| serde_json::json!(
+                        {"kind":"external","model":"","fields":[],"command":command})).collect::<Vec<_>>()},
+                "errors":[], "observations":observations,
+                "verification_setup":[], "verification_delegation":[]
+            })
+        };
+        let mut contract = base.contract().clone();
+        contract.app_contract = Some(serde_json::from_value(serde_json::json!({
+            "operations": {
+                "recordings.scan": declared(
+                    "recordings.scan",
+                    &["google_workspace.calendar_events.v1", "google_workspace.event_conferences.v1"],
+                    &[],
+                ),
+                "recordings.share": declared("recordings.share", &[], &["google_workspace.share_artifact.v1"]),
+                "recordings.note": declared("recordings.note", &[], &[]),
+                "recordings.page": declared("recordings.page", &[], &[])
+            },
+            "presentation":{"stylesheet":"","script":""}, "identities":"",
+            "invariants":{}, "domains":{}, "errors":{}
+        }))?);
+        let artifact = LoadedArtifact::from_contract_for_tests(
+            "declared-recordings".into(),
+            directory.path().to_path_buf(),
+            contract,
+        );
+        // Build verification and local development derive their policy here.
+        let policy = local_policy_for(&artifact, "developer")?;
+        let share = "google_workspace.share_artifact.v1";
+        assert!(
+            policy.operations["recordings.share"]
+                .effects
+                .contains(share)
+        );
+        assert!(!policy.operations["recordings.scan"].effects.contains(share));
+        assert!(!policy.operations["recordings.note"].effects.contains(share));
+        assert!(uses_google_workspace(&artifact));
+
+        let (catalog, attachments) =
+            resource_fixture_for_artifact("recordings", &artifact, &policy)?;
+        let resolved = catalog.resolve("recordings", &attachments, 1)?;
+        let slot = |operation: &str| {
+            resolved
+                .operations
+                .get(operation)
+                .and_then(|slots| slots.get("google_workspace"))
+        };
+        let scan = slot("recordings.scan").context("declared reads")?;
+        assert_eq!(
+            scan.actions,
+            BTreeSet::from([
+                Action::GoogleWorkspaceCalendarEvents,
+                Action::GoogleWorkspaceEventConferences
+            ])
+        );
+        // An operation that only reads charges no budget, so a held share
+        // never blocks it.
+        assert!(scan.budgets.is_empty());
+        let shares = slot("recordings.share").context("declared share")?;
+        assert_eq!(
+            shares.actions,
+            BTreeSet::from([Action::GoogleWorkspaceShareArtifact])
+        );
+        let [budget] = shares.budgets.as_slice() else {
+            bail!("a share slot charges exactly one budget");
+        };
+        assert_eq!(catalog.budgets[&budget.id].limits.concurrency, Some(1));
+        assert_eq!(catalog.budgets[&budget.id].scope, BudgetScope::Connection);
+        // A command or query that declares nothing gets nothing.
+        assert!(slot("recordings.note").is_none());
+        assert!(slot("recordings.page").is_none());
+
+        // A share alone selects the provider: a write is a use, not only a read.
+        let share_only = Policy {
+            operations: BTreeMap::from([(
+                "recordings.share".into(),
+                policy.operations["recordings.share"].clone(),
+            )]),
+            ..policy.clone()
+        };
+        assert!(uses_provider(&share_only, Provider::GoogleWorkspace));
+        // An application that declares nothing of the provider is not offered it.
+        assert!(!uses_google_workspace(&base));
+        let undeclared = local_policy_for(&base, "developer")?;
+        assert!(!uses_provider(&undeclared, Provider::GoogleWorkspace));
+        Ok(())
+    }
+
+    #[test]
+    fn google_workspace_development_world_is_dated_to_the_campaign_clock() -> Result<()> {
+        use crate::integrations::simulated::{
+            GOOGLE_DEVELOPMENT_CALENDAR, date_google_workspace_development,
+            google_workspace_development_fixture, update_google_workspace,
+        };
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("app.sqlite");
+        // No world: refused rather than created.
+        assert!(date_google_workspace_development(&database, "scope", VERIFICATION_TIME).is_err());
+        crate::integrations::simulated::seed(
+            &database,
+            "scope",
+            &crate::integrations::simulated::SimulatedFixture {
+                slack: crate::integrations::simulated::SlackWorld {
+                    workspace_id: "TWORKSPACE".into(),
+                    ..Default::default()
+                },
+                snowflake: crate::integrations::simulated::SnowflakeWorld {
+                    account: "dated".into(),
+                    ..Default::default()
+                },
+                openai: crate::integrations::simulated::OpenAiWorld {
+                    project_id: "proj_dated".into(),
+                    model: "model-dated".into(),
+                    max_input_tokens: 1,
+                    ..Default::default()
+                },
+                google_workspace: google_workspace_development_fixture(),
+                ..Default::default()
+            },
+        )?;
+        let read = || update_google_workspace(&database, "scope", |state| Ok(state.world.clone()));
+        let original = read()?;
+        // 2023-11-14T22:13:20Z: the fixture's last event ends that day, and the
+        // stand-up and review fall on the days before it.
+        date_google_workspace_development(&database, "scope", VERIFICATION_TIME)?;
+        let dated = read()?;
+        let events = &dated.calendars[GOOGLE_DEVELOPMENT_CALENDAR].events;
+        let standup = events.iter().find(|event| event.id == "standup0001");
+        assert_eq!(
+            standup.and_then(|event| event.end.as_ref()?.date_time.as_deref()),
+            Some("2023-11-11T17:30:00Z")
+        );
+        let offsite = events.iter().find(|event| event.id == "offsite0003");
+        assert_eq!(
+            offsite.and_then(|event| event.end.as_ref()?.date.as_deref()),
+            Some("2023-11-14")
+        );
+        // Records keep their clock time, fraction and offset byte for byte.
+        assert_eq!(
+            dated.conference_records["conf-standup-1"].start_time,
+            "2023-11-11T17:01:02.345Z"
+        );
+        assert_eq!(
+            dated.conference_records["conf-review-1"].start_time,
+            "2023-11-12T15:00:30.123456Z"
+        );
+        assert_eq!(dated.conference_records["conf-standup-2"].end_time, None);
+        // Only times move.
+        let mut undated = dated.clone();
+        undated.shift_days(
+            i64::from(
+                time::Date::from_calendar_date(2026, time::Month::January, 8)?.to_julian_day(),
+            ) - i64::from(
+                time::Date::from_calendar_date(2023, time::Month::November, 14)?.to_julian_day(),
+            ),
+        )?;
+        assert_eq!(undated, original);
+        // Dating to the same day again changes nothing.
+        date_google_workspace_development(&database, "scope", VERIFICATION_TIME + 3_600)?;
+        assert_eq!(read()?, dated);
         Ok(())
     }
 
@@ -3881,6 +4155,13 @@ impl Campaign {
         crate::people_providers::seed_verification_if_unconfigured(&runtime)?;
         let runtime = crate::managed_credentials::verification::install(runtime)?;
         let provider_clock = time.start(&runtime)?;
+        if uses_google_workspace(runtime.artifact()) {
+            crate::integrations::simulated::date_google_workspace_development(
+                runtime.db(),
+                runtime.scope(),
+                provider_clock,
+            )?;
+        }
         Ok(Self {
             evidence: Evidence {
                 format: 1,
