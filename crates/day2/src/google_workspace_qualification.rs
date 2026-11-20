@@ -567,6 +567,19 @@ fn classify(
     };
     match endpoint {
         "calendar_events" => {
+            // How close Google's events tokens come to the bound the adapter
+            // gives them (988 bytes, so the bound token fits 1,024).
+            if let Some(token) = body["nextPageToken"].as_str() {
+                count(
+                    &mut shape,
+                    match token.len() {
+                        0..=256 => "next_page_token_up_to_256_bytes",
+                        257..=512 => "next_page_token_up_to_512_bytes",
+                        513..=988 => "next_page_token_up_to_988_bytes",
+                        _ => "next_page_token_over_988_bytes",
+                    },
+                );
+            }
             for item in list("items") {
                 match item["status"].as_str() {
                     None => count(&mut shape, "id_only"),
@@ -886,8 +899,7 @@ struct Entry {
 }
 
 impl Entry {
-    /// A probe that sent nothing, and why: it could not run, or the adapter
-    /// refused it before the network.
+    /// A probe that could not run, and why.
     fn unsettled(probe: &'static str, outcome: &'static str) -> Self {
         Self {
             probe,
@@ -898,6 +910,16 @@ impl Entry {
             response_bytes: 0,
             exchanges: Vec::new(),
         }
+    }
+
+    /// A probe the adapter refused, as it must, before anything was sent: a
+    /// pass, not a probe that could not run.
+    fn unsent(probe: &'static str, outcome: &'static str) -> Self {
+        let mut entry = Self::unsettled(probe, outcome);
+        entry
+            .details
+            .insert("refused_before_network".to_owned(), json!(true));
+        entry
     }
 }
 
@@ -1201,29 +1223,29 @@ impl Qualification {
             self.detail("next_page_token", json!(following.is_some()));
             next = following;
         }
+        // The other query must differ from the profile's: a window of exactly
+        // one day in `Z` form would otherwise be the same query, whose token
+        // the adapter rightly accepts, and the probe would reach Google.
         let start = crate::google_workspace_calendar::rfc3339_seconds(&profile.window.time_min);
-        let Some(time_max) =
-            start.and_then(|start| crate::google_workspace_meet::utc(start + 86_400))
+        let Some(time_max) = [86_400, 43_200]
+            .into_iter()
+            .filter_map(|length| {
+                start.and_then(|start| crate::google_workspace_meet::utc(start + length))
+            })
+            .find(|end| *end != profile.window.time_max)
         else {
             self.entries
                 .push(Entry::unsettled(TOKEN_PROBE, "unsettled_window"));
             return Ok(());
         };
-        match Plan::authorize(
-            Action::GoogleWorkspaceCalendarEvents,
-            &LiveConnection::GoogleWorkspace {
-                service_account: profile.service_account.clone(),
-            },
-            &ResourceTarget::GoogleWorkspaceDomain {
-                calendar_reader: profile.calendar_reader.clone(),
-                email_domain: profile.email_domain.clone(),
-                grantee_domains: profile.grantee_domains.clone(),
-            },
-            &events_request(&profile, &time_max, Some(&first_token)).to_string(),
+        match plan(
+            &profile,
             self.source,
+            Action::GoogleWorkspaceCalendarEvents,
+            events_request(&profile, &time_max, Some(&first_token)),
         ) {
-            Err(error) if error.to_string() == "google_workspace_request_invalid" => {
-                self.entries.push(Entry::unsettled(
+            Err(error) if error.root_cause().to_string() == "google_workspace_request_invalid" => {
+                self.entries.push(Entry::unsent(
                     TOKEN_PROBE,
                     "google_workspace_request_invalid",
                 ));
@@ -1231,7 +1253,7 @@ impl Qualification {
             Err(_) => self
                 .entries
                 .push(Entry::unsettled(TOKEN_PROBE, "other_error")),
-            Ok((plan, _)) => {
+            Ok(plan) => {
                 self.probe(TOKEN_PROBE, &plan, 0)?;
             }
         }

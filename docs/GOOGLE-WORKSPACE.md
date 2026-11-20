@@ -1051,23 +1051,31 @@ counts.
       may be covered; two empty record pages reach the records ceiling.
       **Automated** for the adapter: `events_token_other_query` offers the
       first page's token with another query, the same calendar and start and
-      a window one day long. The adapter binds each token to its query (see
-      `calendar_events`), so it must answer
-      `google_workspace_request_invalid` with no calls; a receipt whose probe
-      reached Google would show the binding missing. The probe no longer
+      a window one day long (half a day if the profile's own window is
+      exactly one day, so the query always differs). The adapter binds each
+      token to its query (see `calendar_events`), so it must answer
+      `google_workspace_request_invalid` with no calls, recorded with
+      `refused_before_network`: a pass. A receipt whose probe reached Google
+      would show the binding missing. The probe no longer
       observes Google: doing so would need a request the adapter never sends,
       outside its reviewed requests and the fence, and Google's answer,
       recorded below, no longer affects the adapter. `unsettled_single_page`
       and `unsettled_first_page_refused` mean the probe could not run. The
       page forms are observed, not forced: every list exchange's shape
-      `items` and `next_page_token_present` / `_empty`.
+      `items` and `next_page_token_present` / `_empty`. The adapter caps
+      Google's events token at 988 bytes so its bound form fits 1,024; a
+      longer one would fail every continued read as `response_invalid`. Each
+      `events_page` exchange records its token's length bucket
+      (`next_page_token_up_to_256_bytes`, `next_page_token_up_to_512_bytes`,
+      `next_page_token_up_to_988_bytes` or `next_page_token_over_988_bytes`),
+      so a receipt shows how close Google comes.
       **Live, 2026-11-20**, from the probe as it then was:
       `events_token_other_query` was `Found` with shape `items` 0 and
       `events_at_or_after_time_max` 0. Google accepted another query's token
       instead of refusing it, and answered an empty page although the one-day
-      window held timed events: it applied the token's position to the new
-      window. The adapter now binds tokens, and the simulation answers as
-      Google did. Pages were full (25) or final; no short page with a token
+      window held timed events, as applying the token's position, or a
+      cursor, to the new window would. The adapter now binds tokens, and the
+      simulation models the answer as the position applied. Pages were full (25) or final; no short page with a token
       was seen.
 - [ ] `conferenceSolution.key.type` values for Meet, add-on and third-party
       conferences, and which of them carry a `hangoutLink`.

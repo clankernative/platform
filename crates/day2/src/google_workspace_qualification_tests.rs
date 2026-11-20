@@ -80,7 +80,17 @@ fn a_rehearsal_runs_every_step_through_the_adapter_and_writes_once() -> Result<(
     // by the adapter, before anything is sent.
     assert_eq!(probes(&receipt, "events_page").len(), 2);
     assert_eq!(detail("events_page", "next_page_token"), true);
-    assert_eq!(probes(&receipt, "events_token_other_query")[0]["calls"], 0);
+    let refused = probes(&receipt, "events_token_other_query")[0];
+    assert_eq!(refused["calls"], 0);
+    assert_eq!(refused["details"]["refused_before_network"], true);
+    let first_page = &probes(&receipt, "events_page")[0]["exchanges"];
+    assert!(
+        first_page
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|exchange| { exchange["shape"]["next_page_token_up_to_256_bytes"] == 1 })
+    );
     assert_eq!(detail("directory_group_alias", "primary_is_group"), true);
     assert_eq!(detail("directory_group_alias", "primary_is_alias"), false);
     assert_eq!(detail("event_recorded", "organizer"), "creator");
