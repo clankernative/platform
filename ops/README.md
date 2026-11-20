@@ -18,6 +18,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 | [Authority.roc](Authority.roc) | Inspect active authority; explicitly activate desired grants or an artifact with an expected stamp and retry identity |
 | [AppSecrets.roc](AppSecrets.roc) | Owner-managed create/rotate/reveal/delete transition table embedded in the runtime; opt-in synthetic provider canaries with guarded cleanup |
 | [Infra.roc](Infra.roc) | Construct the resource graph → prepare → version → init → validate → plan → show → receipt |
+| [InstancePlan.roc](InstancePlan.roc) | `day2 instance plan` only: prepare the rendered request → read credentials once → init → plan → show per core root → receipt |
 | [Ci.roc](Ci.roc) | Source-event trigger policy and the mandatory isolated build/admission/check/evidence recipe |
 | [Verify.roc](Verify.roc) | Platform fixture selection, regression suites, CLI compilation and verification receipts |
 | [Simulation.roc](Simulation.roc) | Run and replay the shared control-world corpus, then generated schedules, before issuing mandatory campaign evidence |

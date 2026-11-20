@@ -9,12 +9,15 @@ in their `day2.json` values.
 ```console
 day2 instance check DIRECTORY [--agent]
 day2 instance render DIRECTORY [--agent]
+day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
 name. It reads no other file. `instance render` validates the same file and
-prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the
-parser and the derivation; there is no second schema.
+prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it.
+`instance plan` runs a [read-only plan](#plan) of the core roots with those
+inputs. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
+derivation; there is no second schema.
 
 ## The spec
 
@@ -152,12 +155,14 @@ size preset or a fixed platform constant:
 | `project` | `project_id`, `region`, `state_bucket_name`, `state_prefixes` |
 | `cluster` | `project_id`, `region`, `zone`, `cluster_name`, `cluster_labels`, `subnet_cidr`, `pod_cidr`, `service_cidr`, `shared_node_pod_pids_limit` |
 | `tenancy` | `kube_context`, `app_namespace_prefix` |
-| `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs` |
+| `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `deployer_subjects`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs` |
 | `day2-app` | `kube_context`, `app_id`, `namespace`, `installation`, `environment`, `hosted_domain`, `edge_origin`, `runtime_resources`, `pod_pids_limit`, `backup_bucket` |
 
-- **People.** The `operators` hold every app's off-site backups and are named
-  in its IAP members, which also admit `domain:<domains.people>`. `owners`
-  grant nothing yet.
+- **People.** Only the `operators` deploy an app by hand
+  (`deployer_subjects`). They also hold every app's off-site backups and are
+  named in its IAP members, which also admit `domain:<domains.people>`.
+  `owners` get no infrastructure authority. CI service accounts hold
+  project-level grants from the instance's bootstrap and are never listed.
 - **Sizes.** The app resources row above. Every preset has the same volume
   until resizing is designed: moving an app to a size with a smaller volume
   would try to shrink its PVC, which cannot shrink.
@@ -173,7 +178,7 @@ size preset or a fixed platform constant:
 Everything else is still committed by the instance until the spec can describe
 it:
 - identity lists that may name its CI service accounts
-  (`state_reader_members`, `state_writer_members`, `deployer_subjects`,
+  (`state_reader_members`, `state_writer_members`,
   `platform_automation_usernames`);
 - node counts, the Cloud Asset API opt-in and other project or cluster choices;
 - discovered IDs (`project_number`, `cloudflare_zone_id`,
@@ -184,14 +189,76 @@ it:
   catalogs and policies, schedules, pod labels and guardrail overrides
   (`container_max`, `resource_guardrails`).
 
-Nothing consumes the rendered variables yet: instance CI switches to them
+The instance commits those at fixed paths: `gcp/config/<root>.tfvars` for
+`project`, `cluster` and `tenancy`, `gcp/config/app-edge/<id>.tfvars` and
+`gcp/config/apps/<id>.tfvars`. Instance CI switches to the rendered variables
 before an instance deletes its committed copies.
+
+## Plan
+
+`instance plan DIRECTORY PLATFORM NEW_DIRECTORY` validates `day2.json`, renders
+its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
+`project`, `cluster`, `tenancy`, then `app-edge` per app.
+
+- **Platform.** `PLATFORM` is a git repository that contains the `platform`
+  commit. Each root plans a private copy of `deploy/gke/stacks/<stack>` read
+  as that commit's git objects. Local or ignored files, replace refs,
+  attributes and filters cannot change it. The CLI and its platform host must
+  carry exactly that commit's rendering sources (`InstanceSpec`,
+  `InstanceRender`, `Names`, `JsonValue`); anything else is refused.
+- **Engine.** OpenTofu 1.12.3, found on `PATH` and admitted only if it is the
+  official release binary for the host (Linux amd64 or macOS arm64). It is
+  copied into `NEW_DIRECTORY` and checked again before every operation, with a
+  private CLI configuration, so ambient provider overrides never apply.
+- **Inputs.** Each root initializes against its rendered backend and plans with
+  a copy of its committed `.tfvars` file, then its rendered variables, so a
+  rendered value wins over a committed copy.
+- **New roots.** Each root first lists its exact state object, which needs only
+  object read access. If the listing is empty, the root plans against an empty
+  local state and is reported as a new root, so no state is created. A missing
+  bucket or a denied listing fails the root.
+- **Credentials.** Google credentials come from the environment. Only these
+  variables pass through: `PATH`, `HOME`, Google credential and account
+  selection (including impersonation), and proxy and CA settings. A private
+  kubeconfig for the cluster is built from derived names in a temporary
+  directory that is removed afterwards. It overrides any committed
+  `kubeconfig_path`. App edges read the DNS provider token from the project's
+  `cloudflare-api-token` secret, in memory only, and only their plan step sees
+  it.
+- **Read-only.** It never takes a state lock, never applies, and never writes
+  into the platform checkout or the instance. `NEW_DIRECTORY` must be outside
+  both and outside the instance's repository, and is created with mode 0700.
+- **Output.**
+  - Each root's plan, its `tofu show -json` output and logs go to
+    `NEW_DIRECTORY`, with `receipt.json`, which records the stacks tree, the
+    engine digest and each root's input, plan and show digests.
+  - Plans hold state values in plain text, so treat the directory like state.
+  - Providers are cached once for all roots.
+  - Credential material is refused there.
+- **Failures.**
+  - A root that fails stops only itself; the others still plan. This includes
+    a root whose cluster or DNS credentials could not be read.
+  - The command exits 6 if any root failed, or if the plan could not start.
+  - A plan with changes exits 0; its receipt lists every changed resource,
+    pending move, import and output change.
+- **Not planned:**
+  - `day2-app`, whose image and artifact inputs come from the release
+    controller (step 3);
+  - instances with OAuth workload inputs (`gcp/config/oauth-workloads.json`),
+    which fail closed.
+- **Known limits:**
+  - Interrupting the command does not yet stop OpenTofu or remove the
+    temporary kubeconfig directory.
+  - Any file in `NEW_DIRECTORY` that the plan did not write fails the receipt.
+  - Platform CI pins OpenTofu 1.11.5, while instance plans pin 1.12.3, the
+    version that writes instance state.
 
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
    `day2 instance check`. Nothing consumes the spec yet.
-2. **Render inputs (started: core-root backends and derived variables).** The platform renders every
+2. **Render inputs (started: core-root backends and derived variables, and a
+   read-only `instance plan` of the core roots except `day2-app`).** The platform renders every
    OpenTofu input (variables and backends) from the spec, and instance
    repositories stop committing them.
    Fields are added only for real choices (size presets, verification cases,

@@ -764,6 +764,77 @@ fn failed_infrastructure_validation_prevents_plan_and_receipt() -> Result<()> {
 }
 
 #[test]
+fn instance_plan_reads_credentials_once_and_stops_only_the_failed_root() -> Result<()> {
+    assert!(
+        automation::SOURCES
+            .iter()
+            .any(|(name, _)| *name == "ops/InstancePlan.roc")
+    );
+    let mut effects = Vec::new();
+    let receipt = automation::run(
+        &automation::runner()?,
+        &["instance-plan-session", "/private/plan/request.json"],
+        |request| {
+            let input: Value = request.decode()?;
+            match request.action.as_str() {
+                "instance-plan-prepare" => {
+                    // The host reads the CLI's rendered request from its file.
+                    assert_eq!(input, json!({"request": "/private/plan/request.json"}));
+                    effects.push("prepare".to_owned());
+                    Ok(json!({"roots":["project","app-edge/home","app-edge/go"]}))
+                }
+                "instance-plan-credentials" => {
+                    effects.push("credentials".to_owned());
+                    Ok(json!({}))
+                }
+                "instance-plan-root" => {
+                    let (label, operation) = (
+                        input["label"].as_str().unwrap(),
+                        input["operation"].as_str().unwrap(),
+                    );
+                    effects.push(format!("{label} {operation}"));
+                    Ok(json!({"ok": !(label == "app-edge/home" && operation == "plan")}))
+                }
+                "instance-plan-receipt" => {
+                    effects.push("receipt".to_owned());
+                    Ok(json!({"ok": false}))
+                }
+                _ => panic!("unexpected instance plan effect: {}", request.action),
+            }
+        },
+    )?;
+    assert_eq!(receipt, json!({"ok": false}));
+    assert_eq!(
+        effects,
+        [
+            "prepare",
+            "credentials",
+            "project init",
+            "project plan",
+            "project show",
+            "app-edge/home init",
+            "app-edge/home plan",
+            "app-edge/go init",
+            "app-edge/go plan",
+            "app-edge/go show",
+            "receipt",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn instance_plan_has_no_platform_entry() -> Result<()> {
+    let result = automation::run(
+        &automation::runner()?,
+        &["platform", "instance-plan", "/private/plan/request.json"],
+        |request| panic!("unexpected effect: {}", request.action),
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
 fn centralized_ci_runs_the_shared_roc_campaign_before_publishing_evidence() -> Result<()> {
     let mut finished = false;
     let mut receipt = false;

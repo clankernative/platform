@@ -1,4 +1,8 @@
 import InstanceSpec
+import "InstanceSpec.roc" as instance_spec_source : Str
+import "InstanceRender.roc" as instance_render_source : Str
+import "Names.roc" as names_source : Str
+import "JsonValue.roc" as json_value_source : Str
 
 ## Step 2 of docs/INSTANCE.md: the OpenTofu inputs the platform renders from an
 ## instance spec, so instance repositories stop committing them. It renders the
@@ -54,7 +58,7 @@ InstanceRender :: [].{
 		## a derived name, the app's size preset or a fixed platform constant. An input at its stack default is
 		## rendered only when another rendered value is computed from it, so two roots read one constant.
 		## Everything else is still the instance's to commit: identity lists that may name its CI service
-		## accounts (state readers and writers, deployers, platform automation), node counts and other cluster
+		## accounts (state readers and writers, platform automation), node counts and other cluster
 		## choices, discovered IDs, images and digests, access policy, extension routes, and per-app
 		## identities, secrets, catalogs and labels.
 		variables : Root, InstanceSpec.Derived -> List((Str, Value))
@@ -116,6 +120,9 @@ InstanceRender :: [].{
 					# Everyone in the people domain reaches every app. Operators are also bound by name, which
 					# the domain already covers.
 					("iap_members", Texts(["domain:${names.people_domain}"].concat(operators))),
+					# Only operators deploy an app by hand; owners never get deploy authority. CI service accounts
+					# hold project-level grants from the instance's bootstrap and are never listed here.
+					("deployer_subjects", Texts(operators)),
 					# Operators keep custody of every app's off-site backups.
 					("offsite_backup_readers", Texts(operators)),
 					("sqlite_storage_gb", Whole(bound.sqlite_storage_gb)),
@@ -151,6 +158,23 @@ InstanceRender :: [].{
 		## The root's rendered variables as one .tfvars.json document.
 		tfvars_json : Root, InstanceSpec.Derived -> Str
 		tfvars_json = |root, names| Value.Fields(root.variables(names)).json()
+
+		## Where the instance commits this root's inputs the spec cannot describe yet, relative to the instance
+		## directory. `instance plan` passes the file before the rendered variables, so a rendered value wins.
+		committed_inputs : Root -> Str
+		committed_inputs = |root| match root {
+			Project | Cluster | Tenancy => "gcp/config/${root.name()}.tfvars"
+			AppEdge(bound) => "gcp/config/app-edge/${bound.id}.tfvars"
+			Day2App(bound) => "gcp/config/apps/${bound.id}.tfvars"
+		}
+
+		## `instance plan` runs every core root except day2-app, whose image and artifact inputs come from the
+		## release controller (step 3 of docs/INSTANCE.md).
+		plannable : Root -> Bool
+		plannable = |root| match root {
+			Day2App(_) => Bool.False
+			Project | Cluster | Tenancy | AppEdge(_) => Bool.True
+		}
 	}
 
 	## An OpenTofu variable value: a string, a whole number, a list of strings, or an object or map.
@@ -162,6 +186,97 @@ InstanceRender :: [].{
 			Texts(items) => "[${Str.join_with(items.map(|item| Json.to_str(item)), ",")}]"
 			Fields(pairs) => "{${Str.join_with(pairs.map(|pair| "${Json.to_str(pair.0)}:${pair.1.json()}"), ",")}}"
 		}
+	}
+
+	## The request `instance plan` hands its recipe. The host validates every field again.
+	plan_request : InstanceSpec, { instance : Str, checkout : Str, output : Str } -> Str
+	plan_request = |spec, paths| {
+		names = spec.derived()
+		Json.to_str({
+			instance: paths.instance,
+			checkout: paths.checkout,
+			output: paths.output,
+			commit: names.platform_commit,
+			project: names.gcp_project,
+			zone: names.gcp_zone,
+			cluster: names.cluster.name,
+			# The host compares these with its own copies and with the platform commit's.
+			renderer: [
+				{ path: "cli/InstanceSpec.roc", text: instance_spec_source },
+				{ path: "cli/InstanceRender.roc", text: instance_render_source },
+				{ path: "cli/Names.roc", text: names_source },
+				{ path: "cli/JsonValue.roc", text: json_value_source },
+			],
+			roots: roots(spec)
+				.keep_if(|root| root.plannable())
+				.map(
+					|root| {
+						backend = root.backend(names)
+						{
+							label: root.label(),
+							stack: root.name(),
+							app_id: root.app_id(),
+							bucket: backend.bucket,
+							prefix: backend.prefix,
+							inputs: root.committed_inputs(),
+							variables: root.tfvars_json(names),
+						}
+					},
+				),
+		})
+	}
+
+	## What the host reports after planning: the exact stacks and engine, and every planned root's backend,
+	## inputs, status and changed resources. `instance_commit` is empty when the instance is not a git checkout.
+	Receipt : {
+		format : U64,
+		applied : Bool,
+		ok : Bool,
+		commit : Str,
+		stacks_tree : Str,
+		checkout : Str,
+		instance : Str,
+		instance_commit : Str,
+		instance_clean : Bool,
+		engine : { version : Str, digest : Str },
+		roots : List(
+			{
+				label : Str,
+				stack : Str,
+				backend : { bucket : Str, prefix : Str },
+				new_root : Bool,
+				inputs : { path : Str, digest : Str },
+				variables : Str,
+				status : Str,
+				changes : List({ address : Str, actions : List(Str) }),
+				plan_digest : Str,
+				show_digest : Str,
+				logs : Str,
+			},
+		),
+		directory : Str,
+	}
+
+	## A receipt is accepted only in format 1, never applied, with known statuses and an `ok` that agrees with them.
+	receipt : Str -> Try(Receipt, [InvalidReceipt])
+	receipt = |raw| {
+		parsed : Try(Receipt, _)
+		parsed = Json.parse(raw)
+		decoded = parsed.map_err(|_| InvalidReceipt)?
+		known = ["no_changes", "changes", "failed_credentials", "failed_init", "failed_plan", "failed_show"]
+		failed = decoded.roots.any(|root| root.status.starts_with("failed_"))
+		if
+			decoded.format
+				== 1
+				and !decoded.applied
+					and decoded.roots.all(|root| known.contains(root.status))
+						and decoded.ok
+							== !failed
+				{
+					Ok(decoded)
+				} else {
+					Err(InvalidReceipt)
+				}
 	}
 
 	roots : InstanceSpec -> List(Root)
@@ -256,8 +371,8 @@ expect
 			"project {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"state_bucket_name\":\"exampleco-tools-tofu-state\",\"state_prefixes\":{\"foundation\":\"foundation/\",\"cluster\":\"platform/cluster/\",\"tenancy\":\"platform/tenancy/\",\"app\":\"platform/app/\",\"day2\":\"day2/\"}}",
 			"cluster {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"zone\":\"us-central1-a\",\"cluster_name\":\"day2\",\"cluster_labels\":{\"managed_by\":\"opentofu\",\"stack\":\"platform-cluster\",\"environment\":\"day2\"},\"subnet_cidr\":\"10.10.0.0/20\",\"pod_cidr\":\"10.20.0.0/16\",\"service_cidr\":\"10.30.0.0/20\",\"shared_node_pod_pids_limit\":1024}",
 			"tenancy {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_namespace_prefix\":\"app-\"}",
-			"app-edge/go {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace_prefix\":\"app-\",\"domain\":\"go.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}",
-			"app-edge/home {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace_prefix\":\"app-\",\"domain\":\"home.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}",
+			"app-edge/go {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace_prefix\":\"app-\",\"domain\":\"go.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}",
+			"app-edge/home {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace_prefix\":\"app-\",\"domain\":\"home.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}",
 			"day2-app/go {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace\":\"app-go\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"edge_origin\":\"https://go.apps.example.com\",\"runtime_resources\":{\"memory_mib\":512,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-go-backups\"}",
 			"day2-app/home {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace\":\"app-home\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"edge_origin\":\"https://home.apps.example.com\",\"runtime_resources\":{\"memory_mib\":2048,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-home-backups\"}",
 		]
@@ -271,3 +386,31 @@ expect match InstanceSpec.from_json(sample) {
 
 # A string value is JSON-escaped.
 expect InstanceRender.Value.Fields([("a\"b", Text("c\\d"))]).json() == "{\"a\\\"b\":\"c\\\\d\"}"
+
+receipt_sample : Str, Bool -> Str
+receipt_sample = |status, ok|
+	\\{"format":1,"applied":false,"ok":OK,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
+	\\"instance_commit":"","instance_clean":false,"engine":{"version":"1.12.3","digest":"sha256:e"},
+	\\"roots":[{"label":"project","stack":"project","backend":{"bucket":"b","prefix":"foundation"},"new_root":false,
+	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"STATUS",
+	\\"changes":[],"plan_digest":"sha256:p","show_digest":"sha256:s","logs":"/o/project"}],"directory":"/o"}
+		.replace_first("OK", if ok "true" else "false")
+		.replace_first("STATUS", status)
+
+expect InstanceRender.receipt(receipt_sample("no_changes", Bool.True)).is_ok()
+expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.False)).is_ok()
+# An ok that disagrees with the statuses, an unknown status or an applied plan is refused.
+expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.True)).is_err()
+expect InstanceRender.receipt(receipt_sample("no_changes", Bool.False)).is_err()
+expect InstanceRender.receipt(receipt_sample("planned", Bool.True)).is_err()
+expect InstanceRender.receipt(
+	receipt_sample("no_changes", Bool.True).replace_first("\"applied\":false", "\"applied\":true"),
+)
+	.is_err()
+
+# The plan request carries the CLI's own rendering sources.
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => InstanceRender.plan_request(spec, { instance: "i", checkout: "p", output: "o" })
+		.contains("\"path\":\"cli/InstanceRender.roc\"")
+	Err(_) => Bool.False
+}

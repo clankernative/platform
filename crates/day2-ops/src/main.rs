@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
-use day2_ops::{backup, chrome_extension, infra, local_dev, maintenance, process, projection};
+use day2_ops::{
+    backup, chrome_extension, infra, instance_plan, local_dev, maintenance, process, projection,
+};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command, time::Duration};
@@ -28,6 +30,7 @@ fn platform() -> Result<PathBuf> {
 struct Operations {
     development: Option<day2::development::Campaign>,
     infrastructure: Option<infra::Session>,
+    instance_plan: Option<instance_plan::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -664,6 +667,44 @@ impl Operations {
                     .context("infrastructure session required")?
                     .command(&input::<Input>(&request)?.operation)
             }
+            "instance-plan-prepare" => {
+                ensure!(
+                    self.instance_plan.is_none(),
+                    "one instance plan per workflow"
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                let session = instance_plan::Session::prepare(&input::<Input>(&request)?.request)?;
+                let summary = session.summary();
+                self.instance_plan = Some(session);
+                Ok(summary)
+            }
+            "instance-plan-credentials" => self
+                .instance_plan
+                .as_mut()
+                .context("instance plan required")?
+                .credentials(),
+            "instance-plan-root" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    label: String,
+                    operation: String,
+                }
+                let parameters: Input = input(&request)?;
+                self.instance_plan
+                    .as_mut()
+                    .context("instance plan required")?
+                    .operation(&parameters.label, &parameters.operation)
+            }
+            "instance-plan-receipt" => self
+                .instance_plan
+                .as_ref()
+                .context("instance plan required")?
+                .receipt(),
             "infra-receipt" => self
                 .infrastructure
                 .as_ref()
@@ -798,11 +839,12 @@ fn run(request: Request) -> Result<Value> {
     let mut operations = Operations {
         development: None,
         infrastructure: None,
+        instance_plan: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
     };
-    if !["workflow", "local-session"].contains(&request.action.as_str()) {
+    if !["workflow", "local-session", "instance-plan"].contains(&request.action.as_str()) {
         ensure!(
             ["instance-project", "artifact-project", "artifact-version"]
                 .contains(&request.action.as_str()),
@@ -810,7 +852,25 @@ fn run(request: Request) -> Result<Value> {
         );
         return operations.effect(request);
     }
-    let arguments: Vec<String> = if request.action == "local-session" {
+    let arguments: Vec<String> = if request.action == "instance-plan" {
+        // `day2 instance plan` only: its recipe has no `day2 platform` entry. The
+        // request comes from the CLI; the instance plan adapter validates it
+        // again and grants nothing the request could otherwise widen.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let request: Input = input(&request)?;
+        vec![
+            "instance-plan-session".into(),
+            request
+                .request
+                .to_str()
+                .context("instance plan request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if request.action == "local-session" {
         let mut local = local_dev::Session::resolve(&platform()?, input(&request)?)?;
         local.detach_output();
         let raw = serde_json::to_string(&local.options)?;

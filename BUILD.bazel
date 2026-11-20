@@ -8,6 +8,10 @@ test_suite(name = "all_tests", tests = ["//crates/worker:unit_lib", "//crates/xt
 
 exports_files([
     "cli/main.roc",
+    "cli/InstanceRender.roc",
+    "cli/InstanceSpec.roc",
+    "cli/JsonValue.roc",
+    "cli/Names.roc",
     ".bazelrc",
     ".bazelversion",
     ".github/workflows/ci.yml",
@@ -67,6 +71,7 @@ exports_files([
     "ops/GkeRelease.roc",
     "ops/GoogleWorkspaceQualification.roc",
     "ops/Infra.roc",
+    "ops/InstancePlan.roc",
     "ops/Linux.roc",
     "ops/RuntimeImage.roc",
     "ops/LocalDev.roc",

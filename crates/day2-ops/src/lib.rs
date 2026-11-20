@@ -2,6 +2,7 @@
 pub mod backup;
 pub mod chrome_extension;
 pub mod infra;
+pub mod instance_plan;
 pub mod local_dev;
 pub mod maintenance;
 pub mod offsite;

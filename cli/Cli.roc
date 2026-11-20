@@ -9,15 +9,16 @@ Cli :: [].{
 
 	Source := [Demo, Instance(Names.LocalPath), Environment]
 
-	Request := [Help(Format), Version(Format), Describe(Describe), Check(Instance), Render(Instance)]
+	Request := [Help(Format), Version(Format), Describe(Describe), Check(Instance), Render(Instance), Plan(Plan)]
 
 	## The command a response reports, including failures before a request exists.
-	Command := [AppDescribe, InstanceCheck, InstanceRender].{
+	Command := [AppDescribe, InstanceCheck, InstanceRender, InstancePlan].{
 		name : Command -> Str
 		name = |command| match command {
 			AppDescribe => "app.describe"
 			InstanceCheck => "instance.check"
 			InstanceRender => "instance.render"
+			InstancePlan => "instance.plan"
 		}
 	}
 
@@ -28,6 +29,32 @@ Cli :: [].{
 
 		with_format : Instance, Format -> Instance
 		with_format = |request, format| { ..request, format }
+	}
+
+	## day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY: a read-only plan of DIRECTORY's core roots, run in
+	## PLATFORM (a checkout at day2.json's platform commit), with plans and logs in NEW_DIRECTORY.
+	Plan :: { directory : Names.LocalPath, checkout : Names.LocalPath, output : Names.LocalPath, format : Format }.{
+		parts :
+			Plan ->
+				{ directory : Names.LocalPath, checkout : Names.LocalPath, output : Names.LocalPath, format : Format }
+		parts =
+			|
+				request,
+			|
+				{
+					directory: request.directory,
+					checkout: request.checkout,
+					output: request.output,
+					format: request.format,
+
+				}
+
+		with_format : Plan, Format -> Plan
+		with_format = |request, format| { ..request, format }
+
+		## The same instance, as `check` and `render` read it.
+		instance : Plan -> Instance
+		instance = |request| Instance.{ directory: request.directory, format: request.format }
 	}
 
 	## The scanner's optional fields and positionals never escape parsing.
@@ -92,8 +119,10 @@ Cli :: [].{
 					[]
 					| ["app", "describe"]
 					| ["instance", "check"]
-					| ["instance", "render"] => Ok(Request.Help(raw.format))
+					| ["instance", "render"]
+					| ["instance", "plan"] => Ok(Request.Help(raw.format))
 					["instance", "check", _] | ["instance", "render", _] => Ok(Request.Help(raw.format))
+					["instance", "plan", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -104,6 +133,12 @@ Cli :: [].{
 			Run => match raw.positionals {
 				[] => if has_options(raw) Err(Problem.MissingCommand) else Ok(Request.Help(raw.format))
 				["app", "describe"] | ["instance", "check"] | ["instance", "render"] => Err(Problem.MissingArgument)
+				["instance", "plan"]
+				| ["instance", "plan", _]
+				| ["instance", "plan", _, _] => Err(Problem.MissingArgument)
+				["instance", "plan", directory, checkout, output] => Ok(
+					Request.Plan(plan(directory, checkout, output, raw)?),
+				)
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
@@ -142,6 +177,7 @@ Cli :: [].{
 		Request.Help(format) | Request.Version(format) => format
 		Request.Describe(value) => value.format
 		Request.Check(value) | Request.Render(value) => value.format
+		Request.Plan(value) => value.format
 	}
 
 	quote : Str -> Str
@@ -172,6 +208,14 @@ Cli :: [].{
 			}
 			Request.Check(value) => ["day2", "instance", "check", value.directory.to_str()]
 			Request.Render(value) => ["day2", "instance", "render", value.directory.to_str()]
+			Request.Plan(value) => [
+				"day2",
+				"instance",
+				"plan",
+				value.directory.to_str(),
+				value.checkout.to_str(),
+				value.output.to_str(),
+			]
 		}
 		base.concat(
 			match request_format(request) {
@@ -203,11 +247,30 @@ instance = |verb, value, raw| {
 	Ok(Cli.Instance.{ directory, format: raw.format })
 }
 
+plan : Str, Str, Str, Raw -> Try(Cli.Plan, Problem)
+plan = |directory, checkout, output, raw| {
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("instance plan accepts only --agent or --json."))
+	}
+	path = |value, role|
+		Names.LocalPath.from_str(value)
+			.map_err(|_| Problem.InvalidArguments("instance plan requires ${role} of at most 4096 bytes"))
+	Ok(
+		Cli.Plan.{
+			directory: path(directory, "an instance directory")?,
+			checkout: path(checkout, "a platform checkout")?,
+			output: path(output, "a new output directory")?,
+			format: raw.format,
+		},
+	)
+}
+
 ## The instance verb follows the family, after any flags.
 instance_command : List(Str) -> Cli.Command
 instance_command = |args| match args {
 	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => instance_command(rest)
 	["render", ..] => Cli.Command.InstanceRender
+	["plan", ..] => Cli.Command.InstancePlan
 	[arg, .. as rest] if arg.starts_with("-") => instance_command(rest)
 	_ => Cli.Command.InstanceCheck
 }
