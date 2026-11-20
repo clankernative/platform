@@ -1281,10 +1281,12 @@ fn google_calendar_parses_the_published_provider_responses() -> Result<()> {
     let page = &page["Found"];
     assert_eq!(page["all_day_omitted"], 1);
     // Google's token reaches the application bound to the query that issued it.
-    let query = crate::google_workspace_calendar::EventsQuery {
-        calendar: "c_team@group.calendar.google.com",
-        time_min: "2026-01-01T00:00:00Z",
-        time_max: "2026-01-31T00:00:00Z",
+    let plan = calendar_plan(
+        Action::GoogleWorkspaceCalendarEvents,
+        calendar_request(Action::GoogleWorkspaceCalendarEvents),
+    )?;
+    let crate::google_workspace::Read::CalendarEvents { query, .. } = plan.read() else {
+        anyhow::bail!("an events read");
     };
     assert_eq!(
         page["next_page_token"],

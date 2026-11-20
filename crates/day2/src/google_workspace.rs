@@ -146,11 +146,9 @@ pub enum Read {
         group: String,
     },
     CalendarEvents {
-        calendar: String,
-        time_min: String,
-        time_max: String,
+        query: EventsQuery,
         /// Google's own token, taken from a continuation bound to exactly
-        /// this calendar and window.
+        /// this query.
         page_token: Option<String>,
     },
     CalendarEvent {
@@ -345,14 +343,16 @@ impl Plan {
                     calendar::window(&input.time_min, &input.time_max),
                     "google_workspace_request_invalid"
                 );
-                // A continuation must carry this exact query's binding: Google
-                // would apply another query's position to this window and
-                // silently answer a short or empty page. Refused here, before
-                // anything is reserved or sent.
-                let query = calendar::EventsQuery {
-                    calendar: &input.calendar_id,
-                    time_min: &input.time_min,
-                    time_max: &input.time_max,
+                // A continuation must carry this exact query's binding: given
+                // another query's token, Google answered an empty page with no
+                // error. Refused here, before anything is reserved or sent.
+                let query = EventsQuery {
+                    source,
+                    service_account: service_account.clone(),
+                    calendar_reader: calendar_reader.clone(),
+                    calendar: input.calendar_id,
+                    time_min: input.time_min,
+                    time_max: input.time_max,
                 };
                 let page_token = match calendar::optional_value(input.page_token) {
                     None => None,
@@ -364,15 +364,7 @@ impl Plan {
                             .to_owned(),
                     ),
                 };
-                (
-                    Read::CalendarEvents {
-                        calendar: input.calendar_id,
-                        time_min: input.time_min,
-                        time_max: input.time_max,
-                        page_token,
-                    },
-                    input.handle,
-                )
+                (Read::CalendarEvents { query, page_token }, input.handle)
             }
             Action::GoogleWorkspaceCalendarEvent | Action::GoogleWorkspaceEventConferences => {
                 let input: CalendarEventRequest =
@@ -631,6 +623,102 @@ impl ApiRequest {
     pub fn request_bytes(&self) -> usize {
         self.query_string().map_or(0, |query| query.len())
             + self.body.as_ref().map_or(0, String::len)
+    }
+}
+
+/// One events query as authorized: the identity that reads it and the one
+/// request it sends.
+///
+/// Google may not bind an events page token to its query: given another
+/// window's token it answered an empty page with no error (observed
+/// 2026-11-20), as applying the token's position, or a cursor, to the new
+/// window would. So the adapter binds every token it hands out to the whole
+/// query. The token an application receives is `v1.{binding}.{google}`, where
+/// `binding` is the first 32 hex digits of the SHA-256 of the source, the
+/// service account, the Calendar reader and [`EventsQuery::request`] itself
+/// without its `pageToken`. A continuation is sent to Google only with the
+/// query whose binding it carries, so a token persisted under another
+/// connection identity, window or request shape is refused. The digest is
+/// unkeyed: it catches a mistake, not a forger, and needs nothing more, since
+/// an application can only send a token for a calendar its grant already lets
+/// it read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventsQuery {
+    source: Source,
+    service_account: String,
+    calendar_reader: String,
+    calendar: String,
+    time_min: String,
+    time_max: String,
+}
+
+impl EventsQuery {
+    pub fn calendar(&self) -> &str {
+        &self.calendar
+    }
+
+    pub fn time_min(&self) -> &str {
+        &self.time_min
+    }
+
+    pub fn time_max(&self) -> &str {
+        &self.time_max
+    }
+
+    /// The one request for a page of this query; `page` is Google's own token.
+    /// The binding hashes this request, so a parameter added here is covered.
+    pub fn request(&self, page: Option<&str>) -> ApiRequest {
+        let mut query: Vec<(&'static str, &str)> = EVENTS_QUERY.to_vec();
+        query.push(("timeMin", &self.time_min));
+        query.push(("timeMax", &self.time_max));
+        if let Some(page) = page {
+            query.push(("pageToken", page));
+        }
+        query.push(("fields", EVENTS_FIELDS));
+        ApiRequest::calendar(
+            "calendar_events",
+            &["calendars", &self.calendar, "events"],
+            &query,
+        )
+    }
+
+    fn binding(&self) -> String {
+        let request = self.request(None);
+        let committed = serde_json::json!([
+            "google_workspace.calendar_events.page_token",
+            calendar::EVENTS_TOKEN_VERSION,
+            match self.source {
+                Source::Native => "native",
+                Source::Simulated => "simulated",
+            },
+            self.service_account,
+            self.calendar_reader,
+            format!("{:?}", request.service),
+            request.segments,
+            request.query,
+        ]);
+        crate::digest_hex(committed.to_string().as_bytes())[..calendar::EVENTS_TOKEN_BINDING_HEX]
+            .to_owned()
+    }
+
+    /// The token an application persists for Google's `google` token.
+    pub fn bind(&self, google: &str) -> String {
+        format!(
+            "{}.{}.{google}",
+            calendar::EVENTS_TOKEN_VERSION,
+            self.binding()
+        )
+    }
+
+    /// Google's token, if `token` was bound to this query; otherwise `None`,
+    /// for another query's or identity's token, a bare Google token or
+    /// anything else.
+    pub fn continuation<'t>(&self, token: &'t str) -> Option<&'t str> {
+        let (binding, google) = token
+            .strip_prefix(calendar::EVENTS_TOKEN_VERSION)?
+            .strip_prefix('.')?
+            .split_once('.')?;
+        (binding == self.binding() && calendar::google_events_token(google)).then_some(google)
     }
 }
 
@@ -975,12 +1063,7 @@ fn run(
                 plan, port, meter, &token, calendar, group,
             )?))
         }
-        Read::CalendarEvents {
-            calendar,
-            time_min,
-            time_max,
-            page_token,
-        } => {
+        Read::CalendarEvents { query, page_token } => {
             let token = access_token(
                 plan,
                 port,
@@ -988,23 +1071,12 @@ fn run(
                 &[CALENDAR_READ_SCOPE, CALENDAR_ACL_READ_SCOPE],
                 now,
             )?;
-            match reader_access(plan, port, meter, &token, calendar)? {
+            match reader_access(plan, port, meter, &token, &query.calendar)? {
                 Access::Shared => {}
                 Access::NotShared => return Ok(encode(&EventsOutcome::NotShared)),
                 Access::NotFound => return Ok(encode(&EventsOutcome::NotFound)),
             }
-            let mut query: Vec<(&'static str, &str)> = EVENTS_QUERY.to_vec();
-            query.push(("timeMin", time_min.as_str()));
-            query.push(("timeMax", time_max.as_str()));
-            if let Some(page_token) = page_token {
-                query.push(("pageToken", page_token.as_str()));
-            }
-            query.push(("fields", EVENTS_FIELDS));
-            let request = ApiRequest::calendar(
-                "calendar_events",
-                &["calendars", calendar, "events"],
-                &query,
-            );
+            let request = query.request(page_token.as_deref());
             let reply = send(port, meter, &request, &token, MAX_CALENDAR_RESPONSE_BYTES)?;
             // The calendar went away after its rule was read.
             if reply.status == 404 {
@@ -1013,11 +1085,7 @@ fn run(
             accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
             Ok(encode(&EventsOutcome::Found(calendar::parse_events_page(
                 &reply.body,
-                &calendar::EventsQuery {
-                    calendar,
-                    time_min,
-                    time_max,
-                },
+                query,
             )?)))
         }
         Read::CalendarEvent { calendar, event } => {
@@ -1059,7 +1127,7 @@ fn group_permission(
     group: &str,
 ) -> Result<Shared, Failure> {
     let page_size = drive::PERMISSION_PAGE_SIZE.to_string();
-    // Google does not bind a page token to its query. This one never leaves
+    // Google may not bind a page token to its query. This one never leaves
     // the action and is sent back only with the identical request.
     let mut continuation: Option<String> = None;
     for _ in 0..drive::PERMISSION_PAGE_CEILING {
@@ -1506,7 +1574,7 @@ impl MeetLists<'_> {
     ) -> Result<Vec<T>, Failure> {
         let page_size = list.page_size.to_string();
         let mut items = Vec::new();
-        // Google does not bind a page token to its query. This one never leaves
+        // Google may not bind a page token to its query. This one never leaves
         // the action and is sent back only with the identical request.
         let mut continuation: Option<String> = None;
         for _ in 0..list.ceiling {
@@ -1642,7 +1710,7 @@ fn calendar_with_role(
     accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
     let summary = calendar::parse_calendar(&reply.body, calendar)?;
     let page_size = ACL_PAGE_SIZE.to_string();
-    // Google does not bind a page token to its query. This one never leaves
+    // Google may not bind a page token to its query. This one never leaves
     // the action and is sent back only with the identical request.
     let mut continuation: Option<String> = None;
     for _ in 0..ACL_PAGE_CEILING {

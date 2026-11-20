@@ -233,21 +233,28 @@ validated inputs.
 
   The application persists `next_page_token` and sends it back only with the
   calendar, `time_min` and `time_max` that issued it, as exact strings. Google
-  does not enforce that: given another query's token it applies the token's
-  position to the new window and answers a short or empty page (observed
-  2026-11-20, see [Qualify live (step 6)](#qualify-live-step-6)). So the
-  adapter binds every token it hands out:
+  does not enforce that: given another window's token it answered an empty
+  page with no error (observed 2026-11-20, see
+  [Qualify live (step 6)](#qualify-live-step-6)), as applying the token's
+  position, or a cursor, to the new window would. So the adapter binds every
+  token it hands out:
 
   - The token is `v1.{binding}.{google}`. `binding` is the first 32 hex digits
-    of the SHA-256 of the query: the calendar, the window and the request's
-    reviewed constants (its fixed parameters and field mask). `google` is
-    Google's own token, at most 988 bytes, so the whole token stays within
-    the 1,024-byte bound; a longer one is `google_workspace_response_invalid`.
+    of the SHA-256 of the identity that read the page (the source, simulated
+    or native, the service account and the Calendar reader) and of the one
+    request the query sends, built by the same code that sends it, with its
+    `pageToken` left out: the route, the window and every fixed parameter and
+    field mask. `google` is Google's own token, at most 988 bytes, so the
+    whole token stays within the 1,024-byte bound; a longer one is
+    `google_workspace_response_invalid`. Whether Google's tokens come close is
+    not observed (see [Qualify live (step 6)](#qualify-live-step-6)).
   - A continuation is sent to Google, unwrapped, only when its binding is this
     request's. Anything else is `google_workspace_request_invalid`, refused
     when the capability is authorized, before anything is reserved or sent:
-    another window's or calendar's token, a token from before a reviewed
-    constant changed, a bare Google token, or a token of another shape.
+    another window's or calendar's token; one issued under another reader,
+    service account or source; one from before the request or a reviewed
+    constant changed (a test pins the binding, so such a change is
+    deliberate); a bare Google token; or a token of another shape.
   - That is the code for every application input the adapter refuses before
     the network. A mismatched token is input for the wrong query, and the
     remedy is the same as for any invalid input: start the query again
@@ -574,11 +581,13 @@ Who can see a calendar is its ACL, resolved as Google resolves it:
 - Organization-wide sharing is modelled as a domain rule.
 - `reader` or more shows the calendar and its events.
 - `freeBusyReader` shows the calendar itself (`calendars.get` is `200`) and
-  refuses every ACL read with `403 forbidden`, as Google answered on
-  2026-11-20; the adapter answers `NotShared`. Its events stay `404`, which
-  was not observed: the adapter never reads the events of a calendar out of
-  play.
-- No access at all is `404` for every route, as observed.
+  refuses its ACL with `403 forbidden`; the adapter answers `NotShared`. Live,
+  on 2026-11-20, only `acl.get` on `user:{reader}` (`403 forbidden`) and
+  `calendars.get` (`200`) were observed; the ACL list's answer is assumed.
+  Its events stay `404`, also not observed: the adapter never reads the
+  events of a calendar out of play.
+- No access at all is `404` for every route. Live, `acl.get` and
+  `calendars.get` were both `404`.
 - Reading the ACL, a single rule or the whole list, needs `writer` or `owner`;
   anything less is `403`.
 - The service account itself has no calendars.
@@ -606,8 +615,10 @@ other than the reviewed constants, `prettyPrint=false` included, so the
 simulation cannot serve a request the adapter was not reviewed to send. Page
 tokens are opaque and tagged, so a forged one is `400`. An events token is
 bound only to its calendar: another window's token is accepted and its
-position applied to the new window, a short or empty page, as Google did on
-2026-11-20. ACL and record tokens stay bound to their whole query, another
+position applied to the new window, a short or empty page. Live, on
+2026-11-20, Google answered another window's token with an empty page, which
+an offset and a cursor both explain; refusing another calendar's token is an
+assumption. ACL and record tokens stay bound to their whole query, another
 query's being `400`; that is an assumption the adapter never tests, since it
 resends those tokens only with the identical request.
 
@@ -1223,10 +1234,10 @@ Its receipt was reviewed: one share was created and nothing was fenced. Two
 probes contradicted the simulation: Google accepted another query's page
 token and answered an empty page, and a free/busy calendar answered `403`
 then `200` rather than `404`. Both are fixed: the adapter binds each events
-page token to its query, and the simulation answers both as Google did. The
-items ticked in
-[Qualify live (step 6)](#qualify-live-step-6) are settled; the provider is
-not yet qualified.
+page token to its query and identity, and the simulation answers a free/busy
+calendar as Google did and models its empty page for another window's token.
+The items ticked in [Qualify live (step 6)](#qualify-live-step-6) are
+settled; the provider is not yet qualified.
 
 A Directory action reserves three or four calls: metadata, IAM, then one call
 per question. A Calendar action reserves the three delegated authentication

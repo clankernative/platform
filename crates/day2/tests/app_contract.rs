@@ -741,36 +741,39 @@ fn native_google_workspace_calendar_outcomes_decode_through_public_sdk() -> Resu
     // The exact request the SDK sends for a continued page, which the adapter
     // must authorize as that page: the token is Google's "next", bound to this
     // calendar and window, and Google is sent "next" alone.
-    let bound = day2::google_workspace_calendar::EventsQuery {
-        calendar: "c_team@group.calendar.google.com",
-        time_min: "2026-01-01T00:00:00Z",
-        time_max: "2026-01-31T00:00:00Z",
-    }
-    .bind("next");
-    let events_request = format!(
-        r#"{{"calendar_id":"c_team@group.calendar.google.com","handle":"fixture-handle","page_token":{{"Some":"{bound}"}},"time_max":"2026-01-31T00:00:00Z","time_min":"2026-01-01T00:00:00Z"}}"#
-    );
+    let events_plan = |request: &str| {
+        day2::google_workspace::Plan::authorize(
+            day2_capabilities::registry::Action::GoogleWorkspaceCalendarEvents,
+            &day2_capabilities::integrations::LiveConnection::GoogleWorkspace {
+                service_account: "reader@example-project.iam.gserviceaccount.com".into(),
+            },
+            &day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
+                calendar_reader: "calendar@example.com".into(),
+                email_domain: "example.com".into(),
+                grantee_domains: vec!["example.com".into()],
+            },
+            request,
+            day2::google_workspace::Source::Simulated,
+        )
+    };
+    let request_with = |page: &str| {
+        format!(
+            r#"{{"calendar_id":"c_team@group.calendar.google.com","handle":"fixture-handle","page_token":{page},"time_max":"2026-01-31T00:00:00Z","time_min":"2026-01-01T00:00:00Z"}}"#
+        )
+    };
+    let (first, _) = events_plan(&request_with(r#""None""#))?;
+    let day2::google_workspace::Read::CalendarEvents { query, .. } = first.read() else {
+        anyhow::bail!("an events read");
+    };
+    let bound = query.bind("next");
+    let events_request = request_with(&format!(r#"{{"Some":"{bound}"}}"#));
     let events_request = events_request.as_str();
-    let (plan, handle) = day2::google_workspace::Plan::authorize(
-        day2_capabilities::registry::Action::GoogleWorkspaceCalendarEvents,
-        &day2_capabilities::integrations::LiveConnection::GoogleWorkspace {
-            service_account: "reader@example-project.iam.gserviceaccount.com".into(),
-        },
-        &day2_capabilities::resources::ResourceTarget::GoogleWorkspaceDomain {
-            calendar_reader: "calendar@example.com".into(),
-            email_domain: "example.com".into(),
-            grantee_domains: vec!["example.com".into()],
-        },
-        events_request,
-        day2::google_workspace::Source::Simulated,
-    )?;
+    let (plan, handle) = events_plan(events_request)?;
     ensure!(handle == "fixture-handle", "handle not carried");
     ensure!(
         *plan.read()
             == day2::google_workspace::Read::CalendarEvents {
-                calendar: "c_team@group.calendar.google.com".into(),
-                time_min: "2026-01-01T00:00:00Z".into(),
-                time_max: "2026-01-31T00:00:00Z".into(),
+                query: query.clone(),
                 page_token: Some("next".into()),
             },
         "the SDK's request was not authorized as the page it names: {:?}",

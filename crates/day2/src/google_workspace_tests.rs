@@ -1447,6 +1447,57 @@ fn events_are_one_bounded_page_of_timed_events_with_their_meeting_codes() {
     assert_eq!(events[3]["status"], serde_json::json!("CancelledUntimed"));
 }
 
+/// The authorized query of an events read.
+fn events_query(plan: &Plan) -> &EventsQuery {
+    let Read::CalendarEvents { query, .. } = plan.read() else {
+        panic!("an events read")
+    };
+    query
+}
+
+/// A token is bound to the identity that read it as well as the query: the
+/// same calendar and window under another Calendar reader, service account
+/// or source refuse it before anything is sent. The binding is pinned, so
+/// changing the request, a reviewed constant or the identity is a reviewed
+/// act that every persisted token feels.
+#[test]
+fn an_events_token_is_bound_to_its_identity_and_pinned() {
+    let bound = events_query(&january()).bind("t");
+    assert_eq!(bound, "v1.7c352b961613b5a1429162d6ad579a7d.t");
+    let request = serde_json::json!({"handle":"h","calendar_id":CALENDAR,
+        "time_min":"2026-01-01T00:00:00Z","time_max":"2026-01-31T00:00:00Z",
+        "page_token":{"Some":bound}})
+    .to_string();
+    let target = simulated::google_workspace_development_target();
+    let other_reader = ResourceTarget::GoogleWorkspaceDomain {
+        calendar_reader: "other-reader@synthetic.example".into(),
+        email_domain: "synthetic.example".into(),
+        grantee_domains: vec!["synthetic.example".into()],
+    };
+    let account = connection(simulated::GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT);
+    let other_account = connection("other-reader@synthetic-project.iam.gserviceaccount.com");
+    let authorize = |connection: &LiveConnection, target: &ResourceTarget, source| {
+        Plan::authorize(
+            Action::GoogleWorkspaceCalendarEvents,
+            connection,
+            target,
+            &request,
+            source,
+        )
+    };
+    assert!(authorize(&account, &target, Source::Simulated).is_ok());
+    for refused in [
+        authorize(&account, &other_reader, Source::Simulated),
+        authorize(&other_account, &target, Source::Simulated),
+        authorize(&account, &target, Source::Native),
+    ] {
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "google_workspace_request_invalid"
+        );
+    }
+}
+
 #[test]
 fn event_pages_continue_only_the_query_that_issued_them() {
     let many = |calendar: &mut GoogleCalendar| {
@@ -1494,12 +1545,8 @@ fn event_pages_continue_only_the_query_that_issued_them() {
         .as_str()
         .unwrap()
         .to_owned();
-    let january = calendar::EventsQuery {
-        calendar: CALENDAR,
-        time_min: window.0,
-        time_max: window.1,
-    };
-    let google = january.continuation(&token).unwrap();
+    let first = january();
+    let google = events_query(&first).continuation(&token).unwrap();
     let later = "2026-01-02T00:00:00Z";
     for refused in [
         events_read(later, window.1, Some(&token)),
@@ -1511,15 +1558,11 @@ fn event_pages_continue_only_the_query_that_issued_them() {
             "google_workspace_request_invalid"
         );
     }
-    // Google itself applies a token's position to another window, as it did
-    // live: bound to the later window, January's position skips 25 of its 28
+    // The simulation applies a token's position to another window, its model
+    // of the empty page Google answered live (an offset and a cursor both fit
+    // that): bound to the later window, January's position skips 25 of its 28
     // events and the page is short, with no error.
-    let rebound = calendar::EventsQuery {
-        calendar: CALENDAR,
-        time_min: later,
-        time_max: window.1,
-    }
-    .bind(google);
+    let rebound = events_query(&events_read(later, window.1, None).unwrap()).bind(google);
     let short = decoded(
         world
             .observe(&events_read(later, window.1, Some(&rebound)).unwrap())
@@ -1852,11 +1895,8 @@ fn the_largest_admissible_page_fits_one_observation() {
     };
     // The longest token Google may send binds to the longest an application
     // may send back; one byte more is refused.
-    let query = calendar::EventsQuery {
-        calendar: CALENDAR,
-        time_min: time,
-        time_max: time,
-    };
+    let plan = january();
+    let query = events_query(&plan);
     let page_with = |token: usize| {
         serde_json::json!({
             "items": (0..calendar::EVENT_PAGE_SIZE as usize).map(item).collect::<Vec<_>>(),
@@ -1867,12 +1907,12 @@ fn the_largest_admissible_page_fits_one_observation() {
     assert_eq!(
         calendar::parse_events_page(
             page_with(calendar::MAX_GOOGLE_EVENTS_TOKEN_BYTES + 1).as_bytes(),
-            &query
+            query
         ),
         Err(Failure::ResponseInvalid)
     );
     let body = page_with(calendar::MAX_GOOGLE_EVENTS_TOKEN_BYTES);
-    let page = calendar::parse_events_page(body.as_bytes(), &query).unwrap();
+    let page = calendar::parse_events_page(body.as_bytes(), query).unwrap();
     assert_eq!(page.events.len(), calendar::EVENT_PAGE_SIZE as usize);
     let crate::carta::OptionalText::Some(bound) = &page.next_page_token else {
         panic!("a bound token")
@@ -1913,7 +1953,7 @@ fn the_largest_admissible_page_fits_one_observation() {
         let mut escaped = serde_json::from_str::<serde_json::Value>(&body).unwrap();
         escaped["items"][0]["creator"]["email"] = serde_json::json!(email);
         assert_eq!(
-            calendar::parse_events_page(escaped.to_string().as_bytes(), &query),
+            calendar::parse_events_page(escaped.to_string().as_bytes(), query),
             Err(Failure::ResponseInvalid),
             "{email}"
         );

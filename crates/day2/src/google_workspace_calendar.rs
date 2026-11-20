@@ -126,63 +126,17 @@ fn token_bytes(value: &str) -> bool {
 }
 
 /// The version an events page token names, and the hex digits of its binding.
-const BOUND_TOKEN_VERSION: &str = "v1";
-const BINDING_HEX: usize = 32;
+pub(crate) const EVENTS_TOKEN_VERSION: &str = "v1";
+pub(crate) const EVENTS_TOKEN_BINDING_HEX: usize = 32;
 /// The longest token Google may hand back for an events page: bound, it is
-/// at most [`MAX_PAGE_TOKEN_BYTES`], so every existing bound still holds.
+/// at most [`MAX_PAGE_TOKEN_BYTES`], so every existing bound still holds. That
+/// Google's tokens stay under it is not observed: a live receipt's
+/// `events_page` shape records which length bucket each falls in.
 pub(crate) const MAX_GOOGLE_EVENTS_TOKEN_BYTES: usize =
-    MAX_PAGE_TOKEN_BYTES - (BOUND_TOKEN_VERSION.len() + 1 + BINDING_HEX + 1);
-
-/// The query an events page token continues. Google does not bind its tokens:
-/// given another query's token it applies the token's position to the new
-/// window and answers a short or empty page (observed 2026-11-20). So the
-/// adapter binds them. The token an application receives is
-/// `v1.{binding}.{google}`, where the binding is the first 32 hex digits of
-/// the SHA-256 of this query (the calendar, the window and the reviewed
-/// constants of the request), and a continuation is sent to Google only with
-/// the query whose binding it carries. The digest is unkeyed: it catches a
-/// mistake, not a forger, and needs nothing more, since an application can
-/// only send a token for a calendar its grant already lets it read.
-pub struct EventsQuery<'a> {
-    pub calendar: &'a str,
-    pub time_min: &'a str,
-    pub time_max: &'a str,
-}
-
-impl EventsQuery<'_> {
-    fn binding(&self) -> String {
-        let query = serde_json::json!([
-            "google_workspace.calendar_events.page_token",
-            BOUND_TOKEN_VERSION,
-            self.calendar,
-            self.time_min,
-            self.time_max,
-            EVENTS_QUERY,
-            EVENTS_FIELDS,
-        ]);
-        let digest = crate::digest(query.to_string().as_bytes());
-        let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
-        hex.get(..BINDING_HEX).unwrap_or(hex).to_owned()
-    }
-
-    /// The token an application persists for Google's `google` token.
-    pub fn bind(&self, google: &str) -> String {
-        format!("{BOUND_TOKEN_VERSION}.{}.{google}", self.binding())
-    }
-
-    /// Google's token, if `token` was bound to this query; otherwise `None`,
-    /// for another query's token, a bare Google token or anything else.
-    pub fn continuation<'t>(&self, token: &'t str) -> Option<&'t str> {
-        let (binding, google) = token
-            .strip_prefix(BOUND_TOKEN_VERSION)?
-            .strip_prefix('.')?
-            .split_once('.')?;
-        (binding == self.binding() && google_events_token(google)).then_some(google)
-    }
-}
+    MAX_PAGE_TOKEN_BYTES - (EVENTS_TOKEN_VERSION.len() + 1 + EVENTS_TOKEN_BINDING_HEX + 1);
 
 /// A token Google handed back for an events page, short enough to bind.
-fn google_events_token(value: &str) -> bool {
+pub(crate) fn google_events_token(value: &str) -> bool {
     (1..=MAX_GOOGLE_EVENTS_TOKEN_BYTES).contains(&value.len()) && token_bytes(value)
 }
 
@@ -712,7 +666,10 @@ fn event(dto: EventDto) -> Result<Parsed, Failure> {
 /// continuation is bound to `query` before the application sees it. Every
 /// field is bounded, so a full page always journals within one observation;
 /// the size is still checked, never assumed.
-pub fn parse_events_page(body: &[u8], query: &EventsQuery<'_>) -> Result<EventsPage, Failure> {
+pub fn parse_events_page(
+    body: &[u8],
+    query: &crate::google_workspace::EventsQuery,
+) -> Result<EventsPage, Failure> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Page {

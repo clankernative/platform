@@ -2759,7 +2759,9 @@ fn google_meet_reply(
 /// An opaque continuation bound to `binding`: a token issued for another
 /// binding, or forged, is refused. ACL and record lists bind their whole query,
 /// an assumption the adapter never tests (it resends a token only with the
-/// identical request); events lists bind only their calendar, as Google does.
+/// identical request). Events lists bind only their calendar: Google accepted
+/// another window's token live, and refusing another calendar's is an
+/// assumption.
 fn google_page_token(world: &GoogleWorkspaceWorld, binding: &str, offset: usize) -> Result<String> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&json!({"b":binding,"o":offset}))?);
@@ -2858,10 +2860,11 @@ fn google_rule(rule: &GoogleAclRule) -> Value {
 /// follows Google: any rule that applies to the subject with `reader` or more
 /// shows a calendar and its events, and reading the ACL, a rule or the whole
 /// list, needs `writer` or `owner`. Free/busy access shows the calendar itself
-/// and refuses its ACL with `403 forbidden`, as Google answered on
-/// 2026-11-20; its events stay `404` (not observed: the adapter never reads
-/// the events of a calendar out of play). A calendar the subject cannot see
-/// at all is `404`. IDs and addresses are matched exactly, and every route
+/// and refuses its ACL with `403 forbidden`: on 2026-11-20 Google answered
+/// `calendars.get` with `200` and the reader's own rule with that `403`; the
+/// list's answer is assumed. Its events stay `404` (not observed: the adapter
+/// never reads the events of a calendar out of play). A calendar the subject
+/// cannot see at all is `404`. IDs and addresses are matched exactly, and every route
 /// admits only its reviewed query.
 fn google_calendar_reply(
     world: &GoogleWorkspaceWorld,
@@ -2985,8 +2988,9 @@ fn google_calendar_reply(
             };
             let size = EVENT_PAGE_SIZE as usize;
             // Google does not bind an events token to its window: given
-            // another window's token it applies the token's position to the
-            // new window (observed 2026-11-20). Only the calendar is bound.
+            // another window's token it answered an empty page (observed
+            // 2026-11-20). This models that as the token's position applied
+            // to the new window; only the calendar is bound.
             let binding = format!("events:{calendar_id}");
             let offset = match query("pageToken") {
                 None => 0,
