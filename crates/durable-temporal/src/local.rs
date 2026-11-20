@@ -5,7 +5,7 @@ use anyhow::{Context, Result, ensure};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom},
-    net::{Ipv4Addr, SocketAddr, TcpListener},
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
@@ -202,9 +202,7 @@ impl LocalServer {
                 .starts_with(&format!("temporal version {CLI_VERSION} ")),
             "Temporal CLI version must be pinned to {CLI_VERSION}"
         );
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let address = listener.local_addr()?;
-        drop(listener);
+        let address = reserve_port((Ipv4Addr::LOCALHOST, 0).into())?;
         let namespace = format!(
             "{LOCAL_NAMESPACE}-{}-{}",
             std::process::id(),
@@ -261,6 +259,7 @@ impl LocalServer {
             self.database().is_file(),
             "persisted Temporal database is missing"
         );
+        reserve_port(self.address).context("reserve the persisted Temporal server's port")?;
         self.launch(StartupPhase::Restart).await
     }
 
@@ -323,6 +322,29 @@ impl LocalServer {
         self.stop()?;
         Err(StartupFailure::capture(phase, None, &self.log(), launch_offset).into())
     }
+}
+
+/// Picks or re-takes the Temporal frontend port and holds it until the server binds it.
+///
+/// After it starts, Temporal's dev server takes more ports with bind(:0): one
+/// each for history, matching and worker, plus HTTP and metrics. A port this
+/// fixture freed by just closing a listener can be handed out again at once,
+/// and Linux picks ephemeral ports at random, so one of those binds can get
+/// the frontend port. Then the second bind of that port fails with "address
+/// already in use" and the server exits. Closing an accepted connection from
+/// the listening side first leaves the port in TIME_WAIT. bind(:0) then skips
+/// it for about a minute, while Temporal's explicit SO_REUSEADDR bind of the
+/// frontend port still succeeds. Temporal's own `GetFreePort` reserves its
+/// ports the same way.
+fn reserve_port(address: SocketAddr) -> std::io::Result<SocketAddr> {
+    let listener = TcpListener::bind(address)?;
+    let address = listener.local_addr()?;
+    let client = TcpStream::connect(address)?;
+    let (accepted, _) = listener.accept()?;
+    // The listening side must close first: the side that closes first holds TIME_WAIT.
+    drop(accepted);
+    drop(client);
+    Ok(address)
 }
 
 impl Drop for LocalServer {
@@ -438,11 +460,19 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let mut server = LocalServer::start(&directory.path().join("restart")).await?;
         server.stop()?;
-        // Keep a real listener open. This is a controlled bind failure, not a
-        // claim that a port race caused any historical failure.
+        // Keep a real listener open: a controlled bind failure.
         let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         server.address = occupied.local_addr()?;
-        let restart = server.restart().await.unwrap_err();
+        // restart takes its port back before launching, so it refuses an occupied port itself.
+        let refused = server.restart().await.unwrap_err();
+        assert_eq!(
+            refused
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::AddrInUse)
+        );
+        assert!(server.child.is_none());
+        let restart = server.launch(StartupPhase::Restart).await.unwrap_err();
         let restart = restart
             .downcast_ref::<StartupFailure>()
             .context("missing restart evidence")?;
@@ -465,6 +495,43 @@ mod tests {
         assert!(matches!(failure.phase, StartupPhase::Initial));
         assert_eq!(failure.code, Some(1));
         assert!(failure.log.address_in_use);
+        Ok(())
+    }
+
+    #[test]
+    fn a_reserved_port_stays_bindable_for_its_server() -> Result<()> {
+        let address = reserve_port((Ipv4Addr::LOCALHOST, 0).into())?;
+        assert_ne!(address.port(), 0);
+        // Temporal binds the frontend port explicitly with SO_REUSEADDR, as std does.
+        let frontend = TcpListener::bind(address)?;
+        assert_eq!(frontend.local_addr()?, address);
+        drop(frontend);
+        // restart re-takes the same port once its server is gone.
+        assert_eq!(reserve_port(address)?, address);
+        Ok(())
+    }
+
+    /// Linux only: the reservation is a closed, non-listening socket that still
+    /// owns the port, so bind(:0) cannot hand the port to anyone else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reserved_port_is_held_by_a_closed_connection() -> Result<()> {
+        let address = reserve_port((Ipv4Addr::LOCALHOST, 0).into())?;
+        let local = format!("0100007F:{:04X}", address.port());
+        let states = fs::read_to_string("/proc/net/tcp")?
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                (fields.get(1) == Some(&local.as_str())).then(|| fields[3].to_owned())
+            })
+            .collect::<Vec<_>>();
+        // 05 FIN_WAIT2 or 06 TIME_WAIT: closed by this side, still bound. Never 0A LISTEN.
+        assert!(
+            states.iter().any(|state| state == "05" || state == "06"),
+            "{states:?}"
+        );
+        assert!(!states.iter().any(|state| state == "0A"), "{states:?}");
         Ok(())
     }
 }
