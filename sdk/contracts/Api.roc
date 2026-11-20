@@ -523,9 +523,8 @@ Api :: [].{
 		any_owner_models = |definition| definition.any_owner
 
 		# Declares a read capability or `audit.history.v1` this operation observes.
-		# Build verification grants an operation only the observations it declares.
-		# Production authority is still the company's policy; rendering that policy
-		# from these declarations is planned.
+		# Build verification and a rendered production policy grant an operation
+		# only the observations it declares.
 		observes :
 			CommandDef(input, output, input_fields, output_fields),
 			Str -> CommandDef(input, output, input_fields, output_fields)

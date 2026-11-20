@@ -10,6 +10,7 @@ pub mod app_sources;
 pub mod artifact;
 pub mod audit;
 pub mod authority;
+pub mod authority_render;
 pub mod authority_state;
 pub mod automation;
 pub mod backup_archive;

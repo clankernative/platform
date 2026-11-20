@@ -23,6 +23,14 @@ pub struct Policy {
     /// application starts and where most of them should stay.
     #[serde(default)]
     pub delegations: BTreeMap<String, DelegationRule>,
+    /// The column holding each owned model's owner. A create must name its
+    /// actor there and no update may change it, whatever any grant's rows say.
+    /// A rendered policy takes it from the schema's `owned_by` declarations, so
+    /// exempting every writer with `.any_owner` never stops the check. An
+    /// explicit policy may leave it empty; a model is then owned only where a
+    /// grant narrows it with `owner_or_admin`, and both must agree.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub row_owners: BTreeMap<String, String>,
 }
 
 /// One operator-approved way for a principal to act as another.
@@ -146,7 +154,11 @@ impl Policy {
     }
 
     fn owned_fields(&self) -> Result<BTreeMap<&str, &str>> {
-        let mut fields = BTreeMap::new();
+        let mut fields: BTreeMap<&str, &str> = self
+            .row_owners
+            .iter()
+            .map(|(model, field)| (model.as_str(), field.as_str()))
+            .collect();
         for operation in self.operations.values() {
             for (model, grant) in &operation.models {
                 if let Rows::OwnerOrAdmin { field } = &grant.rows
@@ -165,6 +177,20 @@ impl Policy {
     pub fn validate(&self, operations: &[Operation], schema: &Schema) -> Result<()> {
         ensure!(self.version == 1, "unsupported authority policy version");
         let owned_fields = self.owned_fields()?;
+        for (model, field) in &self.row_owners {
+            ensure!(
+                matches!(
+                    schema
+                        .models
+                        .get(model)
+                        .with_context(|| format!("authority policy unknown owned model: {model}"))?
+                        .fields
+                        .get(field),
+                    Some(Kind::Text | Kind::TextDomain { .. } | Kind::StandardText { .. })
+                ),
+                "authority owner field must be text: {model}/{field}"
+            );
+        }
         ensure!(
             self.operations.len() == operations.len(),
             "authority policy must explicitly cover every operation"
@@ -606,6 +632,9 @@ pub const DOMAIN_PREFIX: &str = "domain:";
 /// owner, a member, either side of a delegation, or who acted.
 pub const OWNERS: &str = "owners";
 
+/// The most administrators (owners) one application's policy may name.
+pub(crate) const OWNER_BUDGET: usize = 512;
+
 /// Whether `entry` reads like [`OWNERS`] without being it, or is it.
 ///
 /// A near miss such as `owner`, `Owners` or `owners:` must not silently become
@@ -936,6 +965,7 @@ mod owners_tests {
     /// A policy whose only meaningful part is its administrators.
     fn admins(values: &[&str]) -> Policy {
         Policy {
+            row_owners: Default::default(),
             version: 1,
             admins: set(values),
             operations: BTreeMap::new(),

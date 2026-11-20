@@ -1228,6 +1228,85 @@ run "admits_everyone_at_the_hosted_domain" {
   }
 }
 
+run "renders_authority_from_the_artifact_for_admins" {
+  command = plan
+
+  variables {
+    admins    = ["qa@example.com", "ci@example-tools.iam.gserviceaccount.com", "qa@example.com"]
+    readers   = null
+    writers   = null
+    authority = null
+  }
+
+  assert {
+    condition = (
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.rendered_authority == { admins = ["ci@example-tools.iam.gserviceaccount.com", "qa@example.com"] } &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.readers == [] &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.writers == [] &&
+      !contains(keys(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app), "authority")
+    )
+    error_message = "admins select an authority day2 renders from the artifact: no explicit policy, and membership left to day2"
+  }
+}
+
+run "refuses_admins_beside_an_explicit_policy" {
+  command = plan
+
+  variables {
+    admins = ["qa@example.com"]
+  }
+
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "refuses_rendered_authority_without_a_person" {
+  command = plan
+
+  variables {
+    admins    = ["ci@example-tools.iam.gserviceaccount.com"]
+    readers   = null
+    writers   = null
+    authority = null
+  }
+
+  expect_failures = [var.admins]
+}
+
+run "refuses_a_rendered_admin_outside_the_hosted_domain" {
+  command = plan
+
+  variables {
+    admins    = ["qa@example.com", "ada@other.example"]
+    readers   = null
+    writers   = null
+    authority = null
+  }
+
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "refuses_neither_admins_nor_an_explicit_policy" {
+  command = plan
+
+  variables {
+    authority = null
+  }
+
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "refuses_neither_admins_nor_membership" {
+  command = plan
+
+  variables {
+    readers   = null
+    writers   = null
+    authority = null
+  }
+
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
 run "refuses_a_domain_other_than_the_hosted_domain" {
   command = plan
 

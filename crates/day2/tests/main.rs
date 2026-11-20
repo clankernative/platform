@@ -15,6 +15,7 @@ mod app_secret_management;
 mod artifact_hardening;
 mod assets;
 mod authority;
+mod authority_render;
 mod call_context;
 mod collection;
 mod command_adversarial;

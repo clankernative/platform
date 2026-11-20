@@ -154,6 +154,23 @@ impl AuthorityDocument {
     ) -> Result<Self> {
         let binding = instance.apps.get(app).context("app_not_installed")?;
         let mut document = Self::from_binding(binding, instance.hosted_domain());
+        if let Some(authority) = &binding.rendered_authority {
+            let rendered = crate::authority_render::render(
+                artifact.contract(),
+                &crate::authority_render::Inputs {
+                    hosted_domain: instance
+                        .hosted_domain()
+                        .context("rendered_authority_requires_identity")?,
+                    authority,
+                    schedules: &binding.schedules,
+                    ingress: &binding.ingress,
+                },
+            )
+            .with_context(|| format!("render {app} authority from artifact {}", artifact.id()))?;
+            document.readers = rendered.readers;
+            document.writers = rendered.writers;
+            document.policy = Some(rendered.policy);
+        }
         document.resources = match &instance.resources {
             Some(catalog) => catalog.resolve(app, &binding.resource_policies, now_ms)?,
             None => {
@@ -1125,16 +1142,38 @@ pub(crate) fn desired_fingerprint(
             catalog.budgets.retain(|id, _| budgets.contains(id));
             catalog
         });
-    Ok(crate::digest(&serde_json::to_vec(&(
-        "day2-desired-authority-request-v1",
-        instance.scope(app)?,
-        &operator.name,
-        expected,
-        AuthorityDocument::from_binding(binding, instance.hosted_domain()),
-        &binding.resource_policies,
-        selected,
-        target.map(|target| (target.id(), target.directory())),
-    ))?))
+    let desired = AuthorityDocument::from_binding(binding, instance.hosted_domain());
+    let target = target.map(|target| (target.id(), target.directory()));
+    let scope = instance.scope(app)?;
+    // A rendered authority's inputs are its administrators and the actors bound
+    // to schedules and endpoints; the rest is the artifact's. An explicit
+    // binding hashes exactly as it always has, so a completed request keeps
+    // its receipt across an upgrade.
+    Ok(crate::digest(&match &binding.rendered_authority {
+        None => serde_json::to_vec(&(
+            "day2-desired-authority-request-v1",
+            scope,
+            &operator.name,
+            expected,
+            desired,
+            &binding.resource_policies,
+            selected,
+            target,
+        ))?,
+        Some(rendered) => serde_json::to_vec(&(
+            "day2-desired-rendered-authority-request-v1",
+            scope,
+            &operator.name,
+            expected,
+            desired,
+            rendered,
+            &binding.schedules,
+            &binding.ingress,
+            &binding.resource_policies,
+            selected,
+            target,
+        ))?,
+    }))
 }
 
 pub(crate) fn cached_desired_receipt_in(

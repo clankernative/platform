@@ -54,6 +54,7 @@ fn actual_durable_authority_changes_cannot_rebind_the_captured_selection() -> Re
         readers: Default::default(),
         writers: Default::default(),
         policy: Some(crate::authority::Policy {
+            row_owners: Default::default(),
             version: 1,
             admins: [
                 "approver@example.test".to_owned(),

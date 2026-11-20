@@ -8,7 +8,8 @@ owner reach an admitted artifact. It replaces four files in a staged copy of
   operation of the `details` page, so that page serves the app's owners.
 - `commands/create/CreateLink.roc` declares `audience: Closed`.
 - `commands/edit/EditLink.roc` keeps `audience: Employees` and declares
-  `.any_owner(Data.links)`.
+  `.any_owner(Data.links)`. Unlike the base, its update does not name `owner`:
+  admission refuses an update of an owner column.
 - `storage/Models.roc` declares `owned_by: Table.owner({ owner: row.owner })` on
   `Link`. That is authority metadata only: no index, and the schema digest of the
   base fixture is unchanged.
@@ -23,6 +24,10 @@ in-memory variants of the same contract: a page whose preparation command
 declares another audience, a public operation with no audience, a page whose
 preparation command is internal, and an internal command that declares one.
 
-The audiences do not change this fixture's authority. Its tests still use the
-explicit policies in [authority-policies](../authority-policies/); rendering a
-company policy from audiences is separate platform work.
+The `authority_render` integration tests read the same artifact and render its
+authority: employees, owners and nobody as declared, `edit` reaching every link
+through its exemption and only the caller's without it, and in-memory variants
+for internal commands, schedules, effects, observations and refusals. They also
+resolve an instance binding with `rendered_authority`. The fixture's runtime
+tests still use the explicit policies in
+[authority-policies](../authority-policies/).

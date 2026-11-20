@@ -772,7 +772,9 @@ pub fn take_with_lease(
     binding.artifact = artifact_relative;
     binding.readers = active.document.readers;
     binding.writers = active.document.writers;
+    // The manifest records the activated authority itself, rendered or not.
     binding.authority = active.document.policy;
+    binding.rendered_authority = None;
     binding.resource_policies.clear();
     let manifest = Manifest {
         format: 3,
@@ -920,6 +922,7 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
     binding.readers.clear();
     binding.writers.clear();
     binding.authority = None;
+    binding.rendered_authority = None;
     binding.managed_secrets = None;
     binding.resource_policies.clear();
     let path = output.join("instance.json");

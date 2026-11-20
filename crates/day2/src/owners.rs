@@ -128,14 +128,25 @@ pub fn inspect(runtime: &Runtime, operator: &LocalOperator) -> Result<Inspection
     runtime.sql_read(|tx| {
         let active = active_in(tx, runtime)?;
         let owners = active.policy()?.admins.clone();
-        ensure!(owners.len() <= 512, "owner_count_budget");
+        ensure!(
+            owners.len() <= crate::authority::OWNER_BUDGET,
+            "owner_count_budget"
+        );
         let desired_owners = instance
             .apps
             .get(runtime.app())
-            .and_then(|app| app.authority.as_ref())
-            .map(|policy| policy.admins.clone())
+            .and_then(|app| {
+                app.rendered_authority
+                    .as_ref()
+                    .map(|rendered| &rendered.admins)
+                    .or(app.authority.as_ref().map(|policy| &policy.admins))
+            })
+            .cloned()
             .unwrap_or_default();
-        ensure!(desired_owners.len() <= 512, "owner_count_budget");
+        ensure!(
+            desired_owners.len() <= crate::authority::OWNER_BUDGET,
+            "owner_count_budget"
+        );
         Ok(Inspection {
             stamp: active.stamp,
             enabled: active.document.enabled,
@@ -182,7 +193,10 @@ fn changed_document(
         .policy
         .as_mut()
         .context("missing_authority_policy")?;
-    ensure!(policy.admins.len() <= 512, "owner_count_budget");
+    ensure!(
+        policy.admins.len() <= crate::authority::OWNER_BUDGET,
+        "owner_count_budget"
+    );
     match operation {
         Operation::Add => {
             if let Some(domain) = &document.hosted_domain {
@@ -191,7 +205,10 @@ fn changed_document(
                     "owner_must_belong_to_verified_domain"
                 );
             }
-            ensure!(policy.admins.len() < 512, "owner_count_budget");
+            ensure!(
+                policy.admins.len() < crate::authority::OWNER_BUDGET,
+                "owner_count_budget"
+            );
             ensure!(policy.admins.insert(owner.into()), "already_an_owner");
         }
         Operation::Remove => {

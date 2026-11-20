@@ -1389,6 +1389,13 @@ pub struct AppBinding {
     pub writers: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<crate::authority::Policy>,
+    /// The administrators of an app whose operation policy and membership the
+    /// platform renders from its artifact at activation (see
+    /// [`crate::authority_render`]). It replaces `authority`, `readers` and
+    /// `writers`, which stay empty, and needs the installation's identity
+    /// provider: employees are its hosted domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_authority: Option<crate::authority_render::RenderedAuthority>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_policies: Vec<day2_capabilities::resources::Attachment>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1449,6 +1456,8 @@ struct StoredBinding {
     #[serde(default)]
     authority: Option<crate::authority::Policy>,
     #[serde(default)]
+    rendered_authority: Option<crate::authority_render::RenderedAuthority>,
+    #[serde(default)]
     resource_policies: Vec<day2_capabilities::resources::Attachment>,
     #[serde(default)]
     credential_families: BTreeMap<String, day2_capabilities::credentials::CredentialFamilyBinding>,
@@ -1478,6 +1487,7 @@ impl From<StoredBinding> for AppBinding {
             readers: stored.readers,
             writers: stored.writers,
             authority: stored.authority,
+            rendered_authority: stored.rendered_authority,
             resource_policies: stored.resource_policies,
             credential_families: stored.credential_families,
             oauth_connections: stored.oauth_connections,
@@ -2267,7 +2277,7 @@ impl Instance {
         instance.validate_credential_runtime_metadata()?;
         instance.validate_security_authority()?;
         instance.validate_edges()?;
-        instance.validate_domain_entries()?;
+        instance.validate_app_authority()?;
         let mut queues = BTreeSet::new();
         for binding in instance.apps.values() {
             if let Some(runtime) = &binding.runtime {
@@ -2336,8 +2346,10 @@ impl Instance {
 
     /// Refuse a `domain:` entry the installation's identity provider does not
     /// verify, at load, where the operator sees which app named it. The
-    /// activated document is held to the same rule on every authorization.
-    fn validate_domain_entries(&self) -> Result<()> {
+    /// activated document is held to the same rule on every authorization. A
+    /// rendered authority is checked here too: it names only administrators,
+    /// and its domain is the identity provider's by construction.
+    fn validate_app_authority(&self) -> Result<()> {
         for (app, binding) in &self.apps {
             let entries = binding
                 .readers
@@ -2352,6 +2364,24 @@ impl Instance {
                 policy
                     .validate_domains(self.hosted_domain())
                     .with_context(|| format!("apps.{app}.authority"))?;
+            }
+            if let Some(rendered) = &binding.rendered_authority {
+                ensure!(
+                    binding.authority.is_none()
+                        && binding.readers.is_empty()
+                        && binding.writers.is_empty(),
+                    "apps.{app}: rendered_authority replaces authority, readers and writers: \
+                     leave authority out and readers and writers empty"
+                );
+                let hosted_domain = self.hosted_domain().with_context(|| {
+                    format!(
+                        "apps.{app}: rendered_authority needs the installation's identity \
+                         provider: an Employees operation serves its hosted domain"
+                    )
+                })?;
+                rendered
+                    .validate(hosted_domain)
+                    .with_context(|| format!("apps.{app}.rendered_authority"))?;
             }
         }
         Ok(())

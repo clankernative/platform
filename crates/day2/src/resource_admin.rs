@@ -478,6 +478,7 @@ fn proposed_document(
     binding.readers = active.readers.clone();
     binding.writers = active.writers.clone();
     binding.authority = active.policy.clone();
+    binding.rendered_authority = None;
     let desired = AuthorityDocument::resolve(&scoped, runtime.app(), runtime.artifact())?;
     // Resource administration cannot modify app memberships, coarse operation
     // rights, artifact selection, or resurrect a disabled application.

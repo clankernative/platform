@@ -21,6 +21,7 @@ fn access_policy(admin: &str) -> AccessPolicy {
         version: 1,
         admins: BTreeSet::from([admin.into()]),
         delegations: BTreeMap::new(),
+        row_owners: BTreeMap::new(),
         constraints: BTreeMap::new(),
         operations: (0..32)
             .map(|index| {

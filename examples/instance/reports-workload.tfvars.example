@@ -17,7 +17,6 @@ runtime_resources = {
   http_concurrency = 4
   shutdown_seconds = 30
 }
-readers = ["operator@example.com"]
-writers = ["operator@example.com"]
-# Intentionally refuses deployment until the exact artifact's complete policy is supplied.
-authority = { version = 1, admins = [], operations = {} }
+# day2 renders the policy, readers and writers from the artifact's declared
+# audiences at activation; name only the app's administrators.
+admins = ["operator@example.com"]

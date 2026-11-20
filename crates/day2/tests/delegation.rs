@@ -46,6 +46,7 @@ impl Pair {
             oauth_connections: Default::default(),
             schedules: Default::default(),
             ingress: Default::default(),
+            rendered_authority: None,
             authority: Some(serde_json::from_value(policy.clone()).expect("policy")),
             artifact: artifact.to_string_lossy().into(),
             readers: BTreeSet::from(["alice".into()]),

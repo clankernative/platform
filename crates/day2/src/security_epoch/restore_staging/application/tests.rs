@@ -262,6 +262,7 @@ impl Fixture {
             },
             guard: Some(crate::protocol::ExecutionGuard {
                 policy: crate::authority::Policy {
+                    row_owners: Default::default(),
                     version: 1,
                     admins: Default::default(),
                     operations: Default::default(),
