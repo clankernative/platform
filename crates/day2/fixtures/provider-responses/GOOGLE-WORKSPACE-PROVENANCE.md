@@ -90,5 +90,27 @@ adapter or its simulation.
   detail with its `reason`. The message and metadata are illustrative,
   https://cloud.google.com/apis/design/errors
 
+- `google_workspace.meet.recordings.get.json`: Meet `recordings.get` with the
+  adapter's `name,state,driveDestination(file)` mask: one generated
+  recording, named exactly,
+  https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.recordings/get
+- `google_workspace.drive.permissions.list.json`: Drive v3 `permissions.list`
+  with `permissions(id,type,role,emailAddress,deleted),nextPageToken`: the
+  owner, another group as commenter, and an `anyone` grant, which carries no
+  address. The reference allows at most 100 per page,
+  https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/list
+- `google_workspace.drive.permissions.create.json`: Drive v3
+  `permissions.create` with `id,type,role,emailAddress`: "the response body
+  contains a newly created instance of" a Permission. The reference says
+  nothing about creating a permission that already exists; that is a live
+  qualification item,
+  https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/create
+- `google_workspace.drive.error.insufficient_permissions.json` and
+  `google_workspace.drive.error.invalid_sharing.json`: Drive's documented
+  `403 insufficientFilePermissions` and `400 invalidSharingRequest` ("the ACL
+  change isn't allowed") in the `errors[]` envelope. Messages are
+  illustrative,
+  https://developers.google.com/workspace/drive/api/guides/handle-errors
+
 These establish field names and types only. The live qualification recipe
 replaces them with redacted recordings.

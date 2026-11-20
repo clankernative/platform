@@ -243,6 +243,10 @@ impl Authorized {
             || matches!(&self.action, Action::People(action) if action.is_write())
             || matches!(&self.action, Action::Delegate(call) if call.purpose == crate::delegation::Purpose::Send)
             || matches!(&self.action, Action::Freetool(_))
+            // A Workspace share reconciles: it lists the file's permissions
+            // before it creates one, so a second attempt after an unknown
+            // outcome finds the first permission and creates nothing.
+            || matches!(&self.action, Action::GoogleWorkspace(plan) if plan.is_write())
     }
 }
 
@@ -520,7 +524,8 @@ pub(crate) fn authorized(
         | "google_workspace.calendar.v1"
         | "google_workspace.calendar_events.v1"
         | "google_workspace.calendar_event.v1"
-        | "google_workspace.event_conferences.v1" => {
+        | "google_workspace.event_conferences.v1"
+        | "google_workspace.share_artifact.v1" => {
             ensure!(
                 resource.grant.provider == Provider::GoogleWorkspace,
                 crate::error::Failure::ResourceForbidden
@@ -959,9 +964,11 @@ impl ProviderResult {
         }
     }
 
-    /// A Workspace read settles what it actually sent and read, including a
-    /// failed action; a read leaves no unknown outcome. A failure keeps only its
-    /// final exchange's phase and status, never provider content.
+    /// A Workspace action settles what it actually sent and read, including a
+    /// failed action. A read leaves no unknown outcome; the share leaves one
+    /// when its create was sent and no definite answer came back, and then
+    /// keeps its whole reservation. A failure keeps only its final exchange's
+    /// phase and status, never provider content.
     fn google_workspace_metered(
         result: Result<String>,
         meter: crate::google_workspace::Meter,
@@ -977,6 +984,7 @@ impl ProviderResult {
                     Phase::Directory => ExchangePhase::GoogleWorkspaceDirectory,
                     Phase::Calendar => ExchangePhase::GoogleWorkspaceCalendar,
                     Phase::Meet => ExchangePhase::GoogleWorkspaceMeet,
+                    Phase::Drive => ExchangePhase::GoogleWorkspaceDrive,
                 },
                 http_status: last.http_status,
                 request_id: None,
@@ -995,7 +1003,7 @@ impl ProviderResult {
                 request_bytes: meter.request_bytes,
                 response_bytes: meter.response_bytes,
                 cost_microunits: 0,
-                known: true,
+                known: !meter.unknown,
                 dispatched: meter.calls > 0,
             },
         }
@@ -1384,7 +1392,8 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
             };
         }
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
-        Action::GoogleWorkspace(plan) => {
+        // The share is a write and runs only as an effect.
+        Action::GoogleWorkspace(plan) if !plan.is_write() => {
             let (result, meter) = google_workspace_observe(runtime, &plan);
             return ProviderResult::google_workspace_metered(result, meter);
         }
@@ -1489,6 +1498,10 @@ pub(crate) fn execute(
         // and neither reaches the network.
         Action::Grant { url, key } => Ok(grant_result(&url, &key)),
         Action::People(action) => crate::people_providers::execute(runtime, action, effect_id),
+        Action::GoogleWorkspace(plan) if plan.is_write() => {
+            let (result, meter) = google_workspace_observe(runtime, &plan);
+            return ProviderResult::google_workspace_metered(result, meter);
+        }
         Action::Delegate(call) => {
             let mut result =
                 ProviderResult::local(crate::delegation::send(runtime, &call), request_bytes);

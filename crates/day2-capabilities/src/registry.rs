@@ -187,6 +187,10 @@ providers! {
             // The event's conferences in Meet, read as the event's derived
             // owner in the grant's email domain.
             GoogleWorkspaceEventConferences => "google_workspace.event_conferences.v1" (read, data),
+            // The only write: give a group reader on a file Meet generated for
+            // one of the event's conferences, as the event's owner. It never
+            // removes or narrows anything, so it is not destroying.
+            GoogleWorkspaceShareArtifact => "google_workspace.share_artifact.v1" (write, data),
         },
     },
     // App-to-app delegation. The "provider" is another application in this same

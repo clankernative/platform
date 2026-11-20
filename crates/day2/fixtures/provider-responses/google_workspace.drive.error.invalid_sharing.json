@@ -1,0 +1,13 @@
+{
+  "error": {
+    "errors": [
+      {
+        "domain": "global",
+        "reason": "invalidSharingRequest",
+        "message": "Bad Request. User message: \"This sharing request is not allowed.\""
+      }
+    ],
+    "code": 400,
+    "message": "Bad Request. User message: \"This sharing request is not allowed.\""
+  }
+}

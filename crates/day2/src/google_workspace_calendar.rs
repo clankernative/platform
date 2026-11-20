@@ -54,11 +54,12 @@ pub const EVENTS_QUERY: [(&str, &str); 4] = [
 /// Google's 403 reasons that mean a rate or quota was reached, not that access
 /// was refused: the legacy `errors[].reason` values, and the `ErrorInfo`
 /// reason newer APIs give.
-pub const RATE_REASONS: [&str; 6] = [
+pub const RATE_REASONS: [&str; 7] = [
     "rateLimitExceeded",
     "userRateLimitExceeded",
     "quotaExceeded",
     "dailyLimitExceeded",
+    "sharingRateLimitExceeded",
     "RATE_LIMIT_EXCEEDED",
     "RESOURCE_QUOTA_EXCEEDED",
 ];

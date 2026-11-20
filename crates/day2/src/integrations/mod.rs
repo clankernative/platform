@@ -216,6 +216,8 @@ pub(crate) enum ExchangePhase {
     GoogleWorkspaceCalendar,
     /// A Meet read made as an event's owner.
     GoogleWorkspaceMeet,
+    /// A Drive permission read or the one share, made as an event's owner.
+    GoogleWorkspaceDrive,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -416,6 +416,7 @@ const PARALLEL_RUNTIME_TESTS: &[&str] = &[
     "app_contract::native_google_workspace_outcomes_decode_through_public_sdk",
     "app_contract::native_google_workspace_calendar_outcomes_decode_through_public_sdk",
     "app_contract::native_google_workspace_event_conferences_decode_through_public_sdk",
+    "app_contract::native_google_workspace_share_decodes_through_public_sdk",
     "app_contract::native_required_all_rows_builders_preserve_typed_definitions",
     "guards::checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io",
     "credential_metadata::native_compiler_preserves_family_types_and_seals_host_read_constructors",

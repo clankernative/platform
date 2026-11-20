@@ -18,6 +18,7 @@ use serde::Deserialize;
 use std::fmt;
 
 use crate::google_workspace_calendar as calendar;
+use crate::google_workspace_drive::{self as drive, ShareOutcome};
 use crate::google_workspace_meet::{self as meet, EventConferencesOutcome};
 use calendar::{
     ACL_FIELDS, ACL_PAGE_CEILING, ACL_PAGE_SIZE, CALENDAR_ACL_READ_SCOPE, CALENDAR_FIELDS,
@@ -31,6 +32,7 @@ pub const GROUP_MEMBER_READ_SCOPE: &str =
 pub const DIRECTORY_ORIGIN: &str = "https://admin.googleapis.com";
 pub const CALENDAR_ORIGIN: &str = "https://www.googleapis.com";
 pub const MEET_ORIGIN: &str = "https://meet.googleapis.com";
+pub const DRIVE_ORIGIN: &str = "https://www.googleapis.com";
 /// One Directory response. A group or a membership answer is a few hundred bytes.
 pub const MAX_DIRECTORY_RESPONSE_BYTES: usize = 16 * 1024;
 /// The largest single response any action reads; each plan states its own
@@ -95,6 +97,13 @@ failures! {
     /// artifacts were read: Meet deletes a record 30 days after it ends.
     /// Reading the event again lists its records as they are now.
     ConferenceRecordGone => "google_workspace_conference_record_gone",
+    /// A file has more permission pages than a share reads, so whether the
+    /// group already holds access is not answered from a partial list.
+    PermissionPageBudget => "google_workspace_permission_page_budget",
+    /// The permission request was sent and no definite answer came back: the
+    /// permission may exist. Sharing again reconciles, since a share always
+    /// lists before it creates.
+    ShareOutcomeUnknown => "google_workspace_share_outcome_unknown",
 }
 
 impl fmt::Display for Failure {
@@ -150,6 +159,14 @@ pub enum Read {
         calendar: String,
         event: String,
     },
+    /// The provider's only write: give `group` `reader` on the file one of the
+    /// event's artifacts names.
+    ShareArtifact {
+        calendar: String,
+        event: String,
+        artifact: String,
+        group: String,
+    },
 }
 
 /// Where an action's exchanges go. Chosen when the capability is authorized,
@@ -167,6 +184,7 @@ pub enum Source {
 /// domain and grantee domains, and the in-grant inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
+    action: Action,
     source: Source,
     service_account: String,
     calendar_reader: String,
@@ -206,6 +224,16 @@ struct CalendarEventsRequest {
     time_min: String,
     time_max: String,
     page_token: crate::carta::OptionalText,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareArtifactRequest {
+    handle: String,
+    calendar_id: String,
+    event_id: String,
+    artifact: String,
+    group_email: String,
 }
 
 #[derive(Deserialize)]
@@ -345,10 +373,31 @@ impl Plan {
                     input.handle,
                 )
             }
+            Action::GoogleWorkspaceShareArtifact => {
+                let input: ShareArtifactRequest =
+                    crate::json::decode(request.as_bytes()).map_err(invalid)?;
+                calendar_id(&input.calendar_id)?;
+                ensure!(
+                    calendar::event_id(&input.event_id)
+                        && meet::parse_artifact_name(&input.artifact).is_some(),
+                    "google_workspace_request_invalid"
+                );
+                group_domain(&input.group_email)?;
+                (
+                    Read::ShareArtifact {
+                        calendar: input.calendar_id,
+                        event: input.event_id,
+                        artifact: input.artifact,
+                        group: input.group_email,
+                    },
+                    input.handle,
+                )
+            }
             _ => anyhow::bail!(crate::error::Failure::ResourceForbidden),
         };
         Ok((
             Self {
+                action,
                 source,
                 service_account: service_account.clone(),
                 calendar_reader: calendar_reader.clone(),
@@ -368,6 +417,11 @@ impl Plan {
         self.source
     }
 
+    /// Whether the action changes provider state, as the registry declares.
+    pub fn is_write(&self) -> bool {
+        self.action.is_write()
+    }
+
     /// Directory reads run as the service account itself; Calendar and Meet
     /// reads by domain-wide delegation.
     fn delegated(&self) -> bool {
@@ -376,11 +430,13 @@ impl Plan {
 
     /// Authentication exchanges: metadata and IAM, plus the token exchange
     /// when delegated, once for the Calendar reader and, for an event's
-    /// conferences, again for its owner.
+    /// conferences, again for its owner. The share also resolves its group as
+    /// the service account itself.
     fn authentication_calls(&self) -> u64 {
         match self.read {
             Read::Group { .. } | Read::GroupMember { .. } => 2,
             Read::EventConferences { .. } => 6,
+            Read::ShareArtifact { .. } => 3 + 2 + 3,
             _ => 3,
         }
     }
@@ -403,6 +459,13 @@ impl Plan {
                     + meet::MAX_RECORDS as u64
                         * meet::Collection::ALL.len() as u64
                         * meet::ARTIFACT_PAGE_CEILING
+            }
+            // The reader's rule and the event, the group, the record pages,
+            // the artifact, every permission page, the one create, and every
+            // permission page again to reconcile a create whose answer is not
+            // definite.
+            Read::ShareArtifact { .. } => {
+                2 + 1 + meet::RECORD_PAGE_CEILING + 1 + 2 * drive::PERMISSION_PAGE_CEILING + 1
             }
         }
     }
@@ -438,17 +501,21 @@ pub enum Service {
     Directory,
     Calendar,
     Meet,
+    Drive,
 }
 
 /// An API request as the wire sends it: a fixed service, path segments built
-/// from validated inputs, and a fixed query. `endpoint` names it for timing
-/// only; a port routes on the service and segments.
+/// from validated inputs, a fixed query and, for the one write, a fixed JSON
+/// body that makes it a POST. `endpoint` names it for timing only; a port
+/// routes on the service and segments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiRequest {
     pub service: Service,
     pub endpoint: &'static str,
     pub segments: Vec<String>,
     pub query: Vec<(&'static str, String)>,
+    /// Private, so only the share's own constructor makes a POST.
+    body: Option<String>,
 }
 
 impl ApiRequest {
@@ -473,7 +540,33 @@ impl ApiRequest {
                 .chain(&[("prettyPrint", "false")])
                 .map(|(name, value)| (*name, (*value).to_owned()))
                 .collect(),
+            body: None,
         }
+    }
+
+    fn drive(endpoint: &'static str, segments: &[&str], query: &[(&'static str, &str)]) -> Self {
+        Self::new(Service::Drive, endpoint, &["drive", "v3"], segments, query)
+    }
+
+    /// The one request with a body: give `group` `reader` on `file`.
+    fn drive_share(file: &str, group: &str) -> Self {
+        Self {
+            body: Some(drive::share_body(group)),
+            ..Self::drive(
+                "drive_permission_create",
+                &["files", file, "permissions"],
+                &[
+                    ("supportsAllDrives", "true"),
+                    ("sendNotificationEmail", "false"),
+                    ("fields", drive::CREATED_FIELDS),
+                ],
+            )
+        }
+    }
+
+    /// The JSON body of the one write; every other request has none.
+    pub fn body(&self) -> Option<&str> {
+        self.body.as_deref()
     }
 
     fn directory(
@@ -515,9 +608,10 @@ impl ApiRequest {
         })
     }
 
-    /// A GET carries its request in the query.
+    /// A GET carries its request in the query, a POST in its body too.
     pub fn request_bytes(&self) -> usize {
         self.query_string().map_or(0, |query| query.len())
+            + self.body.as_ref().map_or(0, String::len)
     }
 }
 
@@ -546,6 +640,7 @@ pub enum Phase {
     Directory,
     Calendar,
     Meet,
+    Drive,
 }
 
 /// The most recent exchange, kept for correlation. No body or header.
@@ -564,6 +659,9 @@ pub struct Meter {
     pub request_bytes: u64,
     pub response_bytes: u64,
     pub last: Option<LastExchange>,
+    /// A write was sent and no definite answer came back: what it did is not
+    /// known, so its reservation is not settled as known usage.
+    pub unknown: bool,
 }
 
 impl Meter {
@@ -678,6 +776,7 @@ fn send(
             Service::Directory => Phase::Directory,
             Service::Calendar => Phase::Calendar,
             Service::Meet => Phase::Meet,
+            Service::Drive => Phase::Drive,
         },
         request.request_bytes(),
     );
@@ -912,6 +1011,221 @@ fn run(
         Read::EventConferences { calendar, event } => Ok(encode(&event_conferences(
             plan, port, meter, calendar, event, now,
         )?)),
+        Read::ShareArtifact { .. } => Ok(encode(&share_artifact(plan, port, meter, now)?)),
+    }
+}
+
+/// Whether a file's permissions already give the group access.
+enum Shared {
+    /// A live `reader`-or-more grant to the group, by permission ID.
+    Already(String),
+    Absent,
+    /// The owner cannot see the file.
+    Missing,
+}
+
+/// The file's permissions, page by page up to the ceiling, until a grant to
+/// the group is found. A longer list is the budget failure: never an answer
+/// from part of it, and never a create on top of one.
+fn group_permission(
+    port: &mut dyn GooglePort,
+    meter: &mut Meter,
+    token: &AccessToken,
+    file: &str,
+    group: &str,
+) -> Result<Shared, Failure> {
+    let page_size = drive::PERMISSION_PAGE_SIZE.to_string();
+    let mut continuation: Option<String> = None;
+    for _ in 0..drive::PERMISSION_PAGE_CEILING {
+        let mut query = vec![
+            ("supportsAllDrives", "true"),
+            ("pageSize", page_size.as_str()),
+        ];
+        if let Some(page_token) = &continuation {
+            query.push(("pageToken", page_token.as_str()));
+        }
+        query.push(("fields", drive::PERMISSIONS_FIELDS));
+        let request =
+            ApiRequest::drive("drive_permissions", &["files", file, "permissions"], &query);
+        let reply = send(port, meter, &request, token, MAX_CALENDAR_RESPONSE_BYTES)?;
+        if reply.status == 404 {
+            return Ok(Shared::Missing);
+        }
+        accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
+        match drive::parse_permissions_page(&reply.body, group)? {
+            (Some(id), _) => return Ok(Shared::Already(id)),
+            (None, None) => return Ok(Shared::Absent),
+            (None, Some(next)) => continuation = Some(next),
+        }
+    }
+    Err(Failure::PermissionPageBudget)
+}
+
+/// Share one artifact of one event with one group, as the event's owner.
+/// Every part is read again here: the event and its owner, the event's
+/// records, the artifact and its file, and the file's permissions. Nothing an
+/// earlier read returned is trusted. A permission is created only after the
+/// list shows none for the group, and an answer that is not definite is
+/// settled by listing again in the same attempt.
+fn share_artifact(
+    plan: &Plan,
+    port: &mut dyn GooglePort,
+    meter: &mut Meter,
+    now: i64,
+) -> Result<ShareOutcome, Failure> {
+    let Read::ShareArtifact {
+        calendar,
+        event,
+        artifact,
+        group,
+    } = &plan.read
+    else {
+        return Err(Failure::ResponseInvalid);
+    };
+    let owned = match owned_event(plan, port, meter, calendar, event, now)? {
+        Ok(owned) => owned,
+        Err(unowned) => {
+            return Ok(match unowned {
+                Unowned::AllDay => ShareOutcome::AllDay,
+                Unowned::NotShared => ShareOutcome::NotShared,
+                Unowned::NotFound => ShareOutcome::NotFound,
+                Unowned::NoMeeting => ShareOutcome::NoMeeting,
+                Unowned::NoOwner => ShareOutcome::NoOwner,
+            });
+        }
+    };
+    // The group Drive will grant is the group's primary address, so resolve
+    // it first, as the service account with the Directory scope alone: only a
+    // group whose primary address is exactly the one asked about, in a
+    // grantee domain, is ever shared with. An alias never is.
+    let directory = token_for(
+        plan,
+        port,
+        meter,
+        google_auth::Identity::ServiceAccount,
+        &[GROUP_READ_SCOPE],
+        now,
+    )
+    .map_err(Failure::from)?;
+    match group_lookup(plan, port, meter, &directory, group) {
+        Ok(GroupOutcome::Found(found)) if found.email == *group => {}
+        Ok(GroupOutcome::Found(_)) | Err(Failure::GroupOutsideGrant) => {
+            return Ok(ShareOutcome::GroupNotPrimary);
+        }
+        Ok(GroupOutcome::NotFound) => return Ok(ShareOutcome::GroupNotFound),
+        Err(failure) => return Err(failure),
+    }
+    drop(directory);
+    let token = owner_token(
+        plan,
+        port,
+        meter,
+        &owned.owner,
+        &[meet::MEET_READ_SCOPE, drive::DRIVE_SCOPE],
+        now,
+    )?;
+    let (record, collection, _) =
+        meet::parse_artifact_name(artifact).ok_or(Failure::ResponseInvalid)?;
+    let records = event_records(
+        &mut MeetLists {
+            port: &mut *port,
+            meter: &mut *meter,
+            token: &token,
+        },
+        &owned,
+    )?;
+    let Some(records) = records else {
+        return Ok(ShareOutcome::Conflict);
+    };
+    // Only an artifact of one of this event's own records is shared.
+    if !records.iter().any(|(id, _)| id == record) {
+        return Ok(ShareOutcome::NotFound);
+    }
+    let segments: Vec<&str> = artifact.split('/').collect();
+    let request = ApiRequest::meet(
+        "meet_artifact",
+        &segments,
+        &[("fields", collection.artifact_fields())],
+    );
+    let reply = send(port, meter, &request, &token, MAX_CALENDAR_RESPONSE_BYTES)?;
+    if reply.status == 404 {
+        return Ok(ShareOutcome::NotFound);
+    }
+    accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)?;
+    let found = meet::parse_artifact(&reply.body, artifact)?;
+    let (meet::ArtifactState::FileGenerated, Some(file)) = (found.state, found.id) else {
+        return Ok(ShareOutcome::NotReady);
+    };
+    match group_permission(port, meter, &token, &file, group)? {
+        Shared::Already(permission_id) => {
+            return Ok(ShareOutcome::AlreadyShared(drive::Permission {
+                permission_id,
+            }));
+        }
+        Shared::Missing => return Ok(ShareOutcome::NotFound),
+        Shared::Absent => {}
+    }
+    let request = ApiRequest::drive_share(&file, group);
+    meter.send(Phase::Drive, request.request_bytes());
+    let answer = meter.receive(port.call(&request, &token, MAX_CALENDAR_RESPONSE_BYTES));
+    // Anything but a definite answer is settled inside this attempt by
+    // listing again, with the pages reserved for it: the group's grant found
+    // now is this attempt's (it was absent a moment ago) and known; only a
+    // failed list, or a grant still absent, leaves the outcome unknown.
+    let reconcile = |port: &mut dyn GooglePort,
+                     meter: &mut Meter,
+                     landed: bool|
+     -> Result<ShareOutcome, Failure> {
+        match group_permission(port, meter, &token, &file, group) {
+            Ok(Shared::Already(permission_id)) => {
+                let permission = drive::Permission { permission_id };
+                Ok(if landed {
+                    ShareOutcome::Shared(permission)
+                } else {
+                    ShareOutcome::AlreadyShared(permission)
+                })
+            }
+            _ => {
+                meter.unknown = true;
+                Err(Failure::ShareOutcomeUnknown)
+            }
+        }
+    };
+    let Ok(reply) = answer else {
+        return reconcile(port, meter, true);
+    };
+    match reply.status {
+        200 => match accept(&reply, MAX_CALENDAR_RESPONSE_BYTES)
+            .and_then(|()| drive::parse_created(&reply.body, group))
+        {
+            Ok(permission_id) => Ok(ShareOutcome::Shared(drive::Permission { permission_id })),
+            Err(_) => reconcile(port, meter, true),
+        },
+        // Drive says the permission conflicts with one that exists.
+        409 => reconcile(port, meter, false),
+        // Google's guide also gives this reason when a share succeeded and
+        // only its notification failed, so it is believed only once the list
+        // shows no grant.
+        400 if drive::sharing_refused(&reply.body) => {
+            match group_permission(port, meter, &token, &file, group) {
+                Ok(Shared::Already(permission_id)) => {
+                    Ok(ShareOutcome::Shared(drive::Permission { permission_id }))
+                }
+                Ok(Shared::Absent) => Ok(ShareOutcome::SharingRefused),
+                _ => {
+                    meter.unknown = true;
+                    Err(Failure::ShareOutcomeUnknown)
+                }
+            }
+        }
+        // The file is gone: nothing was created on it.
+        404 => Ok(ShareOutcome::NotFound),
+        // Definite refusals: nothing was created.
+        400 => Err(Failure::RequestRefused),
+        401 => Err(Failure::AuthenticationFailed),
+        403 => Err(calendar::forbidden(&reply.body)),
+        429 => Err(Failure::RateLimited),
+        _ => reconcile(port, meter, true),
     }
 }
 
@@ -945,14 +1259,33 @@ fn event_outcome(
 /// An event's conferences. The event is read as the Calendar reader, inside
 /// the reader's bound; its owner is derived from it, and only that owner is
 /// ever impersonated, with Meet's read scope alone.
-fn event_conferences(
+/// What an event's Meet reads need from it, derived as the Calendar reader.
+struct Owned {
+    owner: String,
+    code: String,
+    window: (i64, i64),
+    filter: String,
+}
+
+/// Why an event has nothing to read or share in Meet.
+enum Unowned {
+    AllDay,
+    NotShared,
+    NotFound,
+    NoMeeting,
+    NoOwner,
+}
+
+/// Read the event as the Calendar reader, inside the reader's bound, and
+/// derive the one person its conferences may be read and shared as.
+fn owned_event(
     plan: &Plan,
     port: &mut dyn GooglePort,
     meter: &mut Meter,
     calendar: &str,
     event: &str,
     now: i64,
-) -> Result<EventConferencesOutcome, Failure> {
+) -> Result<Result<Owned, Unowned>, Failure> {
     use calendar::EventStatus;
     let token = access_token(
         plan,
@@ -963,11 +1296,10 @@ fn event_conferences(
     )?;
     let event = match event_outcome(plan, port, meter, &token, calendar, event)? {
         EventOutcome::Found(event) => event,
-        EventOutcome::AllDay => return Ok(EventConferencesOutcome::AllDay),
-        EventOutcome::NotShared => return Ok(EventConferencesOutcome::NotShared),
-        EventOutcome::NotFound => return Ok(EventConferencesOutcome::NotFound),
+        EventOutcome::AllDay => return Ok(Err(Unowned::AllDay)),
+        EventOutcome::NotShared => return Ok(Err(Unowned::NotShared)),
+        EventOutcome::NotFound => return Ok(Err(Unowned::NotFound)),
     };
-    drop(token);
     // A cancelled event that still has its times is read like any other: the
     // meeting may have happened, and whether to act on it is the
     // application's policy. One with no times has no window to search.
@@ -975,41 +1307,61 @@ fn event_conferences(
         EventStatus::Confirmed(times)
         | EventStatus::Tentative(times)
         | EventStatus::Cancelled(times) => times,
-        EventStatus::CancelledUntimed => return Ok(EventConferencesOutcome::NotFound),
+        EventStatus::CancelledUntimed => return Ok(Err(Unowned::NotFound)),
     };
     let crate::carta::OptionalText::Some(code) = &event.meeting_code else {
-        return Ok(EventConferencesOutcome::NoMeeting);
+        return Ok(Err(Unowned::NoMeeting));
     };
     let Some(owner) = meet::owner(&event, &plan.email_domain) else {
-        return Ok(EventConferencesOutcome::NoOwner);
+        return Ok(Err(Unowned::NoOwner));
     };
     let window = meet::record_window(times).ok_or(Failure::ResponseInvalid)?;
     let filter = meet::record_filter(code, window).ok_or(Failure::ResponseInvalid)?;
-    // The reader's exchange has just succeeded with the same service account,
-    // signer and clock, so a refused assertion now is a refused owner.
-    let token = token_for(
+    Ok(Ok(Owned {
+        owner,
+        code: code.clone(),
+        window,
+        filter,
+    }))
+}
+
+/// A token for the event's owner. The reader's exchange has just succeeded
+/// with the same service account, signer and clock, so a refused assertion now
+/// is a refused owner.
+fn owner_token(
+    plan: &Plan,
+    port: &mut dyn GooglePort,
+    meter: &mut Meter,
+    owner: &str,
+    scopes: &[&str],
+    now: i64,
+) -> Result<AccessToken, Failure> {
+    token_for(
         plan,
         port,
         meter,
-        google_auth::Identity::Delegated(&owner),
-        &[meet::MEET_READ_SCOPE],
+        google_auth::Identity::Delegated(owner),
+        scopes,
         now,
     )
     .map_err(|failure| match failure {
         google_auth::Failure::SubjectRefused => Failure::OwnerRefused,
         failure => Failure::from(failure),
-    })?;
-    let mut lists = MeetLists {
-        port,
-        meter,
-        token: &token,
-    };
+    })
+}
+
+/// The event's conference records, each with its ID, read as the owner; or
+/// `None` when they are in more than one space.
+fn event_records(
+    lists: &mut MeetLists<'_>,
+    owned: &Owned,
+) -> Result<Option<Vec<meet::Listed>>, Failure> {
     let records = lists.pages(
         MeetList {
             endpoint: "meet_conference_records",
             segments: &["conferenceRecords"],
             page_size: meet::RECORD_PAGE_SIZE,
-            filter: Some(&filter),
+            filter: Some(&owned.filter),
             fields: meet::RECORDS_FIELDS,
             ceiling: meet::RECORD_PAGE_CEILING,
             max: meet::MAX_RECORDS,
@@ -1017,7 +1369,7 @@ fn event_conferences(
             // A list route is never missing.
             missing: Failure::ResponseInvalid,
         },
-        |body| meet::parse_records_page(body, window),
+        |body| meet::parse_records_page(body, owned.window),
     )?;
     // One meeting code names one space. Records in two mean the code was
     // reused or reassigned inside the window: not this event's to choose.
@@ -1025,9 +1377,45 @@ fn event_conferences(
         .iter()
         .map(|(_, record)| record.space.as_str())
         .collect();
-    if spaces.len() > 1 {
+    Ok((spaces.len() <= 1).then_some(records))
+}
+
+fn event_conferences(
+    plan: &Plan,
+    port: &mut dyn GooglePort,
+    meter: &mut Meter,
+    calendar: &str,
+    event: &str,
+    now: i64,
+) -> Result<EventConferencesOutcome, Failure> {
+    let owned = match owned_event(plan, port, meter, calendar, event, now)? {
+        Ok(owned) => owned,
+        Err(unowned) => {
+            return Ok(match unowned {
+                Unowned::AllDay => EventConferencesOutcome::AllDay,
+                Unowned::NotShared => EventConferencesOutcome::NotShared,
+                Unowned::NotFound => EventConferencesOutcome::NotFound,
+                Unowned::NoMeeting => EventConferencesOutcome::NoMeeting,
+                Unowned::NoOwner => EventConferencesOutcome::NoOwner,
+            });
+        }
+    };
+    let token = owner_token(
+        plan,
+        port,
+        meter,
+        &owned.owner,
+        &[meet::MEET_READ_SCOPE],
+        now,
+    )?;
+    let mut lists = MeetLists {
+        port,
+        meter,
+        token: &token,
+    };
+    let Some(records) = event_records(&mut lists, &owned)? else {
         return Ok(EventConferencesOutcome::Conflict);
-    }
+    };
     let mut listed = Vec::new();
     for (id, mut record) in records {
         for collection in meet::Collection::ALL {
@@ -1052,8 +1440,8 @@ fn event_conferences(
     }
     let records = listed;
     meet::found(meet::EventConferences {
-        owner,
-        meeting_code: code.clone(),
+        owner: owned.owner,
+        meeting_code: owned.code,
         records,
     })
 }

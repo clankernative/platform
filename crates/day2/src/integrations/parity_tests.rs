@@ -2080,7 +2080,28 @@ fn the_google_meet_simulation_emits_only_documented_fields() -> Result<()> {
                 max_input_tokens: 1,
                 ..Default::default()
             },
-            google_workspace: world,
+            google_workspace: {
+                world.groups.insert(
+                    "team@example.com".into(),
+                    super::simulated::GoogleGroup {
+                        id: "group-team".into(),
+                        name: "Team".into(),
+                        ..Default::default()
+                    },
+                );
+                world.drive_files = std::collections::BTreeMap::from([(
+                    "1kuce".into(),
+                    super::simulated::GoogleDriveFile {
+                        name: "Recording".into(),
+                        mime_type: "video/mp4".into(),
+                        owner: "person@example.com".into(),
+                        permissions: vec![super::simulated::GoogleDrivePermission::owner(
+                            "person@example.com",
+                        )],
+                    },
+                )]);
+                world
+            },
             ..Default::default()
         },
     )?;
@@ -2136,12 +2157,233 @@ fn the_google_meet_simulation_emits_only_documented_fields() -> Result<()> {
         let extra: Vec<_> = emitted.difference(&errors).collect();
         assert!(extra.is_empty(), "{fault:?} emits undocumented {extra:?}");
     }
+    // The share: the artifact read, the permission list and the create, and
+    // Drive's refusals, carry only documented fields.
+    let share = share_plan()?;
+    let mut bodies = Vec::new();
+    let mut port = Recording {
+        inner: crate::google_workspace::SimulatedGooglePort::new(&database, "parity/app")?,
+        bodies: &mut bodies,
+    };
+    let (result, _) = crate::google_workspace::observe(&share, &mut port, 100);
+    assert!(result?.starts_with(r#"{"Shared""#));
+    let mut emitted = std::collections::BTreeSet::new();
+    for body in &bodies[12..] {
+        keys(&serde_json::from_slice(body)?, "", &mut emitted);
+    }
+    let listed = documented(&[
+        &GOOGLE_MEET_RECORDING,
+        &GOOGLE_DRIVE_PERMISSIONS,
+        &GOOGLE_DRIVE_CREATED,
+    ])?;
+    let extra: Vec<_> = emitted.difference(&listed).collect();
+    assert!(extra.is_empty(), "the share emits undocumented {extra:?}");
+    let errors = documented(&[&GOOGLE_DRIVE_INSUFFICIENT, &GOOGLE_DRIVE_INVALID_SHARING])?;
+    super::simulated::schedule_faults(
+        &database,
+        "parity/app",
+        super::simulated::GOOGLE_WORKSPACE_WORLD,
+        vec![super::simulated::ScheduledFault {
+            endpoint: super::simulated::GOOGLE_DRIVE_PERMISSIONS_ENDPOINT.into(),
+            remaining: 1,
+            fault: super::simulated::SimulatedFault::Denied,
+        }],
+    )?;
+    let mut bodies = Vec::new();
+    let mut port = Recording {
+        inner: crate::google_workspace::SimulatedGooglePort::new(&database, "parity/app")?,
+        bodies: &mut bodies,
+    };
+    let _ = crate::google_workspace::observe(&share, &mut port, 100);
+    let mut emitted = std::collections::BTreeSet::new();
+    keys(&serde_json::from_slice(&bodies[13])?, "", &mut emitted);
+    let extra: Vec<_> = emitted.difference(&errors).collect();
+    assert!(
+        extra.is_empty(),
+        "Drive's refusal emits undocumented {extra:?}"
+    );
+    Ok(())
+}
+
+const GOOGLE_MEET_RECORDING: RecordedBase = RecordedBase::from_repository(
+    "recordings.get with the name/state/driveDestination(file) mask returns that one recording, named exactly",
+    "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.recordings/get",
+    include_bytes!("../../fixtures/provider-responses/google_workspace.meet.recordings.get.json"),
+);
+
+const GOOGLE_DRIVE_PERMISSIONS: RecordedBase = RecordedBase::from_repository(
+    "permissions.list with the id/type/role/emailAddress/deleted mask lists a file's permissions; anyone and domain grants carry no address",
+    "https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/list",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.drive.permissions.list.json"
+    ),
+);
+
+const GOOGLE_DRIVE_CREATED: RecordedBase = RecordedBase::from_repository(
+    "permissions.create with the id/type/role/emailAddress mask returns the created permission",
+    "https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/create",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.drive.permissions.create.json"
+    ),
+);
+
+const GOOGLE_DRIVE_INSUFFICIENT: RecordedBase = RecordedBase::from_repository(
+    "Drive refuses a change the user may not make with 403 insufficientFilePermissions in the errors[] envelope",
+    "https://developers.google.com/workspace/drive/api/guides/handle-errors",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.drive.error.insufficient_permissions.json"
+    ),
+);
+
+const GOOGLE_DRIVE_INVALID_SHARING: RecordedBase = RecordedBase::from_repository(
+    "Drive refuses a sharing request it will not make with 400 invalidSharingRequest in the errors[] envelope",
+    "https://developers.google.com/workspace/drive/api/guides/handle-errors",
+    include_bytes!(
+        "../../fixtures/provider-responses/google_workspace.drive.error.invalid_sharing.json"
+    ),
+);
+
+fn share_plan() -> Result<crate::google_workspace::Plan> {
+    calendar_plan(
+        Action::GoogleWorkspaceShareArtifact,
+        json!({"handle":"h","calendar_id":"c_team@group.calendar.google.com",
+            "event_id":"abc123def456ghi789jkl012mn","artifact":"conferenceRecords/first-1234/recordings/rec-1",
+            "group_email":"team@example.com"}),
+    )
+}
+
+/// The share against the published bases: the reader's exchanges, rule and
+/// event, the service account's exchanges and the group, the owner's
+/// exchanges with Meet's and Drive's scopes, then `rest`.
+fn share_replies(rest: Vec<(u16, Vec<u8>)>) -> Result<String> {
+    let mut replay = GoogleReplay::ok(vec![
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        google_signed(&CALENDAR_SCOPES)?,
+        GOOGLE_OAUTH_TOKEN.bytes.to_vec(),
+        GOOGLE_ACL_RULE.bytes.to_vec(),
+        GOOGLE_EVENT.bytes.to_vec(),
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        GOOGLE_GENERATE_ACCESS_TOKEN.bytes.to_vec(),
+        GOOGLE_GROUP.bytes.to_vec(),
+        GOOGLE_METADATA_TOKEN.bytes.to_vec(),
+        google_signed_as(
+            "person@example.com",
+            &[
+                crate::google_workspace_meet::MEET_READ_SCOPE,
+                crate::google_workspace_drive::DRIVE_SCOPE,
+            ],
+        )?,
+        GOOGLE_OAUTH_TOKEN.bytes.to_vec(),
+        GOOGLE_MEET_RECORDS.bytes.to_vec(),
+    ]);
+    replay.replies.extend(rest);
+    let (result, _) = crate::google_workspace::observe(&share_plan()?, &mut replay, 100);
+    result
+}
+
+#[test]
+fn google_share_parses_the_published_responses_and_their_mutations() -> Result<()> {
+    let ok = |base: &RecordedBase| (200, base.bytes.to_vec());
+    let bases = || {
+        vec![
+            ok(&GOOGLE_MEET_RECORDING),
+            ok(&GOOGLE_DRIVE_PERMISSIONS),
+            ok(&GOOGLE_DRIVE_CREATED),
+        ]
+    };
+    assert_eq!(
+        share_replies(bases())?,
+        r#"{"Shared":{"permission_id":"09876543210987654321"}}"#
+    );
+    let mutated = |index: usize, status: u16, edit: &dyn Fn(&mut Value)| -> Result<String> {
+        let mut replies = bases();
+        let mut value: Value = serde_json::from_slice(&replies[index].1)?;
+        edit(&mut value);
+        replies[index] = (status, value.to_string().into_bytes());
+        replies.truncate(index + 1);
+        share_replies(replies)
+    };
+    let failed = |result: Result<String>| result.err().map(|error| error.to_string());
+    // The group already reads the file under another address case: found.
+    assert_eq!(
+        mutated(1, 200, &|list| list["permissions"][1]["emailAddress"] =
+            json!("TEAM@example.com"))?,
+        r#"{"AlreadyShared":{"permission_id":"12345678901234567890"}}"#
+    );
+    assert_eq!(
+        mutated(0, 200, &|artifact| artifact["state"] = json!("ENDED"))?,
+        r#""NotReady""#
+    );
+    for (index, name, edit) in [
+        (
+            0,
+            "another recording",
+            &(|artifact: &mut Value| {
+                artifact["name"] = json!("conferenceRecords/first-1234/recordings/rec-2")
+            }) as &dyn Fn(&mut Value),
+        ),
+        (1, "a role Drive does not have", &|list: &mut Value| {
+            list["permissions"][0]["role"] = json!("editor")
+        }),
+    ] {
+        assert_eq!(
+            failed(mutated(index, 200, edit)).as_deref(),
+            Some("google_workspace_response_invalid"),
+            "{name}"
+        );
+    }
+    // A create that does not echo what was asked is settled by listing
+    // again: a list without the group's grant leaves it unknown, and one
+    // with it is the share.
+    let mut writer: Value = serde_json::from_slice(GOOGLE_DRIVE_CREATED.bytes)?;
+    writer["role"] = json!("writer");
+    let with_group = || -> Result<Vec<u8>> {
+        let mut list = GOOGLE_DRIVE_PERMISSIONS.value()?;
+        list["permissions"][1]["emailAddress"] = json!("team@example.com");
+        Ok(list.to_string().into_bytes())
+    };
+    let mut replies = bases();
+    replies[2] = (200, writer.to_string().into_bytes());
+    replies.push(ok(&GOOGLE_DRIVE_PERMISSIONS));
+    assert_eq!(
+        failed(share_replies(replies.clone())).as_deref(),
+        Some("google_workspace_share_outcome_unknown")
+    );
+    replies[3] = (200, with_group()?);
+    assert_eq!(
+        share_replies(replies)?,
+        r#"{"Shared":{"permission_id":"12345678901234567890"}}"#
+    );
+    // Drive's published refusals: a file the owner may not share, and a
+    // sharing request Drive will not make.
+    let refused = |index: usize, status: u16, base: &RecordedBase| {
+        let mut replies = bases();
+        replies[index] = (status, base.bytes.to_vec());
+        replies.truncate(index + 1);
+        share_replies(replies)
+    };
+    for index in [1, 2] {
+        assert_eq!(
+            failed(refused(index, 403, &GOOGLE_DRIVE_INSUFFICIENT)).as_deref(),
+            Some("google_workspace_denied")
+        );
+    }
+    // A sharing refusal is believed only once the list shows no grant.
+    let mut replies = bases();
+    replies[2] = (400, GOOGLE_DRIVE_INVALID_SHARING.bytes.to_vec());
+    replies.push(ok(&GOOGLE_DRIVE_PERMISSIONS));
+    assert_eq!(share_replies(replies)?, r#""SharingRefused""#);
     Ok(())
 }
 
 #[test]
 fn google_meet_bases_cite_the_published_reference_they_follow() {
     for base in [
+        &GOOGLE_MEET_RECORDING,
+        &GOOGLE_DRIVE_PERMISSIONS,
+        &GOOGLE_DRIVE_CREATED,
+        &GOOGLE_DRIVE_INSUFFICIENT,
+        &GOOGLE_DRIVE_INVALID_SHARING,
         &GOOGLE_MEET_RECORDS,
         &GOOGLE_MEET_RECORDINGS,
         &GOOGLE_MEET_SMART_NOTES,

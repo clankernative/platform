@@ -965,6 +965,48 @@ mod narrowing {
         }
     }
 
+    /// Drive applies only the last of concurrent permission changes on a file,
+    /// so a slot that grants the share must charge a budget of concurrency 1.
+    #[test]
+    fn a_workspace_share_slot_requires_a_serial_budget() -> Result<()> {
+        let catalog = |concurrency: Option<u64>, actions: serde_json::Value| -> Result<Catalog> {
+            let mut limits = json!({"calls":100});
+            if let Some(concurrency) = concurrency {
+                limits["concurrency"] = json!(concurrency);
+            }
+            Ok(serde_json::from_value(json!({
+                "version":1,
+                "connections":{"workspace":{"revision":1,"provider":"google_workspace",
+                    "live":crate::integrations::LiveConnection::GoogleWorkspace {
+                        service_account: "reader@example-project.iam.gserviceaccount.com".into(),
+                    }}},
+                "resources":{"domain":{"revision":1,"connection":{"id":"workspace","revision":1},
+                    "target":sample(ResourceKind::GoogleWorkspaceDomain)}},
+                "policies":{"share":{"revision":1,"owner":"owner","actors":["sharer"],
+                    "allowed_apps":["recordings"],"max_duration_seconds":null,
+                    "slots":{"workspace":{"kind":"google_workspace_domain",
+                        "allowed_resources":[{"id":"domain","revision":1}],"actions":actions,
+                        "limits":{"max_request_bytes":32768,"max_response_bytes":65536,
+                            "max_calls_per_invocation":32},
+                        "budgets":[{"id":"shares","revision":1}]}}}},
+                "budgets":{"shares":{"revision":1,"scope":"app","period_seconds":3600,"limits":limits}}
+            }))?)
+        };
+        catalog(Some(1), json!(["google_workspace_share_artifact"]))?.validate()?;
+        for concurrency in [None, Some(2)] {
+            assert_eq!(
+                catalog(concurrency, json!(["google_workspace_share_artifact"]))?
+                    .validate()
+                    .unwrap_err()
+                    .to_string(),
+                "google_workspace_share_requires_a_serial_budget"
+            );
+        }
+        // Reads alone need no such budget.
+        catalog(Some(2), json!(["google_workspace_group"]))?.validate()?;
+        Ok(())
+    }
+
     /// A Workspace grant narrows only by dropping grantee domains.
     #[test]
     fn a_workspace_grant_narrows_only_by_dropping_grantee_domains() {

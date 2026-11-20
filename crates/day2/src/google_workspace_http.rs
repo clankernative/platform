@@ -5,7 +5,7 @@
 //! client that follows no redirect, retries nothing and uses no proxy.
 use crate::google_auth::{self, AccessToken, Exchange, Origins, Reply, Unreached};
 use crate::google_workspace::{
-    ApiRequest, CALENDAR_ORIGIN, DIRECTORY_ORIGIN, GooglePort, MEET_ORIGIN, Service,
+    ApiRequest, CALENDAR_ORIGIN, DIRECTORY_ORIGIN, DRIVE_ORIGIN, GooglePort, MEET_ORIGIN, Service,
 };
 use anyhow::Result;
 
@@ -15,6 +15,7 @@ pub struct NativeGooglePort {
     directory: reqwest::Url,
     calendar: reqwest::Url,
     meet: reqwest::Url,
+    drive: reqwest::Url,
 }
 
 impl NativeGooglePort {
@@ -31,6 +32,7 @@ impl NativeGooglePort {
             directory: reqwest::Url::parse(DIRECTORY_ORIGIN)?,
             calendar: reqwest::Url::parse(CALENDAR_ORIGIN)?,
             meet: reqwest::Url::parse(MEET_ORIGIN)?,
+            drive: reqwest::Url::parse(DRIVE_ORIGIN)?,
         })
     }
 
@@ -49,7 +51,8 @@ impl NativeGooglePort {
             origins: Origins::fixture(url.clone(), url.clone(), url.join("/token")?),
             directory: url.clone(),
             calendar: url.clone(),
-            meet: url,
+            meet: url.clone(),
+            drive: url,
         })
     }
 }
@@ -79,6 +82,7 @@ impl GooglePort for NativeGooglePort {
             Service::Directory => self.directory.clone(),
             Service::Calendar => self.calendar.clone(),
             Service::Meet => self.meet.clone(),
+            Service::Drive => self.drive.clone(),
         };
         url.path_segments_mut()
             .map_err(|_| Unreached::default())?
@@ -90,13 +94,25 @@ impl GooglePort for NativeGooglePort {
                 .map_err(|_| Unreached::default())?;
         authorization.set_sensitive(true);
         let mut timing = crate::request_timing::provider("google_workspace", request.endpoint);
-        let response = self
-            .client
-            .get(url)
-            .header(reqwest::header::AUTHORIZATION, authorization)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .map_err(|_| Unreached::default())?;
+        // A request with a body is the one write, a JSON POST; every other
+        // request is a GET.
+        let response = match request.body() {
+            Some(body) => self
+                .client
+                .post(url)
+                .header(reqwest::header::AUTHORIZATION, authorization)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_owned())
+                .send(),
+            None => self
+                .client
+                .get(url)
+                .header(reqwest::header::AUTHORIZATION, authorization)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send(),
+        }
+        .map_err(|_| Unreached::default())?;
         timing.status(response.status().as_u16());
         google_auth::read_native(response, max_bytes)
     }
@@ -385,27 +401,26 @@ mod tests {
         Ok(())
     }
 
-    /// An event's conferences: the reader's exchanges, rule and event; then
-    /// exchanges for the event's organizer alone, with Meet's read scope alone;
-    /// then the pinned records filter and each record's three artifact lists.
-    #[test]
-    fn native_event_conferences_delegate_to_the_reader_then_only_the_owner() -> Result<()> {
-        use base64::Engine;
-        use std::{net::TcpListener, thread};
-        const READER: &str = "calendar-reader@synthetic.example";
-        const OWNER: &str = "ada@synthetic.example";
-        const CALENDAR: &str = "GET /calendar/v3/calendars/c_engineering@group.calendar.google.com";
-        const RECORD: &str = "GET /v2/conferenceRecords/conf-1";
-        let auth = [
-            "GET /computeMetadata/v1/instance/service-accounts/default/token HTTP/1.1",
-            "POST /v1/projects/-/serviceAccounts/workspace-reader@synthetic-project.iam.gserviceaccount.com:signJwt HTTP/1.1",
-            "POST /token HTTP/1.1",
-        ];
+    const READER: &str = "calendar-reader@synthetic.example";
+    const OWNER: &str = "ada@synthetic.example";
+    const CALENDAR: &str = "GET /calendar/v3/calendars/c_engineering@group.calendar.google.com";
+    const AUTH: [&str; 3] = [
+        "GET /computeMetadata/v1/instance/service-accounts/default/token HTTP/1.1",
+        "POST /v1/projects/-/serviceAccounts/workspace-reader@synthetic-project.iam.gserviceaccount.com:signJwt HTTP/1.1",
+        "POST /token HTTP/1.1",
+    ];
+    const CALENDAR_SCOPES: &str = "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.acls.readonly";
+
+    /// One API request a fixture expects: its request line, the subject whose
+    /// token it must carry, and the reply.
+    type Expected = (String, &'static str, String);
+
+    /// The reader's rule and the event, as every Meet action reads them first.
+    fn reader_reads() -> Vec<Expected> {
         let event = format!(
             r#"{{"id":"standup0001","status":"confirmed","start":{{"dateTime":"2026-01-05T17:00:00Z"}},"end":{{"dateTime":"2026-01-05T17:30:00Z"}},"organizer":{{"email":"{OWNER}"}},"creator":{{"email":"{OWNER}"}},"conferenceData":{{"conferenceId":"abc-defg-hij","conferenceSolution":{{"key":{{"type":"hangoutsMeet"}}}}}}}}"#
         );
-        // (request line, the bearer it must carry, the reply).
-        let api: Vec<(String, &str, String)> = vec![
+        vec![
             (
                 format!("{CALENDAR}/acl/user:{READER}?fields=scope%28type%2Cvalue%29%2Crole&prettyPrint=false HTTP/1.1"),
                 READER,
@@ -421,47 +436,48 @@ mod tests {
                 OWNER,
                 r#"{"conferenceRecords":[{"name":"conferenceRecords/conf-1","space":"spaces/space1","startTime":"2026-01-05T17:01:00.123Z","endTime":"2026-01-05T17:29:00Z"}]}"#.into(),
             ),
-            (
-                format!("{RECORD}/recordings?pageSize=5&fields=recordings%28name%2Cstate%2CdriveDestination%28file%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
-                OWNER,
-                r#"{"recordings":[{"name":"conferenceRecords/conf-1/recordings/rec-1","state":"FILE_GENERATED","driveDestination":{"file":"1fileId"}}]}"#.into(),
-            ),
-            (
-                format!("{RECORD}/smartNotes?pageSize=5&fields=smartNotes%28name%2Cstate%2CdocsDestination%28document%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
-                OWNER,
-                "{}".into(),
-            ),
-            (
-                format!("{RECORD}/transcripts?pageSize=5&fields=transcripts%28name%2Cstate%2CdocsDestination%28document%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
-                OWNER,
-                r#"{"transcripts":[{"name":"conferenceRecords/conf-1/transcripts/tr-1","state":"STARTED"}]}"#.into(),
-            ),
-        ];
-        let expected: Vec<String> = auth
+        ]
+    }
+
+    /// Serve the reader's and then the owner's exchanges, checking each
+    /// delegation's subject and scopes and each request's bearer, and the API
+    /// requests in order. Returns every request line and every request body.
+    fn delegated(
+        plan: &crate::google_workspace::Plan,
+        mut api: Vec<Expected>,
+        owner_scopes: &'static str,
+        group: Option<Expected>,
+    ) -> Result<(Result<String>, Vec<String>, Vec<String>)> {
+        use base64::Engine;
+        use std::{net::TcpListener, thread};
+        // A share resolves its group as the service account itself between
+        // the reader's reads and the owner's.
+        let directory: Vec<String> = group
+            .iter()
+            .flat_map(|(line, ..)| [
+                AUTH[0].to_owned(),
+                "POST /v1/projects/-/serviceAccounts/workspace-reader@synthetic-project.iam.gserviceaccount.com:generateAccessToken HTTP/1.1".to_owned(),
+                line.clone(),
+            ])
+            .collect();
+        let expected: Vec<String> = AUTH
             .iter()
             .map(|line| (*line).to_owned())
             .chain(api[..2].iter().map(|(line, ..)| line.clone()))
-            .chain(auth.iter().map(|line| (*line).to_owned()))
+            .chain(directory)
+            .chain(AUTH.iter().map(|line| (*line).to_owned()))
             .chain(api[2..].iter().map(|(line, ..)| line.clone()))
             .collect();
-        // Exactly these subjects and scopes, in this order.
-        let delegations = [
-            (
-                READER,
-                "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.acls.readonly",
-            ),
-            (
-                OWNER,
-                "https://www.googleapis.com/auth/meetings.space.readonly",
-            ),
-        ];
+        if let Some(group) = group {
+            api.insert(2, group);
+        }
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let origin = format!("http://{}", listener.local_addr()?);
         let count = expected.len();
-        let server = thread::spawn(move || -> Result<Vec<String>> {
-            let mut lines = Vec::new();
+        let server = thread::spawn(move || -> Result<(Vec<String>, Vec<String>)> {
+            let (mut lines, mut bodies) = (Vec::new(), Vec::new());
             let mut api = api.into_iter();
-            let mut delegations = delegations.into_iter();
+            let mut delegations = [(READER, CALENDAR_SCOPES), (OWNER, owner_scopes)].into_iter();
             let (mut signed, mut subject) = (String::new(), "");
             for _ in 0..count {
                 let (mut stream, _) = listener.accept()?;
@@ -477,6 +493,21 @@ mod tests {
                         "200 OK",
                         "Metadata-Flavor: Google\r\n",
                         r#"{"access_token":"workload-token","token_type":"Bearer","expires_in":3600}"#,
+                    )?;
+                } else if first.contains(":generateAccessToken ") {
+                    // Exactly the Directory scope, as the service account.
+                    anyhow::ensure!(
+                        serde_json::from_str::<serde_json::Value>(body)?
+                            == serde_json::json!({"lifetime":"3600s","scope":[
+                                crate::google_workspace::GROUP_READ_SCOPE]}),
+                        "directory token request invalid"
+                    );
+                    subject = "directory";
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        r#"{"accessToken":"token-for-directory","expireTime":"2030-01-01T00:00:00Z"}"#,
                     )?;
                 } else if first.starts_with("POST /v1/projects/") {
                     let (sub, scope) = delegations
@@ -529,21 +560,55 @@ mod tests {
                         request.contains(&format!("Bearer token-for-{bearer}")),
                         "{first} carried another subject's token"
                     );
+                    bodies.push(body.to_owned());
                     respond(&mut stream, "200 OK", "", &reply)?;
                 }
                 lines.push(first);
             }
-            Ok(lines)
+            Ok((lines, bodies))
         });
+        let mut port = NativeGooglePort::transport_fixture(&origin)?;
+        let (result, meter) = crate::google_workspace::observe(plan, &mut port, 100);
+        let (lines, bodies) = server.join().expect("fixture server panicked")?;
+        assert_eq!(lines, expected);
+        assert_eq!(meter.calls, count as u64);
+        Ok((result, lines, bodies))
+    }
+
+    /// An event's conferences: the reader's exchanges, rule and event; then
+    /// exchanges for the event's owner alone, with Meet's read scope alone;
+    /// then the pinned records filter and each record's three artifact lists.
+    #[test]
+    fn native_event_conferences_delegate_to_the_reader_then_only_the_owner() -> Result<()> {
+        const RECORD: &str = "GET /v2/conferenceRecords/conf-1";
+        let mut api = reader_reads();
+        api.extend([
+            (
+                format!("{RECORD}/recordings?pageSize=5&fields=recordings%28name%2Cstate%2CdriveDestination%28file%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                r#"{"recordings":[{"name":"conferenceRecords/conf-1/recordings/rec-1","state":"FILE_GENERATED","driveDestination":{"file":"1fileId"}}]}"#.into(),
+            ),
+            (
+                format!("{RECORD}/smartNotes?pageSize=5&fields=smartNotes%28name%2Cstate%2CdocsDestination%28document%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                "{}".into(),
+            ),
+            (
+                format!("{RECORD}/transcripts?pageSize=5&fields=transcripts%28name%2Cstate%2CdocsDestination%28document%29%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                r#"{"transcripts":[{"name":"conferenceRecords/conf-1/transcripts/tr-1","state":"STARTED"}]}"#.into(),
+            ),
+        ]);
         let plan = crate::google_workspace::tests::plan_for(
             day2_capabilities::resources::Action::GoogleWorkspaceEventConferences,
             r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","event_id":"standup0001"}"#,
         )?;
-        let mut port = NativeGooglePort::transport_fixture(&origin)?;
-        let (result, meter) = crate::google_workspace::observe(&plan, &mut port, 100);
-        let lines = server.join().expect("fixture server panicked")?;
-        assert_eq!(lines, expected);
-        assert_eq!(meter.calls, 12);
+        let (result, ..) = delegated(
+            &plan,
+            api,
+            "https://www.googleapis.com/auth/meetings.space.readonly",
+            None,
+        )?;
         let found: serde_json::Value = serde_json::from_str(&result?)?;
         assert_eq!(found["Found"]["owner"], OWNER);
         assert_eq!(
@@ -554,6 +619,57 @@ mod tests {
             found["Found"]["records"][0]["transcripts"][0]["state"],
             "Started"
         );
+        Ok(())
+    }
+
+    /// The share: the group is resolved as the service account with the
+    /// Directory scope alone, the owner is delegated with Meet's read scope and Drive's,
+    /// the artifact is read by its exact name, the file's permissions are
+    /// listed, and only then is the one reviewed permission created, with
+    /// exactly the reviewed body.
+    #[test]
+    fn native_share_lists_before_it_creates_the_one_reviewed_permission() -> Result<()> {
+        const FILES: &str = "/drive/v3/files/1fileId/permissions";
+        let mut api = reader_reads();
+        api.extend([
+            (
+                "GET /v2/conferenceRecords/conf-1/recordings/rec-1?fields=name%2Cstate%2CdriveDestination%28file%29&prettyPrint=false HTTP/1.1".into(),
+                OWNER,
+                r#"{"name":"conferenceRecords/conf-1/recordings/rec-1","state":"FILE_GENERATED","driveDestination":{"file":"1fileId"}}"#.into(),
+            ),
+            (
+                format!("GET {FILES}?supportsAllDrives=true&pageSize=100&fields=permissions%28id%2Ctype%2Crole%2CemailAddress%2Cdeleted%29%2CnextPageToken&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                format!(r#"{{"permissions":[{{"id":"1","type":"user","role":"owner","emailAddress":"{OWNER}","deleted":false}}]}}"#),
+            ),
+            (
+                format!("POST {FILES}?supportsAllDrives=true&sendNotificationEmail=false&fields=id%2Ctype%2Crole%2CemailAddress&prettyPrint=false HTTP/1.1"),
+                OWNER,
+                r#"{"id":"0987654321","type":"group","role":"reader","emailAddress":"engineering@synthetic.example"}"#.into(),
+            ),
+        ]);
+        let plan = crate::google_workspace::tests::plan_for(
+            day2_capabilities::resources::Action::GoogleWorkspaceShareArtifact,
+            r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","event_id":"standup0001","artifact":"conferenceRecords/conf-1/recordings/rec-1","group_email":"engineering@synthetic.example"}"#,
+        )?;
+        let (result, _, bodies) = delegated(
+            &plan,
+            api,
+            "https://www.googleapis.com/auth/meetings.space.readonly https://www.googleapis.com/auth/drive",
+            Some((
+                "GET /admin/directory/v1/groups/engineering@synthetic.example?fields=id%2Cemail%2Cname&prettyPrint=false HTTP/1.1".into(),
+                "directory",
+                r#"{"id":"g1","email":"engineering@synthetic.example","name":"Engineering"}"#.into(),
+            )),
+        )?;
+        assert_eq!(result?, r#"{"Shared":{"permission_id":"0987654321"}}"#);
+        assert_eq!(
+            bodies.last().map(String::as_str),
+            Some(
+                r#"{"type":"group","role":"reader","emailAddress":"engineering@synthetic.example"}"#
+            )
+        );
+        assert!(bodies[..bodies.len() - 1].iter().all(String::is_empty));
         Ok(())
     }
 }

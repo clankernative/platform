@@ -1146,6 +1146,16 @@ impl Catalog {
                         "resource_budget_revision_changed"
                     );
                 }
+                // Drive applies only the last of concurrent permission changes
+                // on one file, so shares run one at a time: a slot that grants
+                // the share must charge a budget of concurrency 1.
+                ensure!(
+                    !slot.actions.contains(&Action::GoogleWorkspaceShareArtifact)
+                        || slot.budgets.iter().any(|budget| {
+                            self.budgets[&budget.id].limits.concurrency == Some(1)
+                        }),
+                    "google_workspace_share_requires_a_serial_budget"
+                );
             }
         }
         Ok(())

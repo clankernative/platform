@@ -92,6 +92,14 @@ pub enum SimulatedFault {
     /// conference record deleted between its listing and a read of its
     /// artifacts. Google Workspace only.
     Gone,
+    /// The request is served and lands, and its reply is dropped: a write
+    /// takes effect and its caller cannot know it. Google Workspace only;
+    /// elsewhere it is a lost connection.
+    ReplyLost,
+    /// HTTP 409. In Google Workspace the request is served first and then
+    /// answered as a conflict, as when a concurrent writer made the same
+    /// change; elsewhere a plain 409.
+    Conflict,
     /// HTTP 500. Classified as `Incomplete`, and leaves a write outcome unknown.
     ServerError,
     /// The response never arrives. Dispatched, so a write outcome is unknown.
@@ -249,6 +257,11 @@ pub struct GoogleWorkspaceWorld {
     /// full.
     #[serde(default)]
     pub meet_record_pages: Vec<usize>,
+    /// The domains Drive lets the organization share with, when its policy
+    /// restricts sharing; empty is unrestricted. Sharing outside them is
+    /// refused as an invalid sharing request.
+    #[serde(default)]
+    pub drive_trusted_domains: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -289,12 +302,46 @@ pub struct GoogleArtifact {
     pub file: Option<String>,
 }
 
+/// A file Meet saved. Only its owner can list or change its permissions:
+/// `writersCanShare` is not modelled.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GoogleDriveFile {
     pub name: String,
     pub mime_type: String,
     pub owner: String,
+    /// In the order Drive lists them; the owner's own comes first.
+    #[serde(default)]
+    pub permissions: Vec<GoogleDrivePermission>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleDrivePermission {
+    pub id: String,
+    /// `user`, `group`, `domain` or `anyone`.
+    pub kind: String,
+    pub role: String,
+    #[serde(default)]
+    pub email_address: Option<String>,
+    #[serde(default)]
+    pub deleted: bool,
+    /// Who created it, for a campaign's invariants. Never on the wire.
+    #[serde(default)]
+    pub created_by: Option<String>,
+}
+
+impl GoogleDrivePermission {
+    /// The owner's own permission, as Drive lists it on every file.
+    pub fn owner(owner: &str) -> Self {
+        Self {
+            id: format!("owner{}", &crate::digest(owner.as_bytes())[7..23]),
+            kind: "user".into(),
+            role: "owner".into(),
+            email_address: Some(owner.into()),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1575,6 +1622,7 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
                     name: "Standup recording".into(),
                     mime_type: "video/mp4".into(),
                     owner: address("ada"),
+                    permissions: vec![GoogleDrivePermission::owner(&address("ada"))],
                 },
             ),
             (
@@ -1583,10 +1631,12 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
                     name: "Standup transcript".into(),
                     mime_type: "application/vnd.google-apps.document".into(),
                     owner: address("ada"),
+                    permissions: vec![GoogleDrivePermission::owner(&address("ada"))],
                 },
             ),
         ]),
         meet_record_pages: Vec::new(),
+        drive_trusted_domains: BTreeSet::new(),
     }
 }
 
@@ -1644,6 +1694,7 @@ pub fn google_meet_advance(world: &mut GoogleWorkspaceWorld, name: &str) -> Resu
                 GoogleDriveFile {
                     name: format!("{collection} {artifact_id}"),
                     mime_type: mime_type.into(),
+                    permissions: vec![GoogleDrivePermission::owner(&owner)],
                     owner,
                 },
             );
@@ -1685,8 +1736,11 @@ pub const GOOGLE_MEET_RECORDS_ENDPOINT: &str = "google_workspace.meet.conference
 pub const GOOGLE_MEET_RECORDINGS_ENDPOINT: &str = "google_workspace.meet.recordings.list";
 pub const GOOGLE_MEET_SMART_NOTES_ENDPOINT: &str = "google_workspace.meet.smart_notes.list";
 pub const GOOGLE_MEET_TRANSCRIPTS_ENDPOINT: &str = "google_workspace.meet.transcripts.list";
+pub const GOOGLE_MEET_ARTIFACT_ENDPOINT: &str = "google_workspace.meet.artifact.get";
+pub const GOOGLE_DRIVE_PERMISSIONS_ENDPOINT: &str = "google_workspace.drive.permissions.list";
+pub const GOOGLE_DRIVE_SHARE_ENDPOINT: &str = "google_workspace.drive.permissions.create";
 /// Every endpoint a scenario can schedule a fault against.
-pub const GOOGLE_ENDPOINTS: [&str; 15] = [
+pub const GOOGLE_ENDPOINTS: [&str; 18] = [
     GOOGLE_METADATA_ENDPOINT,
     GOOGLE_IAM_TOKEN_ENDPOINT,
     GOOGLE_IAM_SIGN_ENDPOINT,
@@ -1702,6 +1756,9 @@ pub const GOOGLE_ENDPOINTS: [&str; 15] = [
     GOOGLE_MEET_RECORDINGS_ENDPOINT,
     GOOGLE_MEET_SMART_NOTES_ENDPOINT,
     GOOGLE_MEET_TRANSCRIPTS_ENDPOINT,
+    GOOGLE_MEET_ARTIFACT_ENDPOINT,
+    GOOGLE_DRIVE_PERMISSIONS_ENDPOINT,
+    GOOGLE_DRIVE_SHARE_ENDPOINT,
 ];
 /// The key the simulated IAM signs with. Its "signature" is derived from the
 /// signed bytes, so the token endpoint can tell its own assertions from others.
@@ -1779,13 +1836,23 @@ pub(crate) fn google_workspace_serve(
             GoogleRequest::Auth(_) => endpoint.to_owned(),
         });
         if let Some(fault) = take_fault_named(state, endpoint) {
+            if fault == SimulatedFault::ReplyLost {
+                // Serve it, so whatever it changes is committed, and drop the
+                // reply on the way back.
+                google_reply(&mut state.world, &request)?;
+                return Ok(Err(crate::google_auth::Unreached::default()));
+            }
+            if fault == SimulatedFault::Conflict {
+                google_reply(&mut state.world, &request)?;
+                return Ok(Ok(google_error(409, "conflict", "Conflict")));
+            }
             return Ok(google_fault(
                 fault,
                 max,
                 endpoint.starts_with("google_workspace.meet."),
             ));
         }
-        Ok(Ok(google_reply(&state.world, &request)?))
+        Ok(Ok(google_reply(&mut state.world, &request)?))
     });
     match served {
         Ok(reply) => {
@@ -1881,6 +1948,7 @@ fn google_fault(
                 }
                 403 => ("PERMISSION_DENIED", None),
                 404 => ("NOT_FOUND", None),
+                409 => ("ALREADY_EXISTS", None),
                 429 => ("RESOURCE_EXHAUSTED", Some("RATE_LIMIT_EXCEEDED")),
                 _ => ("INTERNAL", None),
             };
@@ -1900,6 +1968,7 @@ fn google_fault(
         SimulatedFault::Denied => failed(403, "forbidden", "Forbidden"),
         SimulatedFault::BadRequest => failed(400, "badRequest", "Bad Request"),
         SimulatedFault::Gone => failed(404, "notFound", "Requested entity was not found."),
+        SimulatedFault::Conflict => failed(409, "conflict", "Conflict"),
         SimulatedFault::ServerError => failed(500, "backendError", "Backend Error"),
         SimulatedFault::NotJson => Reply {
             status: 200,
@@ -1913,6 +1982,7 @@ fn google_fault(
             ..google_json(200, json!({}))
         },
         SimulatedFault::ConnectionLost
+        | SimulatedFault::ReplyLost
         | SimulatedFault::Rejected
         | SimulatedFault::Partitioned
         | SimulatedFault::TokenOverrun
@@ -1979,7 +2049,7 @@ fn google_is_member(world: &GoogleWorkspaceWorld, group: &str, member: &str) -> 
 }
 
 fn google_reply(
-    world: &GoogleWorkspaceWorld,
+    world: &mut GoogleWorkspaceWorld,
     request: &GoogleRequest<'_>,
 ) -> Result<crate::google_auth::Reply> {
     use crate::google_auth::{Exchange, IamMethod, Reply};
@@ -2158,6 +2228,9 @@ fn google_reply(
             if request.service == crate::google_workspace::Service::Meet {
                 return google_meet_reply(world, request, &issued);
             }
+            if request.service == crate::google_workspace::Service::Drive {
+                return google_drive_reply(world, request, &issued);
+            }
             let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
             let (required, group, member) = match segments.as_slice() {
                 ["admin", "directory", "v1", "groups", group] => {
@@ -2250,11 +2323,188 @@ fn google_api_endpoint(request: &crate::google_workspace::ApiRequest) -> &'stati
         (Service::Calendar, [.., "events"]) => GOOGLE_EVENTS_ENDPOINT,
         (Service::Calendar, [.., "events", _]) => GOOGLE_EVENT_ENDPOINT,
         (Service::Calendar, _) => GOOGLE_CALENDAR_ENDPOINT,
+        (Service::Meet, [_, _, _, _, _]) => GOOGLE_MEET_ARTIFACT_ENDPOINT,
         (Service::Meet, [.., "recordings"]) => GOOGLE_MEET_RECORDINGS_ENDPOINT,
         (Service::Meet, [.., "smartNotes"]) => GOOGLE_MEET_SMART_NOTES_ENDPOINT,
         (Service::Meet, [.., "transcripts"]) => GOOGLE_MEET_TRANSCRIPTS_ENDPOINT,
         (Service::Meet, _) => GOOGLE_MEET_RECORDS_ENDPOINT,
+        (Service::Drive, _) if request.body().is_some() => GOOGLE_DRIVE_SHARE_ENDPOINT,
+        (Service::Drive, _) => GOOGLE_DRIVE_PERMISSIONS_ENDPOINT,
     }
+}
+
+/// Serve one Drive permission route as the token's delegated subject. A file
+/// is visible to its owner alone here, and only its owner lists or shares it.
+/// Every route admits only its reviewed query, and a create only the exact
+/// reviewed body: a group as `reader`. Creating a permission for a group that
+/// already has one answers that permission, unchanged, with `200`.
+fn google_drive_reply(
+    world: &mut GoogleWorkspaceWorld,
+    request: &crate::google_workspace::ApiRequest,
+    grant: &GoogleGrant,
+) -> Result<crate::google_auth::Reply> {
+    use crate::google_workspace_drive::{
+        CREATED_FIELDS, DRIVE_SCOPE, PERMISSION_PAGE_SIZE, PERMISSIONS_FIELDS,
+    };
+    let error = google_status_error;
+    let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
+    let ["drive", "v3", "files", file_id, "permissions"] = segments.as_slice() else {
+        return Ok(error(404, "Not Found"));
+    };
+    let page_size = PERMISSION_PAGE_SIZE.to_string();
+    let compact = ("prettyPrint", "false");
+    let admitted = match request.body() {
+        Some(_) => google_query_is(
+            request,
+            &[
+                ("supportsAllDrives", "true"),
+                ("sendNotificationEmail", "false"),
+                ("fields", CREATED_FIELDS),
+                compact,
+            ],
+            &[],
+        ),
+        None => google_query_is(
+            request,
+            &[
+                ("supportsAllDrives", "true"),
+                ("pageSize", page_size.as_str()),
+                ("fields", PERMISSIONS_FIELDS),
+                compact,
+            ],
+            &["pageToken"],
+        ),
+    };
+    if !admitted {
+        return Ok(google_error(400, "badRequest", "Unreviewed query"));
+    }
+    if !grant.scopes.contains(DRIVE_SCOPE) {
+        return Ok(google_error(
+            403,
+            "insufficientPermissions",
+            "Request had insufficient authentication scopes.",
+        ));
+    }
+    let not_found = google_error(404, "notFound", "File not found.");
+    let Some(subject) = grant.subject.clone() else {
+        return Ok(not_found);
+    };
+    let Some(file) = world.drive_files.get(*file_id) else {
+        return Ok(not_found);
+    };
+    if file.owner != subject {
+        return Ok(not_found);
+    }
+    let wire = |permission: &GoogleDrivePermission| {
+        let mut item = json!({"id":permission.id,"type":permission.kind,"role":permission.role});
+        if let Some(email) = &permission.email_address {
+            item["emailAddress"] = json!(email);
+            item["deleted"] = json!(permission.deleted);
+        }
+        item
+    };
+    let Some(body) = request.body() else {
+        let binding = format!("permissions:{file_id}");
+        let offset = match google_query(request, "pageToken") {
+            None => 0,
+            Some(token) => match google_page_offset(world, &binding, token) {
+                Some(offset) => offset,
+                None => return Ok(google_error(400, "invalid", "Invalid page token")),
+            },
+        };
+        let size = PERMISSION_PAGE_SIZE as usize;
+        let items: Vec<Value> = file
+            .permissions
+            .iter()
+            .skip(offset)
+            .take(size)
+            .map(wire)
+            .collect();
+        let mut page = json!({ "permissions": items });
+        if offset + size < file.permissions.len() {
+            page["nextPageToken"] = json!(google_page_token(world, &binding, offset + size)?);
+        }
+        return Ok(google_json(200, page));
+    };
+    // Exactly the reviewed body: a group as reader, nothing else.
+    let asked: Option<String> = serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(|value| {
+            value.as_object().is_some_and(|object| object.len() == 3)
+                && value["type"] == "group"
+                && value["role"] == "reader"
+        })
+        .and_then(|value| value["emailAddress"].as_str().map(str::to_owned));
+    let Some(group) = asked else {
+        return Ok(google_error(400, "badRequest", "Unreviewed permission"));
+    };
+    // Drive grants the group itself, under its primary address, whichever
+    // address the request named.
+    let Some(group) = world
+        .groups
+        .get_key_value(&group)
+        .or_else(|| {
+            world
+                .groups
+                .iter()
+                .find(|(_, candidate)| candidate.aliases.contains(&group))
+        })
+        .map(|(primary, _)| primary.clone())
+    else {
+        return Ok(google_error(
+            400,
+            "invalidSharingRequest",
+            "Bad Request. User message: \"This sharing request is not allowed.\"",
+        ));
+    };
+    let domain = group.rsplit_once('@').map(|(_, domain)| domain.to_owned());
+    let trusted = world.drive_trusted_domains.is_empty()
+        || domain.is_some_and(|domain| world.drive_trusted_domains.contains(&domain));
+    if !trusted {
+        return Ok(google_error(
+            400,
+            "invalidSharingRequest",
+            "Bad Request. User message: \"This sharing request is not allowed.\"",
+        ));
+    }
+    let file = world
+        .drive_files
+        .get_mut(*file_id)
+        .context("simulated_drive_file")?;
+    if let Some(existing) = file.permissions.iter().find(|permission| {
+        permission.kind == "group"
+            && !permission.deleted
+            && permission
+                .email_address
+                .as_deref()
+                .is_some_and(|email| email.eq_ignore_ascii_case(&group))
+    }) {
+        return Ok(google_json(
+            200,
+            json!({"id":existing.id,"type":existing.kind,"role":existing.role,
+                "emailAddress":existing.email_address}),
+        ));
+    }
+    let id = format!(
+        "{}",
+        u64::from_str_radix(
+            &crate::digest(format!("{file_id}:{group}:{}", file.permissions.len()).as_bytes())
+                [7..22],
+            16
+        )?
+    );
+    file.permissions.push(GoogleDrivePermission {
+        id: id.clone(),
+        kind: "group".into(),
+        role: "reader".into(),
+        email_address: Some(group.clone()),
+        deleted: false,
+        created_by: Some(subject),
+    });
+    Ok(google_json(
+        200,
+        json!({"id":id,"type":"group","role":"reader","emailAddress":group}),
+    ))
 }
 
 /// An error in the envelope Meet and other newer Google APIs send: a status
@@ -2313,21 +2563,30 @@ fn google_meet_reply(
     let segments: Vec<&str> = request.segments.iter().map(String::as_str).collect();
     let record_size = RECORD_PAGE_SIZE.to_string();
     let artifact_size = ARTIFACT_PAGE_SIZE.to_string();
-    let (record, collection) = match segments.as_slice() {
-        ["v2", "conferenceRecords"] => (None, None),
-        ["v2", "conferenceRecords", record, segment] => {
-            let Some(collection) = Collection::ALL
-                .into_iter()
-                .find(|collection| collection.segment() == *segment)
-            else {
-                return Ok(error(404, "NOT_FOUND", "Not found", None));
-            };
-            (Some(*record), Some(collection))
-        }
+    let named = |segment: &str| {
+        Collection::ALL
+            .into_iter()
+            .find(|collection| collection.segment() == segment)
+    };
+    let (record, collection, single) = match segments.as_slice() {
+        ["v2", "conferenceRecords"] => (None, None, None),
+        ["v2", "conferenceRecords", record, segment] => match named(segment) {
+            Some(collection) => (Some(*record), Some(collection), None),
+            None => return Ok(error(404, "NOT_FOUND", "Not found", None)),
+        },
+        ["v2", "conferenceRecords", record, segment, id] => match named(segment) {
+            Some(collection) => (Some(*record), Some(collection), Some(*id)),
+            None => return Ok(error(404, "NOT_FOUND", "Not found", None)),
+        },
         _ => return Ok(error(404, "NOT_FOUND", "Not found", None)),
     };
-    let admitted = match collection {
-        None => {
+    let admitted = match (collection, single) {
+        (Some(collection), Some(_)) => google_query_is(
+            request,
+            &[("fields", collection.artifact_fields()), compact],
+            &[],
+        ),
+        (None, _) => {
             google_query_is(
                 request,
                 &[
@@ -2338,7 +2597,7 @@ fn google_meet_reply(
                 &["filter", "pageToken"],
             ) && query("filter").and_then(google_meet_filter).is_some()
         }
-        Some(collection) => google_query_is(
+        (Some(collection), None) => google_query_is(
             request,
             &[
                 ("pageSize", artifact_size.as_str()),
@@ -2420,23 +2679,27 @@ fn google_meet_reply(
                 Collection::SmartNotes => &found.smart_notes,
                 Collection::Transcripts => &found.transcripts,
             };
-            let items = artifacts
-                .iter()
-                .map(|artifact| {
-                    let mut item = json!({
-                        "name": format!("conferenceRecords/{record}/{}/{}", collection.segment(), artifact.id),
-                        "state": artifact.state,
-                    });
-                    if let Some(file) = &artifact.file {
-                        if collection == Collection::Recordings {
-                            item["driveDestination"] = json!({ "file": file });
-                        } else {
-                            item["docsDestination"] = json!({ "document": file });
-                        }
+            let wire = |artifact: &GoogleArtifact| {
+                let mut item = json!({
+                    "name": format!("conferenceRecords/{record}/{}/{}", collection.segment(), artifact.id),
+                    "state": artifact.state,
+                });
+                if let Some(file) = &artifact.file {
+                    if collection == Collection::Recordings {
+                        item["driveDestination"] = json!({ "file": file });
+                    } else {
+                        item["docsDestination"] = json!({ "document": file });
                     }
-                    item
-                })
-                .collect();
+                }
+                item
+            };
+            if let Some(id) = single {
+                return Ok(match artifacts.iter().find(|artifact| artifact.id == id) {
+                    Some(artifact) => reply(200, wire(artifact)),
+                    None => error(404, "NOT_FOUND", "Requested entity was not found.", None),
+                });
+            }
+            let items = artifacts.iter().map(wire).collect();
             page(
                 format!("{}:{record}", collection.segment()),
                 items,
@@ -2833,8 +3096,9 @@ fn fault_response(
         SimulatedFault::BadRequest => http(400),
         SimulatedFault::RateLimitForbidden => http(403),
         SimulatedFault::Gone => http(404),
+        SimulatedFault::Conflict => http(409),
         SimulatedFault::ServerError => http(500),
-        SimulatedFault::ConnectionLost => Some(Err(TransportError {
+        SimulatedFault::ConnectionLost | SimulatedFault::ReplyLost => Some(Err(TransportError {
             kind: AdapterError::TransportUnavailable,
             response_bytes: 0,
             http_status: None,

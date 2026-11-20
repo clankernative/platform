@@ -86,11 +86,19 @@ of at most 31 days, and one event, by domain-wide delegation as the resource's
 play only when its ACL gives the reader its own `writer` or `owner` rule, which
 every Calendar action reads first; visibility through a group, the domain or
 the public is `NotShared`. `google_workspace.event_conferences.v1` reads one
-such event, derives its owner (the organizer, or for a group or resource
-calendar the creator, when that is a person in the resource's `email_domain`),
+such event, derives its owner (always the event's creator, when that is a
+person in the resource's `email_domain` and the organizer is the creator or a
+group or resource calendar),
 and lists that owner's Meet conference records for the event with their
 recordings, smart notes and transcripts, delegated with Meet's read scope
-alone. The token flow is
+alone. `google_workspace.share_artifact.v1`, the provider's only write, gives
+one in-grant group `reader` on the file of one of that event's artifacts, as
+the same owner with Meet's read scope and `drive`, after the Directory
+resolves the group to that exact primary address. It lists the file's
+permissions before it creates one, and lists again in the same attempt when it
+cannot read the create's answer, so it never creates twice. An outcome that
+stays unknown holds the share's budget, which must be its own with
+`concurrency` 1, until an operator reconciles it. The token flow is
 the shared `google_auth` module Workspace Directory also uses; the adapter reaches
 Google through a request-level port, and the simulated port answers the same
 requests from `google_workspace.simulated.sqlite`. See
