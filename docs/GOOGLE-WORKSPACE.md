@@ -548,10 +548,13 @@ Who can see a calendar is its ACL, resolved as Google resolves it:
   group it belongs to (nested membership included), a `domain` rule for its
   domain, and the `default` rule.
 - Organization-wide sharing is modelled as a domain rule.
-- `reader` or more shows the calendar and its events; anything less is `404`.
-  **Contradicted live (2026-11-20 UTC)** for free/busy only: Google answered
-  the reader's rule with `403 forbidden` and `calendars.get` with `200`. The
-  adapter's answer, `NotShared`, is right either way; the simulation is not.
+- `reader` or more shows the calendar and its events.
+- `freeBusyReader` shows the calendar itself (`calendars.get` is `200`) and
+  refuses every ACL read with `403 forbidden`, as Google answered on
+  2026-11-20; the adapter answers `NotShared`. Its events stay `404`, which
+  was not observed: the adapter never reads the events of a calendar out of
+  play.
+- No access at all is `404` for every route, as observed.
 - Reading the ACL, a single rule or the whole list, needs `writer` or `owner`;
   anything less is `403`.
 - The service account itself has no calendars.

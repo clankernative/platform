@@ -58,7 +58,7 @@ fn a_rehearsal_runs_every_step_through_the_adapter_and_writes_once() -> Result<(
         ("directory_group_alias", "Found"),
         ("directory_group_member", "Member"),
         ("calendar_in_play", "Found"),
-        ("calendar_free_busy", "NotFound"),
+        ("calendar_free_busy", "NotShared"),
         ("calendar_unshared", "NotFound"),
         ("events_page", "Found"),
         ("events_token_other_query", "unsettled_single_page"),

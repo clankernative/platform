@@ -2855,9 +2855,12 @@ fn google_rule(rule: &GoogleAclRule) -> Value {
 /// Serve one Calendar route as the token's delegated subject. Visibility
 /// follows Google: any rule that applies to the subject with `reader` or more
 /// shows a calendar and its events, and reading the ACL, a rule or the whole
-/// list, needs `writer` or `owner`. A calendar the subject cannot see is
-/// `404`. IDs and addresses are matched exactly, and every route admits only
-/// its reviewed query.
+/// list, needs `writer` or `owner`. Free/busy access shows the calendar itself
+/// and refuses its ACL with `403 forbidden`, as Google answered on
+/// 2026-11-20; its events stay `404` (not observed: the adapter never reads
+/// the events of a calendar out of play). A calendar the subject cannot see
+/// at all is `404`. IDs and addresses are matched exactly, and every route
+/// admits only its reviewed query.
 fn google_calendar_reply(
     world: &GoogleWorkspaceWorld,
     request: &crate::google_workspace::ApiRequest,
@@ -2922,7 +2925,11 @@ fn google_calendar_reply(
         return Ok(not_found);
     };
     let role = google_effective_role(world, calendar, subject);
-    if role < google_role_rank("reader") {
+    let hidden = match rest {
+        [] | ["acl"] | ["acl", _] => role < google_role_rank("freeBusyReader"),
+        _ => role < google_role_rank("reader"),
+    };
+    if hidden {
         return Ok(not_found);
     }
     let can_read_acl = role >= google_role_rank("writer");

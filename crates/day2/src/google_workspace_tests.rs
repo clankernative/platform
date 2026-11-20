@@ -1183,6 +1183,12 @@ fn only_the_readers_own_writer_or_owner_rule_puts_a_calendar_in_play() {
             "the reader's own reader rule",
             vec![rule("user", Some(READER), "reader")],
         ),
+        // Google shows a free/busy calendar and refuses its ACL with 403, as
+        // it answered live.
+        (
+            "the reader's own free/busy rule",
+            vec![rule("user", Some(READER), "freeBusyReader")],
+        ),
         (
             "the reader's own free/busy rule under a domain rule",
             vec![
