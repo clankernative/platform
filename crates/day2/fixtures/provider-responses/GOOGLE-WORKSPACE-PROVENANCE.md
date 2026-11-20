@@ -112,5 +112,8 @@ adapter or its simulation.
   illustrative,
   https://developers.google.com/workspace/drive/api/guides/handle-errors
 
-These establish field names and types only. The live qualification recipe
-replaces them with redacted recordings.
+These establish field names and types only. The live qualification
+(`google-workspace-qualify`) records no response bodies: its receipt holds
+statuses, reviewed reasons and counts of reviewed field forms. A reviewer
+compares those with these fixtures and corrects a fixture by hand where the
+receipt shows Google's shape differs.

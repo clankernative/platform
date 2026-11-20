@@ -53,6 +53,7 @@ COMPILE_INPUTS = [
     "//:ops/Ci.roc",
     "//:ops/Delegation.roc",
     "//:ops/GkeRelease.roc",
+    "//:ops/GoogleWorkspaceQualification.roc",
     "//:ops/Infra.roc",
     "//:ops/Linux.roc",
     "//:ops/RuntimeImage.roc",

@@ -1447,7 +1447,7 @@ pub const GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT: &str =
 pub const GOOGLE_DEVELOPMENT_CALENDAR_READER: &str = "calendar-reader@synthetic.example";
 /// A shared calendar in the development organization.
 pub const GOOGLE_DEVELOPMENT_CALENDAR: &str = "c_engineering@group.calendar.google.com";
-const GOOGLE_DEVELOPMENT_DOMAIN: &str = "synthetic.example";
+pub const GOOGLE_DEVELOPMENT_DOMAIN: &str = "synthetic.example";
 
 /// The disposable grant matching [`google_workspace_development_fixture`].
 pub fn google_workspace_development_target() -> day2_capabilities::resources::ResourceTarget {

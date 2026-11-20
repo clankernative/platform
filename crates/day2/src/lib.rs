@@ -44,6 +44,7 @@ pub mod google_workspace_calendar;
 pub mod google_workspace_drive;
 pub mod google_workspace_http;
 pub mod google_workspace_meet;
+pub mod google_workspace_qualification;
 mod host;
 pub mod host_inputs;
 mod host_loop;

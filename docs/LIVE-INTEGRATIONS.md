@@ -104,6 +104,50 @@ Google through a request-level port, and the simulated port answers the same
 requests from `google_workspace.simulated.sqlite`. See
 [Google Workspace](GOOGLE-WORKSPACE.md) for the contract, bounds and codes.
 
+`bazel run //crates/xtask:xtask -- google-workspace-qualify PROFILE TOKEN_FILE NEW_EVIDENCE_DIRECTORY`
+is the explicit operator qualification. It is not part of any verification
+recipe. The private
+[`ops/GoogleWorkspaceQualification.roc`](../ops/GoogleWorkspaceQualification.roc)
+recipe owns its step order and runs through `ops/Runner.roc`:
+
+1. open the inputs;
+2. six read steps, each a closed native operation;
+3. the one share;
+4. visibility checks until the permission is listed or seven have run;
+5. drop the run;
+6. publish the receipt.
+
+The native session refuses steps out of order, with arguments, unknown or
+replayed, and drops the run if any step fails. The run enforces every read
+before the share, one create, and at most seven checks, each after its minimum
+wait.
+
+The profile names the grant and the live fixtures by role, and expires within
+a week. Every probe's request must pass the adapter's own authorization
+before the token is read. The token file holds the operator's own
+short-lived access token and must be owner-private. It stands in for the
+metadata server's workload token and for nothing else: IAM and the
+delegated token exchange run unchanged, and no service-account key is
+accepted. `Qualification::native`, which runs it, is an architecture hazard
+whose only reviewed call site is this command. The evidence directory must be
+new.
+
+Every probe is an ordinary action through the native port. A recording layer
+keeps only statuses, byte counts, reviewed error reasons and counts of
+reviewed field forms. It passes only reviewed read requests and, in the share
+step, the one create, so a run creates at most one permission. A marker is
+written before the create can be sent. The receipt names fixtures by role and
+carries the digest of the exact profile bytes. Before publishing, the session
+refuses a receipt that claims `provider_qualified`, or that contains the token
+or any profile value. Every receipt reports `provider_qualified: false`; a
+reviewer settles each checklist item, and the receipt only records evidence.
+
+Nothing is deleted. The operator removes the one permission by hand
+afterwards. See
+[Google Workspace](GOOGLE-WORKSPACE.md#live-qualification) for the
+credential's authority, the profile, the fixtures an administrator creates
+first, and which checklist items a run settles.
+
 ## Carta issuer captures
 
 A resource on a live `carta` connection makes `carta.snapshot.v2` collect one
@@ -382,6 +426,13 @@ A live qualification requires explicitly approved nonproduction targets:
   client-secret file and an expiring `carta-qualify` profile. Its receipt must
   settle the granted scopes, the playground API origin, end-of-pagination form,
   page sizes and which fields Carta omits or nulls before production cut-over.
+- Google Workspace test fixtures in the organization (the
+  [live fixture setup](GOOGLE-WORKSPACE.md#live-fixture-setup)), Token Creator
+  on the connection's service account for the operator, conditioned to
+  expire, an owner-private operator token and an expiring
+  `google-workspace-qualify` profile. Its receipt records evidence for the
+  checklist items marked automated; a reviewer settles each item, and the
+  rest stay manual.
 
 Live credentials and account evidence must be provided before those checks can
 be completed. Installing an adapter or mounting a credential does not assert

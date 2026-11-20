@@ -1118,6 +1118,122 @@ fn carta_qualification_stops_at_every_failed_step_without_retry() -> Result<()> 
     Ok(())
 }
 
+const GOOGLE_WORKSPACE_QUALIFICATION_READS: [&str; 8] = [
+    "google-workspace-qualification-open",
+    "google-workspace-qualification-directory",
+    "google-workspace-qualification-calendars",
+    "google-workspace-qualification-events",
+    "google-workspace-qualification-event",
+    "google-workspace-qualification-conferences",
+    "google-workspace-qualification-share-alias",
+    "google-workspace-qualification-share",
+];
+
+/// The recipe's steps when the share asks for checks (`check`) and the
+/// `visible_at`-th check, if any, finds the permission.
+fn google_workspace_qualification_steps(check: bool, visible_at: Option<usize>) -> Vec<String> {
+    let checks = match (check, visible_at) {
+        (false, _) => 0,
+        (true, Some(at)) => at,
+        (true, None) => 7,
+    };
+    GOOGLE_WORKSPACE_QUALIFICATION_READS
+        .iter()
+        .map(|step| (*step).to_owned())
+        .chain((0..checks).map(|_| "google-workspace-qualification-check".to_owned()))
+        .chain([
+            "google-workspace-qualification-discard".to_owned(),
+            "google-workspace-qualification-receipt".to_owned(),
+        ])
+        .collect()
+}
+
+/// A host that answers the share and each check as `check` and `visible_at`
+/// say, recording every step it is asked for.
+fn google_workspace_qualification_host(
+    check: bool,
+    visible_at: Option<usize>,
+    effects: &mut Vec<String>,
+    request: &automation::Request,
+) -> Result<Value> {
+    assert_eq!(request.decode::<Value>()?, json!({}));
+    effects.push(request.action.clone());
+    let checks = effects
+        .iter()
+        .filter(|step| *step == "google-workspace-qualification-check")
+        .count();
+    Ok(match request.action.as_str() {
+        "google-workspace-qualification-share" => json!({ "check": check }),
+        "google-workspace-qualification-check" => json!({ "visible": Some(checks) == visible_at }),
+        "google-workspace-qualification-receipt" => json!({"creates_sent":1}),
+        _ => json!({}),
+    })
+}
+
+#[test]
+fn google_workspace_qualification_orders_reads_share_and_checks_until_listed() -> Result<()> {
+    assert!(
+        automation::SOURCES
+            .iter()
+            .any(|(name, _)| *name == "ops/GoogleWorkspaceQualification.roc")
+    );
+    let runner = automation::runner()?;
+    // Listed at the third check; never listed, so seven; nothing to check.
+    for (check, visible_at) in [(true, Some(3)), (true, None), (false, None)] {
+        let mut effects = Vec::new();
+        let result = automation::run(&runner, &["google-workspace-qualification"], |request| {
+            google_workspace_qualification_host(check, visible_at, &mut effects, &request)
+        })?;
+        assert_eq!(
+            effects,
+            google_workspace_qualification_steps(check, visible_at)
+        );
+        assert_eq!(result, json!({"creates_sent":1}));
+    }
+    Ok(())
+}
+
+#[test]
+fn google_workspace_qualification_stops_at_every_failed_step_without_retry() -> Result<()> {
+    let runner = automation::runner()?;
+    let steps = google_workspace_qualification_steps(true, Some(2));
+    for index in 0..steps.len() {
+        let mut effects = Vec::new();
+        let result = automation::run(&runner, &["google-workspace-qualification"], |request| {
+            if effects.len() == index {
+                effects.push(request.action.clone());
+                bail!("injected google workspace qualification failure");
+            }
+            google_workspace_qualification_host(true, Some(2), &mut effects, &request)
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected google workspace qualification failure")
+        );
+        assert_eq!(effects, steps[..=index]);
+    }
+    for arguments in [
+        vec!["google-workspace-qualification", "profile.json"],
+        vec!["google-workspace-qualification", "--skip-share"],
+    ] {
+        let mut effects = 0;
+        let result = automation::run(&runner, &arguments, |_| {
+            effects += 1;
+            bail!("unadmitted recipe reached native host");
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown private workflow")
+        );
+        assert_eq!(effects, 0);
+    }
+    Ok(())
+}
+
 #[test]
 fn local_lifecycle_and_invalid_settings_never_build_or_reset_data() -> Result<()> {
     let mut effects = Vec::new();
