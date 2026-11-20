@@ -84,6 +84,7 @@ impl Fixture {
         )?;
         crate::audit::upgrade(&tx)?;
         crate::execution::upgrade(&tx)?;
+        crate::recovery::upgrade(&tx)?;
         crate::preparation::upgrade(&tx)?;
         crate::authority_state::upgrade(&tx)?;
         crate::authority_state::store_record_in(&tx, &active, "operator", "journal-test")?;

@@ -1228,6 +1228,68 @@ fn blocked_target_work_does_not_hold_rollout_abort() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn blocked_source_work_can_be_abandoned_from_the_replacement() -> Result<()> {
+    let (world, candidate, operator) = fixture()?;
+    prepare(&world, &candidate, &operator)?;
+    rollout::transition(
+        &world.runtime,
+        "release-one",
+        Phase::Prepared,
+        Phase::Serving,
+        &operator,
+    )?;
+    world.runtime.accept(
+        "reports.submit",
+        "alice",
+        "source-work",
+        &json!({"title":"x","text":"y"}),
+        100,
+    )?;
+    let replacement = Runtime::load(&candidate, "reports")?;
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Serving,
+        Phase::Draining,
+        &operator,
+    )?;
+    // Revoking blocks the source work; granting again does not unblock it.
+    let mut actors = std::collections::BTreeSet::new();
+    world.change_policy(|policy| {
+        actors = std::mem::take(&mut policy.operations.get_mut("reports.submit").unwrap().actors);
+    })?;
+    world.change_policy(|policy| {
+        policy.operations.get_mut("reports.submit").unwrap().actors = actors;
+    })?;
+    let receipt = day2::recovery::abandon(
+        &replacement,
+        &operator,
+        &day2::recovery::Request {
+            request_id: "abandon-source-work".into(),
+            invocation: "source-work".into(),
+            expected_artifact: world.runtime.artifact().id().into(),
+            reason: "source work blocked during the rollout".into(),
+        },
+    )?;
+    assert_eq!(receipt.invocation, "source-work");
+    assert!(invocations::drain(&replacement, 16)?.is_empty());
+    rollout::transition(
+        &replacement,
+        "release-one",
+        Phase::Draining,
+        Phase::Complete,
+        &operator,
+    )?;
+    replacement.initialize()?;
+    let receipt = invocations::status(&replacement, "source-work", "alice")?;
+    assert_eq!(
+        (receipt.status.as_str(), receipt.error.as_str()),
+        ("failure", "invocation_abandoned")
+    );
+    Ok(())
+}
+
 fn stock_fixture() -> Result<(World, PathBuf, LocalOperator)> {
     let artifact = std::env::var_os("DAY2_TEST_STOCK_LEDGER_ARTIFACT")
         .context("build stock-ledger fixture")?;

@@ -1030,6 +1030,7 @@ impl SchemaInitialization<'_> {
         crate::preparation::upgrade(tx)?;
         crate::capture_delivery::upgrade(tx)?;
         crate::execution::upgrade(tx)?;
+        crate::recovery::upgrade(tx)?;
         upgrade_selection_cursors(tx)?;
         crate::authority_state::upgrade(tx)?;
         if !exists {
@@ -2031,10 +2032,17 @@ impl Runtime {
     fn execute_owned(&self, id: &str, fault: Fault) -> Result<Outcome> {
         // Blocking is host-owned execution metadata, not an application failure or
         // permission to rerun already committed work with another identity.
-        let blocked = self.sql_read(|connection| {
+        let (abandoned, blocked) = self.sql_read(|connection| {
             self.check_binding(connection)?;
-            crate::authority_state::is_blocked(connection, id)
+            Ok((
+                crate::recovery::abandoned(connection, id)?,
+                crate::authority_state::is_blocked(connection, id)?,
+            ))
         })?;
+        // An abandoned invocation keeps its block row but has finished.
+        if abandoned {
+            return Ok(crate::recovery::abandoned_outcome());
+        }
         if blocked {
             return Ok(blocked_outcome(id));
         }
@@ -2860,6 +2868,12 @@ pub(crate) fn completed_outcome(
     policy: &crate::authority::Policy,
 ) -> Result<Outcome> {
     crate::audit::require_current_schema(connection)?;
+    // An abandoned invocation finished without a trace. Its outcome is host
+    // metadata with no application result, so the caller's authority checks
+    // already cover it.
+    if crate::recovery::abandoned(connection, id)? {
+        return Ok(crate::recovery::abandoned_outcome());
+    }
     let (raw, receipt): (Option<String>, Option<String>) = connection.query_row(
         "SELECT trace,receipt FROM day2_invocations WHERE id=?1",
         [id],

@@ -402,3 +402,34 @@ fn the_source_reconciles_a_report_whose_announcement_was_lost() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn an_abandoned_occurrence_is_no_longer_reported_as_blocked() -> Result<()> {
+    let world = World::new()?;
+    bind(&world, "alice", false)?;
+    let blocked = leave_pending(&world, MONDAY - INTERVAL_MS, true)?;
+    let tick = sweep_tick(&world.runtime, MONDAY)?;
+    assert_eq!(
+        tick.blocked.map(|blocked| blocked.occurrence_ms),
+        Some(MONDAY - INTERVAL_MS)
+    );
+    let occurrence = tick.offered[0].0;
+
+    day2::recovery::abandon(
+        &world.runtime,
+        &day2::authority_state::LocalOperator::assert_local("admin")?,
+        &day2::recovery::Request {
+            request_id: "abandon-blocked-sweep".into(),
+            invocation: blocked.clone(),
+            expected_artifact: world.runtime.artifact().id().into(),
+            reason: "occurrence blocked by a policy change".into(),
+        },
+    )?;
+    assert_eq!(status(&world, &blocked)?, "failure");
+    // Finished work is neither in flight nor blocked, and the schedule goes on.
+    let next = sweep_tick(&world.runtime, occurrence + INTERVAL_MS)?;
+    assert_eq!(next.skipped, None);
+    assert_eq!(next.blocked, None);
+    assert_eq!(next.offered.len(), 1);
+    Ok(())
+}

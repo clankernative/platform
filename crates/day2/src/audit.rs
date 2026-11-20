@@ -699,21 +699,61 @@ pub(crate) fn record_attempt(
         .route(attempt.operation)
         .ok()
         .map(|operation| operation.name.as_str());
-    let identity = if !attempt.identity.is_empty()
-        && attempt.identity.len() <= 128
-        && attempt
-            .identity
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.$".contains(&byte))
-    {
-        attempt.identity.to_owned()
-    } else {
-        crate::digest(attempt.identity.as_bytes())
-    };
+    let identity = event_identity(attempt.identity);
     let tag = |value: serde_json::Value| -> Result<String> {
         Ok(value.as_str().context("audit tag")?.to_owned())
     };
     db.execute("INSERT INTO day2_audit_events(scope,kind,identity,actor,initiator,operation,outcome,at_ms,artifact,reason,trigger) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![runtime.scope(),tag(serde_json::to_value(attempt.kind)?)?,identity,actor,initiator,operation,tag(serde_json::to_value(attempt.outcome)?)?,attempt.at_ms,runtime.artifact().id(),attempt.reason.map(|reason| tag(serde_json::to_value(reason)?)).transpose()?,attempt.trigger.as_str()])?;
+    Ok(())
+}
+
+fn event_identity(identity: &str) -> String {
+    if !identity.is_empty()
+        && identity.len() <= 128
+        && identity
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.$".contains(&byte))
+    {
+        identity.to_owned()
+    } else {
+        crate::digest(identity.as_bytes())
+    }
+}
+
+/// An operator's abandonment of a blocked invocation.
+pub(crate) struct Abandonment<'a> {
+    pub operator: &'a str,
+    pub invocation: &'a str,
+    /// The invocation's own operation and artifact, which may be an earlier one.
+    pub operation: &'a str,
+    pub artifact: &'a str,
+    pub at_ms: i64,
+}
+
+/// The event names the operator as actor and initiator and carries no reason
+/// text: the bounded operator reason stays in the append-only abandonment row.
+pub(crate) fn record_abandonment(
+    db: &Connection,
+    runtime: &Runtime,
+    abandonment: Abandonment<'_>,
+) -> Result<()> {
+    ensure!(
+        !db.is_autocommit(),
+        "abandonment audit requires transaction"
+    );
+    validate_event_stream(db)?;
+    db.execute(
+        "INSERT INTO day2_audit_events(scope,kind,identity,actor,initiator,operation,outcome,at_ms,artifact,reason,trigger)
+         VALUES(?1,'recovery',?2,?3,?3,?4,'abandoned',?5,?6,NULL,'recovery')",
+        params![
+            runtime.scope(),
+            event_identity(abandonment.invocation),
+            abandonment.operator,
+            abandonment.operation,
+            abandonment.at_ms,
+            abandonment.artifact
+        ],
+    )?;
     Ok(())
 }
 
@@ -915,6 +955,7 @@ impl PageRequest {
                     "admission",
                     "execution_attempt",
                     "invocation",
+                    "recovery",
                     "web"
                 ]
                 .contains(&value)),
@@ -929,7 +970,8 @@ impl PageRequest {
                     "success",
                     "failure",
                     "received",
-                    "response"
+                    "response",
+                    "abandoned"
                 ]
                 .contains(&value)),
                 InvalidInput

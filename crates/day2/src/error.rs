@@ -82,6 +82,7 @@ failures! {
     TicketExpired => ("ticket_expired", Conflict),
     ArtifactBindingChanged => ("artifact_binding_changed", Conflict),
     AuthorityPolicyChanged => ("authority_policy_changed", Conflict),
+    InvocationAbandoned => ("invocation_abandoned", Conflict),
     PreparationAuthorityChanged => ("preparation_authority_changed", Forbidden),
     EffectAuthorityChanged => ("effect_authority_changed", Forbidden),
     EffectReconciliationPending => ("effect_reconciliation_pending", Conflict),

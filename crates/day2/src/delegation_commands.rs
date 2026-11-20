@@ -540,7 +540,9 @@ pub fn status(callee: &Runtime, verified: &VerifiedQuery) -> Result<String> {
         crate::authority_state::authorize_in(&tx, callee, &query.operation, &query.actor)?;
     let row: Option<(String, String, Option<String>)> = tx.query_row("SELECT i.invocation,v.status,v.outcome FROM day2_app_inbox i JOIN day2_invocations v ON v.id=i.invocation WHERE i.id=?1 AND i.source=?2 AND i.actor=?3 AND i.operation=?4 AND i.contract=?5", params![input.id, query.source.runtime_scope(), query.actor, query.operation, query.contract_digest.as_deref().unwrap_or("")], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
     let (state, output) = if let Some((id, status, raw_outcome)) = row {
-        if crate::authority_state::is_blocked(&tx, &id)? {
+        // An abandoned invocation keeps its block row but has finished: it reads
+        // as refused, like any failure.
+        if status == "pending" && crate::authority_state::is_blocked(&tx, &id)? {
             ("blocked", String::new())
         } else {
             match status.as_str() {
