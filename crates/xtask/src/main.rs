@@ -21,6 +21,7 @@ mod ci_cache;
 mod control_simulation;
 mod formatter_bootstrap;
 mod formatting;
+mod google_workspace_qualify;
 mod linux_provisioning_fixture;
 mod linux_qualification;
 mod linux_runtime_qualification;
@@ -571,6 +572,15 @@ fn main() -> Result<()> {
             let evidence = PathBuf::from(args.next().context(usage)?);
             ensure!(args.next().is_none(), "{usage}");
             carta_qualify::execute(&root, &profile, &secret, &evidence)?;
+        }
+        "google-workspace-qualify" => {
+            let usage =
+                "usage: xtask google-workspace-qualify PROFILE TOKEN_FILE NEW_EVIDENCE_DIRECTORY";
+            let profile = PathBuf::from(args.next().context(usage)?);
+            let token = PathBuf::from(args.next().context(usage)?);
+            let evidence = PathBuf::from(args.next().context(usage)?);
+            ensure!(args.next().is_none(), "{usage}");
+            google_workspace_qualify::execute(&root, &profile, &token, &evidence)?;
         }
         "simulate-control" => {
             let seed = args

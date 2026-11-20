@@ -24,6 +24,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 | [Release.roc](Release.roc) | Select the next secret-dependent release step from persisted state; the native host enforces authority and executes it |
 | [OAuthRegistration.roc](OAuthRegistration.roc) | Exact secret read → prove S256 rejection/correction and required client credential → code exchange → stable account → refresh → same account → secret re-read and native registration receipt |
 | [CartaQualification.roc](CartaQualification.roc) | Read the expiring playground profile and owner-private secret → private scratch store → one native capture through the production pipeline → discard the scratch store → guarded receipt of counts, shapes and classifications with `provider_qualified: false` |
+| [GoogleWorkspaceQualification.roc](GoogleWorkspaceQualification.roc) | Read the expiring profile and owner-private operator token → every read probe through the native adapter → the one share, with writes fenced, and its visibility checks → drop the run → guarded receipt of statuses, counts and reviewed classifications with `provider_qualified: false` |
 | [NativeEnrollment.roc](NativeEnrollment.roc) | Retained issuer birth → current-child checks → supervision; finite real native enrollment/clock/refusal qualification |
 | [RuntimeImage.roc](RuntimeImage.roc) | Resolve immutable images → measure layer inheritance and execution settings → compare the exact read-only app artifact → composition receipt; consumes compiled tooling |
 

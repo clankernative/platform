@@ -97,6 +97,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../../../ops/CartaQualification.roc"),
     ),
     (
+        "ops/GoogleWorkspaceQualification.roc",
+        include_bytes!("../../../ops/GoogleWorkspaceQualification.roc"),
+    ),
+    (
         "ops/Release.roc",
         include_bytes!("../../../ops/Release.roc"),
     ),

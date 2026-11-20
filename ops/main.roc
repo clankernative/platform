@@ -14,6 +14,7 @@ package
 		ProviderConformance,
 		OAuthRegistration,
 		CartaQualification,
+		GoogleWorkspaceQualification,
 		Release,
 		GkeRelease,
 		NativeEnrollment,

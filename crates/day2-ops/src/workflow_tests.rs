@@ -1118,6 +1118,81 @@ fn carta_qualification_stops_at_every_failed_step_without_retry() -> Result<()> 
     Ok(())
 }
 
+const GOOGLE_WORKSPACE_QUALIFICATION_STEPS: [&str; 5] = [
+    "google-workspace-qualification-open",
+    "google-workspace-qualification-read",
+    "google-workspace-qualification-share",
+    "google-workspace-qualification-discard",
+    "google-workspace-qualification-receipt",
+];
+
+#[test]
+fn google_workspace_qualification_runs_fixed_steps_and_returns_the_guarded_receipt_result()
+-> Result<()> {
+    assert!(
+        automation::SOURCES
+            .iter()
+            .any(|(name, _)| *name == "ops/GoogleWorkspaceQualification.roc")
+    );
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &["google-workspace-qualification"],
+        |request| {
+            assert_eq!(request.decode::<Value>()?, json!({}));
+            effects.push(request.action.clone());
+            if request.action == "google-workspace-qualification-receipt" {
+                Ok(json!({"creates_sent":1}))
+            } else {
+                Ok(json!({}))
+            }
+        },
+    )?;
+    assert_eq!(effects, GOOGLE_WORKSPACE_QUALIFICATION_STEPS);
+    assert_eq!(result, json!({"creates_sent":1}));
+    Ok(())
+}
+
+#[test]
+fn google_workspace_qualification_stops_at_every_failed_step_without_retry() -> Result<()> {
+    let runner = automation::runner()?;
+    for (index, failed) in GOOGLE_WORKSPACE_QUALIFICATION_STEPS.iter().enumerate() {
+        let mut effects = Vec::new();
+        let result = automation::run(&runner, &["google-workspace-qualification"], |request| {
+            effects.push(request.action.clone());
+            if request.action == *failed {
+                bail!("injected google workspace qualification failure: {failed}");
+            }
+            Ok(json!({}))
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected google workspace qualification failure")
+        );
+        assert_eq!(effects, GOOGLE_WORKSPACE_QUALIFICATION_STEPS[..=index]);
+    }
+    for arguments in [
+        vec!["google-workspace-qualification", "profile.json"],
+        vec!["google-workspace-qualification", "--skip-share"],
+    ] {
+        let mut effects = 0;
+        let result = automation::run(&runner, &arguments, |_| {
+            effects += 1;
+            bail!("unadmitted recipe reached native host");
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown private workflow")
+        );
+        assert_eq!(effects, 0);
+    }
+    Ok(())
+}
+
 #[test]
 fn local_lifecycle_and_invalid_settings_never_build_or_reset_data() -> Result<()> {
     let mut effects = Vec::new();
