@@ -1462,8 +1462,123 @@ pub fn google_workspace_development_target() -> day2_capabilities::resources::Re
     }
 }
 
+/// Move a seeded development world's meetings to the days before `at`, Unix
+/// seconds, so the window an application derives from its invocation time
+/// finds them: the latest day any event ends becomes `at`'s UTC day.
+///
+/// A disposable instance seeds the world before its campaign chooses a clock,
+/// so the campaign dates it once its clock is known. Whole days keep every
+/// event's clock time and all-day dates intact. Dating to the same day again
+/// changes nothing, and an instance without a Google Workspace world is left
+/// alone.
+pub fn date_google_workspace_development(database: &Path, scope: &str, at: i64) -> Result<()> {
+    if !database.with_file_name(GOOGLE_WORKSPACE_WORLD).is_file() {
+        return Ok(());
+    }
+    update_google_workspace(database, scope, |state| {
+        let Some(latest) = state.world.latest_event_day()? else {
+            return Ok(());
+        };
+        let target = time::OffsetDateTime::from_unix_timestamp(at)
+            .context("google_workspace_development_clock")?
+            .date()
+            .to_julian_day();
+        state
+            .world
+            .shift_days(i64::from(target) - i64::from(latest.to_julian_day()))
+    })
+}
+
+impl GoogleWorkspaceWorld {
+    /// The latest UTC day on which any event ends: an all-day event's
+    /// exclusive end date, or the date of a timed end.
+    fn latest_event_day(&self) -> Result<Option<time::Date>> {
+        let mut latest = None;
+        for event in self
+            .calendars
+            .values()
+            .flat_map(|calendar| &calendar.events)
+        {
+            if let Some(end) = &event.end {
+                let day = day_prefix(end.date_time.as_deref().or(end.date.as_deref()))?;
+                latest = latest.max(Some(day));
+            }
+        }
+        Ok(latest)
+    }
+
+    /// Move every event and conference record by whole days.
+    pub fn shift_days(&mut self, days: i64) -> Result<()> {
+        if days == 0 {
+            return Ok(());
+        }
+        for event in self
+            .calendars
+            .values_mut()
+            .flat_map(|calendar| &mut calendar.events)
+        {
+            for time in [&mut event.start, &mut event.end, &mut event.original_start]
+                .into_iter()
+                .flatten()
+            {
+                for value in [&mut time.date_time, &mut time.date].into_iter().flatten() {
+                    shift_day_prefix(value, days)?;
+                }
+            }
+        }
+        for record in self.conference_records.values_mut() {
+            shift_day_prefix(&mut record.start_time, days)?;
+            if let Some(end) = &mut record.end_time {
+                shift_day_prefix(end, days)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `YYYY-MM-DD` a fixture time starts with.
+fn day_prefix(value: Option<&str>) -> Result<time::Date> {
+    let value = value.context("google_workspace_development_time")?;
+    let field = |range: std::ops::Range<usize>| {
+        value
+            .get(range)
+            .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .context("google_workspace_development_time")
+    };
+    ensure!(
+        value.as_bytes().get(4) == Some(&b'-') && value.as_bytes().get(7) == Some(&b'-'),
+        "google_workspace_development_time"
+    );
+    let month = time::Month::try_from(field(5..7)?.parse::<u8>()?)?;
+    Ok(time::Date::from_calendar_date(
+        field(0..4)?.parse()?,
+        month,
+        field(8..10)?.parse()?,
+    )?)
+}
+
+/// Rewrite only the date a fixture time starts with, keeping its clock time,
+/// fraction and offset byte for byte.
+fn shift_day_prefix(value: &mut String, days: i64) -> Result<()> {
+    let day = day_prefix(Some(value))?;
+    let shifted = time::Date::from_julian_day(
+        i32::try_from(i64::from(day.to_julian_day()) + days)
+            .context("google_workspace_development_time")?,
+    )?;
+    *value = format!(
+        "{:04}-{:02}-{:02}{}",
+        shifted.year(),
+        u8::from(shifted.month()),
+        shifted.day(),
+        &value[10..]
+    );
+    Ok(())
+}
+
 /// A small organization with nested groups, for local development and
-/// verification campaigns that declare Google Workspace reads.
+/// verification campaigns that declare Google Workspace reads and shares.
+/// Its meetings are dated January 2026; a campaign moves them to the days
+/// before its own clock with [`date_google_workspace_development`].
 pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
     let address = |local: &str| format!("{local}@{GOOGLE_DEVELOPMENT_DOMAIN}");
     let group = |id: &str, name: &str, members: &[String]| GoogleGroup {
