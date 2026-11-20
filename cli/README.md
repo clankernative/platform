@@ -15,6 +15,7 @@ cd ..
 ./cli/day2 app describe reports --instance example-instance/instance.json --agent
 ./cli/day2 instance check ../my-instance
 ./cli/day2 instance render ../my-instance --agent
+./cli/day2 instance plan ../my-instance ../platform-at-pin /tmp/my-instance-plan
 ./cli/day2 platform --help
 ./cli/day2 platform check examples/reports 42 16
 ./cli/day2 platform local-dev examples/reports

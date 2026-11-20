@@ -8,6 +8,7 @@ import pf.Stdin
 import pf.Stdout
 import ops.Workflow
 import ops.LocalDev
+import ops.InstancePlan
 import ops.Build
 import ops.Delegation
 import ops.Check
@@ -53,6 +54,8 @@ run! = |args| match args {
 		options = Json.parse(raw).map_err(|_| "invalid local session settings")?
 		LocalDev.session!(options, call!)
 	}
+	# Only the host starts this, for `day2 instance plan`; it has no `platform` entry.
+	["instance-plan-session", request] => InstancePlan.run!(request, call!)
 	["build-recipe"] => Build.recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)

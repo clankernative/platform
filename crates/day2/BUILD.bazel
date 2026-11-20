@@ -54,6 +54,7 @@ COMPILE_INPUTS = [
     "//:ops/Delegation.roc",
     "//:ops/GkeRelease.roc",
     "//:ops/Infra.roc",
+    "//:ops/InstancePlan.roc",
     "//:ops/Linux.roc",
     "//:ops/RuntimeImage.roc",
     "//:ops/LocalDev.roc",

@@ -3,6 +3,8 @@ app [main!] {
 	ops: "../ops/main.roc",
 }
 
+import pf.Env
+import pf.Path
 import pf.Stdout
 import pf.Stderr
 import pf.OsStr
@@ -12,6 +14,7 @@ import Output
 import Problem
 import Host
 import InstanceSpec
+import InstanceRender
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |args| {
@@ -63,8 +66,46 @@ main! = |args| {
 			Ok((path, spec)) => Output.Outcome.Rendered(render, path, spec)
 			Err(problem) => Output.Outcome.Failed(problem, render.parts().format, Cli.Command.InstanceRender)
 		}
+		Cli.Request.Plan(plan) => planned!(plan)
 	}
 	emit!(Output.new(outcome))
+}
+
+## Validate and render the spec here, then plan its core roots through the platform host, which checks the
+## request again before it runs OpenTofu.
+planned! : Cli.Plan => Output.Outcome
+planned! = |plan| {
+	parts = plan.parts()
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, Cli.Command.InstancePlan)
+	match InstanceSpec.load!(parts.directory) {
+		Ok((path, spec)) => {
+			request = InstanceRender.plan_request(
+				spec,
+				{
+					instance: parts.directory.to_str(),
+					checkout: parts.checkout.to_str(),
+					output: parts.output.to_str(),
+				},
+			)
+			# The request can exceed an argument's size, so it travels as a private temporary file.
+			ran = Env.with_temp_dir!(
+				|directory| {
+					file = Path.join(directory, "request.json")
+					Path.write_utf8!(file, request).map_err(|_| "cannot write the plan request")?
+					Host.instance_plan!(Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+				},
+			)
+			match ran {
+				Ok(raw) => match InstanceRender.receipt(raw) {
+					Ok(receipt) => Output.Outcome.Planned(plan, path, spec, receipt)
+					Err(_) => failed(Problem.PlanFailed("the platform host returned an unreadable receipt"))
+				}
+				Err(CallbackErr(error)) => failed(Problem.PlanFailed(error))
+				Err(_) => failed(Problem.PlanFailed("cannot use a private temporary directory"))
+			}
+		}
+		Err(problem) => failed(problem)
+	}
 }
 
 run_platform! : List(Str) => Try(Str, Str)

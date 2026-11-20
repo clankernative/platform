@@ -1013,7 +1013,12 @@ mod tests {
             let value = envelope(&run(&args, None), 0);
             assert_eq!(
                 value["result"]["implemented_commands"],
-                json!(["app.describe", "instance.check", "instance.render"])
+                json!([
+                    "app.describe",
+                    "instance.check",
+                    "instance.render",
+                    "instance.plan"
+                ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
             assert_eq!(value["result"]["supports_invocation"], false);
@@ -1743,10 +1748,10 @@ mod tests {
             variables("tenancy"),
             json!({"kube_context": context, "app_namespace_prefix": "app-"})
         );
-        // Operators reach every app and hold its off-site backups. Lists that may name the instance's CI
-        // service accounts stay with the instance, so owners grant nothing yet.
+        // Operators reach every app, deploy it by hand and hold its off-site backups. Owners (kay and lin)
+        // get no deploy authority.
         let edge = variables("app-edge/home");
-        assert!(edge.get("deployer_subjects").is_none(), "{edge}");
+        assert_eq!(edge["deployer_subjects"], operators);
         assert_eq!(edge["domain"], "home.apps.example.com");
         assert_eq!(edge["kube_context"], context);
         assert_eq!(
@@ -1946,6 +1951,107 @@ mod tests {
         ] {
             assert_eq!(render(args.as_slice(), 2), "conflicting_options");
         }
+    }
+
+    #[test]
+    fn instance_plan_validates_before_it_runs_and_fails_closed() {
+        let scratch = Scratch::new();
+        let instance = scratch.0.join("instance");
+        let platform = scratch.0.join("platform");
+        let output = scratch.0.join("plan");
+        fs::create_dir(&instance).unwrap();
+        fs::create_dir(&platform).unwrap();
+        let (directory, checkout, new) = (
+            instance.to_str().unwrap(),
+            platform.to_str().unwrap(),
+            output.to_str().unwrap(),
+        );
+        let plan = |args: &[&str], code: i32| {
+            let value = envelope(&run(args, None), code);
+            assert_eq!(value["command"], "instance.plan", "{args:?}");
+            assert!(value["result"].is_null(), "{args:?}");
+            (
+                value["error"]["code"].clone(),
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        };
+        // The spec is validated before anything runs, exactly as check and render validate it.
+        assert_eq!(
+            plan(
+                &["instance", "plan", directory, checkout, new, "--agent"],
+                3
+            )
+            .0,
+            "metadata_unreadable"
+        );
+        fs::write(
+            instance.join("day2.json"),
+            SPEC.replacen(r#""org":"tools""#, r#""org":"Tools""#, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            plan(
+                &["instance", "plan", directory, checkout, new, "--agent"],
+                5
+            )
+            .0,
+            "invalid_spec"
+        );
+        for args in [
+            vec!["instance", "plan", "--agent"],
+            vec!["instance", "plan", directory, "--agent"],
+            vec!["instance", "plan", directory, checkout, "--agent"],
+        ] {
+            assert_eq!(plan(args.as_slice(), 2).0, "missing_argument");
+        }
+        assert_eq!(
+            plan(
+                &[
+                    "instance", "plan", directory, checkout, new, "--demo", "--agent"
+                ],
+                2
+            )
+            .0,
+            "conflicting_options"
+        );
+        // A valid spec still needs every root's committed inputs at their fixed paths, then a
+        // checkout containing its platform commit; nothing is written before either check.
+        fs::write(instance.join("day2.json"), SPEC).unwrap();
+        let (code, message) = plan(
+            &["instance", "plan", directory, checkout, new, "--agent"],
+            6,
+        );
+        assert_eq!(code, "plan_failed");
+        assert!(message.contains("gcp/config/project.tfvars"), "{message}");
+        fs::create_dir_all(instance.join("gcp/config/app-edge")).unwrap();
+        for inputs in [
+            "project",
+            "cluster",
+            "tenancy",
+            "app-edge/go",
+            "app-edge/home",
+        ] {
+            fs::write(instance.join(format!("gcp/config/{inputs}.tfvars")), "").unwrap();
+        }
+        let (code, message) = plan(
+            &["instance", "plan", directory, checkout, new, "--agent"],
+            6,
+        );
+        assert_eq!(code, "plan_failed");
+        assert!(message.contains("platform commit"), "{message}");
+        assert!(!output.exists());
+        // A plan never reuses an output directory.
+        fs::create_dir(&output).unwrap();
+        let (code, message) = plan(
+            &["instance", "plan", directory, checkout, new, "--agent"],
+            6,
+        );
+        assert_eq!(code, "plan_failed");
+        assert!(message.contains("new output directory"), "{message}");
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
     }
 
     #[test]

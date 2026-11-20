@@ -15,6 +15,12 @@ Host :: [].{
 		call!(Json.to_str({ protocol: 1.U32, action: "workflow", input: Json.to_str(args) }))
 	}
 
+	## `day2 instance plan`: the host reads the rendered request from this file and validates it again.
+	instance_plan! : Str => Try(Str, Str)
+	instance_plan! = |request| {
+		call!(Json.to_str({ protocol: 1.U32, action: "instance-plan", input: Json.to_str({ request: request }) }))
+	}
+
 	call! : Str => Try(Str, Str)
 	call! = |request| {
 		executable = Env.exe_path!().map_err(|_| "cannot locate platform CLI")?

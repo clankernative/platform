@@ -22,6 +22,7 @@ Problem := [
 	InvalidCatalog(Str),
 	UnsupportedArtifact(U64),
 	MetadataTooLarge,
+	PlanFailed(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -45,6 +46,7 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => 5
+		PlanFailed(_) => 6
 	}
 
 	code : Problem -> Str
@@ -71,11 +73,12 @@ Problem := [
 		InvalidCatalog(_) => "invalid_catalog"
 		UnsupportedArtifact(_) => "unsupported_artifact"
 		MetadataTooLarge => "metadata_too_large"
+		PlanFailed(_) => "plan_failed"
 	}
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app> and instance check|render <directory>."
+		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan <directory>."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -97,6 +100,7 @@ Problem := [
 		InvalidCatalog(detail) => "Invalid operation catalog: ${detail}"
 		UnsupportedArtifact(version) => "Unsupported artifact format ${version.to_str()} for this installed platform."
 		MetadataTooLarge => "Metadata exceeds the 1 MiB limit."
+		PlanFailed(detail) => "The instance plan failed: ${detail}"
 	}
 
 	hint : Problem -> Str
@@ -115,6 +119,9 @@ Problem := [
 		InvalidSpec(
 			_,
 		) => "Fix day2.json: every field is required, unknown fields are rejected, and lists and apps are sorted."
+		PlanFailed(
+			_,
+		) => "Plan with a CLI built from day2.json's platform commit, OpenTofu 1.12.3 on PATH, Google credentials and a new output directory outside the instance; a failed root keeps its logs there."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."

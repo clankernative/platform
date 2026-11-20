@@ -7,6 +7,7 @@ USAGE
   day2 app describe <app> [options]
   day2 instance check <directory> [--agent]
   day2 instance render <directory> [--agent]
+  day2 instance plan <directory> <platform> <new directory> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -36,6 +37,12 @@ COMMANDS
                   app) in apply order, each with the state bucket and prefix it
                   initializes against and the variables derived for it, as
                   .tfvars.json. Reads one file only; writes nothing.
+  instance plan   Validate and render <directory>/day2.json, then run a
+                  read-only OpenTofu 1.12.3 plan of its core roots except
+                  day2-app, on stacks exported from the spec's platform
+                  commit in the <platform> repository. Plans, logs and
+                  receipt.json go to <new directory>. Never locks state,
+                  creates state or applies; exits 6 if a root fails.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
