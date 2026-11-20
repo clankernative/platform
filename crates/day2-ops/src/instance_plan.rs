@@ -546,12 +546,19 @@ pub fn renderer_matches(repository: &Path, commit: &str, sent: &[Source]) -> Res
     Ok(())
 }
 
-/// gcloud's exact report that this root's state object does not exist.
-pub fn state_missing(stderr: &str, bucket: &str, prefix: &str) -> bool {
-    let object = format!("{prefix}/default.tfstate").replace('/', "%2F");
-    let expected =
-        format!("ERROR: (gcloud.storage.objects.describe) gs://{bucket}/{object} not found: 404.");
-    stderr.lines().any(|line| line.trim() == expected)
+/// Whether a listing of exactly `object` found it. The listing repeats the name
+/// once per retained version; any other name is refused.
+pub fn state_listed(listed: &str, object: &str) -> Result<bool> {
+    let names: Vec<&str> = listed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    ensure!(
+        names.iter().all(|name| *name == object),
+        "unexpected state objects listed for {object}"
+    );
+    Ok(!names.is_empty())
 }
 
 /// The backend a root that has never been applied plans with: an empty local state.
@@ -583,7 +590,6 @@ pub struct Session {
     inputs: BTreeMap<String, String>,
     rendered: BTreeMap<String, String>,
     private: tempfile::TempDir,
-    buckets: std::cell::RefCell<BTreeSet<String>>,
     kubeconfig: Option<PathBuf>,
     dns_token: Option<String>,
     credentials_read: bool,
@@ -770,7 +776,6 @@ impl Session {
             inputs,
             rendered,
             private: tempfile::Builder::new().prefix("day2-plan-").tempdir()?,
-            buckets: std::cell::RefCell::new(BTreeSet::new()),
             kubeconfig: None,
             dns_token: None,
             credentials_read: false,
@@ -876,46 +881,26 @@ impl Session {
         Ok(json!({}))
     }
 
-    /// Whether the root's state object exists, read without touching it. The
-    /// state bucket must exist; only gcloud's exact 404 for this root's object
-    /// makes it a root that has never been applied.
+    /// Whether the root's state object exists, read without touching it. Listing
+    /// the exact object needs only object read access: an empty listing is a root
+    /// that has never been applied, and any error (a missing bucket, no access)
+    /// fails the root instead of passing it off as new.
     fn state_exists(&self, root: &Root, directory: &Path) -> Result<bool> {
         let gcloud = crate::maintenance::on_path("gcloud")?;
-        if !self.buckets.borrow().contains(&root.bucket) {
-            let mut command = self.tool(&gcloud);
-            command
-                .args(["storage", "buckets", "describe"])
-                .arg(format!("gs://{}", root.bucket))
-                .arg("--format=value(name)");
-            capture(
-                command,
-                Some(&directory.join("bucket.log")),
-                Duration::from_secs(60),
-                4096,
-            )
-            .with_context(|| format!("{}'s state bucket {} must exist", root.label, root.bucket))?;
-            self.buckets.borrow_mut().insert(root.bucket.clone());
-        }
-        let log = directory.join("state.log");
+        let object = format!("{}/default.tfstate", root.prefix);
         let mut command = self.tool(&gcloud);
         command
-            .args(["storage", "objects", "describe"])
-            .arg(format!(
-                "gs://{}/{}/default.tfstate",
-                root.bucket, root.prefix
-            ))
+            .args(["storage", "objects", "list"])
+            .arg(format!("gs://{}/{object}", root.bucket))
             .arg("--format=value(name)");
-        match capture(command, Some(&log), Duration::from_secs(60), 4096) {
-            Ok(_) => Ok(true),
-            Err(error) => {
-                ensure!(
-                    state_missing(&fs::read_to_string(&log)?, &root.bucket, &root.prefix),
-                    "read the {} state: {error:#}",
-                    root.label
-                );
-                Ok(false)
-            }
-        }
+        let listed = capture(
+            command,
+            Some(&directory.join("state.log")),
+            Duration::from_secs(60),
+            1 << 20,
+        )
+        .with_context(|| format!("list {}'s state in {}", root.label, root.bucket))?;
+        state_listed(&String::from_utf8(listed)?, &object)
     }
 
     fn run_stage(&self, stage: Stage, root: &Root, new_root: bool) -> Result<Option<Vec<u8>>> {
@@ -1587,18 +1572,20 @@ mod tests {
     }
 
     #[test]
-    fn only_gclouds_exact_404_for_this_object_makes_a_new_root() {
-        let bucket = "exampleco-tools-tofu-state";
-        let missing = "ERROR: (gcloud.storage.objects.describe) gs://exampleco-tools-tofu-state/platform%2Fapp%2Fhome%2Fdefault.tfstate not found: 404.\n";
-        assert!(state_missing(missing, bucket, "platform/app/home"));
-        assert!(!state_missing(missing, bucket, "platform/app/go"));
-        assert!(!state_missing(missing, "other-bucket", "platform/app/home"));
-        assert!(!state_missing(
-            "ERROR: (gcloud.storage.objects.describe) HTTPError 403: caller does not have storage.objects.get access",
-            bucket,
-            "platform/app/home"
-        ));
-        assert!(!state_missing("", bucket, "platform/app/home"));
+    fn only_an_empty_listing_of_this_object_makes_a_new_root() {
+        let object = "platform/app/home/default.tfstate";
+        assert!(!state_listed("", object).unwrap());
+        assert!(!state_listed("\n", object).unwrap());
+        // One name per retained version.
+        assert!(state_listed(&format!("{object}\n{object}\n"), object).unwrap());
+        assert!(state_listed("platform/app/home/default.tfstate.backup\n", object).is_err());
+        assert!(
+            state_listed(
+                &format!("{object}\nplatform/app/go/default.tfstate\n"),
+                object
+            )
+            .is_err()
+        );
         assert_eq!(
             backend_override(Path::new("/out/root/new.tfstate")).unwrap(),
             "terraform {\n  backend \"local\" {\n    path = \"/out/root/new.tfstate\"\n  }\n}\n"

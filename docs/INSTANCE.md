@@ -213,9 +213,10 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
 - **Inputs.** Each root initializes against its rendered backend and plans with
   a copy of its committed `.tfvars` file, then its rendered variables, so a
   rendered value wins over a committed copy.
-- **New roots.** The state bucket must exist. A root whose state object is
-  missing (gcloud's exact 404 for that object) plans against an empty local
-  state, reported as a new root, so no state is created.
+- **New roots.** Each root first lists its exact state object, which needs only
+  object read access. If the listing is empty, the root plans against an empty
+  local state and is reported as a new root, so no state is created. A missing
+  bucket or a denied listing fails the root.
 - **Credentials.** Google credentials come from the environment. Only these
   variables pass through: `PATH`, `HOME`, Google credential and account
   selection (including impersonation), and proxy and CA settings. A private
