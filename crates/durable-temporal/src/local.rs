@@ -335,7 +335,8 @@ impl LocalServer {
 /// the listening side first leaves the port in TIME_WAIT. bind(:0) then skips
 /// it for about a minute, while Temporal's explicit SO_REUSEADDR bind of the
 /// frontend port still succeeds. Temporal's own `GetFreePort` reserves its
-/// ports the same way.
+/// ports the same way on Linux. macOS hands out ports in sequence, so there it
+/// costs one TIME_WAIT per server start and keeps one code path.
 fn reserve_port(address: SocketAddr) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(address)?;
     let address = listener.local_addr()?;
@@ -526,9 +527,12 @@ mod tests {
                 (fields.get(1) == Some(&local.as_str())).then(|| fields[3].to_owned())
             })
             .collect::<Vec<_>>();
-        // 05 FIN_WAIT2 or 06 TIME_WAIT: closed by this side, still bound. Never 0A LISTEN.
+        // Closed by this side and still bound: 04 FIN_WAIT1, 05 FIN_WAIT2, 06 TIME_WAIT
+        // or 0B CLOSING. Never 0A LISTEN.
         assert!(
-            states.iter().any(|state| state == "05" || state == "06"),
+            states
+                .iter()
+                .any(|state| ["04", "05", "06", "0B"].contains(&state.as_str())),
             "{states:?}"
         );
         assert!(!states.iter().any(|state| state == "0A"), "{states:?}");
