@@ -61,7 +61,10 @@ fn a_rehearsal_runs_every_step_through_the_adapter_and_writes_once() -> Result<(
         ("calendar_free_busy", "NotShared"),
         ("calendar_unshared", "NotFound"),
         ("events_page", "Found"),
-        ("events_token_other_query", "unsettled_single_page"),
+        (
+            "events_token_other_query",
+            "google_workspace_request_invalid",
+        ),
         ("event_recorded", "Found"),
         ("event_imported", "Found"),
         ("conferences_recorded", "Found"),
@@ -73,6 +76,11 @@ fn a_rehearsal_runs_every_step_through_the_adapter_and_writes_once() -> Result<(
         assert_eq!(probes(&receipt, probe)[0]["outcome"], outcome, "{probe}");
     }
     let detail = |probe: &str, name: &str| probes(&receipt, probe)[0]["details"][name].clone();
+    // The second page continues the first; another query's token is refused
+    // by the adapter, before anything is sent.
+    assert_eq!(probes(&receipt, "events_page").len(), 2);
+    assert_eq!(detail("events_page", "next_page_token"), true);
+    assert_eq!(probes(&receipt, "events_token_other_query")[0]["calls"], 0);
     assert_eq!(detail("directory_group_alias", "primary_is_group"), true);
     assert_eq!(detail("directory_group_alias", "primary_is_alias"), false);
     assert_eq!(detail("event_recorded", "organizer"), "creator");

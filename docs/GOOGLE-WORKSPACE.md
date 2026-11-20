@@ -1038,25 +1038,26 @@ counts.
       `events.list`, `acl.list` and `conferenceRecords.list` under a filter.
       A short ACL page still spends one of the four, so fewer than 400 rules
       may be covered; two empty record pages reach the records ceiling.
-      **Automated**, with no documented rule to check it against: Google
-      documents no binding rule for `pageToken`. `events_token_other_query`
-      sends the first page's token with another query, the same calendar and
-      start and a window one day long. `google_workspace_request_refused`
-      means Google refuses the mix. `Found` with
-      `events_at_or_after_time_max` above zero means Google kept the token's
-      original query and ignored the new window; `Found` with zero means it
-      applied the new window. `unsettled_single_page` and
-      `unsettled_first_page_refused` mean the probe could not run. The page
-      forms are observed, not forced: every list exchange's shape `items` and
-      `next_page_token_present` / `_empty`.
-      **Live, 2026-11-20, contradicting the simulation:**
+      **Automated** for the adapter: `events_token_other_query` offers the
+      first page's token with another query, the same calendar and start and
+      a window one day long. The adapter binds each token to its query (see
+      `calendar_events`), so it must answer
+      `google_workspace_request_invalid` with no calls; a receipt whose probe
+      reached Google would show the binding missing. The probe no longer
+      observes Google: doing so would need a request the adapter never sends,
+      outside its reviewed requests and the fence, and Google's answer,
+      recorded below, no longer affects the adapter. `unsettled_single_page`
+      and `unsettled_first_page_refused` mean the probe could not run. The
+      page forms are observed, not forced: every list exchange's shape
+      `items` and `next_page_token_present` / `_empty`.
+      **Live, 2026-11-20**, from the probe as it then was:
       `events_token_other_query` was `Found` with shape `items` 0 and
       `events_at_or_after_time_max` 0. Google accepted another query's token
       instead of refusing it, and answered an empty page although the one-day
       window held timed events: it applied the token's position to the new
-      window. Nothing in the adapter binds a token to its query today, so a
-      mismatched token loses events silently. Pages were full (25) or final;
-      no short page with a token was seen.
+      window. The adapter now binds tokens, and the simulation answers as
+      Google did. Pages were full (25) or final; no short page with a token
+      was seen.
 - [ ] `conferenceSolution.key.type` values for Meet, add-on and third-party
       conferences, and which of them carry a `hangoutLink`.
       **Automated** for the events in the window: `events_page` → shape
