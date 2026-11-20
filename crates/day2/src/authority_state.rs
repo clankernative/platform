@@ -311,6 +311,19 @@ impl AuthorityDocument {
                             .any(|actor| actor.starts_with(DOMAIN_PREFIX)),
                     "a {DOMAIN_PREFIX} entry cannot be granted app delegation"
                 );
+                // Naming another person reads what the Directory knows about a
+                // colleague. An internal command runs as whoever reaches it, so
+                // only individual actors -- the one bound to the schedule that
+                // renews -- hold it, never a domain or every owner.
+                ensure!(
+                    !grant.actions.contains(
+                        &day2_capabilities::resources::Action::WorkspaceDirectoryNamedUserPath
+                    ) || !grant
+                        .actors
+                        .iter()
+                        .any(|actor| actor.starts_with(DOMAIN_PREFIX) || actor == OWNERS),
+                    "workspace_directory_named_user_path is granted only to individual actors"
+                );
                 // App delegation carries one named person's request across an
                 // application boundary, and a set of owners is not one person.
                 // Freetool execution grants already accept `domain:` and use the

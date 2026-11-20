@@ -175,6 +175,20 @@ impl Operation {
                 "duplicate observation requirement: {capability}"
             );
         }
+        // Naming another person reads organization data about someone who is
+        // not the caller, so no public query or command may declare it. An
+        // internal command still runs as whoever reaches it; activation keeps
+        // its resource grant to individual actors (authority_state).
+        let named =
+            day2_capabilities::registry::Action::WorkspaceDirectoryNamedUserPath.capability();
+        ensure!(
+            self.execution.internal
+                || !self
+                    .observations
+                    .iter()
+                    .any(|capability| capability == named),
+            "{named} is only for an internal command"
+        );
         Ok(())
     }
 
@@ -2413,6 +2427,28 @@ mod selector_tests {
         operation.execution.internal = false;
         operation.audience = Some(Audience::Owners);
         operation.validate_owned_rows("create", &schema)?;
+        Ok(())
+    }
+
+    #[test]
+    fn only_an_internal_command_may_name_another_persons_directory_path() -> Result<()> {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let mut operation = contracts["create"].clone();
+        let named =
+            day2_capabilities::registry::Action::WorkspaceDirectoryNamedUserPath.capability();
+        operation.observations = vec![named.into()];
+        operation.audience = Some(Audience::Employees);
+        operation.execution.internal = false;
+        assert_eq!(
+            operation.validate_observations().unwrap_err().to_string(),
+            "workspace_directory.named_user_path.v1 is only for an internal command"
+        );
+        let mut query = contracts["preview"].clone();
+        query.observations = vec![named.into()];
+        assert!(query.validate_observations().is_err());
+        operation.audience = None;
+        operation.execution.internal = true;
+        operation.validate_observations()?;
         Ok(())
     }
 

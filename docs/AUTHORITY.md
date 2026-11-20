@@ -238,6 +238,14 @@ that is not covered. A grant for app delegation (`local_delegation`) may not
 name a domain; delegation carries one person's request across an application
 boundary, never a domain.
 
+The named Workspace Directory read (`workspace_directory.named_user_path.v1`)
+returns someone other than the caller's org-unit path, and whether their account
+is active. Admission accepts it only on an internal command. An internal command
+still runs as whoever reaches it, so activation refuses a resource grant of
+`workspace_directory_named_user_path` that names a domain or the owners: only
+individual actors, in practice the actor bound to the schedule that renews, hold
+it, and an employee never looks up a colleague.
+
 The activated document records the hosted domain it was resolved under
 (`hosted_domain`), and every authorization checks it against the running
 installation. If the identity provider is removed or its domain changes, the

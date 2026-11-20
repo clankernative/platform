@@ -1710,6 +1710,53 @@ fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> 
     ))?;
     let error = delegated.validate(&artifact).unwrap_err();
     assert!(format!("{error:#}").contains("app delegation"), "{error:#}");
+
+    // Naming another person's Directory path is held by individual actors
+    // only: never everyone at the domain, never every owner.
+    let named = |actors: &[&str]| -> Result<AuthorityDocument> {
+        let mut named = doc.clone();
+        named
+            .policy
+            .as_mut()
+            .unwrap()
+            .operations
+            .get_mut("items.read")
+            .unwrap()
+            .observations
+            .insert("workspace_directory.named_user_path.v1".into());
+        named.resources = serde_json::from_value(grant(
+            "items.read",
+            serde_json::json!({
+                "provider":"workspace_directory",
+                "live":serde_json::to_value(
+                    day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+                        service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                        auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                    },
+                )?,
+                "target":serde_json::to_value(
+                    day2_capabilities::resources::ResourceTarget::WorkspaceDirectory {
+                        customer_id: "C1".into(),
+                    },
+                )?,
+                "actions":["workspace_directory_named_user_path"]
+            }),
+            actors,
+        ))?;
+        Ok(named)
+    };
+    for actors in [
+        &[everyone.as_str()][..],
+        &[OWNERS],
+        &[everyone.as_str(), "viewer"],
+    ] {
+        let error = named(actors)?.validate(&artifact).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("only to individual actors"),
+            "{actors:?}: {error:#}"
+        );
+    }
+    named(&["viewer"])?.validate(&artifact)?;
     Ok(())
 }
 

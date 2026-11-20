@@ -1847,6 +1847,7 @@ fn provider_resource_fixture(
             },
             vec![
                 Action::WorkspaceDirectoryUserPath,
+                Action::WorkspaceDirectoryNamedUserPath,
                 Action::WorkspaceDirectoryHierarchyDelivery,
                 Action::WorkspaceDirectoryDeliveryPage,
             ],
@@ -3581,6 +3582,7 @@ fn disposable_provider_worlds(actor: &str) -> crate::integrations::simulated::Si
                 json!({
                     "customerId":"synthetic-customer-1",
                     "orgUnitPath":"/Engineering",
+                    "suspended":false,
                     "primaryEmail":actor,
                     "kind":"admin#directory#user"
                 }),

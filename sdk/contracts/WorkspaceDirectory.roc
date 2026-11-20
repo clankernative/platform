@@ -44,6 +44,28 @@ WorkspaceDirectory :: [].{
 		},
 	)
 
+	# Another person's checked user path, for an operation whose grant names this read. `NotFound` covers a person
+	# the Directory does not know, one in another customer and a suspended account; a provider failure fails the
+	# read instead.
+	NamedUserPath : [Found(UserPath), NotFound]
+
+	named_user_path : Context, Str -> Observe(NamedUserPath)
+	named_user_path = |context, actor| Resource.bind(context, "workspace_directory").and_then(
+		|resource| named_user_path_with(resource, actor),
+	)
+
+	named_user_path_with : Resource, Str -> Observe(NamedUserPath)
+	named_user_path_with = |resource, actor| Observe.capability(
+		"workspace_directory.named_user_path.v1",
+		Json.to_str({ handle: Resource.token(resource), actor }),
+	).and_then(
+		|raw| {
+			parsed : Try(NamedUserPath, _)
+			parsed = Json.parse(raw)
+			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_named_user_path"))
+		},
+	)
+
 	deliver_hierarchy : Context -> Observe(HierarchyDelivery)
 	deliver_hierarchy = |context| Resource.bind(context, "workspace_directory").and_then(deliver_hierarchy_with)
 

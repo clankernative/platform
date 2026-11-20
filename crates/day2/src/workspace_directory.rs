@@ -1,5 +1,6 @@
 //! Workspace Directory reads: a fresh, complete organizational-unit hierarchy
-//! delivered to the reading invocation, and the current actor's user path.
+//! delivered to the reading invocation, the current actor's user path, and a
+//! named person's user path for an operation granted that read.
 //!
 //! Provider parsing and capture integrity live here; Home owns all path policy,
 //! ancestry decisions, persistence and retention of what it keeps.
@@ -105,6 +106,61 @@ pub struct UserPath {
     pub captured_at: i64,
 }
 
+/// Another person's user path. `NotFound` covers a person the Directory does
+/// not know, one in another customer and a suspended account, without saying
+/// which.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NamedUserPath {
+    Found(UserPath),
+    NotFound,
+}
+
+/// The application names this user, so the name is checked before it reaches
+/// a provider URL: one primary-email address, nothing that could select
+/// another route or user.
+pub fn validate_named_actor(actor: &str) -> Result<()> {
+    bounded(actor, 320, "workspace_directory_named_user_invalid")?;
+    let (local, domain) = actor
+        .split_once('@')
+        .ok_or_else(|| anyhow::anyhow!("workspace_directory_named_user_invalid"))?;
+    ensure!(
+        !local.is_empty()
+            && !domain.is_empty()
+            && !domain.contains('@')
+            && actor
+                .chars()
+                .all(|c| c.is_ascii_graphic() && !matches!(c, '/' | '?' | '#' | '%' | '\\')),
+        "workspace_directory_named_user_invalid"
+    );
+    Ok(())
+}
+
+/// Read one named user's path. Only the provider's own answer that it knows no
+/// such user in this customer becomes `NotFound`; every other failure stays a
+/// failure, so an outage never reads as a departure.
+pub fn collect_named_user_path(
+    input: CaptureInput,
+    port: &mut dyn DirectoryReadPort,
+) -> Result<NamedUserPath> {
+    validate_capture_input(&input)?;
+    validate_named_actor(&input.actor)?;
+    let found = port
+        .named_user_org_unit_path(&input.actor)
+        .map_err(|_| anyhow::anyhow!("workspace_directory_user_lookup_failed"))?;
+    if let Some(user_path) = &found {
+        validate_path(user_path)?;
+    }
+    Ok(match found {
+        None => NamedUserPath::NotFound,
+        Some(user_path) => NamedUserPath::Found(UserPath {
+            customer_id: input.customer_id,
+            actor: input.actor,
+            user_path,
+            captured_at: input.captured_at,
+        }),
+    })
+}
+
 pub fn collect_user_path(
     input: CaptureInput,
     port: &mut dyn DirectoryReadPort,
@@ -127,6 +183,9 @@ pub fn collect_user_path(
 /// publication. No provider response or token is returned to the caller.
 pub trait DirectoryReadPort {
     fn user_org_unit_path(&mut self, actor: &str) -> Result<String>;
+    /// `None` when the Directory knows no such user, the user is in another
+    /// customer, or the account is suspended.
+    fn named_user_org_unit_path(&mut self, actor: &str) -> Result<Option<String>>;
     fn list_org_units(&mut self) -> Result<ProviderPage>;
 }
 
@@ -366,6 +425,8 @@ struct DirectoryOrgUnit {
 struct DirectoryUser {
     customer_id: String,
     org_unit_path: String,
+    /// Requested by every user lookup; only the named read requires it.
+    suspended: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -409,19 +470,39 @@ pub fn parse_org_unit_response(bytes: &[u8]) -> Result<Vec<OrgUnit>> {
     Ok(items)
 }
 
-pub fn parse_user_path(bytes: &[u8], expected_customer: &str) -> Result<String> {
+fn decode_user(bytes: &[u8]) -> Result<DirectoryUser> {
     ensure!(
         bytes.len() <= MAX_USER_RESPONSE_BYTES,
         "workspace_directory_response_too_large"
     );
-    let user: DirectoryUser = crate::json::decode(bytes)
-        .map_err(|_| anyhow::anyhow!("workspace_directory_user_response_invalid"))?;
+    crate::json::decode(bytes)
+        .map_err(|_| anyhow::anyhow!("workspace_directory_user_response_invalid"))
+}
+
+pub fn parse_user_path(bytes: &[u8], expected_customer: &str) -> Result<String> {
+    let user = decode_user(bytes)?;
     ensure!(
         !user.customer_id.is_empty() && user.customer_id == expected_customer,
         "workspace_directory_customer_mismatch"
     );
     validate_path(&user.org_unit_path)?;
     Ok(user.org_unit_path)
+}
+
+/// A named user's path in `expected_customer`, or `None` for a user of another
+/// customer or a suspended account. A malformed record, including one without
+/// its suspension state, is an error whatever it would have answered.
+pub fn parse_named_user_path(bytes: &[u8], expected_customer: &str) -> Result<Option<String>> {
+    let user = decode_user(bytes)?;
+    let suspended = user
+        .suspended
+        .ok_or_else(|| anyhow::anyhow!("workspace_directory_user_response_invalid"))?;
+    ensure!(
+        !user.customer_id.is_empty(),
+        "workspace_directory_user_response_invalid"
+    );
+    validate_path(&user.org_unit_path)?;
+    Ok((user.customer_id == expected_customer && !suspended).then_some(user.org_unit_path))
 }
 
 pub fn validate_hierarchy(units: Vec<OrgUnit>) -> Result<Vec<OrgUnit>> {
@@ -598,6 +679,18 @@ impl NativeDirectoryPort {
     }
 
     fn get(&self, url: reqwest::Url, max: usize, endpoint: &'static str) -> Result<Vec<u8>> {
+        self.fetch(url, max, endpoint, false)?
+            .ok_or_else(|| anyhow::anyhow!("workspace_directory_provider_refused"))
+    }
+
+    /// `None` only for a 404 when `absent_ok`, before any of its body is read.
+    fn fetch(
+        &self,
+        url: reqwest::Url,
+        max: usize,
+        endpoint: &'static str,
+        absent_ok: bool,
+    ) -> Result<Option<Vec<u8>>> {
         let mut timing = crate::request_timing::provider("workspace_directory", endpoint);
         let mut authorization = reqwest::header::HeaderValue::from_str(&format!(
             "Bearer {}",
@@ -614,6 +707,9 @@ impl NativeDirectoryPort {
             .map_err(|_| anyhow::anyhow!("workspace_directory_provider_unavailable"))?;
         timing.status(response.status().as_u16());
         // A refused status is classified before any of its body is read.
+        if absent_ok && response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         ensure!(
             response.status().is_success(),
             "workspace_directory_provider_refused"
@@ -629,7 +725,21 @@ impl NativeDirectoryPort {
             reply.body.len() <= max,
             "workspace_directory_response_too_large"
         );
-        Ok(reply.body)
+        Ok(Some(reply.body))
+    }
+
+    /// One user record, or `None` when the Directory answers that it has no
+    /// such user.
+    fn user_record(&mut self, actor: &str) -> Result<Option<Vec<u8>>> {
+        let mut url = self.directory_origin.clone();
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("workspace_directory_request_invalid"))?
+            .extend(["admin", "directory", "v1", "users", actor]);
+        url.query_pairs_mut()
+            .append_pair("projection", "full")
+            .append_pair("viewType", "admin_view")
+            .append_pair("fields", "customerId,orgUnitPath,suspended");
+        self.fetch(url, MAX_USER_RESPONSE_BYTES, "directory_user", true)
     }
 }
 
@@ -696,16 +806,17 @@ fn acquire_access_token(
 
 impl DirectoryReadPort for NativeDirectoryPort {
     fn user_org_unit_path(&mut self, actor: &str) -> Result<String> {
-        let mut url = self.directory_origin.clone();
-        url.path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("workspace_directory_request_invalid"))?
-            .extend(["admin", "directory", "v1", "users", actor]);
-        url.query_pairs_mut()
-            .append_pair("projection", "full")
-            .append_pair("viewType", "admin_view")
-            .append_pair("fields", "customerId,orgUnitPath");
-        let body = self.get(url, MAX_USER_RESPONSE_BYTES, "directory_user")?;
+        let body = self
+            .user_record(actor)?
+            .ok_or_else(|| anyhow::anyhow!("workspace_directory_provider_refused"))?;
         parse_user_path(&body, &self.customer_id)
+    }
+
+    fn named_user_org_unit_path(&mut self, actor: &str) -> Result<Option<String>> {
+        match self.user_record(actor)? {
+            None => Ok(None),
+            Some(body) => parse_named_user_path(&body, &self.customer_id),
+        }
     }
 
     fn list_org_units(&mut self) -> Result<ProviderPage> {
@@ -744,6 +855,17 @@ pub struct SimulatedDirectoryPort {
 }
 
 impl SimulatedDirectoryPort {
+    /// The world answers only for the user this port was opened for.
+    fn user_record(&self, actor: &str) -> Result<Option<Vec<u8>>> {
+        ensure!(actor == self.actor, "workspace_directory_actor_mismatch");
+        crate::integrations::simulated::workspace_directory_read(
+            &self.database,
+            &self.scope,
+            &self.customer_id,
+            crate::integrations::simulated::DirectoryRead::User(actor),
+        )
+    }
+
     pub fn new(
         database: &std::path::Path,
         scope: &str,
@@ -762,14 +884,17 @@ impl SimulatedDirectoryPort {
 
 impl DirectoryReadPort for SimulatedDirectoryPort {
     fn user_org_unit_path(&mut self, actor: &str) -> Result<String> {
-        ensure!(actor == self.actor, "workspace_directory_actor_mismatch");
-        let bytes = crate::integrations::simulated::workspace_directory_read(
-            &self.database,
-            &self.scope,
-            &self.customer_id,
-            crate::integrations::simulated::DirectoryRead::User(actor),
-        )?;
+        let bytes = self
+            .user_record(actor)?
+            .context("simulated_directory_user_unconfigured")?;
         parse_user_path(&bytes, &self.customer_id)
+    }
+
+    fn named_user_org_unit_path(&mut self, actor: &str) -> Result<Option<String>> {
+        match self.user_record(actor)? {
+            None => Ok(None),
+            Some(bytes) => parse_named_user_path(&bytes, &self.customer_id),
+        }
     }
 
     fn list_org_units(&mut self) -> Result<ProviderPage> {
@@ -778,7 +903,8 @@ impl DirectoryReadPort for SimulatedDirectoryPort {
             &self.scope,
             &self.customer_id,
             crate::integrations::simulated::DirectoryRead::Hierarchy,
-        )?;
+        )?
+        .context("workspace_directory_provider_refused")?;
         let response_bytes = bytes.len();
         Ok(ProviderPage {
             units: parse_org_unit_response(&bytes)?,
@@ -883,6 +1009,10 @@ mod tests {
 
     impl DirectoryReadPort for FixturePort {
         fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+            anyhow::bail!("a hierarchy read never looks up a user")
+        }
+
+        fn named_user_org_unit_path(&mut self, _actor: &str) -> Result<Option<String>> {
             anyhow::bail!("a hierarchy read never looks up a user")
         }
 
@@ -1065,7 +1195,7 @@ mod tests {
                         ensure!(
                             request.contains("projection=full")
                                 && request.contains("viewType=admin_view")
-                                && request.contains("fields=customerId%2CorgUnitPath")
+                                && request.contains("fields=customerId%2CorgUnitPath%2Csuspended")
                                 && request.contains("Bearer directory-token"),
                             "user request projection invalid"
                         );
@@ -1283,6 +1413,10 @@ mod tests {
                 }
             }
 
+            fn named_user_org_unit_path(&mut self, _actor: &str) -> Result<Option<String>> {
+                anyhow::bail!("the current actor's read never names a user")
+            }
+
             fn list_org_units(&mut self) -> Result<ProviderPage> {
                 self.hierarchies += 1;
                 anyhow::bail!("hierarchy must not be fetched")
@@ -1353,6 +1487,200 @@ mod tests {
         assert!(
             parse_user_path(br#"{"customerId":"other","orgUnitPath":"/"}"#, "customer-1").is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_named_read_answers_not_found_only_for_the_providers_own_answer() -> Result<()> {
+        // Another customer and a suspended account read as NotFound; a malformed
+        // record or path is still a failure.
+        assert_eq!(
+            parse_named_user_path(
+                br#"{"customerId":"customer-1","orgUnitPath":"/Engineering","suspended":false}"#,
+                "customer-1"
+            )?,
+            Some("/Engineering".into())
+        );
+        assert_eq!(
+            parse_named_user_path(
+                br#"{"customerId":"customer-1","orgUnitPath":"/Engineering","suspended":true}"#,
+                "customer-1"
+            )?,
+            None
+        );
+        assert_eq!(
+            parse_named_user_path(
+                br#"{"customerId":"other","orgUnitPath":"/","suspended":false}"#,
+                "customer-1"
+            )?,
+            None
+        );
+        for malformed in [
+            &br#"{"customerId":"","orgUnitPath":"/","suspended":false}"#[..],
+            br#"{"customerId":"customer-1","orgUnitPath":"/../x","suspended":false}"#,
+            br#"{"customerId":"other","orgUnitPath":"/../x","suspended":true}"#,
+            br#"{"customerId":"customer-1","orgUnitPath":"/Engineering"}"#,
+            br#"{"customerId":"customer-1","suspended":false}"#,
+            br#"not json"#,
+        ] {
+            assert!(parse_named_user_path(malformed, "customer-1").is_err());
+        }
+        for invalid in [
+            "",
+            "plain",
+            "@example.test",
+            "alice@",
+            "a@b@example.test",
+            "alice@example.test/x",
+            "alice@example.test?x",
+            "alice@example.test#x",
+            "alice%40@example.test",
+            "alice\\x@example.test",
+            " alice@example.test",
+            "alice @example.test",
+            "álice@example.test",
+        ] {
+            assert!(validate_named_actor(invalid).is_err(), "{invalid:?}");
+        }
+        validate_named_actor("first.last+tag@example.test")?;
+        assert!(validate_named_actor(&format!("{}@example.test", "a".repeat(320))).is_err());
+
+        struct Named(Result<Option<String>>);
+        impl DirectoryReadPort for Named {
+            fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+                anyhow::bail!("a named read never reads the current actor")
+            }
+
+            fn named_user_org_unit_path(&mut self, _actor: &str) -> Result<Option<String>> {
+                match &self.0 {
+                    Ok(path) => Ok(path.clone()),
+                    Err(_) => anyhow::bail!("provider details must not escape"),
+                }
+            }
+
+            fn list_org_units(&mut self) -> Result<ProviderPage> {
+                anyhow::bail!("hierarchy must not be fetched")
+            }
+        }
+        let input = capture_input("bob@example.test");
+        assert_eq!(
+            collect_named_user_path(input.clone(), &mut Named(Ok(None)))?,
+            NamedUserPath::NotFound
+        );
+        assert_eq!(
+            collect_named_user_path(input.clone(), &mut Named(Ok(Some("/Sales".into()))))?,
+            NamedUserPath::Found(UserPath {
+                customer_id: input.customer_id.clone(),
+                actor: "bob@example.test".into(),
+                user_path: "/Sales".into(),
+                captured_at: input.captured_at,
+            })
+        );
+        assert_eq!(
+            collect_named_user_path(input, &mut Named(Err(anyhow::anyhow!("secret"))))
+                .unwrap_err()
+                .to_string(),
+            "workspace_directory_user_lookup_failed"
+        );
+        assert_eq!(
+            collect_named_user_path(capture_input("not-an-address"), &mut Named(Ok(None)))
+                .unwrap_err()
+                .to_string(),
+            "workspace_directory_named_user_invalid"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_named_read_maps_only_404_to_not_found() -> Result<()> {
+        use std::{net::TcpListener, thread};
+        // 404 is the Directory's own "no such user" for the named read only; the
+        // current actor's read still fails on it, and 403 and 500 fail both.
+        for status in [
+            "200 OK",
+            "404 Not Found",
+            "403 Forbidden",
+            "500 Internal Server Error",
+        ] {
+            for named in [true, false] {
+                let listener = TcpListener::bind(("127.0.0.1", 0))?;
+                let origin = format!("http://{}", listener.local_addr()?);
+                let server = thread::spawn(move || -> Result<()> {
+                    use std::io::Write;
+                    for _ in 0..3 {
+                        let (mut stream, _) = listener.accept()?;
+                        let request = http_request(&mut stream)?;
+                        if request.starts_with("GET /computeMetadata/") {
+                            fixture_response(
+                                &mut stream,
+                                r#"{"access_token":"metadata-token","token_type":"Bearer","expires_in":3600}"#,
+                                true,
+                            )?;
+                        } else if request.contains(":generateAccessToken ") {
+                            fixture_response(
+                                &mut stream,
+                                r#"{"accessToken":"directory-token","expireTime":"2030-01-01T00:00:00Z"}"#,
+                                false,
+                            )?;
+                        } else if request.contains("/users/departed%40example.test?")
+                            || request.contains("/users/departed@example.test?")
+                        {
+                            ensure!(
+                                request.contains("fields=customerId%2CorgUnitPath%2Csuspended"),
+                                "user request projection invalid"
+                            );
+                            let body = if status == "200 OK" {
+                                r#"{"customerId":"customer-1","orgUnitPath":"/Sales","suspended":false}"#
+                            } else {
+                                r#"{"error":{"code":404,"message":"Resource Not Found: userKey"}}"#
+                            };
+                            write!(
+                                stream,
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )?;
+                            stream.flush()?;
+                        } else {
+                            anyhow::bail!(
+                                "unexpected request: {}",
+                                request.lines().next().unwrap_or("missing")
+                            )
+                        }
+                    }
+                    Ok(())
+                });
+                let mut port = NativeDirectoryPort::transport_fixture(
+                    AuthenticationPlan::DirectServiceAccount {
+                        service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                    },
+                    "customer-1",
+                    100,
+                    CaptureMode::UserPath,
+                    [origin.as_str(); 4],
+                )?;
+                let input = capture_input("departed@example.test");
+                let observed = if named {
+                    collect_named_user_path(input, &mut port)
+                } else {
+                    collect_user_path(input, &mut port).map(NamedUserPath::Found)
+                };
+                server.join().expect("fixture server panicked")?;
+                match (status, named) {
+                    ("200 OK", _) => match observed? {
+                        NamedUserPath::Found(found) => assert_eq!(found.user_path, "/Sales"),
+                        NamedUserPath::NotFound => panic!("{status} named={named}"),
+                    },
+                    ("404 Not Found", true) => {
+                        assert_eq!(observed?, NamedUserPath::NotFound)
+                    }
+                    _ => assert_eq!(
+                        observed.unwrap_err().to_string(),
+                        "workspace_directory_user_lookup_failed",
+                        "{status} named={named}"
+                    ),
+                }
+            }
+        }
         Ok(())
     }
 

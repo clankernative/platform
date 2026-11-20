@@ -69,7 +69,10 @@ application's own history (see [Audit](contracts/Audit.roc)). Declare
 complete hierarchy is handed to the reading invocation and persisted in the
 app's own models; see [capture delivery](../docs/PROVIDER-CAPTURE-DELIVERY.md)),
 or `workspace_directory.user_path.v1` for an independent current-actor user
-lookup. Build verification
+lookup. `workspace_directory.named_user_path.v1` reads another person's user path
+(`WorkspaceDirectory.named_user_path`) and is accepted only on an internal
+command, for example a scheduled renewal; its grant is separate from the current
+actor's. Build verification
 and local development derive synthetic Directory bindings from these declarations,
 independent of operation names. Admission checks capability names and rejects
 writes and duplicates. Production grants remain operator-owned. See
