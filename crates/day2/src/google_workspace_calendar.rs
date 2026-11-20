@@ -116,10 +116,28 @@ pub fn event_id(value: &str) -> bool {
 /// An opaque page token, carried verbatim in a query parameter. Printable and
 /// without the two characters JSON escapes, so a journaled token is its size.
 pub fn page_token(value: &str) -> bool {
-    (1..=MAX_PAGE_TOKEN_BYTES).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic() && byte != b'"' && byte != b'\\')
+    (1..=MAX_PAGE_TOKEN_BYTES).contains(&value.len()) && token_bytes(value)
+}
+
+fn token_bytes(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_graphic() && byte != b'"' && byte != b'\\')
+}
+
+/// The version an events page token names, and the hex digits of its binding.
+pub(crate) const EVENTS_TOKEN_VERSION: &str = "v1";
+pub(crate) const EVENTS_TOKEN_BINDING_HEX: usize = 32;
+/// The longest token Google may hand back for an events page: bound, it is
+/// at most [`MAX_PAGE_TOKEN_BYTES`], so every existing bound still holds. That
+/// Google's tokens stay under it is not observed: a live receipt's
+/// `events_page` shape records which length bucket each falls in.
+pub(crate) const MAX_GOOGLE_EVENTS_TOKEN_BYTES: usize =
+    MAX_PAGE_TOKEN_BYTES - (EVENTS_TOKEN_VERSION.len() + 1 + EVENTS_TOKEN_BINDING_HEX + 1);
+
+/// A token Google handed back for an events page, short enough to bind.
+pub(crate) fn google_events_token(value: &str) -> bool {
+    (1..=MAX_GOOGLE_EVENTS_TOKEN_BYTES).contains(&value.len()) && token_bytes(value)
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -643,11 +661,15 @@ fn event(dto: EventDto) -> Result<Parsed, Failure> {
     }))
 }
 
-/// One events page. A page larger than the requested size or an invalid
-/// continuation is refused rather than truncated. Every field is bounded, so a
-/// full page always journals within one observation; the size is still
-/// checked, never assumed.
-pub fn parse_events_page(body: &[u8]) -> Result<EventsPage, Failure> {
+/// One events page of `query`. A page larger than the requested size or an
+/// invalid continuation is refused rather than truncated. Google's
+/// continuation is bound to `query` before the application sees it. Every
+/// field is bounded, so a full page always journals within one observation;
+/// the size is still checked, never assumed.
+pub fn parse_events_page(
+    body: &[u8],
+    query: &crate::google_workspace::EventsQuery,
+) -> Result<EventsPage, Failure> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Page {
@@ -660,7 +682,7 @@ pub fn parse_events_page(body: &[u8]) -> Result<EventsPage, Failure> {
         || page
             .next_page_token
             .as_deref()
-            .is_some_and(|token| !page_token(token))
+            .is_some_and(|token| !google_events_token(token))
     {
         return Err(Failure::ResponseInvalid);
     }
@@ -674,7 +696,7 @@ pub fn parse_events_page(body: &[u8]) -> Result<EventsPage, Failure> {
     }
     let page = EventsPage {
         events,
-        next_page_token: optional(page.next_page_token),
+        next_page_token: optional(page.next_page_token.map(|token| query.bind(&token))),
         all_day_omitted,
     };
     let encoded = crate::google_workspace::encode(&EventsOutcome::Found(page.clone()));

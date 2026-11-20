@@ -2756,8 +2756,12 @@ fn google_meet_reply(
     }
 }
 
-/// An opaque continuation bound to the query it continues: another query's
-/// token is refused, as Google refuses one.
+/// An opaque continuation bound to `binding`: a token issued for another
+/// binding, or forged, is refused. ACL and record lists bind their whole query,
+/// an assumption the adapter never tests (it resends a token only with the
+/// identical request). Events lists bind only their calendar: Google accepted
+/// another window's token live, and refusing another calendar's is an
+/// assumption.
 fn google_page_token(world: &GoogleWorkspaceWorld, binding: &str, offset: usize) -> Result<String> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&json!({"b":binding,"o":offset}))?);
@@ -2855,9 +2859,13 @@ fn google_rule(rule: &GoogleAclRule) -> Value {
 /// Serve one Calendar route as the token's delegated subject. Visibility
 /// follows Google: any rule that applies to the subject with `reader` or more
 /// shows a calendar and its events, and reading the ACL, a rule or the whole
-/// list, needs `writer` or `owner`. A calendar the subject cannot see is
-/// `404`. IDs and addresses are matched exactly, and every route admits only
-/// its reviewed query.
+/// list, needs `writer` or `owner`. Free/busy access shows the calendar itself
+/// and refuses its ACL with `403 forbidden`: on 2026-11-20 Google answered
+/// `calendars.get` with `200` and the reader's own rule with that `403`; the
+/// list's answer is assumed. Its events stay `404` (not observed: the adapter
+/// never reads the events of a calendar out of play). A calendar the subject
+/// cannot see at all is `404`. IDs and addresses are matched exactly, and every route
+/// admits only its reviewed query.
 fn google_calendar_reply(
     world: &GoogleWorkspaceWorld,
     request: &crate::google_workspace::ApiRequest,
@@ -2922,7 +2930,11 @@ fn google_calendar_reply(
         return Ok(not_found);
     };
     let role = google_effective_role(world, calendar, subject);
-    if role < google_role_rank("reader") {
+    let hidden = match rest {
+        [] | ["acl"] | ["acl", _] => role < google_role_rank("freeBusyReader"),
+        _ => role < google_role_rank("reader"),
+    };
+    if hidden {
         return Ok(not_found);
     }
     let can_read_acl = role >= google_role_rank("writer");
@@ -2975,11 +2987,11 @@ fn google_calendar_reply(
                 return Ok(error(400, "Bad Request"));
             };
             let size = EVENT_PAGE_SIZE as usize;
-            let binding = format!(
-                "events:{calendar_id}:{}:{}",
-                query("timeMin").unwrap_or_default(),
-                query("timeMax").unwrap_or_default()
-            );
+            // Google does not bind an events token to its window: given
+            // another window's token it answered an empty page (observed
+            // 2026-11-20). This models that as the token's position applied
+            // to the new window; only the calendar is bound.
+            let binding = format!("events:{calendar_id}");
             let offset = match query("pageToken") {
                 None => 0,
                 Some(token) => match google_page_offset(world, &binding, token) {

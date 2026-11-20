@@ -567,6 +567,19 @@ fn classify(
     };
     match endpoint {
         "calendar_events" => {
+            // How close Google's events tokens come to the bound the adapter
+            // gives them (988 bytes, so the bound token fits 1,024).
+            if let Some(token) = body["nextPageToken"].as_str() {
+                count(
+                    &mut shape,
+                    match token.len() {
+                        0..=256 => "next_page_token_up_to_256_bytes",
+                        257..=512 => "next_page_token_up_to_512_bytes",
+                        513..=988 => "next_page_token_up_to_988_bytes",
+                        _ => "next_page_token_over_988_bytes",
+                    },
+                );
+            }
             for item in list("items") {
                 match item["status"].as_str() {
                     None => count(&mut shape, "id_only"),
@@ -886,7 +899,7 @@ struct Entry {
 }
 
 impl Entry {
-    /// A probe that did not run, and why.
+    /// A probe that could not run, and why.
     fn unsettled(probe: &'static str, outcome: &'static str) -> Self {
         Self {
             probe,
@@ -897,6 +910,16 @@ impl Entry {
             response_bytes: 0,
             exchanges: Vec::new(),
         }
+    }
+
+    /// A probe the adapter refused, as it must, before anything was sent: a
+    /// pass, not a probe that could not run.
+    fn unsent(probe: &'static str, outcome: &'static str) -> Self {
+        let mut entry = Self::unsettled(probe, outcome);
+        entry
+            .details
+            .insert("refused_before_network".to_owned(), json!(true));
+        entry
     }
 }
 
@@ -1145,10 +1168,13 @@ impl Qualification {
         }
     }
 
-    /// Follow events pages through the adapter, then send the first page's
+    /// Follow events pages through the adapter, then offer the first page's
     /// token with another query: the same calendar and start, with a window
-    /// one day long. A refused first page, or one without a token, leaves
-    /// both unsettled, and the receipt says so.
+    /// one day long. The adapter binds every token to its query, so it must
+    /// refuse that before anything is sent, and the receipt records the
+    /// refusal; a receipt whose probe reached Google would show the binding
+    /// missing. A refused first page, or one without a token, leaves both
+    /// unsettled, and the receipt says so.
     fn events_pages(&mut self, outcome: &str, first: &Value) -> Result<()> {
         const TOKEN_PROBE: &str = "events_token_other_query";
         let profile = self.profile.clone();
@@ -1197,40 +1223,39 @@ impl Qualification {
             self.detail("next_page_token", json!(following.is_some()));
             next = following;
         }
-        // The other query ends one day after the window starts. Events at or
-        // after that end mean Google kept the token's original query.
+        // The other query must differ from the profile's: a window of exactly
+        // one day in `Z` form would otherwise be the same query, whose token
+        // the adapter rightly accepts, and the probe would reach Google.
         let start = crate::google_workspace_calendar::rfc3339_seconds(&profile.window.time_min);
-        let end = start.map(|start| start + 86_400);
-        let Some(time_max) = end.and_then(crate::google_workspace_meet::utc) else {
+        let Some(time_max) = [86_400, 43_200]
+            .into_iter()
+            .filter_map(|length| {
+                start.and_then(|start| crate::google_workspace_meet::utc(start + length))
+            })
+            .find(|end| *end != profile.window.time_max)
+        else {
             self.entries
                 .push(Entry::unsettled(TOKEN_PROBE, "unsettled_window"));
             return Ok(());
         };
-        let Ok(plan) = plan(
+        match plan(
             &profile,
             self.source,
             Action::GoogleWorkspaceCalendarEvents,
             events_request(&profile, &time_max, Some(&first_token)),
-        ) else {
-            self.entries.push(Entry::unsettled(
-                TOKEN_PROBE,
-                "page_token_refused_by_adapter",
-            ));
-            return Ok(());
-        };
-        let (outcome, value, _) = self.probe(TOKEN_PROBE, &plan, 0)?;
-        if outcome == "Found" {
-            let beyond = value["events"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|event| {
-                    let times = event["status"].as_object()?.values().next()?;
-                    crate::google_workspace_calendar::rfc3339_seconds(times["start"].as_str()?)
-                })
-                .filter(|start| end.is_some_and(|end| *start >= end))
-                .count();
-            self.detail("events_at_or_after_time_max", json!(beyond));
+        ) {
+            Err(error) if error.root_cause().to_string() == "google_workspace_request_invalid" => {
+                self.entries.push(Entry::unsent(
+                    TOKEN_PROBE,
+                    "google_workspace_request_invalid",
+                ));
+            }
+            Err(_) => self
+                .entries
+                .push(Entry::unsettled(TOKEN_PROBE, "other_error")),
+            Ok(plan) => {
+                self.probe(TOKEN_PROBE, &plan, 0)?;
+            }
         }
         Ok(())
     }
@@ -1365,6 +1390,21 @@ pub fn simulated_rehearsal(
     imported.id = "imported0004".into();
     imported.creator = Some(format!("grace@{domain}"));
     events.push(imported);
+    // A daily event fills more than one page, so the paging and token probes
+    // run.
+    events.extend((1..=26).map(|day| simulated::GoogleEvent {
+        id: format!("daily{day:04}"),
+        status: "confirmed".into(),
+        start: Some(simulated::GoogleTime::at(&format!(
+            "2026-01-{day:02}T08:00:00Z"
+        ))),
+        end: Some(simulated::GoogleTime::at(&format!(
+            "2026-01-{day:02}T08:30:00Z"
+        ))),
+        organizer: Some(format!("ada@{domain}")),
+        creator: Some(format!("ada@{domain}")),
+        ..Default::default()
+    }));
     world
         .groups
         .get_mut(&format!("engineering@{domain}"))

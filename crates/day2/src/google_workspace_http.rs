@@ -366,15 +366,25 @@ mod tests {
         let plan =
             |action, request: &str| crate::google_workspace::tests::plan_for(action, request);
         use day2_capabilities::resources::Action;
+        let events = |page: Option<&str>| {
+            serde_json::json!({"handle":"h",
+                "calendar_id":"c_engineering@group.calendar.google.com",
+                "time_min":"2026-01-01T00:00:00Z","time_max":"2026-01-31T00:00:00Z",
+                "page_token":page.map_or(serde_json::json!("None"), |page| serde_json::json!({"Some":page}))})
+            .to_string()
+        };
+        let first = plan(Action::GoogleWorkspaceCalendarEvents, &events(None))?;
+        let crate::google_workspace::Read::CalendarEvents { query, .. } = first.read() else {
+            anyhow::bail!("an events read");
+        };
+        let bound = query.bind("next");
         let plans = [
             plan(
                 Action::GoogleWorkspaceCalendar,
                 r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","group_email":"engineering@synthetic.example"}"#,
             )?,
-            plan(
-                Action::GoogleWorkspaceCalendarEvents,
-                r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","time_min":"2026-01-01T00:00:00Z","time_max":"2026-01-31T00:00:00Z","page_token":{"Some":"next"}}"#,
-            )?,
+            // Google is sent its own token, "next", unwrapped from the bound one.
+            plan(Action::GoogleWorkspaceCalendarEvents, &events(Some(&bound)))?,
             plan(
                 Action::GoogleWorkspaceCalendarEvent,
                 r#"{"handle":"h","calendar_id":"c_engineering@group.calendar.google.com","event_id":"standup0001"}"#,

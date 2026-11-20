@@ -58,10 +58,13 @@ fn a_rehearsal_runs_every_step_through_the_adapter_and_writes_once() -> Result<(
         ("directory_group_alias", "Found"),
         ("directory_group_member", "Member"),
         ("calendar_in_play", "Found"),
-        ("calendar_free_busy", "NotFound"),
+        ("calendar_free_busy", "NotShared"),
         ("calendar_unshared", "NotFound"),
         ("events_page", "Found"),
-        ("events_token_other_query", "unsettled_single_page"),
+        (
+            "events_token_other_query",
+            "google_workspace_request_invalid",
+        ),
         ("event_recorded", "Found"),
         ("event_imported", "Found"),
         ("conferences_recorded", "Found"),
@@ -73,6 +76,21 @@ fn a_rehearsal_runs_every_step_through_the_adapter_and_writes_once() -> Result<(
         assert_eq!(probes(&receipt, probe)[0]["outcome"], outcome, "{probe}");
     }
     let detail = |probe: &str, name: &str| probes(&receipt, probe)[0]["details"][name].clone();
+    // The second page continues the first; another query's token is refused
+    // by the adapter, before anything is sent.
+    assert_eq!(probes(&receipt, "events_page").len(), 2);
+    assert_eq!(detail("events_page", "next_page_token"), true);
+    let refused = probes(&receipt, "events_token_other_query")[0];
+    assert_eq!(refused["calls"], 0);
+    assert_eq!(refused["details"]["refused_before_network"], true);
+    let first_page = &probes(&receipt, "events_page")[0]["exchanges"];
+    assert!(
+        first_page
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|exchange| { exchange["shape"]["next_page_token_up_to_256_bytes"] == 1 })
+    );
     assert_eq!(detail("directory_group_alias", "primary_is_group"), true);
     assert_eq!(detail("directory_group_alias", "primary_is_alias"), false);
     assert_eq!(detail("event_recorded", "organizer"), "creator");

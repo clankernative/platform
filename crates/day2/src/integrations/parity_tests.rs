@@ -1280,9 +1280,17 @@ fn google_calendar_parses_the_published_provider_responses() -> Result<()> {
     )?)?;
     let page = &page["Found"];
     assert_eq!(page["all_day_omitted"], 1);
+    // Google's token reaches the application bound to the query that issued it.
+    let plan = calendar_plan(
+        Action::GoogleWorkspaceCalendarEvents,
+        calendar_request(Action::GoogleWorkspaceCalendarEvents),
+    )?;
+    let crate::google_workspace::Read::CalendarEvents { query, .. } = plan.read() else {
+        anyhow::bail!("an events read");
+    };
     assert_eq!(
         page["next_page_token"],
-        json!({"Some":"EXAMPLE_NEXT_PAGE_TOKEN"})
+        json!({"Some":query.bind("EXAMPLE_NEXT_PAGE_TOKEN")})
     );
     let events = page["events"].as_array().context("events")?;
     assert_eq!(events.len(), 3);
