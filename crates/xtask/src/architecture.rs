@@ -2011,6 +2011,12 @@ impl<'a> Scanner<'a> {
                 "day2::resource_admin::now_ms".to_owned(),
             );
         }
+        if source == "crates/day2/src/google_workspace_qualification.rs" {
+            scanner.aliases[0].insert(
+                "Qualification".to_owned(),
+                "day2::google_workspace_qualification::Qualification".to_owned(),
+            );
+        }
         scanner
     }
 
@@ -6155,6 +6161,16 @@ fn hazard(target: &str) -> Option<&'static str> {
         "resource_admin::now_ms" | "crate::resource_admin::now_ms" | "day2::resource_admin::now_ms"
     ) {
         return Some("clock");
+    }
+    // A live Google Workspace qualification run: the native port with an
+    // operator's token as its workload. Every call site is reviewed.
+    if matches!(
+        target,
+        "google_workspace_qualification::Qualification::native"
+            | "crate::google_workspace_qualification::Qualification::native"
+            | "day2::google_workspace_qualification::Qualification::native"
+    ) {
+        return Some("network");
     }
     if matches!(
         target,
@@ -11723,9 +11739,18 @@ mod tests {
             r#"
             use crate::web_security::random as nonce;
             use day2::resource_admin as resource;
-            fn helper_callers() { nonce(); resource::now_ms(); }
+            use day2::google_workspace_qualification::{self as qualification};
+            fn helper_callers() {
+                nonce();
+                resource::now_ms();
+                qualification::Qualification::native(admitted, token);
+            }
         "#,
         );
+        assert!(findings.iter().any(|finding| {
+            finding.target == "day2::google_workspace_qualification::Qualification::native"
+                && finding.kind == "network"
+        }));
         assert!(
             findings
                 .iter()

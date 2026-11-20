@@ -1,28 +1,40 @@
 //! Operator-run live Google Workspace qualification. Never part of
 //! verification and never reached by an application: the private
 //! `ops/GoogleWorkspaceQualification.roc` recipe, run by `xtask
-//! google-workspace-qualify`, drives one [`Qualification`] through its steps.
+//! google-workspace-qualify`, orders the closed [`Step`]s of one
+//! [`Qualification`]. The recipe owns their order; this module enforces what
+//! must hold whatever the order: every read step runs once and before the
+//! share, the share runs once after them, visibility checks run only after
+//! the share, at most [`VISIBILITY_DELAYS`]`.len()` of them, each after its
+//! minimum delay.
 //!
 //! Every probe is an ordinary action, planned by the same [`Plan::authorize`]
 //! the host calls and run by [`google_workspace::observe`] through a port: the
 //! native port in a live run, the simulated one in tests. Between the adapter
 //! and that port a recording layer keeps only closed classifications of what
 //! Google sent (statuses, byte counts, reviewed error reasons, counts of
-//! reviewed field forms) and fences writes: the read probes may send none, the
-//! share probe one, and every later probe none, so a run creates at most one
-//! permission whatever the adapter does. The receipt names each fixture by its
-//! role in the profile and carries the profile's digest. It never holds an
-//! address, ID, token or other provider value, and it reports
-//! `provider_qualified: false` until a reviewer accepts it.
+//! reviewed field forms). It also fences requests: it passes only bodiless
+//! requests to the reviewed read endpoints, and the one create while the share
+//! step allows it; anything else is refused unsent. A run therefore creates at
+//! most one permission whatever the adapter does. The receipt names each
+//! fixture by its role, carries the digest of the exact profile bytes, and
+//! reports `provider_qualified: false` until a reviewer accepts it.
 //!
 //! An operator's machine has no metadata server. The run's workload token is
 //! the operator's own short-lived access token, which the session reads from an
-//! owner-private file and hands to [`Qualification::native`]. The private
-//! [`OperatorWorkload`] port answers the metadata exchange with it and passes
-//! every other exchange through unchanged, so IAM `generateAccessToken` and
-//! `signJwt` and the JWT-bearer exchange run exactly as they do in the runtime.
-//! Nothing outside this module can build that port, and nothing in it can run
-//! anything but the fixed probes below.
+//! owner-private file. The private [`OperatorWorkload`] port answers the
+//! metadata exchange with it and passes every other exchange through
+//! unchanged, so IAM `generateAccessToken` and `signJwt` and the JWT-bearer
+//! exchange run exactly as they do in the runtime.
+//!
+//! What holds: `OperatorWorkload` is private to this module and only
+//! [`Qualification`]'s constructors build it; a `Qualification` runs only its
+//! fixed steps; and [`Qualification::native`] is an architecture hazard, so
+//! every call site needs its own reviewed allowance; the only one is
+//! `xtask google-workspace-qualify`. What does not: `GooglePort`, `Reply`
+//! and `observe` are public, so Rust does not stop other code in this crate
+//! from writing its own port that answers the metadata exchange. Such a port
+//! is new code that only review catches.
 use crate::google_auth::{AccessToken, Exchange, IamMethod, Reply, Unreached};
 use crate::google_workspace::{
     self as workspace, ApiRequest, Failure, GooglePort, Meter, Plan, Source,
@@ -33,71 +45,100 @@ use day2_capabilities::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 /// What an operator reviewed before a run: the grant, and the live fixtures
 /// named by their role. See docs/GOOGLE-WORKSPACE.md, "Live fixture setup".
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct QualificationProfile {
-    pub format: u32,
-    pub service_account: String,
-    pub calendar_reader: String,
-    pub email_domain: String,
-    pub grantee_domains: Vec<String>,
-    pub calendars: Calendars,
-    pub window: Window,
-    pub events: Events,
-    pub group: String,
-    pub group_alias: String,
-    pub group_member: String,
+struct Profile {
+    format: u32,
+    service_account: String,
+    calendar_reader: String,
+    email_domain: String,
+    grantee_domains: Vec<String>,
+    calendars: Calendars,
+    window: Window,
+    events: Events,
+    group: String,
+    group_alias: String,
+    group_member: String,
     /// An artifact of `events.recorded`, generated and not yet shared with
     /// `group`.
-    pub artifact: String,
+    artifact: String,
     /// Unix seconds after which this profile no longer authorizes a run.
-    pub expires_at: i64,
+    expires_at: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Calendars {
+struct Calendars {
     /// The reader holds its own `writer` rule.
-    pub in_play: String,
+    in_play: String,
     /// Shared with the reader as free/busy only.
-    pub free_busy: String,
+    free_busy: String,
     /// The reader has no access at all.
-    pub unshared: String,
+    unshared: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Window {
-    pub time_min: String,
-    pub time_max: String,
+struct Window {
+    time_min: String,
+    time_max: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Events {
+struct Events {
     /// Created on `in_play` by a person in the domain, with a recorded Meet.
-    pub recorded: String,
+    recorded: String,
     /// Imported on `in_play` naming another in-domain person as organizer.
-    pub imported: String,
+    imported: String,
+}
+
+/// A profile admitted from the exact bytes an operator reviewed. Only
+/// [`admit`] makes one, and a [`Qualification`] runs only from one.
+pub struct Admitted {
+    profile: Profile,
+    digest: String,
+}
+
+impl Admitted {
+    /// Every string the profile holds: a receipt may contain none of them.
+    pub fn values(&self) -> Vec<String> {
+        let mut values = Vec::new();
+        let mut pending = vec![serde_json::to_value(&self.profile).unwrap_or_default()];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::String(text) => values.push(text),
+                Value::Array(items) => pending.extend(items),
+                Value::Object(map) => pending.extend(map.into_iter().map(|(_, value)| value)),
+                _ => {}
+            }
+        }
+        values
+    }
 }
 
 /// A profile authorizes a run for at most a week.
 const MAX_PROFILE_HORIZON_SECONDS: i64 = 7 * 86_400;
 /// Events pages followed through the adapter.
 const MAX_EVENT_PAGES: u64 = 4;
-/// Seconds waited before each check that the created permission is listed.
-const VISIBILITY_DELAYS: [u64; 7] = [0, 1, 2, 4, 8, 16, 32];
+/// The minimum wait before each visibility check, in seconds; also the most
+/// checks a run may make.
+pub const VISIBILITY_DELAYS: [u64; 7] = [0, 1, 2, 4, 8, 16, 32];
 const HANDLE: &str = "qualification";
 
 /// The mandatory profile guard, checked before the token is read and again
 /// before anything is sent: a supported format, an unexpired authorization at
 /// most a week out, distinct fixtures, and every probe's request authorized by
-/// the adapter's own rules.
-pub fn admit(profile: &QualificationProfile, now: i64) -> Result<()> {
+/// the adapter's own rules. The digest is of `bytes` exactly, so it matches
+/// `sha256sum` of the profile file.
+pub fn admit(bytes: &[u8], now: i64) -> Result<Admitted> {
+    let profile: Profile = crate::json::decode(bytes)
+        .map_err(|_| anyhow::anyhow!("google_workspace_qualification_profile_invalid"))?;
     ensure!(
         profile.format == 1,
         "google_workspace_qualification_profile_format"
@@ -116,22 +157,72 @@ pub fn admit(profile: &QualificationProfile, now: i64) -> Result<()> {
             && profile.group != profile.group_member,
         "google_workspace_qualification_profile_invalid"
     );
-    reads(profile, Source::Native)?;
-    plan(
+    for step in Step::READS {
+        plans(&profile, Source::Native, step)?;
+    }
+    plans(&profile, Source::Native, Step::Share)?;
+    Ok(Admitted {
         profile,
-        Source::Native,
-        Action::GoogleWorkspaceShareArtifact,
-        share_request(profile, &profile.group),
-    )?;
+        digest: crate::digest(bytes),
+    })
+}
+
+/// The operator's token must be one bearer token: printable ASCII without
+/// spaces, at most 8 KiB, and not JSON, so a service-account key file or a
+/// credentials document is refused before anything else happens.
+pub fn token_shape(token: &str) -> Result<()> {
+    ensure!(
+        (1..=8192).contains(&token.len())
+            && token.bytes().all(|byte| byte.is_ascii_graphic())
+            && !token.starts_with(['{', '[', '"']),
+        "google_workspace_qualification_token_invalid"
+    );
     Ok(())
 }
 
-fn plan(
-    profile: &QualificationProfile,
-    source: Source,
-    action: Action,
-    request: Value,
-) -> Result<Plan> {
+/// The closed steps of a run. The recipe orders them; [`Qualification::step`]
+/// enforces their preconditions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Step {
+    Directory,
+    Calendars,
+    Events,
+    Event,
+    Conferences,
+    ShareAlias,
+    /// The one write.
+    Share,
+    /// One visibility check of the share.
+    Check,
+}
+
+impl Step {
+    pub const READS: [Self; 6] = [
+        Self::Directory,
+        Self::Calendars,
+        Self::Events,
+        Self::Event,
+        Self::Conferences,
+        Self::ShareAlias,
+    ];
+
+    /// The step a recipe action names, after its common prefix.
+    pub fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "directory" => Self::Directory,
+            "calendars" => Self::Calendars,
+            "events" => Self::Events,
+            "event" => Self::Event,
+            "conferences" => Self::Conferences,
+            "share-alias" => Self::ShareAlias,
+            "share" => Self::Share,
+            "check" => Self::Check,
+            _ => return None,
+        })
+    }
+}
+
+fn plan(profile: &Profile, source: Source, action: Action, request: Value) -> Result<Plan> {
     Plan::authorize(
         action,
         &LiveConnection::GoogleWorkspace {
@@ -149,74 +240,116 @@ fn plan(
     .context("google_workspace_qualification_profile_invalid")
 }
 
-fn share_request(profile: &QualificationProfile, group: &str) -> Value {
+fn share_request(profile: &Profile, group: &str) -> Value {
     json!({"handle":HANDLE,"calendar_id":profile.calendars.in_play,
         "event_id":profile.events.recorded,"artifact":profile.artifact,"group_email":group})
 }
 
-fn events_request(
-    profile: &QualificationProfile,
-    time_max: &str,
-    page_token: Option<&str>,
-) -> Value {
+fn events_request(profile: &Profile, time_max: &str, page_token: Option<&str>) -> Value {
     json!({"handle":HANDLE,"calendar_id":profile.calendars.in_play,
         "time_min":profile.window.time_min,"time_max":time_max,
         "page_token":page_token.map_or(json!("None"), |token| json!({"Some":token}))})
 }
 
-/// The fixed read probes, in order, each with its reviewed name. Events
-/// pages after the first and the token-binding probe depend on the first
-/// page, so they are planned as they run.
-fn reads(profile: &QualificationProfile, source: Source) -> Result<Vec<(&'static str, Plan)>> {
+/// A step's fixed probes, in order, each with its reviewed name. Events pages
+/// after the first and the token probe depend on the first page, so they are
+/// planned as they run. A check is the share again.
+fn plans(profile: &Profile, source: Source, step: Step) -> Result<Vec<(&'static str, Plan)>> {
     let calendars = &profile.calendars;
     let event = |id: &str| json!({"handle":HANDLE,"calendar_id":calendars.in_play,"event_id":id});
     let calendar = |id: &str| json!({"handle":HANDLE,"calendar_id":id,"group_email":profile.group});
     let group = |address: &str| json!({"handle":HANDLE,"group_email":address});
-    [
-        ("directory_group", Action::GoogleWorkspaceGroup, group(&profile.group)),
-        ("directory_group_alias", Action::GoogleWorkspaceGroup, group(&profile.group_alias)),
-        (
-            "directory_group_member",
-            Action::GoogleWorkspaceGroupMember,
-            json!({"handle":HANDLE,"group_email":profile.group,"member_email":profile.group_member}),
-        ),
-        ("calendar_in_play", Action::GoogleWorkspaceCalendar, calendar(&calendars.in_play)),
-        ("calendar_free_busy", Action::GoogleWorkspaceCalendar, calendar(&calendars.free_busy)),
-        ("calendar_unshared", Action::GoogleWorkspaceCalendar, calendar(&calendars.unshared)),
-        (
+    let probes = match step {
+        Step::Directory => vec![
+            (
+                "directory_group",
+                Action::GoogleWorkspaceGroup,
+                group(&profile.group),
+            ),
+            (
+                "directory_group_alias",
+                Action::GoogleWorkspaceGroup,
+                group(&profile.group_alias),
+            ),
+            (
+                "directory_group_member",
+                Action::GoogleWorkspaceGroupMember,
+                json!({"handle":HANDLE,"group_email":profile.group,"member_email":profile.group_member}),
+            ),
+        ],
+        Step::Calendars => vec![
+            (
+                "calendar_in_play",
+                Action::GoogleWorkspaceCalendar,
+                calendar(&calendars.in_play),
+            ),
+            (
+                "calendar_free_busy",
+                Action::GoogleWorkspaceCalendar,
+                calendar(&calendars.free_busy),
+            ),
+            (
+                "calendar_unshared",
+                Action::GoogleWorkspaceCalendar,
+                calendar(&calendars.unshared),
+            ),
+        ],
+        Step::Events => vec![(
             "events_page",
             Action::GoogleWorkspaceCalendarEvents,
             events_request(profile, &profile.window.time_max, None),
-        ),
-        ("event_recorded", Action::GoogleWorkspaceCalendarEvent, event(&profile.events.recorded)),
-        ("event_imported", Action::GoogleWorkspaceCalendarEvent, event(&profile.events.imported)),
-        (
-            "conferences_recorded",
-            Action::GoogleWorkspaceEventConferences,
-            event(&profile.events.recorded),
-        ),
-        (
-            "conferences_imported",
-            Action::GoogleWorkspaceEventConferences,
-            event(&profile.events.imported),
-        ),
-        // The alias is refused before any owner token: fenced, it can never
-        // reach Drive.
-        (
+        )],
+        Step::Event => vec![
+            (
+                "event_recorded",
+                Action::GoogleWorkspaceCalendarEvent,
+                event(&profile.events.recorded),
+            ),
+            (
+                "event_imported",
+                Action::GoogleWorkspaceCalendarEvent,
+                event(&profile.events.imported),
+            ),
+        ],
+        Step::Conferences => vec![
+            (
+                "conferences_recorded",
+                Action::GoogleWorkspaceEventConferences,
+                event(&profile.events.recorded),
+            ),
+            (
+                "conferences_imported",
+                Action::GoogleWorkspaceEventConferences,
+                event(&profile.events.imported),
+            ),
+        ],
+        // The alias is refused before any owner token; fenced, it could
+        // never reach Drive anyway.
+        Step::ShareAlias => vec![(
             "share_alias",
             Action::GoogleWorkspaceShareArtifact,
             share_request(profile, &profile.group_alias),
-        ),
-    ]
-    .into_iter()
-    .map(|(name, action, request)| Ok((name, plan(profile, source, action, request)?)))
-    .collect()
+        )],
+        Step::Share | Step::Check => vec![(
+            if step == Step::Share {
+                "share"
+            } else {
+                "share_again"
+            },
+            Action::GoogleWorkspaceShareArtifact,
+            share_request(profile, &profile.group),
+        )],
+    };
+    probes
+        .into_iter()
+        .map(|(name, action, request)| Ok((name, plan(profile, source, action, request)?)))
+        .collect()
 }
 
 /// The operator's access token standing in for the metadata server's workload
 /// token: the metadata exchange is answered with it and nothing else is
-/// changed. Private, built only by [`Qualification::native`] and the
-/// simulated constructor, and never printable.
+/// changed. Private, built only by [`Qualification`]'s constructors, and never
+/// printable.
 struct OperatorWorkload<P> {
     inner: P,
     token: String,
@@ -261,7 +394,7 @@ struct Recorded {
     /// No complete reply arrived.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
-    /// A write the fence refused: it was never sent.
+    /// A request the fence refused: it was never sent.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     fenced: bool,
     /// Reviewed error reasons and statuses, and counts of reviewed forms.
@@ -546,14 +679,47 @@ fn classify(
     shape
 }
 
-/// Records each exchange and fences writes. `writes` is how many creates the
-/// running probe may still send; any other is refused here, unsent.
+/// The reviewed read endpoints: the only requests the fence passes besides
+/// the one create.
+const READ_ENDPOINTS: &[&str] = &[
+    "calendar_acl",
+    "calendar_event",
+    "calendar_events",
+    "calendar_get",
+    "calendar_reader_rule",
+    "directory_group",
+    "directory_has_member",
+    "drive_permissions",
+    "meet_artifact",
+    "meet_conference_records",
+    "meet_recordings",
+    "meet_smart_notes",
+    "meet_transcripts",
+];
+const CREATE_ENDPOINT: &str = "drive_permission_create";
+
+/// The run's one monotonic clock reading.
+fn monotonic() -> Instant {
+    Instant::now()
+}
+
+fn milliseconds(later: Instant, earlier: Instant) -> u64 {
+    u64::try_from(later.saturating_duration_since(earlier).as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Records each exchange and fences requests. A bodiless request to a
+/// reviewed read endpoint passes; the create passes only while `writes`
+/// allows it; anything else is refused here, unsent.
 struct Recording {
     inner: Box<dyn GooglePort>,
     exchanges: Vec<Recorded>,
     writes: u8,
     creates_sent: u64,
-    creates_fenced: u64,
+    requests_fenced: u64,
+    /// When the create's reply, or its failure, came back.
+    created_at: Option<Instant>,
+    /// When the running probe's first permission list came back.
+    first_list_at: Option<Instant>,
 }
 
 impl Recording {
@@ -568,13 +734,15 @@ impl Recording {
                 endpoint,
                 http_status: Some(reply.status),
                 response_bytes: reply.body.len() as u64,
-                // Authentication bodies hold tokens: only a refusal's OAuth or
-                // IAM reason is read.
-                shape: serde_json::from_slice::<Value>(&reply.body)
-                    .ok()
-                    .filter(|_| request.is_some() || reply.status >= 400)
-                    .map(|body| classify(endpoint, reply.status, &body, request))
-                    .unwrap_or_default(),
+                // A successful authentication body holds a token, so it is
+                // never parsed; a refusal's OAuth or IAM reason is.
+                shape: if request.is_some() || reply.status >= 400 {
+                    serde_json::from_slice::<Value>(&reply.body)
+                        .map(|body| classify(endpoint, reply.status, &body, request))
+                        .unwrap_or_default()
+                } else {
+                    BTreeMap::new()
+                },
                 ..Recorded::default()
             },
             Err(unreached) => Recorded {
@@ -617,26 +785,36 @@ impl GooglePort for Recording {
         token: &AccessToken,
         max_bytes: usize,
     ) -> std::result::Result<Reply, Unreached> {
-        if request.body().is_some() {
-            if self.writes == 0 {
-                self.creates_fenced += 1;
-                self.exchanges.push(Recorded {
-                    endpoint: request.endpoint,
-                    fenced: true,
-                    ..Recorded::default()
-                });
-                return Err(Unreached::default());
-            }
+        let read = request.body().is_none() && READ_ENDPOINTS.contains(&request.endpoint);
+        let create =
+            request.endpoint == CREATE_ENDPOINT && request.body().is_some() && self.writes > 0;
+        if !(read || create) {
+            self.requests_fenced += 1;
+            self.exchanges.push(Recorded {
+                endpoint: request.endpoint,
+                fenced: true,
+                ..Recorded::default()
+            });
+            return Err(Unreached::default());
+        }
+        if create {
             self.writes -= 1;
             self.creates_sent += 1;
         }
         let reply = self.inner.call(request, token, max_bytes);
+        let at = monotonic();
+        if create {
+            self.created_at = Some(at);
+        }
+        if request.endpoint == "drive_permissions" && self.first_list_at.is_none() {
+            self.first_list_at = Some(at);
+        }
         self.record(request.endpoint, &reply, Some(request));
         reply
     }
 }
 
-/// Every outcome tag and failure code a probe may report.
+/// Every outcome tag a probe may report.
 const OUTCOMES: &[&str] = &[
     "AllDay",
     "AlreadyShared",
@@ -707,56 +885,77 @@ struct Entry {
     exchanges: Vec<Recorded>,
 }
 
-/// One qualification run: the read probes, then the one write and its
-/// visibility checks, then the receipt.
+impl Entry {
+    /// A probe that did not run, and why.
+    fn unsettled(probe: &'static str, outcome: &'static str) -> Self {
+        Self {
+            probe,
+            outcome,
+            details: Map::new(),
+            calls: 0,
+            request_bytes: 0,
+            response_bytes: 0,
+            exchanges: Vec::new(),
+        }
+    }
+}
+
+/// One qualification run, step by step.
 pub struct Qualification {
-    profile: QualificationProfile,
+    profile: Profile,
+    digest: String,
     source: Source,
     port: OperatorWorkload<Recording>,
     entries: Vec<Entry>,
+    done: BTreeSet<Step>,
+    /// Whether the share's outcome leaves something to check.
+    checkable: bool,
+    checks: usize,
     /// Provider values one probe needs from another; dropped with the run.
     permission: Option<String>,
-    visible_after_seconds: Option<u64>,
+    visible_after_ms: Option<u64>,
     /// [`VISIBILITY_DELAYS`]; shorter in tests.
     delays: &'static [u64],
-    read: bool,
-    shared: bool,
     started: i64,
 }
 
 impl Qualification {
-    /// A live run through the native port, with `token` as the workload.
-    pub fn native(profile: QualificationProfile, token: String) -> Result<Self> {
+    /// A live run through the native port, with `token` as the workload. An
+    /// architecture hazard: each call site needs a reviewed allowance.
+    pub fn native(admitted: Admitted, token: String) -> Result<Self> {
         let port = crate::google_workspace_http::NativeGooglePort::new()?;
-        Self::new(profile, token, Source::Native, Box::new(port))
+        Self::new(admitted, token, Source::Native, Box::new(port))
     }
 
     /// A run against the provider's committed simulated world, through the
-    /// same probes and fences.
+    /// same steps and fences. Public for the xtask session's tests.
     pub fn simulated(
-        profile: QualificationProfile,
+        admitted: Admitted,
         token: String,
         database: &std::path::Path,
         scope: &str,
     ) -> Result<Self> {
         let port = workspace::SimulatedGooglePort::new(database, scope)?;
-        Self::new(profile, token, Source::Simulated, Box::new(port))
+        Self::new(admitted, token, Source::Simulated, Box::new(port))
     }
 
     fn new(
-        profile: QualificationProfile,
+        admitted: Admitted,
         token: String,
         source: Source,
         inner: Box<dyn GooglePort>,
     ) -> Result<Self> {
         let started = crate::oauth::effects::wall_time()?;
-        admit(&profile, started)?;
+        // Admitted again against this run's clock.
+        let Admitted { profile, digest } = admitted;
         ensure!(
-            (1..=8192).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_graphic()),
-            "google_workspace_qualification_token_invalid"
+            started < profile.expires_at,
+            "google_workspace_qualification_profile_expired"
         );
+        token_shape(&token)?;
         Ok(Self {
             profile,
+            digest,
             source,
             port: OperatorWorkload {
                 inner: Recording {
@@ -764,16 +963,19 @@ impl Qualification {
                     exchanges: Vec::new(),
                     writes: 0,
                     creates_sent: 0,
-                    creates_fenced: 0,
+                    requests_fenced: 0,
+                    created_at: None,
+                    first_list_at: None,
                 },
                 token,
             },
             entries: Vec::new(),
+            done: BTreeSet::new(),
+            checkable: false,
+            checks: 0,
             permission: None,
-            visible_after_seconds: None,
+            visible_after_ms: None,
             delays: &VISIBILITY_DELAYS,
-            read: false,
-            shared: false,
             started,
         })
     }
@@ -786,6 +988,7 @@ impl Qualification {
         writes: u8,
     ) -> Result<(&'static str, Value, bool)> {
         self.port.inner.writes = writes;
+        self.port.inner.first_list_at = None;
         let (result, meter): (Result<String>, Meter) =
             workspace::observe(plan, &mut self.port, crate::oauth::effects::wall_time()?);
         self.port.inner.writes = 0;
@@ -810,101 +1013,144 @@ impl Qualification {
         }
     }
 
-    /// Every read probe, in order. Nothing is written: the fence refuses any
-    /// create, so the alias probe cannot reach Drive whatever Google answers.
-    pub fn read(&mut self) -> Result<Value> {
-        ensure!(!self.read, "google_workspace_qualification_step_replayed");
-        self.read = true;
-        let profile = self.profile.clone();
-        let organizer_kind = |organizer: Option<&str>, creator: Option<&str>| -> &'static str {
-            match organizer {
-                None => "absent",
-                Some(organizer) if Some(organizer) == creator => "creator",
-                Some(organizer) if organizer.ends_with("@group.calendar.google.com") => {
-                    "group_calendar"
-                }
-                Some(organizer) if organizer.ends_with("@resource.calendar.google.com") => {
-                    "resource_calendar"
-                }
-                Some(organizer) if organizer.ends_with(&format!("@{}", profile.email_domain)) => {
-                    "person_in_domain"
-                }
-                Some(_) => "person_elsewhere",
+    /// Run one step, once its preconditions hold: a read step once and before
+    /// the share; the share once, after every read step; a check only after a
+    /// share whose outcome leaves something to check, until one finds the
+    /// permission, at most once per [`VISIBILITY_DELAYS`] entry, each after its
+    /// delay. A failed precondition sends nothing.
+    pub fn step(&mut self, step: Step) -> Result<Value> {
+        let order = "google_workspace_qualification_step_out_of_order";
+        match step {
+            Step::Share => ensure!(
+                Step::READS.iter().all(|read| self.done.contains(read))
+                    && !self.done.contains(&Step::Share),
+                order
+            ),
+            Step::Check => ensure!(
+                self.checkable
+                    && self.visible_after_ms.is_none()
+                    && self.checks < self.delays.len(),
+                order
+            ),
+            read => ensure!(
+                !self.done.contains(&read) && !self.done.contains(&Step::Share),
+                order
+            ),
+        }
+        if step != Step::Check {
+            self.done.insert(step);
+        }
+        let probes = plans(&self.profile, self.source, step)?;
+        match step {
+            Step::Events => {
+                let (name, plan) = &probes[0];
+                let (outcome, value, _) = self.probe(name, plan, 0)?;
+                self.events_pages(outcome, &value)?;
             }
-        };
-        for (name, plan) in reads(&profile, self.source)? {
-            let (outcome, value, _) = self.probe(name, &plan, 0)?;
-            match name {
-                "directory_group" | "directory_group_alias" if outcome == "Found" => {
-                    let email = value["email"].as_str();
-                    self.detail(
-                        "primary_is_group",
-                        json!(email == Some(profile.group.as_str())),
-                    );
-                    self.detail(
-                        "primary_is_alias",
-                        json!(email == Some(profile.group_alias.as_str())),
-                    );
+            Step::Share => {
+                let (name, plan) = &probes[0];
+                let (outcome, value, _) = self.probe(name, plan, 1)?;
+                self.permission = value["permission_id"].as_str().map(str::to_owned);
+                self.checkable =
+                    matches!(outcome, "Shared" | "google_workspace_share_outcome_unknown");
+                return Ok(json!({ "check": self.checkable }));
+            }
+            Step::Check => return self.check(&probes[0].1),
+            _ => {
+                for (name, plan) in &probes {
+                    let (outcome, value, _) = self.probe(name, plan, 0)?;
+                    self.describe(name, outcome, &value);
                 }
-                "calendar_in_play" | "calendar_free_busy" | "calendar_unshared"
-                    if outcome == "Found" =>
-                {
-                    let role = ["None", "FreeBusyReader", "Reader", "Writer", "Owner"]
-                        .into_iter()
-                        .find(|role| value["group_role"] == *role)
-                        .unwrap_or("other");
-                    self.detail("group_role", json!(role));
-                }
-                "events_page" => self.events_pages(&value)?,
-                "event_recorded" | "event_imported" if outcome == "Found" => {
-                    let creator = text(&value["creator"]);
-                    let organizer = text(&value["organizer"]);
-                    self.detail("organizer", json!(organizer_kind(organizer, creator)));
-                    self.detail(
-                        "creator_in_domain",
-                        json!(creator.is_some_and(|creator| {
-                            creator.ends_with(&format!("@{}", profile.email_domain))
-                        })),
-                    );
-                    self.detail(
-                        "meeting_code",
-                        json!(text(&value["meeting_code"]).is_some()),
-                    );
-                }
-                "conferences_recorded" | "conferences_imported" if outcome == "Found" => {
-                    let records = value["records"].as_array().cloned().unwrap_or_default();
-                    let artifacts = |kind: &str| -> u64 {
-                        records
-                            .iter()
-                            .map(|record| record[kind].as_array().map_or(0, Vec::len) as u64)
-                            .sum()
-                    };
-                    let listed = records.iter().any(|record| {
-                        ["recordings", "smart_notes", "transcripts"]
-                            .iter()
-                            .any(|kind| {
-                                record[*kind]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .any(|artifact| artifact["name"] == profile.artifact.as_str())
-                            })
-                    });
-                    self.detail("records", json!(records.len()));
-                    self.detail("recordings", json!(artifacts("recordings")));
-                    self.detail("smart_notes", json!(artifacts("smart_notes")));
-                    self.detail("transcripts", json!(artifacts("transcripts")));
-                    self.detail("artifact_listed", json!(listed));
-                }
-                _ => {}
             }
         }
-        Ok(json!({ "probes": self.entries.len() }))
+        Ok(json!({}))
+    }
+
+    /// Closed details of a read probe's outcome, compared in memory.
+    fn describe(&mut self, name: &str, outcome: &str, value: &Value) {
+        if outcome != "Found" {
+            return;
+        }
+        let profile = self.profile.clone();
+        let domain = format!("@{}", profile.email_domain);
+        match name {
+            "directory_group" | "directory_group_alias" => {
+                let email = value["email"].as_str();
+                self.detail(
+                    "primary_is_group",
+                    json!(email == Some(profile.group.as_str())),
+                );
+                self.detail(
+                    "primary_is_alias",
+                    json!(email == Some(profile.group_alias.as_str())),
+                );
+            }
+            "calendar_in_play" | "calendar_free_busy" | "calendar_unshared" => {
+                let role = ["None", "FreeBusyReader", "Reader", "Writer", "Owner"]
+                    .into_iter()
+                    .find(|role| value["group_role"] == *role)
+                    .unwrap_or("other");
+                self.detail("group_role", json!(role));
+            }
+            "event_recorded" | "event_imported" => {
+                let creator = text(&value["creator"]);
+                let organizer = match text(&value["organizer"]) {
+                    None => "absent",
+                    Some(organizer) if Some(organizer) == creator => "creator",
+                    Some(organizer) if organizer.ends_with("@group.calendar.google.com") => {
+                        "group_calendar"
+                    }
+                    Some(organizer) if organizer.ends_with("@resource.calendar.google.com") => {
+                        "resource_calendar"
+                    }
+                    Some(organizer) if organizer.ends_with(&domain) => "person_in_domain",
+                    Some(_) => "person_elsewhere",
+                };
+                self.detail("organizer", json!(organizer));
+                self.detail(
+                    "creator_in_domain",
+                    json!(creator.is_some_and(|creator| creator.ends_with(&domain))),
+                );
+                self.detail(
+                    "meeting_code",
+                    json!(text(&value["meeting_code"]).is_some()),
+                );
+            }
+            "conferences_recorded" | "conferences_imported" => {
+                let records = value["records"].as_array().cloned().unwrap_or_default();
+                let artifacts = |kind: &str| -> u64 {
+                    records
+                        .iter()
+                        .map(|record| record[kind].as_array().map_or(0, Vec::len) as u64)
+                        .sum()
+                };
+                let listed = records.iter().any(|record| {
+                    ["recordings", "smart_notes", "transcripts"]
+                        .iter()
+                        .any(|kind| {
+                            record[*kind]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|artifact| artifact["name"] == profile.artifact.as_str())
+                        })
+                });
+                self.detail("records", json!(records.len()));
+                self.detail("recordings", json!(artifacts("recordings")));
+                self.detail("smart_notes", json!(artifacts("smart_notes")));
+                self.detail("transcripts", json!(artifacts("transcripts")));
+                self.detail("artifact_listed", json!(listed));
+            }
+            _ => {}
+        }
     }
 
     /// Follow events pages through the adapter, then send the first page's
-    /// token with another query, to see whether Google binds the two.
-    fn events_pages(&mut self, first: &Value) -> Result<()> {
+    /// token with another query: the same calendar and start, with a window
+    /// one day long. A refused first page, or one without a token, leaves
+    /// both unsettled, and the receipt says so.
+    fn events_pages(&mut self, outcome: &str, first: &Value) -> Result<()> {
+        const TOKEN_PROBE: &str = "events_token_other_query";
         let profile = self.profile.clone();
         let page = |value: &Value| {
             (
@@ -912,11 +1158,22 @@ impl Qualification {
                 text(&value["next_page_token"]).map(str::to_owned),
             )
         };
+        if outcome != "Found" {
+            self.entries.push(Entry::unsettled(
+                TOKEN_PROBE,
+                "unsettled_first_page_refused",
+            ));
+            return Ok(());
+        }
         let (events, mut next) = page(first);
         self.detail("page", json!(1));
         self.detail("events", json!(events));
         self.detail("next_page_token", json!(next.is_some()));
-        let first_token = next.clone();
+        let Some(first_token) = next.clone() else {
+            self.entries
+                .push(Entry::unsettled(TOKEN_PROBE, "unsettled_single_page"));
+            return Ok(());
+        };
         let mut ordinal = 1;
         while let Some(token) = next.take().filter(|_| ordinal < MAX_EVENT_PAGES) {
             ordinal += 1;
@@ -927,16 +1184,10 @@ impl Qualification {
                 Action::GoogleWorkspaceCalendarEvents,
                 request,
             ) else {
-                // A token the adapter would refuse to send.
-                self.entries.push(Entry {
-                    probe: "events_page",
-                    outcome: "page_token_refused_by_adapter",
-                    details: Map::new(),
-                    calls: 0,
-                    request_bytes: 0,
-                    response_bytes: 0,
-                    exchanges: Vec::new(),
-                });
+                self.entries.push(Entry::unsettled(
+                    "events_page",
+                    "page_token_refused_by_adapter",
+                ));
                 break;
             };
             let (_, value, _) = self.probe("events_page", &plan, 0)?;
@@ -946,71 +1197,80 @@ impl Qualification {
             self.detail("next_page_token", json!(following.is_some()));
             next = following;
         }
-        // Another query: the same calendar and start, a window one day long.
-        let other = crate::google_workspace_calendar::rfc3339_seconds(&profile.window.time_min)
-            .and_then(|start| crate::google_workspace_meet::utc(start + 86_400));
-        if let (Some(token), Some(time_max)) = (first_token, other)
-            && let Ok(plan) = plan(
-                &profile,
-                self.source,
-                Action::GoogleWorkspaceCalendarEvents,
-                events_request(&profile, &time_max, Some(&token)),
-            )
-        {
-            self.probe("events_token_other_query", &plan, 0)?;
+        // The other query ends one day after the window starts. Events at or
+        // after that end mean Google kept the token's original query.
+        let start = crate::google_workspace_calendar::rfc3339_seconds(&profile.window.time_min);
+        let end = start.map(|start| start + 86_400);
+        let Some(time_max) = end.and_then(crate::google_workspace_meet::utc) else {
+            self.entries
+                .push(Entry::unsettled(TOKEN_PROBE, "unsettled_window"));
+            return Ok(());
+        };
+        let Ok(plan) = plan(
+            &profile,
+            self.source,
+            Action::GoogleWorkspaceCalendarEvents,
+            events_request(&profile, &time_max, Some(&first_token)),
+        ) else {
+            self.entries.push(Entry::unsettled(
+                TOKEN_PROBE,
+                "page_token_refused_by_adapter",
+            ));
+            return Ok(());
+        };
+        let (outcome, value, _) = self.probe(TOKEN_PROBE, &plan, 0)?;
+        if outcome == "Found" {
+            let beyond = value["events"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|event| {
+                    let times = event["status"].as_object()?.values().next()?;
+                    crate::google_workspace_calendar::rfc3339_seconds(times["start"].as_str()?)
+                })
+                .filter(|start| end.is_some_and(|end| *start >= end))
+                .count();
+            self.detail("events_at_or_after_time_max", json!(beyond));
         }
         Ok(())
     }
 
-    /// The one write, then checks that the permission is listed. Each check
-    /// is the share again with the fence closed: it lists first and answers
-    /// `AlreadyShared` once Drive lists the permission, and any create it
-    /// would send instead is refused unsent. A check is a scheduled read,
-    /// never a retry: whatever it answers, the next one waits its turn.
-    pub fn share(&mut self) -> Result<Value> {
-        ensure!(
-            self.read && !self.shared,
-            "google_workspace_qualification_step_out_of_order"
-        );
-        self.shared = true;
-        let profile = self.profile.clone();
-        let share = plan(
-            &profile,
-            self.source,
-            Action::GoogleWorkspaceShareArtifact,
-            share_request(&profile, &profile.group),
-        )?;
-        let (outcome, value, _) = self.probe("share", &share, 1)?;
-        self.permission = value["permission_id"].as_str().map(str::to_owned);
-        if !matches!(outcome, "Shared" | "google_workspace_share_outcome_unknown") {
-            return Ok(json!({ "outcome": outcome }));
+    /// One visibility check: the share again with the fence closed, after its
+    /// minimum delay. It answers `AlreadyShared` once Drive lists the
+    /// permission; any create it would send instead is refused unsent. The
+    /// elapsed time is monotonic, from the create's reply to the check's
+    /// first permission list, so it counts every exchange before the list too.
+    fn check(&mut self, plan: &Plan) -> Result<Value> {
+        let delay = self.delays[self.checks];
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
         }
-        let mut waited = 0;
-        for delay in self.delays.iter().copied() {
-            if delay > 0 {
-                std::thread::sleep(std::time::Duration::from_secs(delay));
-            }
-            waited += delay;
-            let (again, value, fenced) = self.probe("share_again", &share, 0)?;
-            self.detail("waited_seconds", json!(waited));
-            if again == "AlreadyShared" && !fenced {
-                let same = self
-                    .permission
-                    .as_deref()
-                    .map(|id| value["permission_id"] == id);
-                self.detail("same_permission", json!(same));
-                self.visible_after_seconds = Some(waited);
-                break;
-            }
+        self.checks += 1;
+        let (outcome, value, fenced) = self.probe("share_again", plan, 0)?;
+        let recording = &self.port.inner;
+        let elapsed = recording
+            .created_at
+            .zip(recording.first_list_at)
+            .map(|(created, listed)| milliseconds(listed, created));
+        self.detail("delay_seconds", json!(delay));
+        self.detail("elapsed_ms", json!(elapsed));
+        let visible = outcome == "AlreadyShared" && !fenced;
+        if visible {
+            let same = self
+                .permission
+                .as_deref()
+                .map(|id| value["permission_id"] == id);
+            self.detail("same_permission", json!(same));
+            self.visible_after_ms = elapsed.or(Some(0));
         }
-        Ok(json!({ "outcome": outcome }))
+        Ok(json!({ "visible": visible }))
     }
 
     /// The receipt. Consumes the run, dropping the port, the operator token
     /// and every provider value it held.
     pub fn finish(self) -> Result<Value> {
         ensure!(
-            self.shared,
+            self.done.contains(&Step::Share),
             "google_workspace_qualification_step_out_of_order"
         );
         let recording = &self.port.inner;
@@ -1020,36 +1280,67 @@ impl Qualification {
         );
         Ok(json!({
             "format": 1,
+            // Names the receipt's format only. The recipe sources' digest is
+            // below; the adapter's code revision is recorded by the operator.
             "adapter": "google-workspace-v1",
+            "recipe_sources": crate::automation::source_digest(),
             "provider_qualified": false,
             "source": match self.source { Source::Native => "native", Source::Simulated => "simulated" },
             "workload": "operator_token",
-            "profile_digest": crate::digest(&serde_json::to_vec(&self.profile)?),
+            "profile_digest": self.digest,
             "started_at": self.started,
             "finished_at": crate::oauth::effects::wall_time()?,
             "creates_sent": recording.creates_sent,
-            "creates_fenced": recording.creates_fenced,
-            "visible_after_seconds": self.visible_after_seconds,
+            "requests_fenced": recording.requests_fenced,
+            "check_delays_seconds": self.delays,
+            "checks": self.checks,
+            "visible_after_ms": self.visible_after_ms,
             "probes": self.entries,
         }))
     }
 }
 
-/// A seeded simulated organization and the profile that names its fixtures,
-/// for tests of the whole session and for rehearsing a profile offline.
+/// The rehearsal organization's profile, expiring a day from now. Public, like
+/// [`simulated_rehearsal`], because the xtask session's tests (another crate)
+/// use them.
+pub fn simulated_profile() -> Result<Vec<u8>> {
+    use crate::integrations::simulated;
+    let domain = simulated::GOOGLE_DEVELOPMENT_DOMAIN;
+    Ok(serde_json::to_vec(&json!({
+        "format": 1,
+        "service_account": simulated::GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT,
+        "calendar_reader": simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER,
+        "email_domain": domain,
+        "grantee_domains": [domain],
+        "calendars": {
+            "in_play": simulated::GOOGLE_DEVELOPMENT_CALENDAR,
+            "free_busy": "c_free_busy@group.calendar.google.com",
+            "unshared": "c_unshared@group.calendar.google.com",
+        },
+        "window": {"time_min": "2026-01-01T00:00:00Z", "time_max": "2026-01-31T00:00:00Z"},
+        "events": {"recorded": "standup0001", "imported": "imported0004"},
+        "group": format!("engineering@{domain}"),
+        "group_alias": format!("eng-alias@{domain}"),
+        "group_member": format!("ada@{domain}"),
+        "artifact": "conferenceRecords/conf-standup-1/recordings/rec-1",
+        "expires_at": crate::oauth::effects::wall_time()? + 86_400,
+    }))?)
+}
+
+/// A seeded simulated organization with the fixtures [`simulated_profile`]
+/// names, and a token its IAM accepts: the database, the profile bytes and the
+/// token.
 pub fn simulated_rehearsal(
     directory: &std::path::Path,
-) -> Result<(std::path::PathBuf, QualificationProfile, String)> {
+) -> Result<(std::path::PathBuf, Vec<u8>, String)> {
     use crate::integrations::simulated::{self as simulated, GoogleAclRule, GoogleCalendar};
     let mut world = simulated::google_workspace_development_fixture();
     let domain = simulated::GOOGLE_DEVELOPMENT_DOMAIN;
-    let reader = simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER;
-    let in_play = simulated::GOOGLE_DEVELOPMENT_CALENDAR;
     let calendar = |role: &str| GoogleCalendar {
         summary: "Qualification".into(),
         acl: [(role != "none").then(|| GoogleAclRule {
             scope_type: "user".into(),
-            scope_value: Some(reader.into()),
+            scope_value: Some(simulated::GOOGLE_DEVELOPMENT_CALENDAR_READER.into()),
             role: role.into(),
         })]
         .into_iter()
@@ -1065,15 +1356,18 @@ pub fn simulated_rehearsal(
         "c_unshared@group.calendar.google.com".into(),
         calendar("none"),
     );
-    let events = &mut world.calendars.get_mut(in_play).context("calendar")?.events;
+    let events = &mut world
+        .calendars
+        .get_mut(simulated::GOOGLE_DEVELOPMENT_CALENDAR)
+        .context("calendar")?
+        .events;
     let mut imported = events[0].clone();
     imported.id = "imported0004".into();
     imported.creator = Some(format!("grace@{domain}"));
     events.push(imported);
-    let engineering = format!("engineering@{domain}");
     world
         .groups
-        .get_mut(&engineering)
+        .get_mut(&format!("engineering@{domain}"))
         .context("group")?
         .aliases
         .insert(format!("eng-alias@{domain}"));
@@ -1108,34 +1402,9 @@ pub fn simulated_rehearsal(
         )
         .map_err(|_| anyhow::anyhow!("simulated metadata"))?;
     let token: Value = serde_json::from_slice(&reply.body)?;
-    let profile = QualificationProfile {
-        format: 1,
-        service_account: simulated::GOOGLE_DEVELOPMENT_SERVICE_ACCOUNT.into(),
-        calendar_reader: reader.into(),
-        email_domain: domain.into(),
-        grantee_domains: vec![domain.into()],
-        calendars: Calendars {
-            in_play: in_play.into(),
-            free_busy: "c_free_busy@group.calendar.google.com".into(),
-            unshared: "c_unshared@group.calendar.google.com".into(),
-        },
-        window: Window {
-            time_min: "2026-01-01T00:00:00Z".into(),
-            time_max: "2026-01-31T00:00:00Z".into(),
-        },
-        events: Events {
-            recorded: "standup0001".into(),
-            imported: "imported0004".into(),
-        },
-        group: engineering,
-        group_alias: format!("eng-alias@{domain}"),
-        group_member: format!("ada@{domain}"),
-        artifact: "conferenceRecords/conf-standup-1/recordings/rec-1".into(),
-        expires_at: crate::oauth::effects::wall_time()? + 86_400,
-    };
     Ok((
         database,
-        profile,
+        simulated_profile()?,
         token["access_token"]
             .as_str()
             .context("simulated token")?
