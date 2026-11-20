@@ -27,6 +27,7 @@ mod linux_qualification;
 mod linux_runtime_qualification;
 mod native_toolchain;
 mod provider_conformance;
+mod qualification_evidence;
 mod release_inputs;
 mod roc_packages;
 mod runtime_image;

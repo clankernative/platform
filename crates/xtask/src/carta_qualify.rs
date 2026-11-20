@@ -8,46 +8,17 @@
 //! and every run reports `provider_qualified: false` until a reviewer accepts
 //! its evidence.
 use super::*;
+use crate::qualification_evidence::{bounded, now};
 use day2::{automation::Request, carta_qualification::QualificationProfile};
 use serde_json::{Value, json};
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-const MAX_INPUT_BYTES: u64 = 16 * 1024;
 const RECEIPT: &str = "receipt.json";
-
-/// A bounded regular file read from the opened descriptor, never through a link.
-fn bounded(path: &Path, private: bool) -> Result<Vec<u8>> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    let metadata = file.metadata()?;
-    ensure!(
-        metadata.is_file()
-            && metadata.len() <= MAX_INPUT_BYTES
-            && (!private || metadata.permissions().mode() & 0o077 == 0),
-        "{} must be a bounded{} regular file",
-        path.display(),
-        if private { " owner-private" } else { "" }
-    );
-    let mut bytes = Vec::new();
-    file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= MAX_INPUT_BYTES, "input byte budget");
-    Ok(bytes)
-}
-
-fn now() -> Result<i64> {
-    Ok(i64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-    )?)
-}
 
 /// The provider capability: one capture of `profile` with `secret` into the
 /// scratch store at the given path, returning the receipt.
@@ -146,10 +117,7 @@ impl Session {
             .context("secret encoding")?
             .trim_end_matches(['\r', '\n'])
             .to_owned();
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&self.evidence)
-            .context("evidence directory must be new")?;
+        crate::qualification_evidence::create_directory(&self.evidence)?;
         self.profile = Some(profile);
         self.secret = Some(secret);
         Ok(json!({}))
@@ -197,23 +165,13 @@ impl Session {
             "unexpected provider qualification claim"
         );
         let bytes = serde_json::to_vec_pretty(&receipt)?;
-        ensure!(
-            !secret.is_empty()
-                && !bytes
-                    .windows(secret.len())
-                    .any(|window| window == secret.as_bytes()),
-            "receipt refused: it contains the client secret"
-        );
+        crate::qualification_evidence::refuse_containing(
+            &bytes,
+            &secret,
+            "receipt refused: it contains the client secret",
+        )?;
         drop(secret);
-        let path = self.evidence.join(RECEIPT);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        File::open(&self.evidence)?.sync_all()?;
+        crate::qualification_evidence::publish(&self.evidence, RECEIPT, &bytes)?;
         Ok(json!({ "outcome": receipt["outcome"] }))
     }
 
