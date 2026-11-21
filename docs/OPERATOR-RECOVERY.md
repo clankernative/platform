@@ -18,12 +18,39 @@ Two kinds of pending invocation never finish on their own:
   stopped before finishing it, for example when maintenance stopped the app
   mid-request. Only that request was running it: that scheduler resumes
   commands, never queries or pages, and a page load's identity is random, so no
-  later request repeats it. It stays pending, and a migration refuses the store
-  with `migration_requires_drained_invocations`, so every activation of a new
-  image fails until it is gone. A rolling profile drains queries and pages too,
+  later request repeats it. It stays pending until a migration abandons it
+  (below) or an operator does. A rolling profile drains queries and pages too,
   so nothing there is orphaned; a native-storage app is not supported.
 
-A local operator ends either explicitly, as one list of up to 16 invocations:
+### A migration abandons its orphaned requests
+
+Every activation of a new image migrates the store after the app stops, holding
+the migration exclusion: the operation lease and the exclusive serving lock,
+which no `day2-serve` can hold beside it. A request cut off by that stop, or by
+any earlier stop or crash, is then provably over, so the migration abandons it
+itself instead of refusing the store with `migration_requires_drained_invocations`
+until an operator does:
+
+- It abandons exactly the invocations `orphaned_request` accepts (below): pending,
+  unblocked, admitted by a direct request, of an operation the store's scheduler
+  never resumes, in an ordinary non-rolling store.
+- The abandonments commit in the migration's own transaction. Work the
+  scheduler finishes, such as an accepted command, must still drain first: the
+  migration is then refused as before, and the refusal changes nothing.
+  Replaying a recorded migration still abandons a request orphaned since, so
+  its activation can proceed.
+- Blocked work, including a blocked request, is left for an operator.
+- Each one is recorded like an operator's, with cause `orphaned_request`,
+  operator and audit actor `day2-migration`, and `request_id` `migration:` plus
+  the invocation id. `day2 migration-apply` lists their receipts under
+  `abandoned`.
+
+The maintenance rehearsal migrates a copy of the store first, so the copy shows
+which requests the live migration will abandon.
+
+### Abandoning explicitly
+
+A local operator ends either kind explicitly, as one list of up to 16 invocations:
 
 ```
 day2 recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUESTS_JSON

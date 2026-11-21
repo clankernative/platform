@@ -661,6 +661,16 @@ pub(crate) fn recovery_exclusion(
     })
 }
 
+/// Whether the serving lock is what keeps servers off this store. Native storage
+/// takes its holder and writer exclusivity from object storage instead, so its
+/// serving lock proves nothing.
+pub(crate) fn ordinary_store(runtime: &Runtime) -> Result<bool> {
+    Ok(!runtime.uses_native_storage()
+        && Instance::load(runtime.instance_path())?
+            .native_bootstrap_for(runtime.app())?
+            .is_none())
+}
+
 /// The operation lease and the exclusive serving lock of an ordinary store, for
 /// an instance operator or a policy administrator. A shared serving lease, held
 /// by every `day2-serve`, makes this fail.
@@ -672,13 +682,7 @@ fn exclusive_store(
         runtime.db().parent().context("store directory")?,
         runtime.app(),
     )?;
-    ensure!(
-        !runtime.uses_native_storage()
-            && Instance::load(runtime.instance_path())?
-                .native_bootstrap_for(runtime.app())?
-                .is_none(),
-        "ordinary_store_required"
-    );
+    ensure!(ordinary_store(runtime)?, "ordinary_store_required");
     if runtime.rolling() {
         require_no_runtime_handoff(runtime.instance_path(), runtime.app())?;
     }

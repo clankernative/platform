@@ -8,7 +8,9 @@
 //!   the serving process stopped before finishing it, for example when
 //!   maintenance stopped the app mid-request. Only that request was running it:
 //!   the scheduler never resumes it, and its random identity is never repeated.
-//!   It stays pending, and a migration refuses the store until it is gone.
+//!   A migration ends the ones it finds itself ([`abandon_orphaned_requests`]),
+//!   since it holds the store against every server; an operator may also end
+//!   one explicitly.
 //!
 //! Abandoning one makes that end explicit. It finishes the invocation as a
 //! failure, refuses any dispatch permit that has not started, and records what
@@ -247,6 +249,87 @@ pub fn abandon(
         }
         Ok(receipts)
     })
+}
+
+/// Who abandons the orphaned requests a migration finds: the migration itself,
+/// not an operator.
+pub const MIGRATION_OPERATOR: &str = "day2-migration";
+
+/// Why a migration abandoned an orphaned request, as its row records.
+const MIGRATION_REASON: &str =
+    "no server held the store when a migration began, so nothing will finish this request";
+
+/// Abandon, in the migration's own transaction, every orphaned request in a
+/// store the migration holds against every server: each pending, unblocked
+/// invocation that a direct request admitted, of an operation the scheduler
+/// never resumes. They record [`Cause::OrphanedRequest`] under
+/// [`MIGRATION_OPERATOR`], with a `request_id` of `migration:` and the
+/// invocation id. An orphaned request is the one kind of pending work that is
+/// provably over without an operator: nothing runs it again, and the request
+/// that admitted it has ended. Otherwise each one, though harmless, would refuse
+/// every migration until an operator abandoned it.
+///
+/// Blocked work stays for an operator to judge. Work the scheduler finishes
+/// must still drain first: the migration's drain check then refuses the store,
+/// and these abandonments roll back with it. A rolling store, which drains
+/// every kind, and native storage, whose serving lock does not exclude
+/// servers, have none.
+pub(crate) fn abandon_orphaned_requests(
+    tx: &Connection,
+    runtime: &Runtime,
+    _exclusion: &crate::deployment::MigrationExclusion,
+    at_ms: i64,
+) -> Result<Vec<Receipt>> {
+    if runtime.rolling() || !crate::deployment::ordinary_store(runtime)? {
+        return Ok(Vec::new());
+    }
+    let scheduled = crate::invocations::scheduled_operations(runtime);
+    let requested = {
+        let mut statement = tx.prepare(
+            "SELECT id,artifact,operation FROM day2_invocations
+             WHERE status='pending' AND trigger=?1 ORDER BY id",
+        )?;
+        statement
+            .query_map([crate::audit::Trigger::Request.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(String, String, String)>>>()?
+    };
+    let mut orphaned = Vec::new();
+    for (invocation, artifact, operation) in requested {
+        if !scheduled.contains(&operation) && !crate::authority_state::is_blocked(tx, &invocation)?
+        {
+            orphaned.push(Request {
+                request_id: format!("migration:{invocation}"),
+                invocation,
+                expected_artifact: artifact,
+                reason: MIGRATION_REASON.into(),
+                cause: Cause::OrphanedRequest,
+            });
+        }
+    }
+    if orphaned.is_empty() {
+        return Ok(Vec::new());
+    }
+    let operator = LocalOperator::assert_local(MIGRATION_OPERATOR)?;
+    let active = crate::authority_state::current(tx)?;
+    let decision = Decision {
+        runtime,
+        operator: &operator,
+        active: &active,
+        scheduled: &scheduled,
+        at_ms,
+    };
+    orphaned
+        .iter()
+        .map(|request| {
+            decision.abandon(
+                tx,
+                request,
+                &serde_json::to_string(&(request, operator.name()))?,
+            )
+        })
+        .collect()
 }
 
 /// What every item of one call is decided under.

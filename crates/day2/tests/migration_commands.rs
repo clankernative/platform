@@ -185,6 +185,41 @@ const DROP_CREDENTIAL_UNIT: &str =
     DROP TABLE day2_credential_browser; DROP TABLE day2_credential_origins;
     DROP TABLE day2_credential_schema_version;";
 
+/// The deploy Home's stop cut short: a page load or query a request admitted,
+/// left pending in the store with no server to finish it.
+#[test]
+fn a_rehearsed_activation_abandons_a_request_its_stop_cut_off() -> Result<()> {
+    let world = World::new()?;
+    world.runtime.accept(
+        "reports.list",
+        "alice",
+        "cut-off-read",
+        &serde_json::json!({"after":"","limit":2}),
+        100,
+    )?;
+    let (copy, outputs) = rehearse(&world, None)?;
+    succeeded(&outputs)?;
+    let applied: serde_json::Value = serde_json::from_slice(&outputs[1].1.stdout)?;
+    assert_eq!(applied["abandoned"][0]["invocation"], "cut-off-read");
+    assert_eq!(applied["abandoned"][0]["cause"], "orphaned_request");
+    assert_eq!(applied["abandoned"].as_array().map(Vec::len), Some(1));
+    let status: String = rusqlite::Connection::open(copy.path().join(".state/reports.sqlite"))?
+        .query_row(
+            "SELECT status FROM day2_invocations WHERE id='cut-off-read'",
+            [],
+            |row| row.get(0),
+        )?;
+    assert_eq!(status, "failure");
+    // Only the copy changed: the rehearsal leaves the live store as it was.
+    let live: String = rusqlite::Connection::open(world.runtime.db())?.query_row(
+        "SELECT status FROM day2_invocations WHERE id='cut-off-read'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(live, "pending");
+    Ok(())
+}
+
 #[test]
 fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {
     let world = World::new()?;

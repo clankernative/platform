@@ -329,8 +329,8 @@ fn main() -> Result<()> {
             let runtime = Runtime::load(Path::new(instance), app)?;
             let target = LoadedArtifact::load(Path::new(target))?;
             let plan = serde_json::from_slice(&fs::read(input)?)?;
-            day2::migration::apply(&runtime, &target, &plan)?;
-            serde_json::json!({"applied":true,"activation_required":target.id()})
+            let abandoned = day2::migration::apply(&runtime, &target, &plan)?;
+            serde_json::json!({"applied":true,"activation_required":target.id(),"abandoned":abandoned})
         }
         [
             "activate",

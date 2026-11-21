@@ -1607,6 +1607,14 @@ fn a_rolling_store_drains_every_kind_so_nothing_there_is_an_orphaned_request() -
         format!("{error:#}").contains("recovery_requires_orphaned_request"),
         "{error:#}"
     );
+    // A migration abandons nothing here either: it waits for the scheduler.
+    let plan = day2::migration::plan(&world.runtime, world.runtime.artifact())?;
+    let error =
+        day2::migration::apply(&world.runtime, world.runtime.artifact(), &plan).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("migration_requires_drained_invocations"),
+        "{error:#}"
+    );
     assert_eq!(
         invocations::drain(&world.runtime, 16)?
             .iter()
