@@ -2,8 +2,8 @@
 //! ops/Tooling.roc orders production. A tooling image opts into consumption
 //! explicitly: missing or altered outputs never trigger a compiler fallback.
 use super::*;
+use day2::sdk_release::{BlobIdentity, Distribution, OPERATOR_FILES, verify};
 use flate2::{Compression, write::GzEncoder};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fs,
@@ -15,45 +15,9 @@ const MANIFEST: &str = "distribution.json";
 const ARCHIVE: &str = "libhost.a";
 const OPERATOR: &str = "operator.tar.gz";
 const MODE: &str = "DAY2_PRECOMPILED_TOOLING";
-pub(super) const OPERATOR_FILES: &[&str] = &[
-    "cli/day2",
-    "cli/day2-host",
-    "cli/day2-workflows",
-    "cli/day2-workflows.json",
-    "licenses/LICENSE",
-    "licenses/THIRD-PARTY-NOTICES.txt",
-    "licenses/dependency-inventory.json",
-];
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct BlobIdentity {
-    pub(super) digest: String,
-    pub(super) bytes: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Distribution {
-    pub(super) format: u32,
-    pub(super) target: String,
-    pub(super) inputs: String,
-    pub(super) workflow_sources: String,
-    pub(super) toolchain: String,
-    pub(super) worker: BlobIdentity,
-    pub(super) operator: BlobIdentity,
-    pub(super) operator_files: BTreeMap<String, BlobIdentity>,
-}
 
 fn target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
-}
-
-fn identity(bytes: &[u8]) -> BlobIdentity {
-    BlobIdentity {
-        digest: digest(bytes),
-        bytes: bytes.len() as u64,
-    }
 }
 
 fn inputs(root: &Path) -> Result<String> {
@@ -64,21 +28,6 @@ fn inputs(root: &Path) -> Result<String> {
 
 fn bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     day2_assets::read_regular(path, limit)
-}
-
-pub(super) fn verify(path: &Path, expected: &BlobIdentity, limit: u64) -> Result<Vec<u8>> {
-    day2_assets::hash_part(&expected.digest)?;
-    ensure!(
-        expected.bytes > 0 && expected.bytes <= limit,
-        "tooling output byte budget"
-    );
-    let bytes = bounded(path, limit)?;
-    ensure!(
-        bytes.len() as u64 == expected.bytes && digest(&bytes) == expected.digest,
-        "precompiled tooling output changed: {}",
-        path.display()
-    );
-    Ok(bytes)
 }
 
 /// The image's explicit mode prevents a missing cache from compiling platform
@@ -150,7 +99,7 @@ fn package(root: &Path, worker: &Path, expected_inputs: &str) -> Result<serde_js
         header.set_mtime(0);
         header.set_cksum();
         archive.append_data(&mut header, name, bytes.as_slice())?;
-        operator_files.insert((*name).to_owned(), identity(&bytes));
+        operator_files.insert((*name).to_owned(), BlobIdentity::of(&bytes));
     }
     let operator = archive.into_inner()?.finish()?;
     ensure!(operator.len() <= 256 << 20, "operator package byte budget");
@@ -161,8 +110,8 @@ fn package(root: &Path, worker: &Path, expected_inputs: &str) -> Result<serde_js
         inputs: expected_inputs.to_owned(),
         workflow_sources: day2::automation::source_digest(),
         toolchain: day2::automation::toolchain_digest(),
-        worker: identity(&worker_bytes),
-        operator: identity(&operator),
+        worker: BlobIdentity::of(&worker_bytes),
+        operator: BlobIdentity::of(&operator),
         operator_files,
     };
     let bytes = serde_json::to_vec_pretty(&distribution)?;
@@ -241,8 +190,8 @@ mod tests {
             inputs: digest(b"platform inputs"),
             workflow_sources: day2::automation::source_digest(),
             toolchain: day2::automation::toolchain_digest(),
-            worker: identity(worker),
-            operator: identity(b"operator"),
+            worker: BlobIdentity::of(worker),
+            operator: BlobIdentity::of(b"operator"),
             operator_files: BTreeMap::new(),
         };
         let original = serde_json::to_value(&manifest)?;
@@ -275,7 +224,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let path = root.path().join("file");
         fs::write(&path, b"compiled bytes")?;
-        let expected = identity(b"compiled bytes");
+        let expected = BlobIdentity::of(b"compiled bytes");
         assert_eq!(verify(&path, &expected, 64)?, b"compiled bytes");
         fs::write(&path, b"altered bytes!")?;
         assert!(verify(&path, &expected, 64).is_err());

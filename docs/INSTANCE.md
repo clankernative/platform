@@ -11,13 +11,16 @@ day2 instance check DIRECTORY [--agent]
 day2 instance render DIRECTORY [--agent]
 day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY [--agent]
 day2 instance apply DIRECTORY PLATFORM PLAN_DIRECTORY NEW_DIRECTORY [--agent]
+day2 instance release publish DIRECTORY REQUEST NEW_MANIFEST [--agent]
+day2 instance release fetch DIRECTORY DIGEST BYTES [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
 name. It reads no other file. `instance render` validates the same file and
 prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it.
 `instance plan` runs a [read-only plan](#plan) of the core roots with those
-inputs, and `instance apply` [applies](#apply) them. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
+inputs, and `instance apply` [applies](#apply) them. `instance release`
+[publishes and fetches](#release) the qualified SDK releases apps pin. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
 derivation; there is no second schema.
 
 ## The spec
@@ -96,6 +99,7 @@ Nothing below can be configured, restated or overridden.
 | Instance repository | `<org>/instance` |
 | App CI repository | `<org>/app-ci` |
 | Required app check | `<org>/app-ci: day2 / verification (pull_request)` |
+| Artifact registry | `<region>-docker.pkg.dev/<project>` |
 | SDK image registry | `<region>-docker.pkg.dev/<project>/day2` |
 | Shared OpenTofu state bucket | `<project>-tofu-state` |
 | Platform root state | bucket `<project>-tofu-state`, prefixes `foundation` (project), `platform/cluster`, `platform/tenancy`, `platform/app` (app edges) and `day2` (roots an instance opts into, such as its CI integration); the security shell's prefix is not derived yet |
@@ -333,6 +337,61 @@ owners never do.
 - **Not applied:** `day2-app` and the stacks the spec does not model yet; the
   instance's own tooling still applies those.
 
+## Release
+
+An app's `sdk` is the digest of a qualified SDK release manifest. `instance
+release` publishes and fetches those releases in the instance's state bucket,
+one object per blob at `gs://<project>-tofu-state/day2/platform-releases/sha256/<hex>`,
+named by its sha256. Both names come from `day2.json`.
+
+- **Profile.** Only `linux_sqlite_single_v1`, one exclusive SQLite runtime per
+  app. Rolling releases (`linux_sqlite_rwo_v1`) are refused.
+- **Images.** Each image is digest-pinned in the artifact registry:
+  `<region>-docker.pkg.dev/<project>/<repository>/<name>@sha256:<hex>`, in any
+  repository there. They are checked against the registry root, not the SDK
+  image registry, because existing releases mirror the SDK under an app's
+  repository (such as `home/`), the only one app CI's pull credential can read.
+- **Publish.** For operators. `REQUEST` names exactly `profile`,
+  `platform_commit`, `runtime` and `tooling` (each `{image, config}`), and the
+  paths of the `distribution`, `operator` archive and `native` and `strict`
+  evidence, relative to the current directory.
+  - Before anything is pulled or uploaded, the manifest is built from the
+    files' identities and checked, and the distribution and evidence must bind
+    it: the same commit, images, workflows, toolchain, distribution, operator
+    archive and worker.
+  - Both images must pull for `linux/amd64` as their qualified image IDs.
+  - Each blob is created only if absent. An object that already exists counts
+    only once a download of its exact generation has the same digest, so a
+    publication resumes but never replaces bytes.
+  - The manifest is written to `NEW_MANIFEST`, which must be new, and published
+    last, so an incomplete publication is never selectable. Its bytes are its
+    fields sorted, indented two spaces, with a final newline. The command prints
+    its digest and size; selecting it is a reviewed `day2.json` change.
+- **Fetch.** Reads the approved manifest, then the distribution and evidence it
+  names, and checks them as a publication does. It then installs the operator
+  CLI and prints its path and the cached manifest, distribution and evidence. It
+  needs only read access to the bucket. It verifies integrity and qualification
+  evidence, not approval: approval is the digest the caller pinned.
+- **Cache.** `$DAY2_RELEASE_CACHE`, else `~/.cache/day2-platform-releases`.
+  - Each blob is at `<hex>` (mode 0444) and each operator at `<hex>.operator/`
+    (`cli/` executables 0555, other files 0444). Each is guarded by an exclusive
+    lock on `<name>.lock`.
+  - A miss downloads the object's exact generation into a temporary directory in
+    the cache, and renames it in only once verified and synced.
+  - Every hit is verified again, operator files one by one, and a changed file
+    is refused, never repaired.
+  - An operator is extracted with exactly its fixed files, regular files only,
+    each of its qualified size and digest.
+  - Instance CI images bake an operator at
+    `/opt/day2-platform-releases/<hex>.operator/cli/day2` in this layout.
+- **Tools.** `gcloud storage` and `docker` from `PATH`, with the ambient
+  credentials, each with a deadline.
+- **Failures** after the spec validates exit 6 with `release_failed`; argument
+  and spec errors exit 2, 3 or 5, as for the other instance commands.
+- **Known limits:** an interrupted release command may leave `download-*` or
+  `operator-*` temporary directories in the cache root. They are never treated
+  as cache hits.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
@@ -344,8 +403,9 @@ owners never do.
    repositories stop committing them.
    Fields are added only for real choices (size presets, verification cases,
    schedules), never to restate a derived name.
-3. **Platform-owned control.** Deployment, promotion, webhook and artifact
-   provenance logic moves from instance repositories into `ops/*.roc` recipes
+3. **Platform-owned control (started: slice 1, publishing and fetching SDK
+   releases with `day2 instance release`).** Deployment, promotion, webhook and
+   artifact provenance logic moves from instance repositories into `ops/*.roc` recipes
    with narrow Rust capabilities. Instance workflows become rendered shims that
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails
    the check.

@@ -100,6 +100,10 @@ InstanceSpec :: {
 		instance_repository : Str,
 		app_ci_repository : Str,
 		required_check : Str,
+
+		## The project's Artifact Registry, <region>-docker.pkg.dev/<project>. Every derived image is under it, and so are
+		## the images a qualified SDK release pins.
+		artifact_registry : Str,
 		sdk_registry : Str,
 		tofu_state_bucket : Str,
 		platform_state_prefixes : { project : Str, cluster : Str, tenancy : Str, app_edge : Str, day2 : Str },
@@ -146,6 +150,7 @@ InstanceSpec :: {
 			instance_repository: "${spec.org}/instance",
 			app_ci_repository: "${spec.org}/app-ci",
 			required_check: "${spec.org}/app-ci: ${required_context}",
+			artifact_registry: registry,
 			sdk_registry: "${registry}/day2",
 			tofu_state_bucket,
 			platform_state_prefixes,
@@ -833,4 +838,9 @@ expect {
 	moved = sample.replace_each("example.com\"", "corp.iam.gserviceaccount.com\"")
 	moved != sample and InstanceSpec.from_json(moved).is_err()
 		and InstanceSpec.from_json(sample.replace_each("example.com\"", "corp.example.org\"")).is_ok()
+}
+
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => spec.derived().artifact_registry == "us-central1-docker.pkg.dev/exampleco-tools"
+	Err(_) => Bool.False
 }

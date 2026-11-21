@@ -1,0 +1,32 @@
+{
+  "distribution": {
+    "bytes": 1661,
+    "digest": "sha256:8d35dccbedfa31ecf5d1bfd7d94f15eae1897460a5f71c60667553bc46da812b"
+  },
+  "evidence": {
+    "native": {
+      "bytes": 140255,
+      "digest": "sha256:8748b64e1accafa295b213e9980822c66d7f4a38f9a813a8597eed4003fc3b11"
+    },
+    "strict": {
+      "bytes": 34223,
+      "digest": "sha256:57b50634f200f49d74bcfaa04f98425e8f5da9a378c12d9b0a33793c607d5cd3"
+    }
+  },
+  "operator": {
+    "bytes": 32175226,
+    "digest": "sha256:bd1e1954064cbbfa82bc16dd23d0ef19b804ff8c0b5eb78b90ee4ad128ed5b23"
+  },
+  "platform_commit": "93aba94790df7ad80d6a45103788e3604ad06b7e",
+  "profile": "linux_sqlite_single_v1",
+  "runtime": {
+    "config": "sha256:bee72d54aebe87040f9c4b5c8f1bfdbb46a298acc7547f66c71bb0c26377c3f2",
+    "image": "us-central1-docker.pkg.dev/wonderly-internal-tools/home/day2-runtime@sha256:bee72d54aebe87040f9c4b5c8f1bfdbb46a298acc7547f66c71bb0c26377c3f2"
+  },
+  "target": "linux-x86_64",
+  "tooling": {
+    "config": "sha256:b09218adc4ce99595c2fa9ee473c55973edaeff9ef2c9e4759601c5204d8f748",
+    "image": "us-central1-docker.pkg.dev/wonderly-internal-tools/home/day2-tooling@sha256:b09218adc4ce99595c2fa9ee473c55973edaeff9ef2c9e4759601c5204d8f748"
+  },
+  "version": 1
+}
