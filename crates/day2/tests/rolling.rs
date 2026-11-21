@@ -987,6 +987,21 @@ fn offline_activation_uses_target_configuration_and_requires_exclusive_ownership
     );
     assert_eq!(day2::authority_state::current(&db)?.stamp, active.stamp);
     drop(lease);
+    // Only an instance operator or a policy administrator takes the store.
+    let error = day2::deployment::activate_maintenance(
+        &world.runtime,
+        &target,
+        &candidate,
+        &LocalOperator::assert_local("bob")?,
+        &active.stamp,
+        "offline-release",
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("maintenance_operator_required"),
+        "{error:#}"
+    );
+    assert_eq!(day2::authority_state::current(&db)?.stamp, active.stamp);
     day2::deployment::activate_maintenance(
         &world.runtime,
         &target,

@@ -544,9 +544,9 @@ and `mark-activated`, which take the same request file;
 `abandon` lists the blocked invocations for `recovery-abandon`, 1 to 16, each
 with its own `request_id`, `invocation`, `expected_artifact` and `reason`, each
 `request_id` and invocation once, and only that operation takes it (`activate`
-abandons orphaned requests itself); the list is checked before the app stops, and its tooling
-image must be a build with `day2 recovery-abandon`, which may be newer than the
-running app's;
+abandons orphaned requests itself); the list is checked before the app stops,
+and its tooling image must be a build with `day2 recovery-abandon`, which may be
+newer than the running app's;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
 optional. The tooling image must come from the same platform build as the
 target app image: activation rehearses its `day2 admit-maintenance` with the

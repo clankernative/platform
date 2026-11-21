@@ -65,6 +65,12 @@ copy taken once the app has stopped lists what the live migration will abandon;
 the earlier copy taken while the source still serves also lists reads that
 were then in flight and finished there.
 
+`day2 activate` and `day2 platform authority activate` refuse while any
+runnable work is pending (`activation_precondition_failed`), orphaned requests
+included. GKE activation always migrates first. Elsewhere, run `day2
+migration-plan` and `day2 migration-apply` onto the target before activating,
+and the migration abandons them.
+
 The lock is what keeps servers off the store, so this holds only for processes
 that take it. `day2 serve-local`, `day2 invoke`, `day2 resume` and the local
 development server do not: never migrate a store one of them is using.

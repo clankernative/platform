@@ -101,14 +101,6 @@ pub enum Cause {
 }
 
 impl Cause {
-    /// The wire name, as receipts carry it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Blocked => "blocked",
-            Self::OrphanedRequest => "orphaned_request",
-        }
-    }
-
     /// The refusal when the invocation is not of this cause.
     fn refusal(self) -> &'static str {
         match self {
@@ -199,7 +191,6 @@ pub fn abandon(
         .iter()
         .map(|request| serde_json::to_string(&(request, operator.name())))
         .collect::<serde_json::Result<Vec<_>>>()?;
-    let scheduled = crate::invocations::scheduled_operations(runtime);
     let at_ms = runtime.host().now_ms()?;
     runtime.sql_write(|tx| {
         runtime.check_binding(tx)?;
@@ -213,8 +204,7 @@ pub fn abandon(
             runtime,
             operator,
             active: &active,
-            cause: Cause::Blocked,
-            scheduled: &scheduled,
+            kind: Kind::Blocked,
             at_ms,
         };
         let mut receipts = Vec::with_capacity(requests.len());
@@ -319,8 +309,9 @@ pub(crate) fn abandon_orphaned_requests(
         runtime,
         operator,
         active: &active,
-        cause: Cause::OrphanedRequest,
-        scheduled: &scheduled,
+        kind: Kind::OrphanedRequest {
+            scheduled: &scheduled,
+        },
         at_ms,
     };
     orphaned
@@ -335,27 +326,38 @@ pub(crate) fn abandon_orphaned_requests(
         .collect()
 }
 
+/// What one call abandons, with what deciding it needs.
+#[derive(Clone, Copy)]
+enum Kind<'a> {
+    /// An operator's call: blocked work.
+    Blocked,
+    /// A migration's call, with the operations this store's scheduler resumes.
+    OrphanedRequest { scheduled: &'a [String] },
+}
+
+impl Kind<'_> {
+    fn cause(self) -> Cause {
+        match self {
+            Self::Blocked => Cause::Blocked,
+            Self::OrphanedRequest { .. } => Cause::OrphanedRequest,
+        }
+    }
+}
+
 /// What every item of one call is decided under.
 struct Decision<'a> {
     runtime: &'a Runtime,
     operator: &'a LocalOperator,
     active: &'a crate::authority_state::ActiveAuthority,
-    /// Blocked for an operator's call, orphaned request for a migration's.
-    cause: Cause,
-    /// The operations this store's scheduler resumes.
-    scheduled: &'a [String],
+    kind: Kind<'a>,
     at_ms: i64,
 }
 
 impl Decision<'_> {
     fn abandon(&self, tx: &Connection, request: &Request, payload: &str) -> Result<Receipt> {
-        let (runtime, operator, active, cause, at_ms) = (
-            self.runtime,
-            self.operator,
-            self.active,
-            self.cause,
-            self.at_ms,
-        );
+        let (runtime, operator, active, at_ms) =
+            (self.runtime, self.operator, self.active, self.at_ms);
+        let cause = self.kind.cause();
         if let Some((stored, receipt)) = tx
             .query_row(
                 "SELECT payload,receipt FROM day2_abandonments WHERE request_id=?1",
@@ -384,17 +386,12 @@ impl Decision<'_> {
             Failure::ArtifactBindingChanged
         );
         let blocked = crate::authority_state::is_blocked(tx, &request.invocation)?;
-        let qualifies = match cause {
-            Cause::Blocked => status == "pending" && blocked,
+        let qualifies = match self.kind {
+            Kind::Blocked => status == "pending" && blocked,
             // A blocked request is left to an operator, who abandons it as blocked.
-            Cause::OrphanedRequest => orphaned_request(
-                self.runtime,
-                self.scheduled,
-                &status,
-                &trigger,
-                &operation,
-                blocked,
-            ),
+            Kind::OrphanedRequest { scheduled } => {
+                orphaned_request(runtime, scheduled, &status, &trigger, &operation, blocked)
+            }
         };
         ensure!(qualifies, cause.refusal());
         let receipt = Receipt {
