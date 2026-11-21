@@ -610,15 +610,30 @@ pub(crate) struct StoreMaintenanceLease {
 /// initialization or authority. Readiness/replica observations alone cannot
 /// prove that a draining server released its store.
 pub(crate) struct MigrationExclusion {
+    state: PathBuf,
+    app: String,
     _operation: operation::OperationLease,
     _serving: File,
 }
 
 pub(crate) fn migration_exclusion(state: &Path, app: &str) -> Result<MigrationExclusion> {
     Ok(MigrationExclusion {
+        state: state.to_path_buf(),
+        app: app.to_owned(),
         _operation: operation::OperationLease::acquire(state, app)?,
         _serving: serving_lock(state, app, false)?,
     })
+}
+
+impl MigrationExclusion {
+    /// Refuses a runtime whose store this exclusion does not hold.
+    pub(crate) fn check(&self, runtime: &Runtime) -> Result<()> {
+        ensure!(
+            runtime.db().parent() == Some(self.state.as_path()) && runtime.app() == self.app,
+            "migration_store_changed"
+        );
+        Ok(())
+    }
 }
 
 impl StoreMaintenanceLease {
@@ -661,6 +676,16 @@ pub(crate) fn recovery_exclusion(
     })
 }
 
+/// Whether the serving lock is what keeps servers off this store. Native storage
+/// takes its holder and writer exclusivity from object storage instead, so its
+/// serving lock proves nothing.
+pub(crate) fn ordinary_store(runtime: &Runtime) -> Result<bool> {
+    Ok(!runtime.uses_native_storage()
+        && Instance::load(runtime.instance_path())?
+            .native_bootstrap_for(runtime.app())?
+            .is_none())
+}
+
 /// The operation lease and the exclusive serving lock of an ordinary store, for
 /// an instance operator or a policy administrator. A shared serving lease, held
 /// by every `day2-serve`, makes this fail.
@@ -672,13 +697,7 @@ fn exclusive_store(
         runtime.db().parent().context("store directory")?,
         runtime.app(),
     )?;
-    ensure!(
-        !runtime.uses_native_storage()
-            && Instance::load(runtime.instance_path())?
-                .native_bootstrap_for(runtime.app())?
-                .is_none(),
-        "ordinary_store_required"
-    );
+    ensure!(ordinary_store(runtime)?, "ordinary_store_required");
     if runtime.rolling() {
         require_no_runtime_handoff(runtime.instance_path(), runtime.app())?;
     }

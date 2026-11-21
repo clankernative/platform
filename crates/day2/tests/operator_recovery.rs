@@ -679,3 +679,237 @@ fn a_list_is_abandoned_all_or_nothing_and_checked_before_any_change() -> Result<
     assert_eq!(pending(&world)?, 1);
     Ok(())
 }
+
+/// One migration of the store onto its own artifact, as each activation runs,
+/// under `operator`.
+fn migrate_as(world: &World, operator: &LocalOperator) -> Result<Vec<recovery::Receipt>> {
+    let plan = day2::migration::plan(&world.runtime, world.runtime.artifact())?;
+    day2::migration::apply(&world.runtime, world.runtime.artifact(), &plan, operator)
+}
+
+fn migrate(world: &World) -> Result<Vec<recovery::Receipt>> {
+    migrate_as(world, &operator()?)
+}
+
+fn ids(receipts: &[recovery::Receipt]) -> Vec<(&str, Cause)> {
+    receipts
+        .iter()
+        .map(|receipt| (receipt.invocation.as_str(), receipt.cause))
+        .collect()
+}
+
+#[test]
+fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() -> Result<()> {
+    let world = World::new()?;
+    interrupted_read(&world, "first-read")?;
+    interrupted_read(&world, "second-read")?;
+    world.runtime.accept(
+        "reports.submit",
+        "alice",
+        "accepted-command",
+        &serde_json::json!({"title":"x","text":"y"}),
+        100,
+    )?;
+    // Work the scheduler finishes must drain first. The refusal changes nothing,
+    // so the reads stay pending beside the command.
+    let before = world.runtime.inspect()?;
+    refused(migrate(&world), "migration_requires_drained_invocations");
+    assert_eq!(world.runtime.inspect()?, before);
+    assert_eq!((pending(&world)?, abandonments(&world)?), (3, 0));
+    // The scheduler finishes the command and the commands it requests, never a read.
+    assert!(
+        invocations::drain(&world.runtime, 16)?
+            .iter()
+            .all(|item| item.status == "success")
+    );
+    assert_eq!(pending(&world)?, 2);
+    // While a server holds the store, its requests may still be running.
+    let lease = serving_lease(&world)?;
+    refused(migrate(&world), "another server owns this SQLite app");
+    drop(lease);
+    // Abandoning needs an instance operator or a policy administrator.
+    refused(
+        migrate_as(&world, &LocalOperator::assert_local("bob")?),
+        "recovery_operator_required",
+    );
+    assert_eq!((pending(&world)?, abandonments(&world)?), (2, 0));
+
+    let receipts = migrate(&world)?;
+    assert_eq!(
+        ids(&receipts),
+        vec![
+            ("first-read", Cause::OrphanedRequest),
+            ("second-read", Cause::OrphanedRequest),
+        ]
+    );
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| evidence(receipt) == (0, 0, 0) && receipt.children.is_empty())
+    );
+    assert_eq!((pending(&world)?, abandonments(&world)?), (0, 2));
+    assert!(abandoned(
+        &world.runtime.execute("first-read", Fault::None)?
+    ));
+    let status = invocations::status(&world.runtime, "second-read", "alice")?;
+    assert_eq!(
+        (status.status.as_str(), status.error.as_str()),
+        ("failure", "invocation_abandoned")
+    );
+    // Recorded under the migration's operator, marked as the migration's own.
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    assert_eq!(
+        db.query_row(
+            "SELECT request_id,operator,reason,json_extract(receipt,'$.cause'),
+                json_extract(payload,'$[1]')
+             FROM day2_abandonments WHERE invocation='first-read'",
+            [],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        )?,
+        (
+            "migration:first-read".into(),
+            "admin".into(),
+            "no server held the store when a migration began, so nothing will finish this request"
+                .into(),
+            "orphaned_request".into(),
+            "admin".into(),
+        )
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_audit_events
+             WHERE kind='recovery' AND outcome='abandoned' AND actor='admin'
+             AND operation='reports.list'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        2
+    );
+    // Replaying the recorded migration still abandons a request orphaned since,
+    // and commits it although the schema is already current.
+    assert!(migrate(&world)?.is_empty());
+    interrupted_read(&world, "late-read")?;
+    assert_eq!(
+        ids(&migrate(&world)?),
+        vec![("late-read", Cause::OrphanedRequest)]
+    );
+    assert_eq!((pending(&world)?, abandonments(&world)?), (0, 3));
+    day2::migration::activate(&world.runtime, world.runtime.artifact())?;
+    // An operator's request for an invocation the migration abandoned is
+    // refused, and operator requests cannot take the migration's keys.
+    refused(
+        abandon_one(
+            &world.runtime,
+            &operator()?,
+            &orphan(&world, "late-read", "too-late"),
+        ),
+        "recovery_already_resolved",
+    );
+    refused(
+        abandon_one(
+            &world.runtime,
+            &operator()?,
+            &orphan(&world, "late-read", "migration:late-read"),
+        ),
+        "invalid_recovery_request_id",
+    );
+    Ok(())
+}
+
+#[test]
+fn a_migration_abandons_only_direct_requests_and_nothing_when_it_fails() -> Result<()> {
+    let world = World::new()?;
+    // A read another app asked for on the actor's behalf: no direct request
+    // admitted it, so the migration leaves it, and its drain check refuses.
+    interrupted_read(&world, "delegated-read")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    db.execute(
+        "UPDATE day2_invocations SET trigger='delegated' WHERE id='delegated-read'",
+        [],
+    )?;
+    refused(migrate(&world), "migration_requires_drained_invocations");
+    assert_eq!((pending(&world)?, abandonments(&world)?), (1, 0));
+    db.execute(
+        "UPDATE day2_invocations SET status='success' WHERE id='delegated-read'",
+        [],
+    )?;
+    // A migration that fails after deciding abandons nothing: a stale plan
+    // rolls the abandonment back with it.
+    interrupted_read(&world, "cut-off-read")?;
+    let schema: String = db.query_row(
+        "SELECT value FROM day2_meta WHERE key='schema'",
+        [],
+        |row| row.get(0),
+    )?;
+    db.execute(
+        "UPDATE day2_meta SET value='sha256:elsewhere' WHERE key='schema'",
+        [],
+    )?;
+    refused(migrate(&world), "stale_migration_plan");
+    assert_eq!((pending(&world)?, abandonments(&world)?), (1, 0));
+    db.execute(
+        "UPDATE day2_meta SET value=?1 WHERE key='schema'",
+        [&schema],
+    )?;
+    assert_eq!(
+        ids(&migrate(&world)?),
+        vec![("cut-off-read", Cause::OrphanedRequest)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_migration_leaves_blocked_work_to_an_operator() -> Result<()> {
+    // A read cut off before the policy change that blocks the notify is blocked
+    // with it.
+    let (world, _simulation, notify) = blocked_notify(44, |simulation, _| {
+        simulation.runtime().accept(
+            "reports.list",
+            "alice",
+            "blocked-read",
+            &serde_json::json!({"after":"","limit":2}),
+            100,
+        )
+    })?;
+    interrupted_read(&world, "cut-off-read")?;
+    let blocked = |invocation: &str| -> Result<bool> {
+        Ok(rusqlite::Connection::open(world.runtime.db())?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM day2_authority_blocks WHERE invocation=?1)",
+            [invocation],
+            |row| row.get(0),
+        )?)
+    };
+    assert!(blocked(&notify)? && blocked("blocked-read")? && !blocked("cut-off-read")?);
+    // A block never refuses a migration, and it is for an operator to judge,
+    // even for a request: only the unblocked read is abandoned.
+    assert_eq!(
+        ids(&migrate(&world)?),
+        vec![("cut-off-read", Cause::OrphanedRequest)]
+    );
+    assert_eq!((pending(&world)?, abandonments(&world)?), (2, 1));
+    assert_eq!(
+        world.runtime.execute(&notify, Fault::None)?.status,
+        "blocked"
+    );
+    assert_eq!(
+        ids(&recovery::abandon(
+            &world.runtime,
+            &operator()?,
+            &[
+                request(&world, &notify, "notify-as-blocked"),
+                request(&world, "blocked-read", "read-as-blocked"),
+            ],
+        )?),
+        vec![
+            (notify.as_str(), Cause::Blocked),
+            ("blocked-read", Cause::Blocked)
+        ]
+    );
+    Ok(())
+}

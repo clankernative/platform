@@ -3229,6 +3229,7 @@ impl Session {
         let target = self.request.target.clone().context("target")?;
         let artifact = format!("{ROOT}/artifacts/{}", target.artifact_id);
         let app = self.request.app.clone();
+        let operator = self.request.operator.clone();
         match step {
             "plan" => {
                 ensure!(
@@ -3291,6 +3292,7 @@ impl Session {
                         &app,
                         &artifact,
                         PLAN,
+                        &operator,
                     ],
                     Duration::from_secs(1_800),
                 )?;
@@ -3477,7 +3479,7 @@ impl Session {
             )?;
             self.exec(&["cp", TARGET, ADMISSION_INSTANCE], Duration::from_secs(60))?;
         } else {
-            self.exec(
+            let applied = self.exec(
                 &[
                     DAY2,
                     "migration-apply",
@@ -3485,8 +3487,29 @@ impl Session {
                     &app,
                     &artifact,
                     PLAN,
+                    &operator,
                 ],
                 Duration::from_secs(1_800),
+            )?;
+            let applied: Value =
+                serde_json::from_str(applied.trim()).context("day2 migration-apply output")?;
+            // Requests the migration abandons because no server will finish
+            // them. Shown before the confirmation: the live migration abandons
+            // the same ones once the app has stopped. A copy taken while the
+            // source serves also lists reads still in flight there.
+            let abandoned = applied["abandoned"].clone();
+            let count = abandoned
+                .as_array()
+                .context("day2 migration-apply output lists no abandoned requests")?
+                .len();
+            if count > 0 {
+                eprintln!(
+                    "== the migration abandons {count} request(s) no server will finish: {abandoned}"
+                );
+            }
+            self.record(
+                "rehearsal-abandoned",
+                json!({"abandoned": abandoned, "online": self.preparing_online()}),
             )?;
             let inspected =
                 self.host_workflow(&["authority", "inspect", ADMISSION_INSTANCE, &app])?;

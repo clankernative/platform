@@ -784,7 +784,12 @@ impl Session {
         );
         drop(prior_db);
         let plan = day2::migration::plan(&old, &target)?;
-        day2::migration::apply(&old, &target, &plan)?;
+        day2::migration::apply(
+            &old,
+            &target,
+            &plan,
+            &day2::authority_state::LocalOperator::assert_local("local-development")?,
+        )?;
         let mut config = Instance::load(&instance)?;
         let app = config.apps.get_mut("app").context("local app")?;
         app.artifact = target.directory().to_string_lossy().into_owned();
