@@ -141,6 +141,8 @@ struct FakeCluster {
     operation_pods: Option<Value>,
     fail_on: Option<String>,
     denied_operator: Option<String>,
+    /// An invocation `day2 recovery-abandon` refuses, refusing the whole list.
+    refused_invocation: Option<String>,
     drop_on_copy_out: Option<String>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
     replicas: u64,
@@ -582,6 +584,21 @@ impl Cluster for FakeCluster {
             }
             ["exec", _, "--", DAY2, "migration-apply", ..] => r#"{"applied":true}"#.into(),
             ["exec", _, "--", DAY2, "operation-claim", ..] => r#"{"claimed":true}"#.into(),
+            ["exec", _, "--", DAY2, "recovery-abandon", CURRENT, "example_app", operator, requests] => {
+                ensure!(self.denied_operator.as_deref() != Some(*operator), "Error: recovery_operator_required");
+                let requests: Vec<day2::recovery::Request> = serde_json::from_str(requests)?;
+                // Like `day2 recovery-abandon`: one refusal changes nothing.
+                ensure!(
+                    !requests.iter().any(|request| Some(&request.invocation) == self.refused_invocation.as_ref()),
+                    "Error: recovery_requires_orphaned_request"
+                );
+                serde_json::to_string(&requests.iter().map(|request| day2::recovery::Receipt {
+                    invocation: request.invocation.clone(),
+                    cause: request.cause,
+                    evidence: day2::recovery::EvidenceSummary::default(),
+                    children: Vec::new(),
+                }).collect::<Vec<_>>())?
+            }
             ["exec", _, "--", "cat", file] => fs::read_to_string(self.pod_path(file))?,
             other => bail!("unexpected kubectl {other:?}"),
         })
@@ -632,6 +649,16 @@ impl Harness {
         if operation == Operation::AuthorityApply || operation.targeted() {
             request["request_id"] = "release-1".into();
         }
+        if operation == Operation::RecoveryAbandon {
+            request["abandon"] = json!([
+                {"request_id": "abandon-orphan", "invocation": "page-orphan",
+                 "expected_artifact": format!("sha256:{}", self.running.artifact_id),
+                 "reason": "request cut off when the app stopped", "cause": "orphaned_request"},
+                {"request_id": "abandon-blocked", "invocation": "blocked-sync",
+                 "expected_artifact": format!("sha256:{}", self.running.artifact_id),
+                 "reason": "blocked by a policy change", "cause": "blocked"},
+            ]);
+        }
         if operation.targeted() {
             request["target"] = json!({"instance": target_file, "app_image": self.target.reference,
                 "artifact_id": self.target.artifact_id});
@@ -668,6 +695,7 @@ impl Harness {
             helper_service: false,
             fail_on: None,
             denied_operator: None,
+            refused_invocation: None,
             drop_on_copy_out: None,
             annotations: self.annotations.clone(),
             replicas: 1,
@@ -2607,6 +2635,200 @@ fn authority_apply_needs_a_backup_a_stamp_and_a_confirmation() -> Result<()> {
     session.workflow("authority-apply")?;
     let receipt = session.finish()?;
     assert_eq!(receipt["replicas_restored"], true);
+    Ok(())
+}
+
+/// The `day2 recovery-abandon` calls the session made, as their request lists.
+fn abandon_calls(harness: &Harness) -> Vec<Value> {
+    harness
+        .calls
+        .borrow()
+        .iter()
+        .filter(|call| call.iter().any(|arg| arg == "recovery-abandon"))
+        .map(|call| serde_json::from_str(call.last().unwrap()).unwrap())
+        .collect()
+}
+
+fn listed(harness: &Harness) -> Result<Value> {
+    let request: Value =
+        serde_json::from_slice(&fs::read(harness.directory.path().join("request.json"))?)?;
+    Ok(request["abandon"].clone())
+}
+
+#[test]
+fn recovery_abandon_needs_a_backup_and_a_confirmation_and_restores_the_app() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::RecoveryAbandon, |_| {}, true)?;
+    prepare(&mut session)?;
+    ensure!(
+        session.workflow("recovery-abandon").is_err(),
+        "needs backup and confirmation"
+    );
+    ensure!(session.confirm().is_err(), "confirm after the backup");
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    ensure!(
+        session.workflow("recovery-abandon").is_err(),
+        "needs a confirmation"
+    );
+    ensure!(
+        session.workflow("authority-apply").is_err(),
+        "authority-apply belongs to its own operation"
+    );
+    session.confirm()?;
+    assert_eq!(*harness.asked.borrow(), 1, "the operator confirmed once");
+    let result = session.workflow("recovery-abandon")?;
+    assert_eq!(result["abandoned"][0]["invocation"], "page-orphan");
+    assert_eq!(result["abandoned"][0]["cause"], "orphaned_request");
+    assert_eq!(result["abandoned"][1]["cause"], "blocked");
+    ensure!(
+        session.workflow("recovery-abandon").is_err(),
+        "abandons once per session"
+    );
+    let receipt = session.finish()?;
+    assert_eq!(receipt["replicas_restored"], true);
+    // One call carried the reviewed list exactly, with each cause and reason.
+    assert_eq!(abandon_calls(&harness), vec![listed(&harness)?]);
+    // It ran only while the app was stopped, after the backup.
+    let verbs = harness.verbs();
+    let stopped = verbs
+        .iter()
+        .position(|verb| verb == "scale --replicas=0")
+        .unwrap();
+    let abandoned = harness
+        .calls
+        .borrow()
+        .iter()
+        .position(|call| call.iter().any(|arg| arg == "recovery-abandon"))
+        .unwrap();
+    let restored = verbs
+        .iter()
+        .position(|verb| verb == "scale --replicas=1")
+        .unwrap();
+    assert!(stopped < abandoned && abandoned < restored);
+    let journal = harness.journal();
+    let step = |name: &str| journal.iter().position(|step| step == name).unwrap();
+    assert!(step("backup") < step("recovery-abandon"));
+    assert!(step("recovery-abandon") < step("recovery-abandoned"));
+    Ok(())
+}
+
+#[test]
+fn a_refused_recovery_abandon_changes_nothing_and_its_request_file_reruns() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::RecoveryAbandon,
+        |cluster| cluster.refused_invocation = Some("blocked-sync".into()),
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.confirm()?;
+    ensure!(
+        session.workflow("recovery-abandon").is_err(),
+        "the second invocation is refused"
+    );
+    ensure!(session.finish().is_err(), "recovery-abandon has not run");
+    drop(session);
+    assert!(harness.scaled_up() && harness.deleted_pod());
+    assert!(
+        !harness
+            .journal()
+            .iter()
+            .any(|step| step == "recovery-abandoned")
+    );
+    // The same request file in a new session abandons the whole list.
+    let mut session = harness.open(Operation::RecoveryAbandon, |_| {}, true)?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.confirm()?;
+    assert_eq!(
+        session.workflow("recovery-abandon")?["abandoned"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    session.finish()?;
+    assert_eq!(
+        abandon_calls(&harness),
+        vec![listed(&harness)?, listed(&harness)?]
+    );
+    Ok(())
+}
+
+/// An edit to a reviewed request file and the refusal it must produce.
+type RequestChange = (fn(&mut Value), &'static str);
+
+#[test]
+fn only_recovery_abandon_lists_invocations_and_each_once() -> Result<()> {
+    let harness = Harness::new();
+    let path = harness.request(Operation::RecoveryAbandon);
+    let base: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let refused = |operation: Operation, change: &dyn Fn(&mut Value), code: &str| -> Result<()> {
+        let mut request = base.clone();
+        change(&mut request);
+        fs::write(&path, request.to_string())?;
+        let error = Session::open(operation.name(), &path, harness.tools(|_| {}, true))
+            .err()
+            .context("refused")?;
+        ensure!(format!("{error:#}").contains(code), "{error:#}");
+        Ok(())
+    };
+    let changes: [RequestChange; 7] = [
+        (
+            |request| request["abandon"] = json!([]),
+            "recovery_requests_count",
+        ),
+        (
+            |request| {
+                let first = request["abandon"][0].clone();
+                request["abandon"] = json!(vec![first; 17]);
+            },
+            "recovery_requests_count",
+        ),
+        (
+            |request| request["abandon"][1]["invocation"] = "page-orphan".into(),
+            "recovery_request_duplicate",
+        ),
+        (
+            |request| request["abandon"][1]["request_id"] = "abandon-orphan".into(),
+            "recovery_request_duplicate",
+        ),
+        (
+            |request| request["abandon"][0]["reason"] = "line\nbreak".into(),
+            "invalid_recovery_reason",
+        ),
+        (
+            |request| request["abandon"][0]["cause"] = "stuck".into(),
+            "unknown variant",
+        ),
+        (
+            |request| {
+                request["abandon"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("cause");
+            },
+            "missing field `cause`",
+        ),
+    ];
+    for (change, code) in changes {
+        refused(Operation::RecoveryAbandon, &change, code)?;
+    }
+    refused(
+        Operation::Backup,
+        &|_| {},
+        "only recovery-abandon lists invocations",
+    )?;
+    assert!(
+        !harness
+            .verbs()
+            .iter()
+            .any(|verb| verb == "scale --replicas=0")
+    );
+    assert!(abandon_calls(&harness).is_empty());
     Ok(())
 }
 

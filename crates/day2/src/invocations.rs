@@ -438,10 +438,13 @@ pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
     drain_artifact(runtime, budget)
 }
 
-fn drain_artifact(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
-    // Immutable admitted declarations can exclude this pump without opening
-    // SQLite. Queue emptiness itself must be read under the SQL-unit guard.
-    let operations: Vec<_> = runtime
+/// The operations whose pending invocations the scheduler resumes for this
+/// runtime's artifact: every command, and in a rolling store also every query
+/// and page, so a pending read cannot strand source work. A pending invocation
+/// of anything else is never resumed: only the request that admitted it was
+/// running it.
+pub(crate) fn scheduled_operations(runtime: &Runtime) -> Vec<String> {
+    runtime
         .artifact()
         .contract()
         .operations
@@ -459,7 +462,13 @@ fn drain_artifact(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
                 .filter(|_| runtime.rolling())
                 .map(|page| format!("$page.{}", page.name)),
         )
-        .collect();
+        .collect()
+}
+
+fn drain_artifact(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
+    // Immutable admitted declarations can exclude this pump without opening
+    // SQLite. Queue emptiness itself must be read under the SQL-unit guard.
+    let operations = scheduled_operations(runtime);
     if operations.is_empty() {
         return Ok(Vec::new());
     }

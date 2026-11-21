@@ -92,6 +92,8 @@ pub enum Operation {
     Inspect,
     Backup,
     AuthorityApply,
+    /// Abandon listed invocations that will never finish, with the app stopped.
+    RecoveryAbandon,
     Activate,
     /// Recovery for `activate` of a new artifact when its own stamp step failed.
     MarkActivated,
@@ -105,12 +107,13 @@ impl Operation {
             "inspect" => Self::Inspect,
             "backup" => Self::Backup,
             "authority-apply" => Self::AuthorityApply,
+            "recovery-abandon" => Self::RecoveryAbandon,
             "activate" => Self::Activate,
             "rollout" => Self::Rollout,
             "runtime-rollout" => Self::RuntimeRollout,
             "mark-activated" => Self::MarkActivated,
             _ => bail!(
-                "maintain operation must be inspect, backup, authority-apply, activate, mark-activated, rollout or runtime-rollout"
+                "maintain operation must be inspect, backup, authority-apply, recovery-abandon, activate, mark-activated, rollout or runtime-rollout"
             ),
         })
     }
@@ -120,6 +123,7 @@ impl Operation {
             Self::Inspect => "inspect",
             Self::Backup => "backup",
             Self::AuthorityApply => "authority-apply",
+            Self::RecoveryAbandon => "recovery-abandon",
             Self::Activate => "activate",
             Self::Rollout => "rollout",
             Self::RuntimeRollout => "runtime-rollout",
@@ -145,7 +149,7 @@ impl Operation {
         match self {
             Self::Inspect | Self::MarkActivated => 0,
             // The verified backup.
-            Self::Backup | Self::AuthorityApply => 1,
+            Self::Backup | Self::AuthorityApply | Self::RecoveryAbandon => 1,
             // The backup, which the rehearsal then migrates as its copy, and
             // the WAL and SQLite temporary files that migration grows. The
             // real migration's WAL is on the app's volume; its temporary files
@@ -369,6 +373,10 @@ pub struct Request {
     /// controller or claim that happens to have the same name.
     #[serde(default)]
     pub placement: Option<Placement>,
+    /// The invocations `recovery-abandon` ends, each with its own idempotency
+    /// key, artifact and cause. Only that operation takes them.
+    #[serde(default)]
+    pub abandon: Vec<day2::recovery::Request>,
     /// Skip the typed confirmation; recorded in the journal.
     #[serde(default)]
     pub yes: bool,
@@ -519,6 +527,16 @@ impl Request {
             (None, true) => bail!("{} requires target", operation.name()),
             (Some(_), false) => bail!("only activate and mark-activated take a target"),
             (None, false) => {}
+        }
+        if operation == Operation::RecoveryAbandon {
+            // The store-free checks, so a malformed list never stops the app.
+            day2::recovery::validate(&self.abandon)
+                .context("recovery-abandon lists 1-16 valid invocations, each once")?;
+        } else {
+            ensure!(
+                self.abandon.is_empty(),
+                "only recovery-abandon lists invocations to abandon"
+            );
         }
         Ok(())
     }
@@ -2978,6 +2996,7 @@ impl Session {
                         self.operation,
                         Operation::Backup
                             | Operation::AuthorityApply
+                            | Operation::RecoveryAbandon
                             | Operation::Activate
                             | Operation::Rollout
                             | Operation::RuntimeRollout
@@ -3040,6 +3059,47 @@ impl Session {
                 self.state.result = Some(receipt.clone());
                 self.record("authority-applied", receipt.clone())?;
                 Ok(receipt)
+            }
+            "recovery-abandon" => {
+                ensure!(
+                    self.operation == Operation::RecoveryAbandon
+                        && self.state.backup.is_some()
+                        && self.state.confirmed
+                        && self.state.result.is_none(),
+                    "recovery-abandon needs a verified backup and a confirmation, once"
+                );
+                let requests = serde_json::to_string(&self.request.abandon)?;
+                eprintln!(
+                    "== recovery abandon ({} invocations)",
+                    self.request.abandon.len()
+                );
+                self.record(
+                    "recovery-abandon",
+                    json!({"requests": self.request.abandon}),
+                )?;
+                // One transaction: a refusal leaves every listed invocation as
+                // it was. Each request is idempotent, so rerunning the same
+                // request file returns the receipts of committed ones.
+                let raw = self.exec(
+                    &[
+                        DAY2,
+                        "recovery-abandon",
+                        CURRENT,
+                        &app,
+                        &operator,
+                        &requests,
+                    ],
+                    Duration::from_secs(600),
+                )?;
+                let receipts: Value = serde_json::from_str(raw.trim())?;
+                ensure!(
+                    receipts.as_array().map(Vec::len) == Some(self.request.abandon.len()),
+                    "recovery-abandon returned no receipt for each invocation"
+                );
+                let result = json!({"abandoned": receipts});
+                self.record("recovery-abandoned", result.clone())?;
+                self.state.result = Some(result.clone());
+                Ok(result)
             }
             "authority-activate" => {
                 ensure!(
@@ -4382,6 +4442,27 @@ impl Session {
                     "apply",
                 )
             }
+            Operation::RecoveryAbandon => {
+                ensure!(
+                    self.state.backup.is_some(),
+                    "confirm after the backup is copied"
+                );
+                let listed = self
+                    .request
+                    .abandon
+                    .iter()
+                    .map(|request| format!("{} as {}", request.invocation, request.cause.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    format!(
+                        "Type 'abandon' to finish {} invocation(s) of {} as abandoned ({listed}): ",
+                        self.request.abandon.len(),
+                        self.request.app
+                    ),
+                    "abandon",
+                )
+            }
             _ => bail!("{} needs no confirmation", self.operation.name()),
         };
         ensure!(!self.state.confirmed, "already confirmed");
@@ -4590,6 +4671,9 @@ impl Session {
             ),
             Operation::AuthorityApply => {
                 ensure!(self.state.result.is_some(), "authority-apply has not run")
+            }
+            Operation::RecoveryAbandon => {
+                ensure!(self.state.result.is_some(), "recovery-abandon has not run")
             }
             Operation::Activate => ensure!(
                 self.state.marked,

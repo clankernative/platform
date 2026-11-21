@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use day2::{
     authority_state::LocalOperator,
     invocations,
-    recovery::{self, EvidenceSummary, Request},
+    recovery::{self, Cause, EvidenceSummary, Request},
     simulation::Simulation,
     store::Fault,
 };
@@ -19,10 +19,22 @@ fn request(world: &World, invocation: &str, request_id: &str) -> Request {
         invocation: invocation.into(),
         expected_artifact: world.runtime.artifact().id().into(),
         reason: "send stopped by policy review".into(),
+        cause: Cause::Blocked,
     }
 }
 
-fn refused(result: Result<recovery::Receipt>, code: &str) {
+/// One request, as most of these tests make.
+fn abandon_one(
+    runtime: &day2::store::Runtime,
+    operator: &LocalOperator,
+    request: &Request,
+) -> Result<recovery::Receipt> {
+    let mut receipts = recovery::abandon(runtime, operator, std::slice::from_ref(request))?;
+    assert_eq!(receipts.len(), 1);
+    Ok(receipts.remove(0))
+}
+
+fn refused<T: std::fmt::Debug>(result: Result<T>, code: &str) {
     let error = format!("{:#}", result.unwrap_err());
     assert!(error.contains(code), "{error}");
 }
@@ -77,23 +89,23 @@ fn abandon_finishes_blocked_work_once_and_records_who_and_why() -> Result<()> {
     let (world, _simulation, notify) = blocked_notify(40, |_, _| Ok(()))?;
     let operator = operator()?;
     refused(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &LocalOperator::assert_local("bob")?,
             &request(&world, &notify, "not-an-operator"),
         ),
         "recovery_operator_required",
     );
-    let first = recovery::abandon(&world.runtime, &operator, &request(&world, &notify, "once"))?;
+    let first = abandon_one(&world.runtime, &operator, &request(&world, &notify, "once"))?;
     assert_eq!(first.invocation, notify);
     assert_eq!(evidence(&first), (0, 0, 0));
     // The same request returns the same receipt and changes nothing.
     assert_eq!(
-        recovery::abandon(&world.runtime, &operator, &request(&world, &notify, "once"))?,
+        abandon_one(&world.runtime, &operator, &request(&world, &notify, "once"))?,
         first
     );
     refused(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &operator,
             &Request {
@@ -104,7 +116,7 @@ fn abandon_finishes_blocked_work_once_and_records_who_and_why() -> Result<()> {
         "recovery_request_conflict",
     );
     refused(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &operator,
             &request(&world, &notify, "again"),
@@ -202,7 +214,7 @@ fn only_blocked_work_on_the_expected_artifact_can_be_abandoned() -> Result<()> {
     let operator = operator()?;
     world.submit("ordinary", Fault::None)?;
     refused(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &operator,
             &request(&world, "ordinary", "done"),
@@ -218,7 +230,7 @@ fn only_blocked_work_on_the_expected_artifact_can_be_abandoned() -> Result<()> {
         100,
     )?;
     refused(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &operator,
             &request(&world, "runnable", "runnable"),
@@ -226,7 +238,7 @@ fn only_blocked_work_on_the_expected_artifact_can_be_abandoned() -> Result<()> {
         "recovery_requires_blocked_invocation",
     );
     refused(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &operator,
             &request(&world, "missing", "missing"),
@@ -234,7 +246,7 @@ fn only_blocked_work_on_the_expected_artifact_can_be_abandoned() -> Result<()> {
         "not_found",
     );
     refused(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &operator,
             &Request {
@@ -246,7 +258,7 @@ fn only_blocked_work_on_the_expected_artifact_can_be_abandoned() -> Result<()> {
     );
     for reason in ["", "   ", "line\nbreak"] {
         refused(
-            recovery::abandon(
+            abandon_one(
                 &world.runtime,
                 &operator,
                 &Request {
@@ -265,7 +277,7 @@ fn only_blocked_work_on_the_expected_artifact_can_be_abandoned() -> Result<()> {
         0
     );
     assert_eq!(
-        recovery::abandon(
+        abandon_one(
             &world.runtime,
             &operator,
             &request(&world, &notify, "valid")
@@ -284,7 +296,7 @@ fn a_permit_that_has_not_started_is_refused_and_settles_as_not_dispatched() -> R
         permit = Some(simulation.admit_effect(effect)?);
         Ok(())
     })?;
-    let receipt = recovery::abandon(
+    let receipt = abandon_one(
         &world.runtime,
         &operator()?,
         &request(&world, &notify, "fence"),
@@ -323,7 +335,7 @@ fn a_provider_result_arriving_after_abandon_is_recorded_without_completion() -> 
         performed = Some(simulation.perform_admitted_effect(permit)?);
         Ok(())
     })?;
-    let receipt = recovery::abandon(
+    let receipt = abandon_one(
         &world.runtime,
         &operator()?,
         &request(&world, &notify, "late"),
@@ -358,7 +370,7 @@ fn abandon_reports_settled_and_never_admitted_effects() -> Result<()> {
         let performed = simulation.perform_effect(effect)?;
         simulation.settle_effect(performed)
     })?;
-    let receipt = recovery::abandon(
+    let receipt = abandon_one(
         &world.runtime,
         &operator()?,
         &request(&world, &settled, "known"),
@@ -369,11 +381,301 @@ fn abandon_reports_settled_and_never_admitted_effects() -> Result<()> {
         simulation.claim_effect(notify)?.context("claimed effect")?;
         Ok(())
     })?;
-    let receipt = recovery::abandon(
+    let receipt = abandon_one(
         &world.runtime,
         &operator()?,
         &request(&world, &claimed, "never"),
     )?;
     assert_eq!(evidence(&receipt), (1, 0, 0));
+    Ok(())
+}
+
+fn orphan(world: &World, invocation: &str, request_id: &str) -> Request {
+    Request {
+        reason: "request cut off when maintenance stopped the app".into(),
+        cause: Cause::OrphanedRequest,
+        ..request(world, invocation, request_id)
+    }
+}
+
+/// What every `day2-serve` holds on its store while it runs.
+fn serving_lease(world: &World) -> Result<std::fs::File> {
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(
+            world
+                .runtime
+                .db()
+                .parent()
+                .context("store directory")?
+                .join("reports.serve.lock"),
+        )?;
+    lease.try_lock_shared()?;
+    Ok(lease)
+}
+
+fn pending(world: &World) -> Result<i64> {
+    Ok(rusqlite::Connection::open(world.runtime.db())?.query_row(
+        "SELECT count(*) FROM day2_invocations WHERE status='pending'",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn abandonments(world: &World) -> Result<i64> {
+    Ok(rusqlite::Connection::open(world.runtime.db())?.query_row(
+        "SELECT count(*) FROM day2_abandonments",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// A query a direct request admitted, cut off before it ran. The scheduler of
+/// an ordinary non-rolling store never resumes a query.
+fn interrupted_read(world: &World, id: &str) -> Result<()> {
+    world.runtime.accept(
+        "reports.list",
+        "alice",
+        id,
+        &serde_json::json!({"after":"","limit":2}),
+        100,
+    )
+}
+
+#[test]
+fn an_orphaned_request_is_abandoned_only_while_no_server_holds_the_store() -> Result<()> {
+    let world = World::new()?;
+    let operator = operator()?;
+    interrupted_read(&world, "orphan")?;
+    assert_eq!(pending(&world)?, 1);
+    // The operator must name the cause; this read is not blocked.
+    refused(
+        abandon_one(
+            &world.runtime,
+            &operator,
+            &request(&world, "orphan", "as-blocked"),
+        ),
+        "recovery_requires_blocked_invocation",
+    );
+    // While a server holds the store, its request may still be running.
+    let lease = serving_lease(&world)?;
+    for code in [
+        "recovery_requires_exclusive_store",
+        "another server owns this SQLite app",
+    ] {
+        refused(
+            abandon_one(
+                &world.runtime,
+                &operator,
+                &orphan(&world, "orphan", "cut-off"),
+            ),
+            code,
+        );
+    }
+    drop(lease);
+    // The exclusion admits only an instance operator or a policy administrator.
+    refused(
+        abandon_one(
+            &world.runtime,
+            &LocalOperator::assert_local("bob")?,
+            &orphan(&world, "orphan", "not-an-operator"),
+        ),
+        "maintenance_operator_required",
+    );
+    assert_eq!((pending(&world)?, abandonments(&world)?), (1, 0));
+
+    let receipt = abandon_one(
+        &world.runtime,
+        &operator,
+        &orphan(&world, "orphan", "cut-off"),
+    )?;
+    assert_eq!(
+        (receipt.invocation.as_str(), receipt.cause),
+        ("orphan", Cause::OrphanedRequest)
+    );
+    assert_eq!(evidence(&receipt), (0, 0, 0));
+    // Nothing is pending for a migration to refuse, and nothing runs it again.
+    assert_eq!(pending(&world)?, 0);
+    assert!(abandoned(&world.runtime.execute("orphan", Fault::None)?));
+    let status = invocations::status(&world.runtime, "orphan", "alice")?;
+    assert_eq!(
+        (status.status.as_str(), status.error.as_str()),
+        ("failure", "invocation_abandoned")
+    );
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    assert_eq!(
+        db.query_row(
+            "SELECT operator,json_extract(receipt,'$.cause'),json_extract(payload,'$[0].cause')
+             FROM day2_abandonments WHERE invocation='orphan'",
+            [],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?
+            ))
+        )?,
+        (
+            "admin".into(),
+            "orphaned_request".into(),
+            "orphaned_request".into()
+        )
+    );
+    // A recorded request returns its receipt, even once a server holds the
+    // store again; a changed request under its key is still refused.
+    let lease = serving_lease(&world)?;
+    assert_eq!(
+        abandon_one(
+            &world.runtime,
+            &operator,
+            &orphan(&world, "orphan", "cut-off")
+        )?,
+        receipt
+    );
+    refused(
+        abandon_one(
+            &world.runtime,
+            &operator,
+            &Request {
+                reason: "a different reason".into(),
+                ..orphan(&world, "orphan", "cut-off")
+            },
+        ),
+        "recovery_request_conflict",
+    );
+    drop(lease);
+    refused(
+        abandon_one(
+            &world.runtime,
+            &operator,
+            &orphan(&world, "orphan", "again"),
+        ),
+        "recovery_already_resolved",
+    );
+    Ok(())
+}
+
+#[test]
+fn work_a_runtime_resumes_is_never_an_orphaned_request() -> Result<()> {
+    let (world, _simulation, notify) = blocked_notify(42, |_, _| Ok(()))?;
+    let operator = operator()?;
+    // A command from a direct request: the scheduler resumes it, and a client
+    // may retry it under its key.
+    world.runtime.accept(
+        "reports.submit",
+        "alice",
+        "accepted-command",
+        &serde_json::json!({"title":"x","text":"y"}),
+        100,
+    )?;
+    // A command request's child: a runtime resumes it, and no request owns it.
+    world.submit("parent", Fault::None)?;
+    let child = world.child("parent")?;
+    for (invocation, key) in [
+        ("accepted-command", "command-as-orphan"),
+        (child.as_str(), "child-as-orphan"),
+        // Blocked work is abandoned as blocked, so the cause stays exact.
+        (notify.as_str(), "blocked-as-orphan"),
+        // Finished work never qualifies.
+        ("parent", "finished-as-orphan"),
+    ] {
+        refused(
+            abandon_one(&world.runtime, &operator, &orphan(&world, invocation, key)),
+            "recovery_requires_orphaned_request",
+        );
+    }
+    assert_eq!(abandonments(&world)?, 0);
+    // The scheduler still finishes the accepted command.
+    assert_eq!(world.finish("accepted-command")?.status, "success");
+    assert_eq!(
+        abandon_one(
+            &world.runtime,
+            &operator,
+            &request(&world, &notify, "as-blocked")
+        )?
+        .cause,
+        Cause::Blocked
+    );
+    Ok(())
+}
+
+#[test]
+fn a_list_is_abandoned_all_or_nothing_and_checked_before_any_change() -> Result<()> {
+    let (world, _simulation, notify) = blocked_notify(43, |_, _| Ok(()))?;
+    let operator = operator()?;
+    interrupted_read(&world, "first-read")?;
+    interrupted_read(&world, "second-read")?;
+    world.runtime.accept(
+        "reports.submit",
+        "alice",
+        "accepted-command",
+        &serde_json::json!({"title":"x","text":"y"}),
+        100,
+    )?;
+    let before = pending(&world)?;
+    // One ineligible item refuses the list, and the others stay pending.
+    refused(
+        recovery::abandon(
+            &world.runtime,
+            &operator,
+            &[
+                orphan(&world, "first-read", "first"),
+                orphan(&world, "accepted-command", "command"),
+            ],
+        ),
+        "recovery_requires_orphaned_request",
+    );
+    assert_eq!((pending(&world)?, abandonments(&world)?), (before, 0));
+    for (requests, code) in [
+        (Vec::new(), "recovery_requests_count"),
+        (
+            vec![orphan(&world, "first-read", "first"); recovery::MAX_REQUESTS + 1],
+            "recovery_requests_count",
+        ),
+        (
+            vec![
+                orphan(&world, "first-read", "first"),
+                orphan(&world, "first-read", "again"),
+            ],
+            "recovery_request_duplicate",
+        ),
+        (
+            vec![
+                orphan(&world, "first-read", "same-key"),
+                orphan(&world, "second-read", "same-key"),
+            ],
+            "recovery_request_duplicate",
+        ),
+    ] {
+        refused(
+            recovery::abandon(&world.runtime, &operator, &requests),
+            code,
+        );
+    }
+    // Both causes in one list, under one exclusion and one transaction.
+    let receipts = recovery::abandon(
+        &world.runtime,
+        &operator,
+        &[
+            orphan(&world, "first-read", "first"),
+            orphan(&world, "second-read", "second"),
+            request(&world, &notify, "blocked"),
+        ],
+    )?;
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|receipt| (receipt.invocation.as_str(), receipt.cause))
+            .collect::<Vec<_>>(),
+        vec![
+            ("first-read", Cause::OrphanedRequest),
+            ("second-read", Cause::OrphanedRequest),
+            (notify.as_str(), Cause::Blocked),
+        ]
+    );
+    // Only the accepted command remains pending, for the scheduler.
+    assert_eq!(pending(&world)?, 1);
     Ok(())
 }
