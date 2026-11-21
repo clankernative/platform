@@ -3,13 +3,15 @@ load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", 
 package(default_visibility = ["//visibility:public"])
 
 COMPILE_INPUTS = [
+    "//:cli/fixtures/release-receipt.json",
     "//:cli/InstanceRender.roc",
     "//:cli/InstanceSpec.roc",
     "//:cli/JsonValue.roc",
     "//:cli/Names.roc",
     "//:deploy/gke/k8s/maintenance-pod.yaml",
     "//:deploy/gke/k8s/activation-image-init.yaml",
-    "//:deploy/gke/stacks/day2-app/tests/oauth-instance.json"
+    "//:deploy/gke/stacks/day2-app/tests/oauth-instance.json",
+    "//crates/day2:fixtures/sdk-release/manifest-cc689326.json"
 ]
 
 INTERNAL_DEPS = [

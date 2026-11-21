@@ -3,6 +3,7 @@ package
 		Workflow,
 		LocalDev,
 		InstanceRoots,
+		InstanceRelease,
 		Build,
 		Delegation,
 		Check,

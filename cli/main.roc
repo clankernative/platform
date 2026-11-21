@@ -15,6 +15,7 @@ import Problem
 import Host
 import InstanceSpec
 import InstanceRender
+import InstanceRelease
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |args| {
@@ -67,6 +68,7 @@ main! = |args| {
 			Err(problem) => Output.Outcome.Failed(problem, render.parts().format, Cli.Command.InstanceRender)
 		}
 		Cli.Request.Roots(roots) => ran!(roots)
+		Cli.Request.Release(release) => released!(release)
 	}
 	emit!(Output.new(outcome))
 }
@@ -107,6 +109,37 @@ ran! = |roots| {
 				}
 				Err(CallbackErr(error)) => broken(error)
 				Err(_) => broken("cannot use a private temporary directory")
+			}
+		}
+		Err(problem) => failed(problem)
+	}
+}
+
+## Validate the spec and derive its bucket and registry here, then publish or fetch the release through the platform
+## host, which checks the request again before it runs gcloud or docker.
+released! : Cli.Release => Output.Outcome
+released! = |release| {
+	parts = release.parts()
+	verb = parts.action.verb()
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, release.command())
+	match InstanceSpec.load!(parts.directory) {
+		Ok((path, spec)) => {
+			request = InstanceRelease.request(spec, parts.action)
+			# The request travels as a private temporary file, as plan and apply requests do.
+			ran = Env.with_temp_dir!(
+				|directory| {
+					file = Path.join(directory, "request.json")
+					Path.write_utf8!(file, request).map_err(|_| "cannot write the release ${verb} request")?
+					Host.instance_release!(verb, Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+				},
+			)
+			match ran {
+				Ok(raw) => match InstanceRelease.receipt(raw, parts.action) {
+					Ok(receipt) => Output.Outcome.Released(release, path, spec, receipt)
+					Err(_) => failed(Problem.ReleaseFailed("the platform host returned an unreadable receipt"))
+				}
+				Err(CallbackErr(error)) => failed(Problem.ReleaseFailed(error))
+				Err(_) => failed(Problem.ReleaseFailed("cannot use a private temporary directory"))
 			}
 		}
 		Err(problem) => failed(problem)

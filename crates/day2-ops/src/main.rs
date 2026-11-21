@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, infra, instance_roots, local_dev, maintenance, process, projection,
+    backup, chrome_extension, infra, instance_release, instance_roots, local_dev, maintenance,
+    process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -33,6 +34,9 @@ struct Operations {
     /// The mode the host action fixed for `day2 instance plan|apply`, and its session.
     instance_mode: Option<instance_roots::Mode>,
     instance_session: Option<instance_roots::Session>,
+    /// The mode the host action fixed for `day2 instance release publish|fetch`, and its session.
+    release_mode: Option<instance_release::Mode>,
+    release_session: Option<instance_release::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -711,6 +715,54 @@ impl Operations {
                 .as_ref()
                 .context("instance session required")?
                 .receipt(),
+            "instance-release-prepare" => {
+                ensure!(
+                    self.release_session.is_none(),
+                    "one release session per workflow"
+                );
+                let mode = self.release_mode.context(
+                    "only day2 instance release publish or fetch starts a release session",
+                )?;
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                self.release_session = Some(instance_release::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    mode,
+                    Box::new(instance_release::Native),
+                    None,
+                )?);
+                Ok(json!({}))
+            }
+            "instance-release-image" | "instance-release-blob" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                let session = self
+                    .release_session
+                    .as_mut()
+                    .context("release session required")?;
+                if request.action == "instance-release-image" {
+                    session.image(&name)
+                } else {
+                    session.blob(&name)
+                }
+            }
+            "instance-release-manifest" => self
+                .release_session
+                .as_mut()
+                .context("release session required")?
+                .manifest(),
+            "instance-release-operator" => self
+                .release_session
+                .as_mut()
+                .context("release session required")?
+                .operator(),
             "infra-receipt" => self
                 .infrastructure
                 .as_ref()
@@ -847,6 +899,8 @@ fn run(request: Request) -> Result<Value> {
         infrastructure: None,
         instance_mode: None,
         instance_session: None,
+        release_mode: None,
+        release_session: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
@@ -856,6 +910,8 @@ fn run(request: Request) -> Result<Value> {
         "local-session",
         "instance-plan",
         "instance-apply",
+        "instance-release-publish",
+        "instance-release-fetch",
     ]
     .contains(&request.action.as_str())
     {
@@ -888,6 +944,28 @@ fn run(request: Request) -> Result<Value> {
                 .request
                 .to_str()
                 .context("instance request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if let Some(mode) = match request.action.as_str() {
+        "instance-release-publish" => Some(instance_release::Mode::Publish),
+        "instance-release-fetch" => Some(instance_release::Mode::Fetch),
+        _ => None,
+    } {
+        // `day2 instance release publish|fetch` only, as for plan and apply: the
+        // action fixes the session's mode and the adapter validates the request.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.release_mode = Some(mode);
+        vec![
+            format!("instance-release-{}-session", mode.name()),
+            input
+                .request
+                .to_str()
+                .context("release request path must be UTF-8")?
                 .to_owned(),
         ]
     } else if request.action == "local-session" {

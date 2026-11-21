@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "target": "linux-x86_64",
+  "inputs": "sha256:d7dae13e7ce014932913ec7b2b483a758e6219305db81945a8695047e194f87d",
+  "workflow_sources": "sha256:d992cfadfb9817cf33845c7922ebb3ba5452c08c58f443748ca61f8daa17eaa7",
+  "toolchain": "sha256:b5b1e930b182f6c8b849464a62c95a6f077208cb386c48e5f0a4d30b8772a4e0",
+  "worker": {
+    "digest": "sha256:fd9eef8c8941042cb2701ee143196afb6a34ba5b8a41311c7fbe04ab029d9ab3",
+    "bytes": 23625492
+  },
+  "operator": {
+    "digest": "sha256:bd1e1954064cbbfa82bc16dd23d0ef19b804ff8c0b5eb78b90ee4ad128ed5b23",
+    "bytes": 32175226
+  },
+  "operator_files": {
+    "cli/day2": {
+      "digest": "sha256:766fa9a6dbedb26d98fd3bd44c386c5168c51493ed4bd2a7f20ade5bef52e261",
+      "bytes": 5266448
+    },
+    "cli/day2-host": {
+      "digest": "sha256:8d83d349a75069c15ba23b0c129bfd88fc08672b698b870787d54575d90e075d",
+      "bytes": 64318528
+    },
+    "cli/day2-workflows": {
+      "digest": "sha256:60830f919458bfe4fb019e077225d59ad74b2825447fd4a95026ebf9958a16ae",
+      "bytes": 3678216
+    },
+    "cli/day2-workflows.json": {
+      "digest": "sha256:dd85b1122668362832fc46476552a7b9274e6da5bf1925e660283a1cf45e8c74",
+      "bytes": 271
+    },
+    "licenses/LICENSE": {
+      "digest": "sha256:d24168d1fdfb4dfd3c342043fcd5eff3d175db19f6e90bb2d272c48fe5ff6d0c",
+      "bytes": 1159
+    },
+    "licenses/THIRD-PARTY-NOTICES.txt": {
+      "digest": "sha256:8908602b579d28ed3d09472d5d404d509f82a0c6d73471f3e1cb38295702368d",
+      "bytes": 4237639
+    },
+    "licenses/dependency-inventory.json": {
+      "digest": "sha256:d523dbcb9b23536f98f69f25ab1b957fb791e7b0e009781c63557f97aa32282a",
+      "bytes": 131959
+    }
+  }
+}

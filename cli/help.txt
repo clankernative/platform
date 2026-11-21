@@ -9,6 +9,8 @@ USAGE
   day2 instance render <directory> [--agent]
   day2 instance plan <directory> <platform> <new directory> [--agent]
   day2 instance apply <directory> <platform> <plan directory> <new directory> [--agent]
+  day2 instance release publish <directory> <request> <new manifest> [--agent]
+  day2 instance release fetch <directory> <sha256:digest> <bytes> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -52,6 +54,21 @@ COMMANDS
                   resource. A failed project, cluster or tenancy root stops
                   the roots after it; a failed app edge stops only itself.
                   Exits 6 if a root fails or is refused.
+  instance release publish
+                  For operators. Validate <directory>/day2.json, then publish
+                  the qualified SDK release <request> describes into the
+                  instance's state bucket. Both images must pull as their
+                  qualified image IDs; each blob is uploaded create-only (an
+                  existing object counts only if its bytes match); the
+                  manifest is written to <new manifest> and published last.
+  instance release fetch
+                  Fetch the approved release <sha256:digest> of <bytes> from
+                  the instance's state bucket into the local release cache
+                  ($DAY2_RELEASE_CACHE, else ~/.cache/day2-platform-releases),
+                  bind the distribution and evidence it names, and print the
+                  operator CLI's path. Every cached file is verified on use.
+                  Verifies integrity and qualification evidence, not
+                  approval: approval is the digest you pass.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
@@ -87,8 +104,8 @@ FOR AGENTS
   is a JSON string containing illustrative input, not an executable command.
   Help/version JSON lists implemented_commands and explicit capability flags.
   Exit codes: 0 success/help; 2 usage; 3 context/read failure; 4 not found;
-              5 invalid or unsupported metadata; 6 an instance root failed;
-              1 output failure.
+              5 invalid or unsupported metadata; 6 an instance root or a
+              release failed; 1 output failure.
 
 PROTOTYPE SCOPE
   Local source distribution. Current artifact discovery uses shared runtime

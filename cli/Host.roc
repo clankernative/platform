@@ -27,6 +27,17 @@ Host :: [].{
 		)
 	}
 
+	## `day2 instance release publish|fetch`: as for plan and apply, the action fixes the mode and the host reads the
+	## rendered request from this file and validates it again.
+	instance_release! : Str, Str => Try(Str, Str)
+	instance_release! = |verb, request| {
+		call!(
+			Json.to_str(
+				{ protocol: 1.U32, action: "instance-release-${verb}", input: Json.to_str({ request: request }) },
+			),
+		)
+	}
+
 	call! : Str => Try(Str, Str)
 	call! = |request| {
 		executable = Env.exe_path!().map_err(|_| "cannot locate platform CLI")?
