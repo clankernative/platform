@@ -14,9 +14,7 @@ variables {
   runtime_resources           = { memory_mib = 512, cpu_millis = 1000, process_limit = 1024, http_concurrency = 4, shutdown_seconds = 30 }
   pod_pids_limit              = 1024
   backup_bucket               = "example-tools-example-backups"
-  readers                     = ["qa@example.com"]
-  writers                     = ["qa@example.com"]
-  authority                   = jsondecode(file("tests/oauth-instance.json")).apps.example_app.authority
+  admins                      = ["qa@example.com"]
   security_shell_contract     = { namespace = "day2-security", name = "security-shell-contract" }
   node_selector               = { "iam.gke.io/gke-metadata-server-enabled" = "true" }
   native_enrollment_placement = { pool_name = "native-pool", profile = "native-fixture" }

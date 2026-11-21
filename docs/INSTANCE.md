@@ -140,9 +140,9 @@ scheme and stays because moving it is a state move. The renderer emits no root
 the spec cannot yet describe: the installation security shell
 (`security-shell-edge`, `security-shell`), opt-in integrations under
 `deploy/integrations/` (such as `gitea-instance-ci`), optional stacks (such as
-`qualification-runner`) and roots an instance owns itself. Access policy
-(day2-app's `readers`, `writers` and `authority`) is rendered at release
-activation (step 3), not by this command.
+`qualification-runner`) and roots an instance owns itself. Day2 renders an
+app's access policy at release activation from day2-app's `admins` (step 3);
+this command does not set them yet.
 
 ### Variables
 

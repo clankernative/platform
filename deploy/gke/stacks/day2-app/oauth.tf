@@ -77,6 +77,9 @@ resource "terraform_data" "oauth_admission" {
         local.oauth_selection.installation == var.installation && local.oauth_selection.environment == var.environment &&
         local.oauth_selection.identity == { scheme = "google_iap", hosted_domain = var.hosted_domain } &&
         local.oauth_selection.apps[var.app_id].artifact == "artifacts/${var.artifact_id}" &&
+        length(local.oauth_selection.apps[var.app_id].readers) == 0 && length(local.oauth_selection.apps[var.app_id].writers) == 0 &&
+        !contains(keys(local.oauth_selection.apps[var.app_id]), "authority") &&
+        jsonencode(local.oauth_selection.apps[var.app_id].rendered_authority) == jsonencode({ admins = sort(distinct(var.admins)) }) &&
         local.oauth_selection.apps[var.app_id].edge == { origin = var.edge_origin, iap_audience = local.iap_audience } &&
         local.oauth_selection.security_shell == { origin = local.shell_origin, iap_audience = local.shell_audience } &&
         local.oauth_selection.oauth_shell_transport.service_account == local.shell_service_account &&
@@ -90,7 +93,7 @@ resource "terraform_data" "oauth_admission" {
         (var.app_calls == null ? true : local.contract["APP_CALL_WORKLOAD_EMAIL"] == local.contract["OAUTH_APP_SERVICE_ACCOUNT"]) &&
         lookup(var.node_selector, "iam.gke.io/gke-metadata-server-enabled", "") == "true",
       false)
-      error_message = "OAuth must match this installation, artifact, app/shell edges, same-project shell contract and actual annotated app workload identity on a metadata-enabled node pool."
+      error_message = "OAuth must match this installation, artifact, rendered authority for admins, app/shell edges, same-project shell contract and actual annotated app workload identity on a metadata-enabled node pool."
     }
     precondition {
       condition = try(
