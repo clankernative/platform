@@ -1,3 +1,4 @@
+import InstanceRender
 import Names
 import Problem
 import "help.txt" as help_text : Str
@@ -9,16 +10,17 @@ Cli :: [].{
 
 	Source := [Demo, Instance(Names.LocalPath), Environment]
 
-	Request := [Help(Format), Version(Format), Describe(Describe), Check(Instance), Render(Instance), Plan(Plan)]
+	Request := [Help(Format), Version(Format), Describe(Describe), Check(Instance), Render(Instance), Roots(Roots)]
 
 	## The command a response reports, including failures before a request exists.
-	Command := [AppDescribe, InstanceCheck, InstanceRender, InstancePlan].{
+	Command := [AppDescribe, InstanceCheck, InstanceRender, InstancePlan, InstanceApply].{
 		name : Command -> Str
 		name = |command| match command {
 			AppDescribe => "app.describe"
 			InstanceCheck => "instance.check"
 			InstanceRender => "instance.render"
 			InstancePlan => "instance.plan"
+			InstanceApply => "instance.apply"
 		}
 	}
 
@@ -31,17 +33,32 @@ Cli :: [].{
 		with_format = |request, format| { ..request, format }
 	}
 
-	## day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY: a read-only plan of DIRECTORY's core roots, run in
-	## PLATFORM (a checkout at day2.json's platform commit), with plans and logs in NEW_DIRECTORY.
-	Plan :: { directory : Names.LocalPath, checkout : Names.LocalPath, output : Names.LocalPath, format : Format }.{
+	## day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY: a read-only plan of DIRECTORY's core roots, run in PLATFORM
+	## (a checkout at day2.json's platform commit), with plans and logs in NEW_DIRECTORY. day2 instance apply DIRECTORY
+	## PLATFORM PLAN_DIRECTORY NEW_DIRECTORY applies them, root by root, only as reviewed in PLAN_DIRECTORY, a prior
+	## plan's output; its mode carries that directory.
+	Roots :: {
+		mode : InstanceRender.Mode,
+		directory : Names.LocalPath,
+		checkout : Names.LocalPath,
+		output : Names.LocalPath,
+		format : Format,
+	}.{
 		parts :
-			Plan ->
-				{ directory : Names.LocalPath, checkout : Names.LocalPath, output : Names.LocalPath, format : Format }
+			Roots ->
+				{
+					mode : InstanceRender.Mode,
+					directory : Names.LocalPath,
+					checkout : Names.LocalPath,
+					output : Names.LocalPath,
+					format : Format,
+				}
 		parts =
 			|
 				request,
 			|
 				{
+					mode: request.mode,
 					directory: request.directory,
 					checkout: request.checkout,
 					output: request.output,
@@ -49,11 +66,18 @@ Cli :: [].{
 
 				}
 
-		with_format : Plan, Format -> Plan
+		with_format : Roots, Format -> Roots
 		with_format = |request, format| { ..request, format }
 
+		## The command a response reports.
+		command : Roots -> Command
+		command = |request| match request.mode {
+			InstanceRender.Mode.Plan => Command.InstancePlan
+			InstanceRender.Mode.Apply(_) => Command.InstanceApply
+		}
+
 		## The same instance, as `check` and `render` read it.
-		instance : Plan -> Instance
+		instance : Roots -> Instance
 		instance = |request| Instance.{ directory: request.directory, format: request.format }
 	}
 
@@ -120,9 +144,10 @@ Cli :: [].{
 					| ["app", "describe"]
 					| ["instance", "check"]
 					| ["instance", "render"]
-					| ["instance", "plan"] => Ok(Request.Help(raw.format))
+					| ["instance", "plan"]
+					| ["instance", "apply"] => Ok(Request.Help(raw.format))
 					["instance", "check", _] | ["instance", "render", _] => Ok(Request.Help(raw.format))
-					["instance", "plan", ..] => Ok(Request.Help(raw.format))
+					["instance", "plan", ..] | ["instance", "apply", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -135,10 +160,22 @@ Cli :: [].{
 				["app", "describe"] | ["instance", "check"] | ["instance", "render"] => Err(Problem.MissingArgument)
 				["instance", "plan"]
 				| ["instance", "plan", _]
-				| ["instance", "plan", _, _] => Err(Problem.MissingArgument)
+				| ["instance", "plan", _, _]
+				| ["instance", "apply"]
+				| ["instance", "apply", _]
+				| ["instance", "apply", _, _]
+				| ["instance", "apply", _, _, _] => Err(Problem.MissingArgument)
 				["instance", "plan", directory, checkout, output] => Ok(
-					Request.Plan(plan(directory, checkout, output, raw)?),
+					Request.Roots(roots(InstanceRender.Mode.Plan, directory, checkout, output, raw)?),
 				)
+				["instance", "apply", directory, checkout, reviewed, output] => {
+					plan = local_path("apply", reviewed, "a reviewed plan directory")?
+					Ok(
+						Request.Roots(
+							roots(InstanceRender.Mode.Apply(plan.to_str()), directory, checkout, output, raw)?,
+						),
+					)
+				}
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
@@ -177,7 +214,7 @@ Cli :: [].{
 		Request.Help(format) | Request.Version(format) => format
 		Request.Describe(value) => value.format
 		Request.Check(value) | Request.Render(value) => value.format
-		Request.Plan(value) => value.format
+		Request.Roots(value) => value.format
 	}
 
 	quote : Str -> Str
@@ -208,14 +245,20 @@ Cli :: [].{
 			}
 			Request.Check(value) => ["day2", "instance", "check", value.directory.to_str()]
 			Request.Render(value) => ["day2", "instance", "render", value.directory.to_str()]
-			Request.Plan(value) => [
+			Request.Roots(value) => [
 				"day2",
 				"instance",
-				"plan",
+				value.mode.name(),
 				value.directory.to_str(),
 				value.checkout.to_str(),
-				value.output.to_str(),
 			]
+				.concat(
+					match value.mode {
+						InstanceRender.Mode.Plan => []
+						InstanceRender.Mode.Apply(reviewed) => [reviewed]
+					},
+				)
+				.concat([value.output.to_str()])
 		}
 		base.concat(
 			match request_format(request) {
@@ -247,16 +290,16 @@ instance = |verb, value, raw| {
 	Ok(Cli.Instance.{ directory, format: raw.format })
 }
 
-plan : Str, Str, Str, Raw -> Try(Cli.Plan, Problem)
-plan = |directory, checkout, output, raw| {
+roots : InstanceRender.Mode, Str, Str, Str, Raw -> Try(Cli.Roots, Problem)
+roots = |mode, directory, checkout, output, raw| {
+	verb = mode.name()
 	if has_options(raw) {
-		return Err(Problem.ConflictingOptions("instance plan accepts only --agent or --json."))
+		return Err(Problem.ConflictingOptions("instance ${verb} accepts only --agent or --json."))
 	}
-	path = |value, role|
-		Names.LocalPath.from_str(value)
-			.map_err(|_| Problem.InvalidArguments("instance plan requires ${role} of at most 4096 bytes"))
+	path = |value, role| local_path(verb, value, role)
 	Ok(
-		Cli.Plan.{
+		Cli.Roots.{
+			mode,
 			directory: path(directory, "an instance directory")?,
 			checkout: path(checkout, "a platform checkout")?,
 			output: path(output, "a new output directory")?,
@@ -265,12 +308,18 @@ plan = |directory, checkout, output, raw| {
 	)
 }
 
+local_path : Str, Str, Str -> Try(Names.LocalPath, Problem)
+local_path = |verb, value, role|
+	Names.LocalPath.from_str(value)
+		.map_err(|_| Problem.InvalidArguments("instance ${verb} requires ${role} of at most 4096 bytes"))
+
 ## The instance verb follows the family, after any flags.
 instance_command : List(Str) -> Cli.Command
 instance_command = |args| match args {
 	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => instance_command(rest)
 	["render", ..] => Cli.Command.InstanceRender
 	["plan", ..] => Cli.Command.InstancePlan
+	["apply", ..] => Cli.Command.InstanceApply
 	[arg, .. as rest] if arg.starts_with("-") => instance_command(rest)
 	_ => Cli.Command.InstanceCheck
 }

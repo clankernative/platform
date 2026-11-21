@@ -14,7 +14,7 @@ Output :: { outcome : Outcome }.{
 		Described(Source),
 		Checked(Cli.Instance, Names.LocalPath, InstanceSpec),
 		Rendered(Cli.Instance, Names.LocalPath, InstanceSpec),
-		Planned(Cli.Plan, Names.LocalPath, InstanceSpec, InstanceRender.Receipt),
+		Ran(Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -26,8 +26,8 @@ Output :: { outcome : Outcome }.{
 	exit_code : Output -> I32
 	exit_code = |response| match response.outcome {
 		Outcome.Failed(problem, _, _) => problem.exit_code()
-		# A root that could not be planned fails the command, as a plan that cannot start does.
-		Outcome.Planned(_, _, _, receipt) => if receipt.ok 0 else Problem.PlanFailed("").exit_code()
+		# A root that failed or was refused fails the command, as a run that cannot start does.
+		Outcome.Ran(request, _, _, receipt) => if receipt.ok 0 else roots_failed(request.parts().mode, "").exit_code()
 		_ => 0
 	}
 
@@ -46,9 +46,16 @@ Output :: { outcome : Outcome }.{
 			Outcome.Described(loaded) => description_text(loaded)
 			Outcome.Checked(request, path, spec) => checked_text(request, path, spec)
 			Outcome.Rendered(request, path, spec) => rendered_text(request, path, spec)
-			Outcome.Planned(request, path, spec, receipt) => planned_text(request, path, spec, receipt)
+			Outcome.Ran(request, path, spec, receipt) => ran_text(request, path, spec, receipt)
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
+	}
+
+	## The problem a failed `instance plan` or `apply` reports.
+	roots_failed : InstanceRender.Mode, Str -> Problem
+	roots_failed = |mode, detail| match mode {
+		InstanceRender.Mode.Plan => Problem.PlanFailed(detail)
+		InstanceRender.Mode.Apply(_) => Problem.ApplyFailed(detail)
 	}
 
 	safe : Str -> Str
@@ -71,7 +78,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Help(value) | Output.Outcome.Version(value) | Output.Outcome.Failed(_, value, _) => value
 	Output.Outcome.Described(loaded) => loaded.request().parts().format
 	Output.Outcome.Checked(request, _, _) | Output.Outcome.Rendered(request, _, _) => request.parts().format
-	Output.Outcome.Planned(request, _, _, _) => request.parts().format
+	Output.Outcome.Ran(request, _, _, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -126,7 +133,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Described(loaded) => success_json(loaded)
 	Output.Outcome.Checked(request, path, spec) => checked_json(request, path, spec)
 	Output.Outcome.Rendered(request, path, spec) => rendered_json(request, path, spec)
-	Output.Outcome.Planned(request, path, spec, receipt) => planned_json(request, path, spec, receipt)
+	Output.Outcome.Ran(request, path, spec, receipt) => ran_json(request, path, spec, receipt)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -214,27 +221,30 @@ render_actions = |request| [
 	Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request)),
 ]
 
-plan_actions : Cli.Plan -> List(Cli.Action)
-plan_actions = |request| [
-	Cli.Action.new("Show the rendered backends and variables this plan used.", Cli.Request.Render(request.instance())),
+roots_actions : Cli.Roots -> List(Cli.Action)
+roots_actions = |request| [
+	Cli.Action.new(
+		"Show the rendered backends and variables this ${request.parts().mode.name()} used.",
+		Cli.Request.Render(request.instance()),
+	),
 	Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request.instance())),
 ]
 
-## The roots `instance plan` leaves to the release controller.
+## The roots `instance plan` and `apply` leave to the release controller.
 not_planned : InstanceSpec -> List(Str)
 not_planned = |spec| InstanceRender.roots(spec).drop_if(|root| root.plannable()).map(|root| root.label())
 
-planned_json : Cli.Plan, Names.LocalPath, InstanceSpec, InstanceRender.Receipt -> Str
+ran_json : Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt -> Str
 # Keep the wire record concrete, as success_json does for the same compiler reason.
-planned_json = |request, path, spec, receipt| {
-	# A root that could not be planned fails the command, so the envelope carries its error beside the receipt.
+ran_json = |request, path, spec, receipt| {
+	# A root that failed or was refused fails the command, so the envelope carries its error beside the receipt.
 	error : Try(Problem.Dto, [Null])
-	error = if receipt.ok Err(Null) else Ok(Problem.PlanFailed(failed_roots(receipt)).dto())
+	error = if receipt.ok Err(Null) else Ok(Output.roots_failed(request.parts().mode, failed_roots(receipt)).dto())
 	Json.to_str({
 		schema_version: 1.U64,
 		ok: receipt.ok,
-		command: "instance.plan",
-		exit_code: Output.new(Output.Outcome.Planned(request, path, spec, receipt)).exit_code(),
+		command: request.command().name(),
+		exit_code: Output.new(Output.Outcome.Ran(request, path, spec, receipt)).exit_code(),
 		context: { spec_path: path.to_str(), spec_validation: "checked" },
 		result: {
 			installation: spec.derived().installation,
@@ -242,13 +252,16 @@ planned_json = |request, path, spec, receipt| {
 			not_planned: not_planned(spec),
 		},
 		error,
-		next_actions: plan_actions(request).map(|action| action.dto()),
+		next_actions: roots_actions(request).map(|action| action.dto()),
 	})
 }
 
 failed_roots : InstanceRender.Receipt -> Str
 failed_roots = |receipt| {
-	failed = receipt.roots.keep_if(|root| root.status.starts_with("failed_")).map(|root| root.label)
+	failed =
+		receipt.roots
+			.keep_if(|root| root.status.starts_with("failed_") or root.status.starts_with("refused_"))
+			.map(|root| root.label)
 	"${failed.len().to_str()} of ${receipt.roots.len().to_str()} roots failed: ${Str.join_with(failed, ", ")}"
 }
 
@@ -259,17 +272,25 @@ root_status = |root| {
 	outcome = match root.status {
 		"no_changes" => "no changes"
 		"changes" => "${root.changes.len().to_str()} to change"
-		"failed_credentials" => "not planned: its cluster or DNS credentials could not be read"
+		"applied" => "applied ${root.changes.len().to_str()} changes"
+		"skipped" => "not run: a shared root before it failed"
+		"refused_destroy" => "refused: the plan deletes, replaces or forgets a resource; nothing applied"
+		"refused_unreviewed" => "refused: its plan differs from the reviewed plan; nothing applied"
+		"failed_credentials" => "not run: its cluster or DNS credentials could not be read"
 		"failed_init" => "failed at init; logs in ${root.logs}"
 		"failed_plan" => "failed at plan; logs in ${root.logs}"
 		"failed_show" => "failed at show; logs in ${root.logs}"
+		"failed_apply" => "failed at apply; logs in ${root.logs}"
 		unknown => "unknown status ${unknown}"
 	}
-	if root.new_root "${outcome} (new root, planned against empty state)" else outcome
+	if root.new_root and root.status == "changes" "${outcome} (new root, planned against empty state)"
+	else if root.new_root and root.status == "applied" "${outcome} (new root, state created)"
+	else outcome
 }
 
-planned_text : Cli.Plan, Names.LocalPath, InstanceSpec, InstanceRender.Receipt -> Str
-planned_text = |request, path, spec, receipt| {
+ran_text : Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt -> Str
+ran_text = |request, path, spec, receipt| {
+	mode = request.parts().mode
 	# The label column fits the longest label (app IDs reach 20 bytes) with two spaces to spare.
 	width = receipt.roots.fold(
 		24,
@@ -308,14 +329,37 @@ planned_text = |request, path, spec, receipt| {
 	skipped = not_planned(spec)
 	next =
 		Str.join_with(
-			plan_actions(request)
+			roots_actions(request)
 				.map(|action| action.dto())
 				.map(|action| "  ${Output.safe(action.description)}\n    ${Output.safe(action.command)}"),
 			"\n\n",
 		)
+	title = match mode {
+		InstanceRender.Mode.Plan => "OpenTofu plan, read-only"
+		InstanceRender.Mode.Apply(_) => "OpenTofu apply"
+	}
+	reviewed = match mode {
+		InstanceRender.Mode.Plan => []
+		InstanceRender.Mode.Apply(directory) => ["REVIEWED PLAN", "  ${Output.safe(directory)}/receipt.json", ""]
+	}
+	review = match mode {
+		InstanceRender.Mode.Plan => [
+			"",
+			"REVIEW",
+			"  Each root's plan.txt shows what it would change. instance apply applies a root only if its new",
+			"  plan makes exactly the changes this plan shows.",
+		]
+		InstanceRender.Mode.Apply(_) => []
+	}
+	not_run =
+		if skipped.is_empty() [] else [
+			"",
+			"NOT RUN  /  their image and artifact inputs come from the release controller",
+			Str.join_with(skipped.map(|label| "  ${Output.safe(label)}"), "\n"),
+		]
 	Str.join_with(
 		[
-			"DAY2  /  instance ${spec.derived().installation}  /  OpenTofu plan, read-only",
+			"DAY2  /  instance ${spec.derived().installation}  /  ${title}",
 			"",
 			"SPEC",
 			"  ${Output.safe(path.to_str())}",
@@ -324,24 +368,12 @@ planned_text = |request, path, spec, receipt| {
 			"  ${Output.safe(receipt.checkout)} @ ${Output.safe(receipt.commit)}",
 			"  OpenTofu ${Output.safe(receipt.engine.version)}",
 			"",
-			"CORE ROOTS  /  ${receipt.roots.len().to_str()} planned, in apply order",
-			planned,
 		]
-			.concat(
-				if skipped.is_empty() [] else [
-					"",
-					"NOT PLANNED  /  their image and artifact inputs come from the release controller",
-					Str.join_with(skipped.map(|label| "  ${Output.safe(label)}"), "\n"),
-				],
-			)
-			.concat([
-				"",
-				"RECEIPT",
-				"  ${Output.safe(receipt.directory)}/receipt.json",
-				"",
-				"NEXT",
-				next,
-			]),
+			.concat(reviewed)
+			.concat(["CORE ROOTS  /  ${receipt.roots.len().to_str()}, in apply order", planned])
+			.concat(review)
+			.concat(not_run)
+			.concat(["", "RECEIPT", "  ${Output.safe(receipt.directory)}/receipt.json", "", "NEXT", next]),
 		"\n",
 	)
 }
@@ -641,7 +673,13 @@ info_json = |is_help| {
 		result: {
 			text: if is_help Cli.help else Output.version,
 			version: Output.version,
-			implemented_commands: ["app.describe", "instance.check", "instance.render", "instance.plan"],
+			implemented_commands: [
+				"app.describe",
+				"instance.check",
+				"instance.render",
+				"instance.plan",
+				"instance.apply",
+			],
 			platform_commands: [
 				"platform.build",
 				"platform.check",
@@ -790,10 +828,10 @@ planned_spec =
 
 planned_receipt : Str
 planned_receipt =
-	\\{"format":1,"applied":false,"ok":false,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
+	\\{"format":1,"mode":"plan","ok":false,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
 	\\"instance_commit":"","instance_clean":false,"engine":{"version":"1.12.3","digest":"sha256:e"},
 	\\"roots":[{"label":"project","stack":"project","backend":{"bucket":"b","prefix":"foundation"},"new_root":false,
-	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"failed_plan",
+	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"failed_plan","review":"",
 	\\"changes":[],"plan_digest":"","show_digest":"","logs":"/o/project"}],"directory":"/o"}
 
 # A plan whose root failed exits 6 and reports plan_failed beside its receipt.
@@ -801,14 +839,39 @@ expect match (
 	Cli.parse(["instance", "plan", "d", "p", "o", "--agent"]),
 	InstanceSpec.from_json(planned_spec),
 	Names.LocalPath.from_str("d/day2.json"),
-	InstanceRender.receipt(planned_receipt),
+	InstanceRender.receipt(planned_receipt, InstanceRender.Mode.Plan),
 ) {
-	(Ok(Cli.Request.Plan(request)), Ok(spec), Ok(path), Ok(receipt)) => {
-		response = Output.new(Output.Outcome.Planned(request, path, spec, receipt))
+	(Ok(Cli.Request.Roots(request)), Ok(spec), Ok(path), Ok(receipt)) => {
+		response = Output.new(Output.Outcome.Ran(request, path, spec, receipt))
 		response.exit_code()
 			== 6
 			and response.body().contains("\"code\":\"plan_failed\"")
-				and response.body().contains("1 of 1 roots failed: project")
+				and response.body().contains("\"command\":\"instance.plan\"")
+					and response.body().contains("1 of 1 roots failed: project")
+	}
+	_ => Bool.False
+}
+
+applied_receipt : Str
+applied_receipt =
+	planned_receipt
+		.replace_first("\"mode\":\"plan\"", "\"mode\":\"apply\"")
+		.replace_first("\"status\":\"failed_plan\"", "\"status\":\"refused_destroy\"")
+
+# An apply that refused a destructive plan exits 6, reports apply_failed, and says what it refused.
+expect match (
+	Cli.parse(["instance", "apply", "d", "p", "r", "o"]),
+	InstanceSpec.from_json(planned_spec),
+	Names.LocalPath.from_str("d/day2.json"),
+	InstanceRender.receipt(applied_receipt, InstanceRender.Mode.Apply("r")),
+) {
+	(Ok(Cli.Request.Roots(request)), Ok(spec), Ok(path), Ok(receipt)) => {
+		response = Output.new(Output.Outcome.Ran(request, path, spec, receipt))
+		response.exit_code()
+			== 6
+			and response.body().contains("OpenTofu apply")
+				and response.body().contains("REVIEWED PLAN\n  r/receipt.json")
+					and response.body().contains("refused: the plan deletes, replaces or forgets a resource")
 	}
 	_ => Bool.False
 }

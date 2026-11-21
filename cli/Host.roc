@@ -1,3 +1,4 @@
+import InstanceRender
 import pf.Env
 import pf.Path
 import pf.Cmd
@@ -15,10 +16,15 @@ Host :: [].{
 		call!(Json.to_str({ protocol: 1.U32, action: "workflow", input: Json.to_str(args) }))
 	}
 
-	## `day2 instance plan`: the host reads the rendered request from this file and validates it again.
-	instance_plan! : Str => Try(Str, Str)
-	instance_plan! = |request| {
-		call!(Json.to_str({ protocol: 1.U32, action: "instance-plan", input: Json.to_str({ request: request }) }))
+	## `day2 instance plan|apply`: the action fixes the mode; the host reads the rendered request from this file and
+	## validates it again, including that it asks for the same mode.
+	instance_roots! : InstanceRender.Mode, Str => Try(Str, Str)
+	instance_roots! = |mode, request| {
+		call!(
+			Json.to_str(
+				{ protocol: 1.U32, action: "instance-${mode.name()}", input: Json.to_str({ request: request }) },
+			),
+		)
 	}
 
 	call! : Str => Try(Str, Str)

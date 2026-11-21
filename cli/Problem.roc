@@ -23,6 +23,7 @@ Problem := [
 	UnsupportedArtifact(U64),
 	MetadataTooLarge,
 	PlanFailed(Str),
+	ApplyFailed(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -46,7 +47,7 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => 5
-		PlanFailed(_) => 6
+		PlanFailed(_) | ApplyFailed(_) => 6
 	}
 
 	code : Problem -> Str
@@ -74,6 +75,7 @@ Problem := [
 		UnsupportedArtifact(_) => "unsupported_artifact"
 		MetadataTooLarge => "metadata_too_large"
 		PlanFailed(_) => "plan_failed"
+		ApplyFailed(_) => "apply_failed"
 	}
 
 	message : Problem -> Str
@@ -101,6 +103,7 @@ Problem := [
 		UnsupportedArtifact(version) => "Unsupported artifact format ${version.to_str()} for this installed platform."
 		MetadataTooLarge => "Metadata exceeds the 1 MiB limit."
 		PlanFailed(detail) => "The instance plan failed: ${detail}"
+		ApplyFailed(detail) => "The instance apply failed: ${detail}"
 	}
 
 	hint : Problem -> Str
@@ -122,6 +125,9 @@ Problem := [
 		PlanFailed(
 			_,
 		) => "Plan with a CLI built from day2.json's platform commit, OpenTofu 1.12.3 on PATH, Google credentials and a new output directory outside the instance; a failed root keeps its logs there."
+		ApplyFailed(
+			_,
+		) => "Apply as an operator with a CLI built from day2.json's platform commit, OpenTofu 1.12.3 on PATH and a new output directory outside the instance. A failed or refused root keeps its logs there; a plan that deletes, replaces or forgets a resource is never applied."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."

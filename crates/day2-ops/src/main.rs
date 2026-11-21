@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, infra, instance_plan, local_dev, maintenance, process, projection,
+    backup, chrome_extension, infra, instance_roots, local_dev, maintenance, process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -30,7 +30,9 @@ fn platform() -> Result<PathBuf> {
 struct Operations {
     development: Option<day2::development::Campaign>,
     infrastructure: Option<infra::Session>,
-    instance_plan: Option<instance_plan::Session>,
+    /// The mode the host action fixed for `day2 instance plan|apply`, and its session.
+    instance_mode: Option<instance_roots::Mode>,
+    instance_session: Option<instance_roots::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -667,27 +669,31 @@ impl Operations {
                     .context("infrastructure session required")?
                     .command(&input::<Input>(&request)?.operation)
             }
-            "instance-plan-prepare" => {
+            "instance-roots-prepare" => {
                 ensure!(
-                    self.instance_plan.is_none(),
-                    "one instance plan per workflow"
+                    self.instance_session.is_none(),
+                    "one instance session per workflow"
                 );
+                let mode = self
+                    .instance_mode
+                    .context("only day2 instance plan or apply starts an instance session")?;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Input {
                     request: PathBuf,
                 }
-                let session = instance_plan::Session::prepare(&input::<Input>(&request)?.request)?;
+                let session =
+                    instance_roots::Session::prepare(&input::<Input>(&request)?.request, mode)?;
                 let summary = session.summary();
-                self.instance_plan = Some(session);
+                self.instance_session = Some(session);
                 Ok(summary)
             }
-            "instance-plan-credentials" => self
-                .instance_plan
+            "instance-roots-credentials" => self
+                .instance_session
                 .as_mut()
-                .context("instance plan required")?
+                .context("instance session required")?
                 .credentials(),
-            "instance-plan-root" => {
+            "instance-roots-operation" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Input {
@@ -695,15 +701,15 @@ impl Operations {
                     operation: String,
                 }
                 let parameters: Input = input(&request)?;
-                self.instance_plan
+                self.instance_session
                     .as_mut()
-                    .context("instance plan required")?
+                    .context("instance session required")?
                     .operation(&parameters.label, &parameters.operation)
             }
-            "instance-plan-receipt" => self
-                .instance_plan
+            "instance-roots-receipt" => self
+                .instance_session
                 .as_ref()
-                .context("instance plan required")?
+                .context("instance session required")?
                 .receipt(),
             "infra-receipt" => self
                 .infrastructure
@@ -839,12 +845,20 @@ fn run(request: Request) -> Result<Value> {
     let mut operations = Operations {
         development: None,
         infrastructure: None,
-        instance_plan: None,
+        instance_mode: None,
+        instance_session: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
     };
-    if !["workflow", "local-session", "instance-plan"].contains(&request.action.as_str()) {
+    if ![
+        "workflow",
+        "local-session",
+        "instance-plan",
+        "instance-apply",
+    ]
+    .contains(&request.action.as_str())
+    {
         ensure!(
             ["instance-project", "artifact-project", "artifact-version"]
                 .contains(&request.action.as_str()),
@@ -852,22 +866,28 @@ fn run(request: Request) -> Result<Value> {
         );
         return operations.effect(request);
     }
-    let arguments: Vec<String> = if request.action == "instance-plan" {
-        // `day2 instance plan` only: its recipe has no `day2 platform` entry. The
-        // request comes from the CLI; the instance plan adapter validates it
-        // again and grants nothing the request could otherwise widen.
+    let arguments: Vec<String> = if let Some(mode) = match request.action.as_str() {
+        "instance-plan" => Some(instance_roots::Mode::Plan),
+        "instance-apply" => Some(instance_roots::Mode::Apply),
+        _ => None,
+    } {
+        // `day2 instance plan|apply` only: their recipes have no `day2 platform`
+        // entry. The action fixes the session's mode; the request comes from the
+        // CLI and the instance adapter validates it again, so it grants nothing
+        // the request could otherwise widen.
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
             request: PathBuf,
         }
-        let request: Input = input(&request)?;
+        let input: Input = input(&request)?;
+        operations.instance_mode = Some(mode);
         vec![
-            "instance-plan-session".into(),
-            request
+            format!("instance-{}-session", mode.name()),
+            input
                 .request
                 .to_str()
-                .context("instance plan request path must be UTF-8")?
+                .context("instance request path must be UTF-8")?
                 .to_owned(),
         ]
     } else if request.action == "local-session" {

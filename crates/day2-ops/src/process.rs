@@ -9,7 +9,20 @@ use std::{
 };
 
 pub fn run(command: &mut Command, directory: &Path, log: &Path, timeout: Duration) -> Result<()> {
-    supervised(command, directory, log, timeout, None)
+    supervised(command, directory, log, timeout, None, None)
+}
+
+/// As `run`, for a tool that must be allowed to stop cleanly, such as an
+/// OpenTofu apply that holds a state lock: at the deadline or the log budget the
+/// group gets SIGINT, and only after `grace` SIGKILL.
+pub fn run_interruptible(
+    command: &mut Command,
+    directory: &Path,
+    log: &Path,
+    timeout: Duration,
+    grace: Duration,
+) -> Result<()> {
+    supervised(command, directory, log, timeout, None, Some(grace))
 }
 
 pub fn run_cancellable(
@@ -19,7 +32,7 @@ pub fn run_cancellable(
     timeout: Duration,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<()> {
-    supervised(command, directory, log, timeout, Some(cancelled))
+    supervised(command, directory, log, timeout, Some(cancelled), None)
 }
 
 fn supervised(
@@ -28,6 +41,7 @@ fn supervised(
     log: &Path,
     timeout: Duration,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
+    grace: Option<Duration>,
 ) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
@@ -62,6 +76,17 @@ fn supervised(
             std::thread::sleep(Duration::from_millis(25));
         }
     })();
+    if outcome.is_err()
+        && let Some(grace) = grace
+    {
+        // Ask the tool to stop, and give it time to finish in-flight work and
+        // release what it holds before the group is killed.
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::INT);
+        let stopping = Instant::now();
+        while stopping.elapsed() < grace && matches!(child.try_wait(), Ok(None)) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
     // Reap the group on both success and failure, including descendants left by
     // a completed parent. This is supervision of trusted tools, not containment
     // of a hostile process that creates a new session.

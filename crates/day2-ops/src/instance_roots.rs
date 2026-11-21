@@ -1,22 +1,29 @@
-//! Read-only OpenTofu plans of an instance's core roots, for `day2 instance plan`.
-//! The CLI renders each root's backend and variables from day2.json and
-//! InstancePlan.roc chooses the step order; this adapter independently validates
-//! the request and every engine operation.
+//! OpenTofu runs of an instance's core roots, for `day2 instance plan` and
+//! `day2 instance apply`. The CLI renders each root's backend and variables from
+//! day2.json and InstanceRoots.roc chooses the step order; this adapter
+//! independently validates the request and every engine operation.
 //!
 //! What it guarantees, and how:
 //! - The pinned engine: OpenTofu `ENGINE_VERSION`, admitted by digest, copied into
 //!   the output directory and checked again before every operation, with a
 //!   private CLI configuration (no ambient provider overrides).
-//! - The pinned stacks: each root plans a private copy of
+//! - The pinned stacks: each root runs a private copy of
 //!   `deploy/gke/stacks/<stack>` read as git objects of the spec's platform
 //!   commit (no working tree, replace refs, filters or attributes), and the
 //!   CLI's and this host's rendering rules must both be that commit's.
-//! - Read-only: plans never take a state lock. A root whose state does not exist
-//!   yet plans against an empty local state, so no state object is created.
+//! - The host's mode: the host action fixes the session's `Mode`, and the request
+//!   must name the same one, so a plan can never apply whatever the recipe asks.
+//! - Read-only plans: a plan session never takes a state lock. A root whose state
+//!   does not exist yet plans against an empty local state, so no state object is
+//!   created.
+//! - Reviewed applies: an apply session plans each root with the state lock and
+//!   applies exactly that saved plan, which OpenTofu refuses if the state changed
+//!   in between. It refuses a plan that deletes, replaces or forgets a resource,
+//!   and it runs no root until every shared root before it has applied.
 //! - Secrets stay out of the output: the DNS token is held in memory and passed
-//!   to app-edge plans only; the kubeconfig and its auth-plugin cache live in a
-//!   private temporary directory removed with the session; the receipt step
-//!   refuses unexpected files in the output.
+//!   to app-edge plans and applies only; the kubeconfig and its auth-plugin cache
+//!   live in a private temporary directory removed with the session; the receipt
+//!   step refuses unexpected files in the output.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,11 +38,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The core stacks a plan may run. day2-app is planned by the release
+/// The core stacks a session may run. day2-app is planned by the release
 /// controller, which owns its image and artifact inputs.
 pub const STACKS: [&str; 4] = ["project", "cluster", "tenancy", "app-edge"];
 
-/// The engine every instance plan runs, by version and by the digest of the
+/// The stacks every later root reads. An apply runs no root until each shared
+/// root before it has applied, so one failure stops the rest; an app edge reads
+/// only these, so its failure never stops another app's.
+pub const SHARED: [&str; 3] = ["project", "cluster", "tenancy"];
+
+/// How long a plan or apply waits for another holder of a root's state lock.
+const LOCK_TIMEOUT: &str = "-lock-timeout=300s";
+
+/// The engine every instance session runs, by version and by the digest of the
 /// official release binary for each supported host.
 pub const ENGINE_VERSION: &str = "1.12.3";
 const ENGINE_DIGESTS: [(&str, &str); 2] = [
@@ -99,9 +114,28 @@ const REQUEST_LIMIT: u64 = 1 << 20;
 const BLOB_LIMIT: u64 = 16 << 20;
 const SHOW_LIMIT: u64 = 64 << 20;
 
+/// What a session may do: `day2 instance plan` never locks state or applies;
+/// `day2 instance apply` applies each root's saved plan.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Plan,
+    Apply,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Apply => "apply",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    pub mode: Mode,
     pub instance: PathBuf,
     /// A git repository containing `commit`; only that commit's objects are read.
     pub checkout: PathBuf,
@@ -114,6 +148,9 @@ pub struct Request {
     /// The rendering sources the CLI was built with, compared byte for byte with
     /// this host's and the platform commit's.
     pub renderer: Vec<Source>,
+    /// An apply's reviewed plan: a prior `instance plan` output directory. Each
+    /// root applies only a plan whose changes equal the ones reviewed there.
+    pub reviewed: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -143,6 +180,7 @@ pub enum Stage {
     Init,
     Plan,
     Show,
+    Apply,
 }
 
 impl Stage {
@@ -151,7 +189,8 @@ impl Stage {
             "init" => Self::Init,
             "plan" => Self::Plan,
             "show" => Self::Show,
-            _ => bail!("unknown instance plan operation"),
+            "apply" => Self::Apply,
+            _ => bail!("unknown instance root operation"),
         })
     }
 
@@ -160,6 +199,16 @@ impl Stage {
             Self::Init => "init",
             Self::Plan => "plan",
             Self::Show => "show",
+            Self::Apply => "apply",
+        }
+    }
+
+    fn after(self) -> Option<Self> {
+        match self {
+            Self::Init => None,
+            Self::Plan => Some(Self::Init),
+            Self::Show => Some(Self::Plan),
+            Self::Apply => Some(Self::Show),
         }
     }
 }
@@ -168,6 +217,10 @@ impl Stage {
 enum Failure {
     Credentials,
     Stage(Stage),
+    /// The saved plan deletes, replaces or forgets a resource; nothing was applied.
+    Destroys,
+    /// The saved plan's changes differ from the reviewed plan's; nothing was applied.
+    Unreviewed,
 }
 
 #[derive(Default)]
@@ -176,6 +229,11 @@ struct Progress {
     failed: Option<Failure>,
     new_root: bool,
     changes: Vec<Value>,
+    destroys: Vec<String>,
+    /// The digest of the saved plan's changes (`review_digest`), and of the saved
+    /// plan file itself, both taken at show.
+    review: String,
+    plan_digest: String,
 }
 
 /// Where a root's files live inside the output directory.
@@ -188,7 +246,8 @@ pub struct Layout {
     pub plan: PathBuf,
 }
 
-/// Credentials a plan step receives; only `plan` of the roots that need them.
+/// Credentials an engine step receives; only `plan` and `apply` of the roots that
+/// need them.
 pub struct Credentials<'a> {
     pub kubeconfig: Option<&'a Path>,
     pub dns_token: Option<&'a str>,
@@ -211,12 +270,14 @@ fn needs_dns(stack: &str) -> bool {
 }
 
 /// The exact engine invocation for one stage of one root: arguments and the
-/// variables set on top of the allowlisted ambient ones.
+/// variables set on top of the allowlisted ambient ones. `local_state` is a plan
+/// session's root that has never been applied.
 pub fn invocation(
+    mode: Mode,
     stage: Stage,
     root: &Root,
     layout: &Layout,
-    new_root: bool,
+    local_state: bool,
     credentials: &Credentials,
 ) -> (Vec<OsString>, Vec<(&'static str, OsString)>) {
     let mut args: Vec<OsString> = vec![format!("-chdir={}", layout.stack.display()).into()];
@@ -239,13 +300,17 @@ pub fn invocation(
                 ]
                 .map(OsString::from),
             );
-            if !new_root {
+            if !local_state {
                 args.push(format!("-backend-config=bucket={}", root.bucket).into());
                 args.push(format!("-backend-config=prefix={}", root.prefix).into());
             }
         }
         Stage::Plan => {
-            args.extend(["plan", "-input=false", "-no-color", "-lock=false"].map(OsString::from));
+            args.extend(["plan", "-input=false", "-no-color"].map(OsString::from));
+            args.push(match mode {
+                Mode::Plan => "-lock=false".into(),
+                Mode::Apply => LOCK_TIMEOUT.into(),
+            });
             args.push(format!("-var-file={}", layout.inputs.display()).into());
             args.push(format!("-var-file={}", layout.rendered.display()).into());
             args.push(format!("-out={}", layout.plan.display()).into());
@@ -253,23 +318,82 @@ pub fn invocation(
                 && let Some(kubeconfig) = credentials.kubeconfig
             {
                 // A -var outranks every var file, so a committed kubeconfig_path can
-                // never point the provider at another kubeconfig.
+                // never point the provider at another kubeconfig. A saved plan keeps it.
                 args.push(format!("-var=kubeconfig_path={}", kubeconfig.display()).into());
-                env.push(("KUBECONFIG", kubeconfig.into()));
-                env.push(("KUBE_CONFIG_PATH", kubeconfig.into()));
             }
-            if needs_dns(&root.stack)
-                && let Some(token) = credentials.dns_token
-            {
-                env.push(("CLOUDFLARE_API_TOKEN", token.into()));
-            }
+            provider_env(root, credentials, &mut env);
         }
         Stage::Show => {
             args.extend(["show", "-json", "-no-color"].map(OsString::from));
             args.push(layout.plan.clone().into());
         }
+        Stage::Apply => {
+            // Exactly the saved plan: OpenTofu refuses it if the state changed since.
+            args.extend(["apply", "-input=false", "-no-color", LOCK_TIMEOUT].map(OsString::from));
+            args.push(layout.plan.clone().into());
+            provider_env(root, credentials, &mut env);
+        }
     }
     (args, env)
+}
+
+/// The cluster and DNS credentials a root's providers read from the environment.
+fn provider_env(root: &Root, credentials: &Credentials, env: &mut Vec<(&'static str, OsString)>) {
+    if needs_cluster(&root.stack)
+        && let Some(kubeconfig) = credentials.kubeconfig
+    {
+        env.push(("KUBECONFIG", kubeconfig.into()));
+        env.push(("KUBE_CONFIG_PATH", kubeconfig.into()));
+    }
+    if needs_dns(&root.stack)
+        && let Some(token) = credentials.dns_token
+    {
+        env.push(("CLOUDFLARE_API_TOKEN", token.into()));
+    }
+}
+
+/// Whether `stage` of `label` may run now. Each root runs its stages in order and
+/// stops at its first failure; only an apply session applies; and an apply runs no
+/// root until every shared root before it has applied, since later roots read
+/// their state.
+fn admit(
+    mode: Mode,
+    roots: &[Root],
+    progress: &BTreeMap<String, Progress>,
+    label: &str,
+    stage: Stage,
+) -> Result<()> {
+    let current = progress.get(label).context("unknown root")?;
+    ensure!(current.failed.is_none(), "{label} already failed");
+    ensure!(
+        !current.done.contains(&stage),
+        "duplicate {} for {label}",
+        stage.name()
+    );
+    if let Some(required) = stage.after() {
+        ensure!(
+            current.done.contains(&required),
+            "{} needs {} first",
+            stage.name(),
+            required.name()
+        );
+    }
+    ensure!(
+        stage != Stage::Apply || mode == Mode::Apply,
+        "instance plan never applies"
+    );
+    if mode == Mode::Apply {
+        for root in roots.iter().take_while(|root| root.label != label) {
+            let earlier = progress.get(&root.label).context("unknown root")?;
+            ensure!(
+                !SHARED.contains(&root.stack.as_str())
+                    || (earlier.failed.is_none() && earlier.done.contains(&Stage::Apply)),
+                "{label} runs only after {} has applied",
+                root.label
+            );
+        }
+    }
+    Ok(())
 }
 
 fn text(value: &str, limit: usize, allowed: impl Fn(u8) -> bool) -> bool {
@@ -365,7 +489,42 @@ pub fn validate(request: &Request) -> Result<()> {
             );
         }
     }
-    Ok(())
+    // Apply order is fixed: the shared roots first, then each app's edge by app,
+    // so no request can run an app edge before the state it reads.
+    ensure!(
+        request
+            .roots
+            .iter()
+            .take(SHARED.len())
+            .map(|root| root.stack.as_str())
+            .eq(SHARED),
+        "the core roots start with project, cluster and tenancy, in that order"
+    );
+    ensure!(
+        request.roots[SHARED.len()..]
+            .windows(2)
+            .all(|pair| pair[0].app_id < pair[1].app_id),
+        "app edges follow the shared roots, sorted by app"
+    );
+    // Every core root keeps its state in one bucket, each under its own prefix.
+    let bucket = &request.roots[0].bucket;
+    let mut prefixes = BTreeSet::new();
+    for root in &request.roots {
+        ensure!(
+            &root.bucket == bucket,
+            "the core roots share one state bucket"
+        );
+        ensure!(
+            prefixes.insert(root.prefix.as_str()),
+            "two roots share the state prefix {}",
+            root.prefix
+        );
+    }
+    match (request.mode, &request.reviewed) {
+        (Mode::Plan, None) | (Mode::Apply, Some(_)) => Ok(()),
+        (Mode::Plan, Some(_)) => bail!("a plan reviews nothing"),
+        (Mode::Apply, None) => bail!("an apply needs the plan that was reviewed"),
+    }
 }
 
 /// Run a trusted tool and return its bounded stdout bytes. stderr goes to `log`
@@ -536,11 +695,11 @@ pub fn renderer_matches(repository: &Path, commit: &str, sent: &[Source]) -> Res
         let pinned = tree_files(repository, commit, path)?;
         ensure!(
             !pinned.is_empty(),
-            "day2.json's platform commit {commit} predates instance plan: it has no {path}"
+            "day2.json's platform commit {commit} predates instance plan and apply: it has no {path}"
         );
         ensure!(
             pinned.len() == 1 && pinned[0].1 == bytes,
-            "this CLI renders with {path} from another commit; plan with a CLI built from {commit}"
+            "this CLI renders with {path} from another commit; use a CLI built from {commit}"
         );
     }
     Ok(())
@@ -569,6 +728,107 @@ pub fn backend_override(state: &Path) -> Result<String> {
     ))
 }
 
+/// An apply reads the instance only as committed: a clean git checkout whose
+/// day2.json and every root's committed inputs, as already read into `committed`,
+/// equal their bytes at HEAD.
+fn committed_at_head(
+    instance: &Path,
+    commit: &str,
+    clean: bool,
+    roots: &[Root],
+    committed: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    ensure!(
+        !commit.is_empty() && clean,
+        "instance apply needs a clean git checkout of the instance"
+    );
+    let prefix = String::from_utf8(git(instance, &["rev-parse", "--show-prefix"], 4096)?)?;
+    let prefix = prefix.trim();
+    let at_head = |path: &str| {
+        git(
+            instance,
+            &["cat-file", "blob", &format!("{commit}:{prefix}{path}")],
+            BLOB_LIMIT,
+        )
+        .with_context(|| format!("{path} is not committed at the instance's HEAD"))
+    };
+    ensure!(
+        fs::read(instance.join("day2.json"))? == at_head("day2.json")?,
+        "day2.json differs from the instance's HEAD"
+    );
+    for root in roots {
+        ensure!(
+            committed[&root.label] == at_head(&root.inputs)?,
+            "{} differs from the instance's HEAD",
+            root.inputs
+        );
+    }
+    Ok(())
+}
+
+/// The reviewed changes of each root, from a prior `instance plan` output for the
+/// same platform commit and stacks, the same roots in the same order and the same
+/// backends, committed inputs and rendered variables. A root that plan could not
+/// plan (before its cluster existed, say) has no reviewed changes, so an apply
+/// refuses it if it has any; plan and review again after the roots before it apply.
+fn reviewed_changes(
+    directory: &Path,
+    request: &Request,
+    stacks_tree: &str,
+    inputs: &BTreeMap<String, String>,
+    rendered: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut bytes = Vec::new();
+    fs::File::open(directory.join("receipt.json"))
+        .context("the reviewed plan directory has no receipt.json")?
+        .take(SHOW_LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= SHOW_LIMIT, "reviewed receipt budget");
+    let receipt: Value = serde_json::from_slice(&bytes).context("reviewed receipt")?;
+    ensure!(
+        receipt["format"] == 1 && receipt["mode"] == "plan" && receipt["audit_error"].is_null(),
+        "the reviewed directory must hold an instance plan"
+    );
+    ensure!(
+        receipt["commit"] == request.commit.as_str() && receipt["stacks_tree"] == stacks_tree,
+        "the reviewed plan used another platform commit; plan and review again"
+    );
+    let planned = receipt["roots"]
+        .as_array()
+        .context("reviewed receipt roots")?;
+    ensure!(
+        planned.len() == request.roots.len(),
+        "the reviewed plan has other roots; plan and review again"
+    );
+    let mut reviewed = BTreeMap::new();
+    for (root, planned) in request.roots.iter().zip(planned) {
+        let label = &root.label;
+        ensure!(
+            planned["label"] == label.as_str(),
+            "the reviewed plan has other roots; plan and review again"
+        );
+        ensure!(
+            planned["backend"] == json!({"bucket": root.bucket, "prefix": root.prefix})
+                && planned["inputs"]["path"] == root.inputs.as_str()
+                && planned["inputs"]["digest"] == inputs[label].as_str()
+                && planned["variables"] == rendered[label].as_str(),
+            "{label}'s backend or inputs changed since the reviewed plan; plan and review again"
+        );
+        match planned["status"].as_str() {
+            Some("no_changes" | "changes") => {
+                let review = planned["review"]
+                    .as_str()
+                    .filter(|review| review.starts_with("sha256:"))
+                    .context("reviewed receipt review digest")?;
+                reviewed.insert(label.clone(), review.to_owned());
+            }
+            Some("failed_credentials" | "failed_init" | "failed_plan" | "failed_show") => {}
+            _ => bail!("the reviewed receipt has an unknown status for {label}"),
+        }
+    }
+    Ok(reviewed)
+}
+
 fn host() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux_amd64",
@@ -591,28 +851,43 @@ pub struct Session {
     rendered: BTreeMap<String, String>,
     private: tempfile::TempDir,
     kubeconfig: Option<PathBuf>,
+    /// False once an apply changed the cluster root: the kubeconfig (or its
+    /// absence) must be fetched again before the next root that needs it.
+    kubeconfig_current: bool,
+    /// Whether this apply already read the cluster's credentials again.
+    kubeconfig_refreshed: bool,
     dns_token: Option<String>,
     credentials_read: bool,
+    /// An apply's reviewed changes digest per root label.
+    reviewed: BTreeMap<String, String>,
     progress: BTreeMap<String, Progress>,
 }
 
 impl Session {
-    pub fn prepare(raw: &Path) -> Result<Self> {
+    /// Validate and stage the CLI's request for a session the host started in `mode`.
+    pub fn prepare(raw: &Path, mode: Mode) -> Result<Self> {
         let mut bytes = Vec::new();
         fs::File::open(raw)?
             .take(REQUEST_LIMIT + 1)
             .read_to_end(&mut bytes)?;
         ensure!(
             bytes.len() as u64 <= REQUEST_LIMIT,
-            "instance plan request budget"
+            "instance request budget"
         );
         let request: Request = day2::json::decode(&bytes)?;
+        ensure!(
+            request.mode == mode,
+            "the host started an instance {} but the request is for an instance {}",
+            mode.name(),
+            request.mode.name()
+        );
         validate(&request)?;
+        let verb = mode.name();
         // Refuse a reused output directory before running anything; the builder
         // below still refuses one that appears in between.
         ensure!(
             fs::symlink_metadata(&request.output).is_err(),
-            "instance plan requires a new output directory"
+            "instance {verb} requires a new output directory"
         );
         let instance = request
             .instance
@@ -647,7 +922,7 @@ impl Session {
         for unsupported in UNSUPPORTED {
             ensure!(
                 fs::symlink_metadata(instance.join(unsupported)).is_err(),
-                "{unsupported} is not supported by instance plan yet"
+                "{unsupported} is not supported by instance plan or apply yet"
             );
         }
         for root in &request.roots {
@@ -701,6 +976,39 @@ impl Session {
             ),
             _ => (String::new(), false),
         };
+        // Every root's committed inputs, read once and bounded, before anything is written.
+        let mut committed = BTreeMap::new();
+        for root in &request.roots {
+            let mut bytes = Vec::new();
+            fs::File::open(instance.join(&root.inputs))?
+                .take(1_048_577)
+                .read_to_end(&mut bytes)?;
+            ensure!(bytes.len() <= 1_048_576, "{} budget", root.inputs);
+            committed.insert(root.label.clone(), bytes);
+        }
+        let inputs: BTreeMap<String, String> = committed
+            .iter()
+            .map(|(label, bytes)| (label.clone(), day2::digest(bytes)))
+            .collect();
+        let rendered: BTreeMap<String, String> = request
+            .roots
+            .iter()
+            .map(|root| (root.label.clone(), day2::digest(root.variables.as_bytes())))
+            .collect();
+        let reviewed = match &request.reviewed {
+            None => BTreeMap::new(),
+            Some(directory) => {
+                // An apply runs only what was reviewed, from what is committed.
+                committed_at_head(
+                    &instance,
+                    &instance_commit,
+                    instance_clean,
+                    &request.roots,
+                    &committed,
+                )?;
+                reviewed_changes(directory, &request, &stacks_tree, &inputs, &rendered)?
+            }
+        };
         let found = crate::maintenance::on_path("tofu")?;
         let bytes = fs::read(&found)?;
         let engine_digest = day2::digest(&bytes);
@@ -713,7 +1021,7 @@ impl Session {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&request.output)
-            .context("instance plan requires a new output directory")?;
+            .with_context(|| format!("instance {verb} requires a new output directory"))?;
         let output = request.output.canonicalize()?;
         let engine = output.join("tofu");
         fs::write(&engine, &bytes)?;
@@ -728,8 +1036,6 @@ impl Session {
             ),
         )?;
         let mut layouts = BTreeMap::new();
-        let mut inputs = BTreeMap::new();
-        let mut rendered = BTreeMap::new();
         for root in &request.roots {
             let directory = output.join(root.label.replace('/', "-"));
             fs::create_dir(&directory)?;
@@ -739,11 +1045,6 @@ impl Session {
                 fs::create_dir_all(target.parent().context("stack file")?)?;
                 fs::write(&target, bytes)?;
             }
-            let mut committed = Vec::new();
-            fs::File::open(instance.join(&root.inputs))?
-                .take(1_048_577)
-                .read_to_end(&mut committed)?;
-            ensure!(committed.len() <= 1_048_576, "{} budget", root.inputs);
             let layout = Layout {
                 config: config.clone(),
                 stack,
@@ -752,10 +1053,8 @@ impl Session {
                 rendered: directory.join("rendered.tfvars.json"),
                 plan: directory.join("plan.bin"),
             };
-            fs::write(&layout.inputs, &committed)?;
+            fs::write(&layout.inputs, &committed[&root.label])?;
             fs::write(&layout.rendered, &root.variables)?;
-            inputs.insert(root.label.clone(), day2::digest(&committed));
-            rendered.insert(root.label.clone(), day2::digest(root.variables.as_bytes()));
             layouts.insert(root.label.clone(), layout);
         }
         let progress = request
@@ -775,10 +1074,15 @@ impl Session {
             layouts,
             inputs,
             rendered,
-            private: tempfile::Builder::new().prefix("day2-plan-").tempdir()?,
+            private: tempfile::Builder::new()
+                .prefix("day2-instance-")
+                .tempdir()?,
             kubeconfig: None,
+            kubeconfig_current: true,
+            kubeconfig_refreshed: false,
             dns_token: None,
             credentials_read: false,
+            reviewed,
             progress,
         };
         let reported: Value = serde_json::from_slice(&capture(
@@ -822,14 +1126,21 @@ impl Session {
         command
     }
 
+    /// The roots in apply order, and which of them every later root reads.
     pub fn summary(&self) -> Value {
-        json!({"roots": self.request.roots.iter().map(|root| root.label.clone()).collect::<Vec<_>>()})
+        json!({"roots": self.request.roots.iter().map(|root| json!({
+            "label": root.label,
+            "shared": SHARED.contains(&root.stack.as_str()),
+        })).collect::<Vec<_>>()})
     }
 
     /// The cluster kubeconfig (from derived names) and the DNS token, read once.
-    /// A failure is recorded against the roots that need it; the others plan.
+    /// A failure is recorded against the roots that need it; the others run.
     pub fn credentials(&mut self) -> Result<Value> {
-        ensure!(!self.credentials_read, "credentials are read once per plan");
+        ensure!(
+            !self.credentials_read,
+            "credentials are read once per session"
+        );
         self.credentials_read = true;
         if self
             .request
@@ -837,26 +1148,7 @@ impl Session {
             .iter()
             .any(|root| needs_cluster(&root.stack))
         {
-            let kubeconfig = self.private.path().join("kubeconfig");
-            let fetched = crate::maintenance::on_path("gcloud").and_then(|gcloud| {
-                let mut command = self.tool(&gcloud);
-                command
-                    .env("KUBECONFIG", &kubeconfig)
-                    .args(["container", "clusters", "get-credentials"])
-                    .arg(&self.request.cluster)
-                    .args(["--zone", &self.request.zone])
-                    .args(["--project", &self.request.project]);
-                crate::process::run(
-                    &mut command,
-                    self.private.path(),
-                    &self.output.join("credentials.log"),
-                    Duration::from_secs(120),
-                )
-            });
-            match fetched {
-                Ok(()) => self.kubeconfig = Some(kubeconfig),
-                Err(error) => fs::write(self.output.join("cluster.error"), format!("{error:#}"))?,
-            }
+            self.fetch_kubeconfig("credentials.log")?;
         }
         if self.request.roots.iter().any(|root| needs_dns(&root.stack)) {
             let read = crate::maintenance::on_path("gcloud").and_then(|gcloud| {
@@ -881,6 +1173,40 @@ impl Session {
         Ok(json!({}))
     }
 
+    /// The cluster's kubeconfig, from derived names, into the private directory.
+    /// A failure is recorded in `cluster.error` and leaves no kubeconfig.
+    fn fetch_kubeconfig(&mut self, log: &str) -> Result<()> {
+        let kubeconfig = self.private.path().join("kubeconfig");
+        let _ = fs::remove_file(&kubeconfig);
+        let fetched = crate::maintenance::on_path("gcloud").and_then(|gcloud| {
+            let mut command = self.tool(&gcloud);
+            command
+                .env("KUBECONFIG", &kubeconfig)
+                .args(["container", "clusters", "get-credentials"])
+                .arg(&self.request.cluster)
+                .args(["--zone", &self.request.zone])
+                .args(["--project", &self.request.project]);
+            crate::process::run(
+                &mut command,
+                self.private.path(),
+                &self.output.join(log),
+                Duration::from_secs(120),
+            )
+        });
+        self.kubeconfig_current = true;
+        match fetched {
+            Ok(()) => {
+                let _ = fs::remove_file(self.output.join("cluster.error"));
+                self.kubeconfig = Some(kubeconfig);
+            }
+            Err(error) => {
+                self.kubeconfig = None;
+                fs::write(self.output.join("cluster.error"), format!("{error:#}"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Whether the root's state object exists, read without touching it. Listing
     /// the exact object needs only object read access: an empty listing is a root
     /// that has never been applied, and any error (a missing bucket, no access)
@@ -903,39 +1229,73 @@ impl Session {
         state_listed(&String::from_utf8(listed)?, &object)
     }
 
-    fn run_stage(&self, stage: Stage, root: &Root, new_root: bool) -> Result<Option<Vec<u8>>> {
+    fn run_stage(&self, stage: Stage, root: &Root, local_state: bool) -> Result<Option<Vec<u8>>> {
         let directory = self.output.join(root.label.replace('/', "-"));
         let layout = &self.layouts[&root.label];
         let log = directory.join(format!("{}.log", stage.name()));
         let (args, env) = invocation(
+            self.request.mode,
             stage,
             root,
             layout,
-            new_root,
+            local_state,
             &Credentials {
                 kubeconfig: self.kubeconfig.as_deref(),
                 dns_token: self.dns_token.as_deref(),
             },
         );
         let mut command = self.engine(&[])?;
-        command.args(args).envs(env);
+        command.args(args.clone()).envs(env.clone());
         if stage == Stage::Show {
-            return Ok(Some(capture(
-                command,
-                Some(&log),
+            let shown = capture(command, Some(&log), Duration::from_secs(300), SHOW_LIMIT)?;
+            // The same plan as text, which is what an operator reviews before an
+            // apply; OpenTofu masks sensitive values in it.
+            let mut text = self.engine(&[])?;
+            text.args(args.iter().filter(|arg| arg.as_os_str() != "-json"))
+                .envs(env);
+            let readable = capture(
+                text,
+                Some(&directory.join("plan-text.log")),
                 Duration::from_secs(300),
                 SHOW_LIMIT,
-            )?));
+            )?;
+            fs::write(directory.join("plan.txt"), readable)?;
+            return Ok(Some(shown));
         }
-        crate::process::run(&mut command, &directory, &log, Duration::from_secs(900))?;
+        // A step that holds the state lock (an apply session's plan and apply) is
+        // interrupted when it overruns, so OpenTofu saves state and releases the
+        // lock, and is killed only after a grace period. Creating a cluster can
+        // take most of an hour.
+        let locked =
+            self.request.mode == Mode::Apply && matches!(stage, Stage::Plan | Stage::Apply);
+        let deadline = Duration::from_secs(if stage == Stage::Apply { 7200 } else { 900 });
+        if locked {
+            crate::process::run_interruptible(
+                &mut command,
+                &directory,
+                &log,
+                deadline,
+                Duration::from_secs(1800),
+            )?;
+        } else {
+            crate::process::run(&mut command, &directory, &log, deadline)?;
+        }
         Ok(None)
     }
 
-    /// One engine operation of one root: init, then plan, then show. A failed
-    /// operation is recorded for the receipt and stops only that root.
+    /// One engine operation of one root: init, then plan, then show, then, in an
+    /// apply session, apply. A failed operation is recorded for the receipt and
+    /// stops that root; `admit` keeps later roots from running after a shared one.
     pub fn operation(&mut self, label: &str, name: &str) -> Result<Value> {
         ensure!(self.credentials_read, "credentials come before any root");
         let stage = Stage::parse(name)?;
+        admit(
+            self.request.mode,
+            &self.request.roots,
+            &self.progress,
+            label,
+            stage,
+        )?;
         let root = self
             .request
             .roots
@@ -943,43 +1303,70 @@ impl Session {
             .find(|root| root.label == label)
             .context("unknown root")?
             .clone();
-        let progress = self.progress.get(label).context("unknown root")?;
-        ensure!(progress.failed.is_none(), "{label} already failed");
-        ensure!(
-            !progress.done.contains(&stage),
-            "duplicate {name} for {label}"
-        );
-        let required = match stage {
-            Stage::Init => None,
-            Stage::Plan => Some(Stage::Init),
-            Stage::Show => Some(Stage::Plan),
-        };
-        if let Some(required) = required {
-            ensure!(
-                progress.done.contains(&required),
-                "{name} needs {} first",
-                required.name()
-            );
+        if self.request.mode == Mode::Apply
+            && stage == Stage::Init
+            && needs_cluster(&root.stack)
+            && !self.kubeconfig_refreshed
+        {
+            // The first root that needs the cluster runs only after the cluster root
+            // has applied. Read the credentials again if that apply changed the
+            // cluster (it may have created it) or if the first read failed.
+            self.kubeconfig_refreshed = true;
+            if !self.kubeconfig_current || self.kubeconfig.is_none() {
+                self.fetch_kubeconfig("credentials-refresh.log")?;
+            }
         }
+        let progress = self.progress.get(label).context("unknown root")?;
         let mut new_root = progress.new_root;
+        let plan_digest = progress.plan_digest.clone();
+        let gate = apply_gate(
+            &progress.changes,
+            &progress.destroys,
+            &progress.review,
+            self.reviewed.get(label),
+        );
         let directory = self.output.join(label.replace('/', "-"));
+        let plan_file = self.layouts[label].plan.clone();
         let missing = (needs_cluster(&root.stack) && self.kubeconfig.is_none())
             || (needs_dns(&root.stack) && self.dns_token.is_none());
         let outcome = if stage == Stage::Init && missing {
             Err(Failure::Credentials)
+        } else if stage == Stage::Apply && gate != Ok(true) {
+            // Nothing to change completes the root without the engine; a refusal fails it.
+            gate.clone().map(|_| None).map_err(|(failure, message)| {
+                let _ = fs::write(directory.join("apply.error"), message);
+                failure
+            })
         } else {
-            (|| -> Result<Option<Vec<u8>>> {
-                if stage == Stage::Init {
-                    new_root = !self.state_exists(&root, &directory)?;
-                    if new_root {
-                        // Plan against an empty local state: nothing is created remotely.
-                        fs::write(
-                            self.layouts[label].stack.join("backend_override.tf"),
-                            backend_override(&directory.join("new.tfstate"))?,
-                        )?;
+            (|| -> Result<Option<(Vec<u8>, String)>> {
+                match stage {
+                    Stage::Init => {
+                        new_root = !self.state_exists(&root, &directory)?;
+                        if self.request.mode == Mode::Plan && new_root {
+                            // Plan against an empty local state: nothing is created
+                            // remotely. An apply initializes the real backend, so its
+                            // apply creates the state.
+                            fs::write(
+                                self.layouts[label].stack.join("backend_override.tf"),
+                                backend_override(&directory.join("new.tfstate"))?,
+                            )?;
+                        }
                     }
+                    Stage::Apply => ensure!(
+                        day2::digest(&fs::read(&plan_file)?) == plan_digest,
+                        "the saved plan changed after it was shown"
+                    ),
+                    Stage::Plan | Stage::Show => {}
                 }
-                self.run_stage(stage, &root, new_root)
+                // Show reads the plan file; its digest must be the same before and after.
+                let before = if stage == Stage::Show {
+                    day2::digest(&fs::read(&plan_file)?)
+                } else {
+                    String::new()
+                };
+                let shown =
+                    self.run_stage(stage, &root, self.request.mode == Mode::Plan && new_root)?;
+                Ok(shown.map(|shown| (shown, before)))
             })()
             .map_err(|error| {
                 let _ = fs::write(
@@ -988,18 +1375,34 @@ impl Session {
                 );
                 Failure::Stage(stage)
             })
-            .and_then(|shown| match shown {
-                Some(shown) => {
-                    fs::write(directory.join("show.json"), &shown)
-                        .map_err(|_| Failure::Stage(stage))?;
-                    changes(&shown).map(Some).map_err(|error| {
-                        let _ = fs::write(directory.join("show.error"), format!("{error:#}"));
-                        Failure::Stage(stage)
-                    })
-                }
-                None => Ok(None),
-            })
         };
+        let outcome = outcome.and_then(|shown| match shown {
+            Some((shown, plan)) => {
+                fs::write(directory.join("show.json"), &shown)
+                    .map_err(|_| Failure::Stage(stage))?;
+                (|| -> Result<_> {
+                    ensure!(
+                        day2::digest(&fs::read(&plan_file)?) == plan,
+                        "the saved plan changed while it was shown"
+                    );
+                    Ok((
+                        changes(&shown)?,
+                        destructive(&shown)?,
+                        review_digest(&shown)?,
+                        plan,
+                    ))
+                })()
+                .map(Some)
+                .map_err(|error| {
+                    let _ = fs::write(directory.join("show.error"), format!("{error:#}"));
+                    Failure::Stage(stage)
+                })
+            }
+            None => Ok(None),
+        });
+        if stage == Stage::Apply && root.stack == "cluster" && gate == Ok(true) && outcome.is_ok() {
+            self.kubeconfig_current = false;
+        }
         let progress = self.progress.get_mut(label).context("unknown root")?;
         progress.new_root = new_root;
         match outcome {
@@ -1008,8 +1411,11 @@ impl Session {
                 Ok(json!({"ok": false}))
             }
             Ok(found) => {
-                if let Some(found) = found {
+                if let Some((found, destroys, review, plan)) = found {
                     progress.changes = found;
+                    progress.destroys = destroys;
+                    progress.review = review;
+                    progress.plan_digest = plan;
                 }
                 progress.done.insert(stage);
                 Ok(json!({"ok": true}))
@@ -1017,31 +1423,42 @@ impl Session {
         }
     }
 
+    /// The session's receipt. It is written even when the output audit fails, so
+    /// an apply that changed infrastructure always leaves one, then marked failed.
     pub fn receipt(&self) -> Result<Value> {
-        audit(&self.output, &self.layouts)?;
+        let audited = audit(&self.output, &self.layouts);
+        let mode = self.request.mode;
         let mut roots = Vec::new();
         let mut ok = true;
+        // In an apply, the roots after a failed shared root never run.
+        let mut stopped = false;
         for root in &self.request.roots {
             let progress = &self.progress[&root.label];
             let status = match progress.failed {
-                Some(Failure::Credentials) => "failed_credentials",
-                Some(Failure::Stage(Stage::Init)) => "failed_init",
-                Some(Failure::Stage(Stage::Plan)) => "failed_plan",
-                Some(Failure::Stage(Stage::Show)) => "failed_show",
+                Some(failure) => status(failure),
+                None if stopped && progress.done.is_empty() => "skipped",
                 None => {
+                    let last = match mode {
+                        Mode::Plan => Stage::Show,
+                        Mode::Apply => Stage::Apply,
+                    };
                     ensure!(
-                        progress.done.contains(&Stage::Show),
-                        "{} was not planned",
-                        root.label
+                        progress.done.contains(&last),
+                        "{} did not finish its {}",
+                        root.label,
+                        mode.name()
                     );
-                    if progress.changes.is_empty() {
-                        "no_changes"
-                    } else {
-                        "changes"
+                    match (mode, progress.changes.is_empty()) {
+                        (_, true) => "no_changes",
+                        (Mode::Plan, false) => "changes",
+                        (Mode::Apply, false) => "applied",
                     }
                 }
             };
             ok &= progress.failed.is_none();
+            stopped |= mode == Mode::Apply
+                && progress.failed.is_some()
+                && SHARED.contains(&root.stack.as_str());
             let directory = self.output.join(root.label.replace('/', "-"));
             let digest = |name: &str| -> Result<String> {
                 let path = directory.join(name);
@@ -1060,15 +1477,16 @@ impl Session {
                 "variables": self.rendered[&root.label],
                 "status": status,
                 "changes": progress.changes,
+                "review": progress.review,
                 "plan_digest": digest("plan.bin")?,
                 "show_digest": digest("show.json")?,
                 "logs": directory,
             }));
         }
-        let receipt = json!({
+        let mut receipt = json!({
             "format": 1,
-            "applied": false,
-            "ok": ok,
+            "mode": mode.name(),
+            "ok": ok && audited.is_ok(),
             "commit": self.request.commit,
             "stacks_tree": self.stacks_tree,
             "checkout": self.platform,
@@ -1079,16 +1497,64 @@ impl Session {
             "roots": roots,
             "directory": self.output,
         });
+        if let Err(error) = &audited {
+            receipt["audit_error"] = json!(format!("{error:#}"));
+        }
         fs::write(
             self.output.join("receipt.json"),
             serde_json::to_vec_pretty(&receipt)?,
         )?;
+        audited?;
         Ok(receipt)
     }
 }
 
-/// The output holds only the plan's own files: no kubeconfig, auth-plugin cache
-/// or other credential material may appear in it.
+/// What an apply does at a root's apply stage, from its shown plan: complete the
+/// root without the engine when nothing changes (`Ok(false)`), refuse a plan that
+/// destroys or differs from the reviewed one, and otherwise run it (`Ok(true)`).
+fn apply_gate(
+    changes: &[Value],
+    destroys: &[String],
+    review: &str,
+    reviewed: Option<&String>,
+) -> Result<bool, (Failure, String)> {
+    if changes.is_empty() {
+        Ok(false)
+    } else if !destroys.is_empty() {
+        Err((
+            Failure::Destroys,
+            format!(
+                "the plan deletes, replaces or forgets {}; instance apply never does",
+                destroys.join(", ")
+            ),
+        ))
+    } else if reviewed.map(String::as_str) != Some(review) {
+        Err((
+            Failure::Unreviewed,
+            "the plan's changes differ from the reviewed plan's, or the reviewed plan could \
+             not plan this root; plan and review again"
+                .into(),
+        ))
+    } else {
+        Ok(true)
+    }
+}
+
+/// A failed root's receipt status.
+fn status(failure: Failure) -> &'static str {
+    match failure {
+        Failure::Credentials => "failed_credentials",
+        Failure::Stage(Stage::Init) => "failed_init",
+        Failure::Stage(Stage::Plan) => "failed_plan",
+        Failure::Stage(Stage::Show) => "failed_show",
+        Failure::Stage(Stage::Apply) => "failed_apply",
+        Failure::Destroys => "refused_destroy",
+        Failure::Unreviewed => "refused_unreviewed",
+    }
+}
+
+/// The output holds only the session's own files: no kubeconfig, auth-plugin
+/// cache or other credential material may appear in it.
 fn audit(output: &Path, layouts: &BTreeMap<String, Layout>) -> Result<()> {
     let roots: BTreeSet<String> = layouts
         .keys()
@@ -1102,12 +1568,13 @@ fn audit(output: &Path, layouts: &BTreeMap<String, Layout>) -> Result<()> {
                 "tofurc",
                 "plugins",
                 "credentials.log",
+                "credentials-refresh.log",
                 "cluster.error",
                 "dns.error"
             ]
             .contains(&name.as_str())
                 || roots.contains(&name),
-            "unexpected {name} in the instance plan output"
+            "unexpected {name} in the instance output"
         );
     }
     let mut pending = vec![output.to_path_buf()];
@@ -1117,7 +1584,7 @@ fn audit(output: &Path, layouts: &BTreeMap<String, Layout>) -> Result<()> {
             let name = entry.file_name().to_string_lossy().into_owned();
             ensure!(
                 !name.contains("kubeconfig") && !name.contains("gcloud_auth_plugin"),
-                "credential material {name} in the instance plan output"
+                "credential material {name} in the instance output"
             );
             if entry.file_type()?.is_dir() {
                 pending.push(entry.path());
@@ -1182,12 +1649,128 @@ pub fn changes(shown: &[u8]) -> Result<Vec<Value>> {
     Ok(found)
 }
 
+/// The resources a saved plan would delete (a replacement included) or forget,
+/// from `tofu show -json`. `day2 instance apply` refuses such a plan; output
+/// removals are not resources and never count.
+pub fn destructive(shown: &[u8]) -> Result<Vec<String>> {
+    let plan: Value = serde_json::from_slice(shown).context("plan JSON")?;
+    let mut found = Vec::new();
+    for change in plan["resource_changes"]
+        .as_array()
+        .context("plan has no resource changes")?
+    {
+        let actions = change["change"]["actions"]
+            .as_array()
+            .context("plan actions")?;
+        if actions
+            .iter()
+            .any(|action| matches!(action.as_str(), Some("delete" | "forget")))
+        {
+            found.push(
+                change["address"]
+                    .as_str()
+                    .context("plan address")?
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(found)
+}
+
+/// A digest of exactly what a saved plan would change, from `tofu show -json`:
+/// every resource change other than an unmoved, unimported no-op or read, with
+/// its actions and its values before, after and known only after apply, and
+/// every output change. An apply applies a root only when its new plan has the
+/// digest of the plan that was reviewed.
+pub fn review_digest(shown: &[u8]) -> Result<String> {
+    let plan: Value = serde_json::from_slice(shown).context("plan JSON")?;
+    let mut resources = Vec::new();
+    for change in plan["resource_changes"]
+        .as_array()
+        .context("plan has no resource changes")?
+    {
+        let detail = &change["change"];
+        let quiet = detail["actions"] == json!(["no-op"]) || detail["actions"] == json!(["read"]);
+        if quiet && change["previous_address"].is_null() && detail["importing"].is_null() {
+            continue;
+        }
+        resources.push(json!({
+            "address": change["address"],
+            "deposed": change["deposed"],
+            "previous_address": change["previous_address"],
+            "actions": detail["actions"],
+            "before": detail["before"],
+            "after": detail["after"],
+            "after_unknown": detail["after_unknown"],
+            "before_sensitive": detail["before_sensitive"],
+            "after_sensitive": detail["after_sensitive"],
+            "replace_paths": detail["replace_paths"],
+            "importing": detail["importing"],
+        }));
+    }
+    let mut outputs = Vec::new();
+    if let Some(changes) = plan["output_changes"].as_object() {
+        for (name, change) in changes {
+            if change["actions"] != json!(["no-op"]) {
+                outputs.push(json!({
+                    "name": name,
+                    "actions": change["actions"],
+                    "before": change["before"],
+                    "after": change["after"],
+                    "after_unknown": change["after_unknown"],
+                    "before_sensitive": change["before_sensitive"],
+                    "after_sensitive": change["after_sensitive"],
+                }));
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    canonical(
+        &json!({"resources": resources, "outputs": outputs}),
+        &mut bytes,
+    )?;
+    Ok(day2::digest(&bytes))
+}
+
+/// JSON with object keys sorted at every level, so equal values hash equally.
+fn canonical(value: &Value, out: &mut Vec<u8>) -> Result<()> {
+    match value {
+        Value::Object(fields) => {
+            let mut names: Vec<&String> = fields.keys().collect();
+            names.sort();
+            out.push(b'{');
+            for (index, name) in names.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                out.extend(serde_json::to_vec(name)?);
+                out.push(b':');
+                canonical(&fields[name], out)?;
+            }
+            out.push(b'}');
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                canonical(item, out)?;
+            }
+            out.push(b']');
+        }
+        scalar => out.extend(serde_json::to_vec(scalar)?),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn request() -> Request {
         Request {
+            mode: Mode::Plan,
             instance: "instance".into(),
             checkout: "platform".into(),
             output: "plan".into(),
@@ -1206,6 +1789,24 @@ mod tests {
                     variables: r#"{"project_id":"exampleco-tools"}"#.into(),
                 },
                 Root {
+                    label: "cluster".into(),
+                    stack: "cluster".into(),
+                    app_id: None,
+                    bucket: "exampleco-tools-tofu-state".into(),
+                    prefix: "platform/cluster".into(),
+                    inputs: "gcp/config/cluster.tfvars".into(),
+                    variables: r#"{"cluster_name":"day2"}"#.into(),
+                },
+                Root {
+                    label: "tenancy".into(),
+                    stack: "tenancy".into(),
+                    app_id: None,
+                    bucket: "exampleco-tools-tofu-state".into(),
+                    prefix: "platform/tenancy".into(),
+                    inputs: "gcp/config/tenancy.tfvars".into(),
+                    variables: r#"{"app_namespace_prefix":"app-"}"#.into(),
+                },
+                Root {
                     label: "app-edge/home".into(),
                     stack: "app-edge".into(),
                     app_id: Some("home".into()),
@@ -1222,6 +1823,7 @@ mod tests {
                     text: String::from_utf8(bytes.to_vec()).unwrap(),
                 })
                 .collect(),
+            reviewed: None,
         }
     }
 
@@ -1288,15 +1890,15 @@ mod tests {
 
     #[test]
     fn rejects_everything_outside_the_core_roots_and_fixed_inputs() {
-        let cases: [fn(&mut Request); 15] = [
+        let cases: [fn(&mut Request); 23] = [
             |r| r.roots[0].stack = "day2-app".into(),
             |r| r.roots[0].stack = "security-shell".into(),
             |r| r.roots[0].label = "cluster".into(),
-            |r| r.roots[1].app_id = None,
+            |r| r.roots[3].app_id = None,
             |r| r.roots[0].app_id = Some("home".into()),
-            |r| r.roots[1].label = "app-edge/go".into(),
-            |r| r.roots[1].inputs = "gcp/config/apps/home.tfvars".into(),
-            |r| r.roots[1].inputs = "gcp/config/../../etc/passwd.tfvars".into(),
+            |r| r.roots[3].label = "app-edge/go".into(),
+            |r| r.roots[3].inputs = "gcp/config/apps/home.tfvars".into(),
+            |r| r.roots[3].inputs = "gcp/config/../../etc/passwd.tfvars".into(),
             |r| r.roots[0].inputs = "gcp/config/cluster.tfvars".into(),
             |r| r.roots[0].variables = "[]".into(),
             |r| r.roots[0].prefix = "foundation/".into(),
@@ -1304,6 +1906,24 @@ mod tests {
             |r| r.zone = "-us-central1-a".into(),
             |r| r.cluster = "-day2".into(),
             |r| r.roots.push(r.roots[0].clone()),
+            // Apply order, backends and the reviewed plan are fixed.
+            |r| r.roots.swap(0, 3),
+            |r| r.roots.swap(1, 2),
+            |r| {
+                r.roots.remove(2);
+            },
+            |r| {
+                let mut go = r.roots[3].clone();
+                go.label = "app-edge/go".into();
+                go.app_id = Some("go".into());
+                go.inputs = "gcp/config/app-edge/go.tfvars".into();
+                go.prefix = "platform/app/go".into();
+                r.roots.push(go);
+            },
+            |r| r.roots[3].bucket = "exampleco-tools-home-state".into(),
+            |r| r.roots[2].prefix = "platform/cluster".into(),
+            |r| r.reviewed = Some("plan".into()),
+            |r| r.mode = Mode::Apply,
         ];
         for (index, edit) in cases.iter().enumerate() {
             let mut request = request();
@@ -1315,12 +1935,19 @@ mod tests {
     #[test]
     fn plans_never_lock_or_change_providers_and_rendered_variables_win() {
         let request = request();
-        let (project, edge) = (&request.roots[0], &request.roots[1]);
+        let (project, edge) = (&request.roots[0], &request.roots[3]);
         let credentials = Credentials {
             kubeconfig: Some(Path::new("/private/kubeconfig")),
             dns_token: Some("token"),
         };
-        let (init, env) = invocation(Stage::Init, edge, &layout(), false, &credentials);
+        let (init, env) = invocation(
+            Mode::Plan,
+            Stage::Init,
+            edge,
+            &layout(),
+            false,
+            &credentials,
+        );
         assert_eq!(
             strings(&init),
             [
@@ -1349,13 +1976,21 @@ mod tests {
         );
         assert_eq!(env[0].1, OsString::from("/out/tofurc"));
         assert_eq!(env[1].1, OsString::from("/out/root/data"));
-        let (new_init, _) = invocation(Stage::Init, edge, &layout(), true, &credentials);
+        let (new_init, _) =
+            invocation(Mode::Plan, Stage::Init, edge, &layout(), true, &credentials);
         assert!(
             !strings(&new_init)
                 .iter()
                 .any(|arg| arg.starts_with("-backend-config"))
         );
-        let (plan, env) = invocation(Stage::Plan, edge, &layout(), false, &credentials);
+        let (plan, env) = invocation(
+            Mode::Plan,
+            Stage::Plan,
+            edge,
+            &layout(),
+            false,
+            &credentials,
+        );
         assert_eq!(
             strings(&plan),
             [
@@ -1373,12 +2008,26 @@ mod tests {
         let names: Vec<&str> = env.iter().map(|(name, _)| *name).collect();
         assert!(names.contains(&"KUBECONFIG") && names.contains(&"CLOUDFLARE_API_TOKEN"));
         // The project root plans with neither the kubeconfig nor the DNS token.
-        let (args, env) = invocation(Stage::Plan, project, &layout(), false, &credentials);
+        let (args, env) = invocation(
+            Mode::Plan,
+            Stage::Plan,
+            project,
+            &layout(),
+            false,
+            &credentials,
+        );
         assert!(!strings(&args).iter().any(|arg| arg.starts_with("-var=")));
         assert!(env.iter().all(|(name, _)| {
             !["KUBECONFIG", "KUBE_CONFIG_PATH", "CLOUDFLARE_API_TOKEN"].contains(name)
         }));
-        let (show, env) = invocation(Stage::Show, edge, &layout(), false, &credentials);
+        let (show, env) = invocation(
+            Mode::Plan,
+            Stage::Show,
+            edge,
+            &layout(),
+            false,
+            &credentials,
+        );
         assert_eq!(
             strings(&show),
             [
@@ -1623,8 +2272,9 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let instance = scratch.path().join("instance");
         fs::create_dir_all(instance.join("gcp/config/app-edge")).unwrap();
-        fs::write(instance.join("gcp/config/project.tfvars"), "").unwrap();
-        fs::write(instance.join("gcp/config/app-edge/home.tfvars"), "").unwrap();
+        for inputs in ["project", "cluster", "tenancy", "app-edge/home"] {
+            fs::write(instance.join(format!("gcp/config/{inputs}.tfvars")), "").unwrap();
+        }
         let platform = scratch.path().join("platform");
         fs::create_dir(&platform).unwrap();
         let write = |request: &Request| {
@@ -1636,13 +2286,25 @@ mod tests {
         request.instance = instance.clone();
         request.checkout = platform.clone();
         request.output = scratch.path().join("plan");
+        // A request for another mode than the host started is refused first.
+        let error = Session::prepare(&write(&request), Mode::Apply)
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}")
+                .contains("started an instance apply but the request is for an instance plan"),
+            "{error:#}"
+        );
+        assert!(!scratch.path().join("plan").exists());
         // Not a git checkout.
-        assert!(Session::prepare(&write(&request)).is_err());
+        assert!(Session::prepare(&write(&request), Mode::Plan).is_err());
         assert!(!scratch.path().join("plan").exists());
         // An output directory inside the instance or the checkout.
         for inside in [instance.join("plan"), platform.join("plan")] {
             request.output = inside.clone();
-            let error = Session::prepare(&write(&request)).err().unwrap();
+            let error = Session::prepare(&write(&request), Mode::Plan)
+                .err()
+                .unwrap();
             assert!(
                 format!("{error:#}").contains("outside the instance"),
                 "{error:#}"
@@ -1653,10 +2315,357 @@ mod tests {
         request.output = scratch.path().join("plan");
         std::os::unix::fs::symlink("missing", instance.join("gcp/config/oauth-workloads.json"))
             .unwrap();
-        let error = Session::prepare(&write(&request)).err().unwrap();
+        let error = Session::prepare(&write(&request), Mode::Plan)
+            .err()
+            .unwrap();
         assert!(
             format!("{error:#}").contains("oauth-workloads.json"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn applies_lock_state_and_apply_exactly_the_saved_plan() {
+        let request = request();
+        let (project, edge) = (&request.roots[0], &request.roots[3]);
+        let credentials = Credentials {
+            kubeconfig: Some(Path::new("/private/kubeconfig")),
+            dns_token: Some("token"),
+        };
+        // An apply session's init always uses the real backend: apply creates state.
+        let (init, _) = invocation(
+            Mode::Apply,
+            Stage::Init,
+            edge,
+            &layout(),
+            false,
+            &credentials,
+        );
+        assert!(strings(&init).contains(&"-backend-config=prefix=platform/app/home".to_owned()));
+        let (plan, _) = invocation(
+            Mode::Apply,
+            Stage::Plan,
+            edge,
+            &layout(),
+            false,
+            &credentials,
+        );
+        let plan = strings(&plan);
+        assert!(plan.contains(&"-lock-timeout=300s".to_owned()));
+        assert!(!plan.iter().any(|arg| arg.starts_with("-lock=")));
+        let (apply, env) = invocation(
+            Mode::Apply,
+            Stage::Apply,
+            edge,
+            &layout(),
+            false,
+            &credentials,
+        );
+        assert_eq!(
+            strings(&apply),
+            [
+                "-chdir=/out/root/stack",
+                "apply",
+                "-input=false",
+                "-no-color",
+                "-lock-timeout=300s",
+                "/out/root/plan.bin",
+            ]
+        );
+        let names: Vec<&str> = env.iter().map(|(name, _)| *name).collect();
+        assert!(
+            names.contains(&"KUBECONFIG")
+                && names.contains(&"KUBE_CONFIG_PATH")
+                && names.contains(&"CLOUDFLARE_API_TOKEN")
+        );
+        // The project root applies with neither the kubeconfig nor the DNS token.
+        let (_, env) = invocation(
+            Mode::Apply,
+            Stage::Apply,
+            project,
+            &layout(),
+            false,
+            &credentials,
+        );
+        assert!(env.iter().all(|(name, _)| {
+            !["KUBECONFIG", "KUBE_CONFIG_PATH", "CLOUDFLARE_API_TOKEN"].contains(name)
+        }));
+    }
+
+    #[test]
+    fn destructive_finds_deletes_replacements_and_forgets_but_not_outputs() {
+        let shown = json!({"format_version": "1.2", "resource_changes": [
+            {"address": "google_storage_bucket.b", "change": {"actions": ["update"]}},
+            {"address": "google_compute_address.d", "change": {"actions": ["delete", "create"]}},
+            {"address": "google_compute_address.e", "change": {"actions": ["create", "delete"]}},
+            {"address": "google_sa.gone", "change": {"actions": ["delete"]}},
+            {"address": "google_sa.kept", "change": {"actions": ["forget"]}},
+            {"address": "google_sa.new", "change": {"actions": ["create"]}},
+        ], "output_changes": {"url": {"actions": ["delete"]}}});
+        assert_eq!(
+            destructive(&serde_json::to_vec(&shown).unwrap()).unwrap(),
+            [
+                "google_compute_address.d",
+                "google_compute_address.e",
+                "google_sa.gone",
+                "google_sa.kept",
+            ]
+        );
+        let additive = json!({"format_version": "1.2", "resource_changes": [
+            {"address": "google_sa.new", "change": {"actions": ["create"]}},
+        ], "output_changes": {"url": {"actions": ["delete"]}}});
+        assert!(
+            destructive(&serde_json::to_vec(&additive).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(destructive(br#"{"format_version":"1.2"}"#).is_err());
+    }
+
+    #[test]
+    fn stages_run_in_order_and_an_apply_waits_for_every_shared_root() {
+        let roots = request().roots;
+        let fresh = || -> BTreeMap<String, Progress> {
+            roots
+                .iter()
+                .map(|root| (root.label.clone(), Progress::default()))
+                .collect()
+        };
+        let finish = |progress: &mut BTreeMap<String, Progress>, label: &str, stages: &[Stage]| {
+            progress
+                .get_mut(label)
+                .unwrap()
+                .done
+                .extend(stages.iter().copied());
+        };
+        let refused = |mode, progress: &BTreeMap<String, Progress>, label, stage| {
+            format!(
+                "{:#}",
+                admit(mode, &roots, progress, label, stage).unwrap_err()
+            )
+        };
+        let mut progress = fresh();
+        assert!(
+            refused(Mode::Plan, &progress, "project", Stage::Plan)
+                .contains("plan needs init first")
+        );
+        finish(
+            &mut progress,
+            "project",
+            &[Stage::Init, Stage::Plan, Stage::Show],
+        );
+        assert!(refused(Mode::Plan, &progress, "project", Stage::Show).contains("duplicate show"));
+        // A plan session never applies, even after show.
+        assert!(refused(Mode::Plan, &progress, "project", Stage::Apply).contains("never applies"));
+        // A plan runs every root regardless of the others.
+        admit(Mode::Plan, &roots, &fresh(), "app-edge/home", Stage::Init).unwrap();
+        // An apply runs an app edge only once the shared root before it has applied.
+        assert!(
+            refused(Mode::Apply, &progress, "app-edge/home", Stage::Init)
+                .contains("runs only after project has applied")
+        );
+        admit(Mode::Apply, &roots, &progress, "project", Stage::Apply).unwrap();
+        finish(&mut progress, "project", &[Stage::Apply]);
+        assert!(
+            refused(Mode::Apply, &progress, "app-edge/home", Stage::Init)
+                .contains("runs only after cluster has applied")
+        );
+        for shared in ["cluster", "tenancy"] {
+            finish(
+                &mut progress,
+                shared,
+                &[Stage::Init, Stage::Plan, Stage::Show, Stage::Apply],
+            );
+        }
+        admit(Mode::Apply, &roots, &progress, "app-edge/home", Stage::Init).unwrap();
+        // A failed shared root stops every later root.
+        let mut failed = fresh();
+        failed.get_mut("project").unwrap().failed = Some(Failure::Destroys);
+        assert!(
+            refused(Mode::Apply, &failed, "app-edge/home", Stage::Init).contains("runs only after")
+        );
+        assert!(refused(Mode::Apply, &failed, "project", Stage::Init).contains("already failed"));
+        assert_eq!(status(Failure::Destroys), "refused_destroy");
+        assert_eq!(status(Failure::Stage(Stage::Apply)), "failed_apply");
+        assert_eq!(status(Failure::Unreviewed), "refused_unreviewed");
+    }
+
+    #[test]
+    fn a_review_digest_covers_every_changed_value_and_ignores_quiet_resources() {
+        let digest = |shown: Value| review_digest(&serde_json::to_vec(&shown).unwrap()).unwrap();
+        let plan = |members: &str| {
+            json!({"format_version": "1.2", "resource_changes": [
+                {"address": "google_project_service.a", "change": {"actions": ["no-op"], "before": {"x": 1}, "after": {"x": 1}}},
+                {"address": "data.google_client_config.c", "change": {"actions": ["read"], "after": {"access_token": "t"}}},
+                {"address": "google_project_iam_member.m", "change": {"actions": ["update"],
+                    "before": {"member": "user:a@example.com"}, "after": {"member": members}, "after_unknown": {}}},
+            ], "output_changes": {"same": {"actions": ["no-op"]}}})
+        };
+        let reviewed = digest(plan("user:b@example.com"));
+        assert!(reviewed.starts_with("sha256:"));
+        // Key order and quiet resources do not matter; every changed value does.
+        let mut reordered = plan("user:b@example.com");
+        reordered["resource_changes"][0]["change"]["after"] = json!({"x": 2});
+        reordered["resource_changes"][1]["change"]["after"] = json!({"access_token": "u"});
+        assert_eq!(digest(reordered), reviewed);
+        assert_ne!(digest(plan("user:c@example.com")), reviewed);
+        let mut output = plan("user:b@example.com");
+        output["output_changes"]["url"] =
+            json!({"actions": ["update"], "before": "a", "after": "b"});
+        assert_ne!(digest(output), reviewed);
+        // A moved or imported no-op is a change to review.
+        let mut moved = plan("user:b@example.com");
+        moved["resource_changes"][0]["previous_address"] = json!("google_project_service.old");
+        assert_ne!(digest(moved), reviewed);
+        assert!(review_digest(br#"{"format_version":"1.2"}"#).is_err());
+    }
+
+    #[test]
+    fn an_apply_accepts_only_a_successful_plan_of_the_same_roots_and_inputs() {
+        let scratch = tempfile::tempdir().unwrap();
+        let request = request();
+        let inputs: BTreeMap<String, String> = request
+            .roots
+            .iter()
+            .map(|root| (root.label.clone(), format!("sha256:i-{}", root.label)))
+            .collect();
+        let rendered: BTreeMap<String, String> = request
+            .roots
+            .iter()
+            .map(|root| (root.label.clone(), format!("sha256:v-{}", root.label)))
+            .collect();
+        let receipt = || {
+            json!({"format": 1, "mode": "plan", "ok": true, "commit": request.commit,
+                "stacks_tree": "tree", "roots": request.roots.iter().map(|root| json!({
+                    "label": root.label,
+                    "backend": {"bucket": root.bucket, "prefix": root.prefix},
+                    "inputs": {"path": root.inputs, "digest": inputs[&root.label]},
+                    "variables": rendered[&root.label],
+                    "status": "changes",
+                    "review": format!("sha256:r-{}", root.label),
+                })).collect::<Vec<_>>()})
+        };
+        let check = |receipt: &Value| {
+            fs::write(
+                scratch.path().join("receipt.json"),
+                serde_json::to_vec(receipt).unwrap(),
+            )
+            .unwrap();
+            reviewed_changes(scratch.path(), &request, "tree", &inputs, &rendered)
+        };
+        let reviewed = check(&receipt()).unwrap();
+        assert_eq!(reviewed["app-edge/home"], "sha256:r-app-edge/home");
+        type Refusal = (fn(&mut Value), &'static str);
+        let refusals: [Refusal; 7] = [
+            (|r| r["mode"] = json!("apply"), "must hold an instance plan"),
+            (
+                |r| r["audit_error"] = json!("unexpected file"),
+                "must hold an instance plan",
+            ),
+            (
+                |r| r["stacks_tree"] = json!("other"),
+                "another platform commit",
+            ),
+            (
+                |r| r["roots"].as_array_mut().unwrap().truncate(3),
+                "other roots",
+            ),
+            (
+                |r| r["roots"][3]["variables"] = json!("sha256:other"),
+                "inputs changed",
+            ),
+            (
+                |r| r["roots"][1]["backend"]["prefix"] = json!("platform/other"),
+                "backend or inputs changed",
+            ),
+            (
+                |r| r["roots"][2]["status"] = json!("planned"),
+                "unknown status for tenancy",
+            ),
+        ];
+        for (edit, message) in refusals {
+            let mut changed = receipt();
+            edit(&mut changed);
+            let error = format!("{:#}", check(&changed).unwrap_err());
+            assert!(error.contains(message), "{error}");
+        }
+        // A plan where a root could not plan is accepted; that root has no reviewed
+        // changes, so an apply refuses it unless it has nothing to change.
+        let mut partial = receipt();
+        partial["ok"] = json!(false);
+        partial["roots"][2]["status"] = json!("failed_credentials");
+        let reviewed = check(&partial).unwrap();
+        assert!(reviewed.contains_key("cluster") && !reviewed.contains_key("tenancy"));
+    }
+
+    #[test]
+    fn an_apply_reads_the_instance_only_as_committed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let files: Vec<(String, &[u8])> = ["day2.json"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(request().roots.iter().map(|root| root.inputs.clone()))
+            .map(|path| (path, b"x = 1\n".as_slice()))
+            .collect();
+        let borrowed: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), *bytes))
+            .collect();
+        let (instance, commit) = repository(scratch.path(), &borrowed);
+        let roots = request().roots;
+        let read = |roots: &[Root]| -> BTreeMap<String, Vec<u8>> {
+            roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.label.clone(),
+                        fs::read(instance.join(&root.inputs)).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let committed = read(&roots);
+        committed_at_head(&instance, &commit, true, &roots, &committed).unwrap();
+        assert!(committed_at_head(&instance, &commit, false, &roots, &committed).is_err());
+        assert!(committed_at_head(&instance, "", true, &roots, &committed).is_err());
+        // The bytes actually read are compared, not a later read of the file.
+        let mut edited = committed.clone();
+        edited.insert("tenancy".into(), b"x = 2\n".to_vec());
+        let error = format!(
+            "{:#}",
+            committed_at_head(&instance, &commit, true, &roots, &edited).unwrap_err()
+        );
+        assert!(error.contains("tenancy.tfvars differs"), "{error}");
+        fs::write(instance.join("day2.json"), "{}").unwrap();
+        let error = format!(
+            "{:#}",
+            committed_at_head(&instance, &commit, true, &roots, &committed).unwrap_err()
+        );
+        assert!(error.contains("day2.json differs"), "{error}");
+    }
+
+    #[test]
+    fn an_apply_runs_only_an_unrefused_plan_with_changes() {
+        let reviewed = "sha256:r".to_owned();
+        let change = [json!({"address": "google_sa.new", "actions": ["create"]})];
+        assert_eq!(apply_gate(&[], &[], "sha256:other", None), Ok(false));
+        assert_eq!(
+            apply_gate(&change, &[], "sha256:r", Some(&reviewed)),
+            Ok(true)
+        );
+        let refused = |destroys: &[String], review, reviewed| {
+            apply_gate(&change, destroys, review, reviewed)
+                .unwrap_err()
+                .0
+        };
+        assert_eq!(
+            refused(&["google_sa.old".into()], "sha256:r", Some(&reviewed)),
+            Failure::Destroys
+        );
+        assert_eq!(
+            refused(&[], "sha256:other", Some(&reviewed)),
+            Failure::Unreviewed
+        );
+        assert_eq!(refused(&[], "sha256:r", None), Failure::Unreviewed);
     }
 }

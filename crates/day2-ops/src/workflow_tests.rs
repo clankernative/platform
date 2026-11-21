@@ -763,55 +763,73 @@ fn failed_infrastructure_validation_prevents_plan_and_receipt() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn instance_plan_reads_credentials_once_and_stops_only_the_failed_root() -> Result<()> {
+/// Runs an instance session against a fake host: `failing` lists the
+/// `label operation` steps that fail. Returns the effects in order.
+fn instance_session(session: &str, failing: &[&str]) -> Result<Vec<String>> {
     assert!(
         automation::SOURCES
             .iter()
-            .any(|(name, _)| *name == "ops/InstancePlan.roc")
+            .any(|(name, _)| *name == "ops/InstanceRoots.roc")
     );
     let mut effects = Vec::new();
     let receipt = automation::run(
         &automation::runner()?,
-        &["instance-plan-session", "/private/plan/request.json"],
+        &[session, "/private/instance/request.json"],
         |request| {
             let input: Value = request.decode()?;
             match request.action.as_str() {
-                "instance-plan-prepare" => {
+                "instance-roots-prepare" => {
                     // The host reads the CLI's rendered request from its file.
-                    assert_eq!(input, json!({"request": "/private/plan/request.json"}));
+                    assert_eq!(input, json!({"request": "/private/instance/request.json"}));
                     effects.push("prepare".to_owned());
-                    Ok(json!({"roots":["project","app-edge/home","app-edge/go"]}))
+                    Ok(json!({"roots":[
+                        {"label":"project","shared":true},
+                        {"label":"cluster","shared":true},
+                        {"label":"app-edge/home","shared":false},
+                        {"label":"app-edge/go","shared":false},
+                    ]}))
                 }
-                "instance-plan-credentials" => {
+                "instance-roots-credentials" => {
                     effects.push("credentials".to_owned());
                     Ok(json!({}))
                 }
-                "instance-plan-root" => {
-                    let (label, operation) = (
+                "instance-roots-operation" => {
+                    let step = format!(
+                        "{} {}",
                         input["label"].as_str().unwrap(),
-                        input["operation"].as_str().unwrap(),
+                        input["operation"].as_str().unwrap()
                     );
-                    effects.push(format!("{label} {operation}"));
-                    Ok(json!({"ok": !(label == "app-edge/home" && operation == "plan")}))
+                    let ok = !failing.contains(&step.as_str());
+                    effects.push(step);
+                    Ok(json!({ "ok": ok }))
                 }
-                "instance-plan-receipt" => {
+                "instance-roots-receipt" => {
                     effects.push("receipt".to_owned());
                     Ok(json!({"ok": false}))
                 }
-                _ => panic!("unexpected instance plan effect: {}", request.action),
+                _ => panic!("unexpected instance effect: {}", request.action),
             }
         },
     )?;
     assert_eq!(receipt, json!({"ok": false}));
+    Ok(effects)
+}
+
+#[test]
+fn instance_plan_reads_credentials_once_and_stops_only_the_failed_root() -> Result<()> {
     assert_eq!(
-        effects,
+        instance_session(
+            "instance-plan-session",
+            &["cluster plan", "app-edge/home plan"]
+        )?,
         [
             "prepare",
             "credentials",
             "project init",
             "project plan",
             "project show",
+            "cluster init",
+            "cluster plan",
             "app-edge/home init",
             "app-edge/home plan",
             "app-edge/go init",
@@ -824,13 +842,43 @@ fn instance_plan_reads_credentials_once_and_stops_only_the_failed_root() -> Resu
 }
 
 #[test]
-fn instance_plan_has_no_platform_entry() -> Result<()> {
-    let result = automation::run(
-        &automation::runner()?,
-        &["platform", "instance-plan", "/private/plan/request.json"],
-        |request| panic!("unexpected effect: {}", request.action),
+fn instance_apply_stops_at_a_failed_shared_root_but_not_at_an_app_edge() -> Result<()> {
+    let applied = |label: &str| {
+        ["init", "plan", "show", "apply"].map(|operation| format!("{label} {operation}"))
+    };
+    // An app edge that fails stops only itself.
+    let mut expected = vec!["prepare".to_owned(), "credentials".to_owned()];
+    expected.extend(applied("project"));
+    expected.extend(applied("cluster"));
+    expected.extend(applied("app-edge/home"));
+    expected.extend(applied("app-edge/go"));
+    expected.push("receipt".to_owned());
+    assert_eq!(
+        instance_session("instance-apply-session", &["app-edge/home apply"])?,
+        expected
     );
-    assert!(result.is_err());
+    // A shared root that fails, here at a refused or failed apply, stops every later root.
+    let mut expected = vec!["prepare".to_owned(), "credentials".to_owned()];
+    expected.extend(applied("project"));
+    expected.extend(applied("cluster"));
+    expected.push("receipt".to_owned());
+    assert_eq!(
+        instance_session("instance-apply-session", &["cluster apply"])?,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
+fn instance_sessions_have_no_platform_entry() -> Result<()> {
+    for session in ["instance-plan", "instance-apply"] {
+        let result = automation::run(
+            &automation::runner()?,
+            &["platform", session, "/private/instance/request.json"],
+            |request| panic!("unexpected effect: {}", request.action),
+        );
+        assert!(result.is_err(), "{session}");
+    }
     Ok(())
 }
 

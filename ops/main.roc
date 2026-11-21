@@ -2,7 +2,7 @@ package
 	[
 		Workflow,
 		LocalDev,
-		InstancePlan,
+		InstanceRoots,
 		Build,
 		Delegation,
 		Check,
