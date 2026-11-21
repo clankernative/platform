@@ -718,8 +718,9 @@ pub(crate) async fn serve_runtime_pair(
     instance: &Path,
     app: &str,
     selection: crate::runtime_pair::Selection,
+    access: Access<'_>,
 ) -> Result<()> {
-    serve_configured(instance, app, Access::Edge, None, Some(selection), Ok).await
+    serve_configured(instance, app, access, None, Some(selection), Ok).await
 }
 
 /// Closed selected-App startup, consumed only on its final HTTP owner. Runtime

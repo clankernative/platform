@@ -691,11 +691,15 @@ fn require_transaction(connection: &Connection) -> Result<()> {
 }
 
 pub(crate) fn scope_matches(connection: &Connection, runtime: &Runtime) -> Result<()> {
+    require_scope(connection, runtime.scope())
+}
+
+pub(crate) fn require_scope(connection: &Connection, expected: &str) -> Result<()> {
     let scope: String =
         connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
             row.get(0)
         })?;
-    ensure!(scope == runtime.scope(), Failure::InstallationChanged);
+    ensure!(scope == expected, Failure::InstallationChanged);
     Ok(())
 }
 

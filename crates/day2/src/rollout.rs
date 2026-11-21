@@ -236,7 +236,7 @@ pub(crate) fn state(connection: &Connection) -> Result<Option<Release>> {
     if let Some(release) = &release
         && let ReleaseKind::RuntimePair { admission, .. } = &release.kind
     {
-        admission.validate_record()?;
+        admission.validate_journal(connection, &release.scope)?;
         release.source.require_runtime_image()?;
         release.target.require_runtime_image()?;
         ensure!(

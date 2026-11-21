@@ -19,7 +19,7 @@ mod image;
 pub(crate) use executor::bind_serving_process;
 pub use executor::{
     Candidate, CandidateCheck, Execution, ExecutorRole, Selection, admit, rehearsal_wait,
-    source_drain, supervise,
+    source_drain, supervise, supervise_trial,
 };
 pub use handoff::{
     AdoptionObservation, Backend, Binding as HandoffBinding, DrainObservation, Endpoint, Handoff,
@@ -202,9 +202,61 @@ pub enum Profile {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
     Passed,
+    Trial { scope: String },
+}
+
+const TRIAL_INSTALLATION: &str = "runtime_pair_qualification";
+const TRIAL_APP: &str = "reports";
+const TRIAL_ACTOR: &str = "runtime-pair-qualifier";
+
+fn trial_scope(scope: &str) -> bool {
+    let mut fields = scope.split('/');
+    if fields.next() != Some(TRIAL_INSTALLATION) {
+        return false;
+    }
+    let Some(nonce) = fields.next().and_then(|name| name.strip_prefix("trial_")) else {
+        return false;
+    };
+    fields.next() == Some(TRIAL_APP)
+        && fields.next().is_none()
+        && nonce.len() == 32
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn require_trial_instance(instance: &Instance, app: &str) -> Result<()> {
+    ensure!(
+        instance.installation == TRIAL_INSTALLATION
+            && trial_scope(&instance.scope(app)?)
+            && instance.apps.len() == 1
+            && instance.identity.is_none()
+            && instance.resources.is_none()
+            && instance.security_shell.is_none()
+            && instance.oauth_shell_transport.is_none()
+            && instance.oauth_clients.is_none()
+            && instance.oauth_runtime.is_none()
+            && instance.credential_runtime.is_none()
+            && instance.control.as_ref().is_some_and(|control| {
+                control.operators.len() == 1
+                    && control.operators.contains(TRIAL_ACTOR)
+                    && control.sources.is_empty()
+                    && control.apps.is_empty()
+                    && control.builders.is_empty()
+                    && control.runtimes.is_empty()
+                    && control.secrets.is_empty()
+                    && control.security_epochs.is_empty()
+                    && control.security_bootstraps.is_empty()
+                    && control.restore_passkeys.is_none()
+                    && control.restore_approval_signing.is_none()
+            })
+            && instance.apps[app].edge.is_none(),
+        "runtime_pair_trial_installation_required"
+    );
+    Ok(())
 }
 
 /// Shared evidence contains no app/artifact/controller identities: the campaign
@@ -235,6 +287,16 @@ impl Admission {
     /// The returned evidence is data. Store and deployment authorization are
     /// checked separately by the operation that uses it.
     pub fn review(bytes: &[u8], expected: &str, source: &Manifest) -> Result<Self> {
+        let admission = Self::read(bytes, expected, source)?;
+        ensure!(
+            admission.receipt.outcome == Outcome::Passed
+                && admission.receipt.checks == Check::required(),
+            "runtime_pair_qualification_incomplete"
+        );
+        Ok(admission)
+    }
+
+    fn read(bytes: &[u8], expected: &str, source: &Manifest) -> Result<Self> {
         ensure!(bytes.len() <= 1_048_576, "runtime_pair_receipt_budget");
         day2_assets::hash_part(expected)?;
         ensure!(
@@ -247,14 +309,32 @@ impl Admission {
             receipt_digest: expected.into(),
             receipt,
         };
-        admission.validate_record()?;
+        admission.validate_pair()?;
         Ok(admission)
     }
 
-    pub(crate) fn validate_record(&self) -> Result<()> {
+    pub(crate) fn validate_journal(&self, db: &rusqlite::Connection, scope: &str) -> Result<()> {
+        self.validate_pair()?;
+        match &self.receipt.outcome {
+            Outcome::Passed => ensure!(
+                self.receipt.checks == Check::required(),
+                "runtime_pair_qualification_incomplete"
+            ),
+            Outcome::Trial { scope: trial } => {
+                ensure!(
+                    trial == scope && trial_scope(trial) && self.receipt.checks.is_empty(),
+                    "runtime_pair_trial_scope_changed"
+                );
+                authority_state::require_scope(db, trial)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_pair(&self) -> Result<()> {
         day2_assets::hash_part(&self.receipt_digest)?;
         ensure!(
-            self.receipt.version == 1 && self.receipt.checks == Check::required(),
+            self.receipt.version == 1,
             "runtime_pair_qualification_incomplete"
         );
         day2_assets::hash_part(&self.receipt.verifier)?;
@@ -382,6 +462,52 @@ pub fn prepare(
     receipt_bytes: &[u8],
     operator: &LocalOperator,
 ) -> Result<Release> {
+    prepare_in_scope(
+        runtime,
+        candidate_bytes,
+        request,
+        receipt_bytes,
+        operator,
+        false,
+    )
+}
+
+/// Admit a trial only to an isolated Reports qualification installation. Its
+/// journal cannot be loaded under an installed scope and its input cannot be
+/// reviewed as release evidence.
+pub fn prepare_trial(
+    runtime: &Runtime,
+    candidate_bytes: &[u8],
+    request: &Request,
+    trial_bytes: &[u8],
+    operator: &LocalOperator,
+) -> Result<Release> {
+    prepare_in_scope(
+        runtime,
+        candidate_bytes,
+        request,
+        trial_bytes,
+        operator,
+        true,
+    )
+}
+
+fn prepare_in_scope(
+    runtime: &Runtime,
+    candidate_bytes: &[u8],
+    request: &Request,
+    receipt_bytes: &[u8],
+    operator: &LocalOperator,
+    trial: bool,
+) -> Result<Release> {
+    let original = Instance::load(runtime.instance_path())?;
+    if trial {
+        require_trial_instance(&original, runtime.app())?;
+        ensure!(
+            operator.name() == TRIAL_ACTOR,
+            "runtime_pair_trial_operator_required"
+        );
+    }
     rollout::operator(runtime, operator)?;
     let _operation = crate::deployment::OperationLease::acquire(
         runtime.db().parent().context("state root")?,
@@ -406,7 +532,6 @@ pub fn prepare(
         request.source_image != request.target_image,
         "runtime_pair_requires_new_image"
     );
-    let original = Instance::load(runtime.instance_path())?;
     let instance_digest = crate::digest(&serde_json::to_vec(&original)?);
     ensure!(
         instance_digest == runtime.instance_digest(),
@@ -482,7 +607,17 @@ pub fn prepare(
             runtime: identity,
             protocols: expected.protocols,
         };
-        let admission = Admission::review(receipt_bytes, &request.receipt_digest, &source)?;
+        let admission = if trial {
+            let admission = Admission::read(receipt_bytes, &request.receipt_digest, &source)?;
+            ensure!(
+                matches!(admission.receipt.outcome, Outcome::Trial { .. }),
+                "runtime_pair_trial_input_required"
+            );
+            admission.validate_journal(tx, runtime.scope())?;
+            admission
+        } else {
+            Admission::review(receipt_bytes, &request.receipt_digest, &source)?
+        };
         let generation =
             |identity: RuntimeIdentity, image: &str, composition: Composition| Generation {
                 composition: Some(composition),
@@ -619,6 +754,37 @@ mod tests {
             incomplete.checks.remove(&check);
             assert!(review(&incomplete, &receipt.source).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn trial_is_bound_to_its_disposable_database_and_cannot_be_published() -> Result<()> {
+        let mut receipt = receipt();
+        let scope = "runtime_pair_qualification/trial_0123456789abcdef0123456789abcdef/reports";
+        receipt.outcome = Outcome::Trial {
+            scope: scope.into(),
+        };
+        assert!(review(&receipt, &receipt.source).is_err());
+        receipt.checks.clear();
+        assert!(review(&receipt, &receipt.source).is_err());
+        let bytes = serde_json::to_vec(&receipt)?;
+        let trial = Admission::read(&bytes, &crate::digest(&bytes), &receipt.source)?;
+        let db = Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE day2_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+        db.execute("INSERT INTO day2_meta VALUES('scope',?1)", [scope])?;
+        trial.validate_journal(&db, scope)?;
+        assert!(trial.validate_journal(&db, "tools/prod/reports").is_err());
+        db.execute("UPDATE day2_meta SET value='tools/prod/reports'", [])?;
+        assert!(trial.validate_journal(&db, scope).is_err());
+        let mut wrong_scope = trial;
+        wrong_scope.receipt.outcome = Outcome::Trial {
+            scope: "tools/prod/reports".into(),
+        };
+        assert!(
+            wrong_scope
+                .validate_journal(&db, "tools/prod/reports")
+                .is_err()
+        );
         Ok(())
     }
 

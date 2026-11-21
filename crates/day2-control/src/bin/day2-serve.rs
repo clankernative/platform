@@ -43,9 +43,19 @@ fn run_pair_executor(arguments: &[std::ffi::OsString]) -> Result<()> {
             .worker_threads(2)
             .enable_all()
             .build()?;
-        let result = runtime.block_on(day2::runtime_pair::supervise(
-            &instance, app, selection, &evidence,
-        ));
+        let result = if arguments[2] == "--runtime-candidate-trial" {
+            let port = arguments[5]
+                .to_str()
+                .context("published port must be UTF-8")?
+                .parse()?;
+            runtime.block_on(day2::runtime_pair::supervise_trial(
+                &instance, app, selection, &evidence, port,
+            ))
+        } else {
+            runtime.block_on(day2::runtime_pair::supervise(
+                &instance, app, selection, &evidence,
+            ))
+        };
         runtime.shutdown_timeout(Duration::from_secs(1));
         result?;
     }
@@ -54,11 +64,12 @@ fn run_pair_executor(arguments: &[std::ffi::OsString]) -> Result<()> {
 
 fn run() -> Result<ServiceExit> {
     let mut arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    if arguments.len() == 5
+    if (arguments.len() == 5
         && matches!(
             arguments[2].to_str(),
             Some("--runtime-candidate" | "--runtime-candidate-check" | "--runtime-source-executor")
-        )
+        ))
+        || (arguments.len() == 6 && arguments[2] == "--runtime-candidate-trial")
     {
         return pair_executor_exit(run_pair_executor(&arguments));
     }
