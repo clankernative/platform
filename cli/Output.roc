@@ -55,7 +55,7 @@ Output :: { outcome : Outcome }.{
 	roots_failed : InstanceRender.Mode, Str -> Problem
 	roots_failed = |mode, detail| match mode {
 		InstanceRender.Mode.Plan => Problem.PlanFailed(detail)
-		InstanceRender.Mode.Apply => Problem.ApplyFailed(detail)
+		InstanceRender.Mode.Apply(_) => Problem.ApplyFailed(detail)
 	}
 
 	safe : Str -> Str
@@ -275,6 +275,7 @@ root_status = |root| {
 		"applied" => "applied ${root.changes.len().to_str()} changes"
 		"skipped" => "not run: a shared root before it failed"
 		"refused_destroy" => "refused: the plan deletes, replaces or forgets a resource; nothing applied"
+		"refused_unreviewed" => "refused: its plan differs from the reviewed plan; nothing applied"
 		"failed_credentials" => "not run: its cluster or DNS credentials could not be read"
 		"failed_init" => "failed at init; logs in ${root.logs}"
 		"failed_plan" => "failed at plan; logs in ${root.logs}"
@@ -333,16 +334,23 @@ ran_text = |request, path, spec, receipt| {
 				.map(|action| "  ${Output.safe(action.description)}\n    ${Output.safe(action.command)}"),
 			"\n\n",
 		)
+	title = match mode {
+		InstanceRender.Mode.Plan => "OpenTofu plan, read-only"
+		InstanceRender.Mode.Apply(_) => "OpenTofu apply"
+	}
+	reviewed = match mode {
+		InstanceRender.Mode.Plan => []
+		InstanceRender.Mode.Apply(directory) => ["REVIEWED PLAN", "  ${Output.safe(directory)}/receipt.json", ""]
+	}
+	not_run =
+		if skipped.is_empty() [] else [
+			"",
+			"NOT RUN  /  their image and artifact inputs come from the release controller",
+			Str.join_with(skipped.map(|label| "  ${Output.safe(label)}"), "\n"),
+		]
 	Str.join_with(
 		[
-			match mode {
-				InstanceRender.Mode.Plan => "DAY2  /  instance ${
-					spec
-						.derived()
-						.installation
-				}  /  OpenTofu plan, read-only"
-				InstanceRender.Mode.Apply => "DAY2  /  instance ${spec.derived().installation}  /  OpenTofu apply"
-			},
+			"DAY2  /  instance ${spec.derived().installation}  /  ${title}",
 			"",
 			"SPEC",
 			"  ${Output.safe(path.to_str())}",
@@ -351,24 +359,11 @@ ran_text = |request, path, spec, receipt| {
 			"  ${Output.safe(receipt.checkout)} @ ${Output.safe(receipt.commit)}",
 			"  OpenTofu ${Output.safe(receipt.engine.version)}",
 			"",
-			"CORE ROOTS  /  ${receipt.roots.len().to_str()}, in apply order",
-			planned,
 		]
-			.concat(
-				if skipped.is_empty() [] else [
-					"",
-					"NOT RUN  /  their image and artifact inputs come from the release controller",
-					Str.join_with(skipped.map(|label| "  ${Output.safe(label)}"), "\n"),
-				],
-			)
-			.concat([
-				"",
-				"RECEIPT",
-				"  ${Output.safe(receipt.directory)}/receipt.json",
-				"",
-				"NEXT",
-				next,
-			]),
+			.concat(reviewed)
+			.concat(["CORE ROOTS  /  ${receipt.roots.len().to_str()}, in apply order", planned])
+			.concat(not_run)
+			.concat(["", "RECEIPT", "  ${Output.safe(receipt.directory)}/receipt.json", "", "NEXT", next]),
 		"\n",
 	)
 }
@@ -826,7 +821,7 @@ planned_receipt =
 	\\{"format":1,"mode":"plan","ok":false,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
 	\\"instance_commit":"","instance_clean":false,"engine":{"version":"1.12.3","digest":"sha256:e"},
 	\\"roots":[{"label":"project","stack":"project","backend":{"bucket":"b","prefix":"foundation"},"new_root":false,
-	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"failed_plan",
+	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"failed_plan","review":"",
 	\\"changes":[],"plan_digest":"","show_digest":"","logs":"/o/project"}],"directory":"/o"}
 
 # A plan whose root failed exits 6 and reports plan_failed beside its receipt.
@@ -855,17 +850,18 @@ applied_receipt =
 
 # An apply that refused a destructive plan exits 6, reports apply_failed, and says what it refused.
 expect match (
-	Cli.parse(["instance", "apply", "d", "p", "o"]),
+	Cli.parse(["instance", "apply", "d", "p", "r", "o"]),
 	InstanceSpec.from_json(planned_spec),
 	Names.LocalPath.from_str("d/day2.json"),
-	InstanceRender.receipt(applied_receipt, InstanceRender.Mode.Apply),
+	InstanceRender.receipt(applied_receipt, InstanceRender.Mode.Apply("r")),
 ) {
 	(Ok(Cli.Request.Roots(request)), Ok(spec), Ok(path), Ok(receipt)) => {
 		response = Output.new(Output.Outcome.Ran(request, path, spec, receipt))
 		response.exit_code()
 			== 6
 			and response.body().contains("OpenTofu apply")
-				and response.body().contains("refused: the plan deletes, replaces or forgets a resource")
+				and response.body().contains("REVIEWED PLAN\n  r/receipt.json")
+					and response.body().contains("refused: the plan deletes, replaces or forgets a resource")
 	}
 	_ => Bool.False
 }

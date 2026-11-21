@@ -33,8 +33,10 @@ Cli :: [].{
 		with_format = |request, format| { ..request, format }
 	}
 
-	## day2 instance plan|apply DIRECTORY PLATFORM NEW_DIRECTORY: a read-only plan, or an apply, of DIRECTORY's core
-	## roots, run in PLATFORM (a checkout at day2.json's platform commit), with plans and logs in NEW_DIRECTORY.
+	## day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY: a read-only plan of DIRECTORY's core roots, run in PLATFORM
+	## (a checkout at day2.json's platform commit), with plans and logs in NEW_DIRECTORY. day2 instance apply DIRECTORY
+	## PLATFORM PLAN_DIRECTORY NEW_DIRECTORY applies them, root by root, only as reviewed in PLAN_DIRECTORY, a prior
+	## plan's output; its mode carries that directory.
 	Roots :: {
 		mode : InstanceRender.Mode,
 		directory : Names.LocalPath,
@@ -71,7 +73,7 @@ Cli :: [].{
 		command : Roots -> Command
 		command = |request| match request.mode {
 			InstanceRender.Mode.Plan => Command.InstancePlan
-			InstanceRender.Mode.Apply => Command.InstanceApply
+			InstanceRender.Mode.Apply(_) => Command.InstanceApply
 		}
 
 		## The same instance, as `check` and `render` read it.
@@ -161,13 +163,19 @@ Cli :: [].{
 				| ["instance", "plan", _, _]
 				| ["instance", "apply"]
 				| ["instance", "apply", _]
-				| ["instance", "apply", _, _] => Err(Problem.MissingArgument)
+				| ["instance", "apply", _, _]
+				| ["instance", "apply", _, _, _] => Err(Problem.MissingArgument)
 				["instance", "plan", directory, checkout, output] => Ok(
 					Request.Roots(roots(InstanceRender.Mode.Plan, directory, checkout, output, raw)?),
 				)
-				["instance", "apply", directory, checkout, output] => Ok(
-					Request.Roots(roots(InstanceRender.Mode.Apply, directory, checkout, output, raw)?),
-				)
+				["instance", "apply", directory, checkout, reviewed, output] => {
+					plan = local_path("apply", reviewed, "a reviewed plan directory")?
+					Ok(
+						Request.Roots(
+							roots(InstanceRender.Mode.Apply(plan.to_str()), directory, checkout, output, raw)?,
+						),
+					)
+				}
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
@@ -243,8 +251,14 @@ Cli :: [].{
 				value.mode.name(),
 				value.directory.to_str(),
 				value.checkout.to_str(),
-				value.output.to_str(),
 			]
+				.concat(
+					match value.mode {
+						InstanceRender.Mode.Plan => []
+						InstanceRender.Mode.Apply(reviewed) => [reviewed]
+					},
+				)
+				.concat([value.output.to_str()])
 		}
 		base.concat(
 			match request_format(request) {
@@ -282,9 +296,7 @@ roots = |mode, directory, checkout, output, raw| {
 	if has_options(raw) {
 		return Err(Problem.ConflictingOptions("instance ${verb} accepts only --agent or --json."))
 	}
-	path = |value, role|
-		Names.LocalPath.from_str(value)
-			.map_err(|_| Problem.InvalidArguments("instance ${verb} requires ${role} of at most 4096 bytes"))
+	path = |value, role| local_path(verb, value, role)
 	Ok(
 		Cli.Roots.{
 			mode,
@@ -295,6 +307,11 @@ roots = |mode, directory, checkout, output, raw| {
 		},
 	)
 }
+
+local_path : Str, Str, Str -> Try(Names.LocalPath, Problem)
+local_path = |verb, value, role|
+	Names.LocalPath.from_str(value)
+		.map_err(|_| Problem.InvalidArguments("instance ${verb} requires ${role} of at most 4096 bytes"))
 
 ## The instance verb follows the family, after any flags.
 instance_command : List(Str) -> Cli.Command

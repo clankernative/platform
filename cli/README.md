@@ -16,7 +16,7 @@ cd ..
 ./cli/day2 instance check ../my-instance
 ./cli/day2 instance render ../my-instance --agent
 ./cli/day2 instance plan ../my-instance ../platform-at-pin /tmp/my-instance-plan
-./cli/day2 instance apply ../my-instance ../platform-at-pin /tmp/my-instance-apply
+./cli/day2 instance apply ../my-instance ../platform-at-pin /tmp/my-instance-plan /tmp/my-instance-apply
 ./cli/day2 platform --help
 ./cli/day2 platform check examples/reports 42 16
 ./cli/day2 platform local-dev examples/reports

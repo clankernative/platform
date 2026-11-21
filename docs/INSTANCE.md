@@ -10,7 +10,7 @@ in their `day2.json` values.
 day2 instance check DIRECTORY [--agent]
 day2 instance render DIRECTORY [--agent]
 day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY [--agent]
-day2 instance apply DIRECTORY PLATFORM NEW_DIRECTORY [--agent]
+day2 instance apply DIRECTORY PLATFORM PLAN_DIRECTORY NEW_DIRECTORY [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
@@ -232,7 +232,8 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
 - **Output.**
   - Each root's plan, its `tofu show -json` output and logs go to
     `NEW_DIRECTORY`, with `receipt.json`, which records the stacks tree, the
-    engine digest and each root's input, plan and show digests.
+    engine digest and each root's input, plan and show digests, and the
+    digest of its changes that a later `instance apply` must match.
   - Plans hold state values in plain text, so treat the directory like state.
   - Providers are cached once for all roots.
   - Credential material is refused there.
@@ -256,17 +257,29 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
 
 ## Apply
 
-`instance apply DIRECTORY PLATFORM NEW_DIRECTORY` runs the same roots with the
-same platform, engine, inputs, credentials and output rules as `instance plan`,
-and applies them. Only operators apply by hand; app owners never do.
+`instance apply DIRECTORY PLATFORM PLAN_DIRECTORY NEW_DIRECTORY` runs the same
+roots with the same platform, engine, inputs, credentials and output rules as
+`instance plan`, and applies them as reviewed. Only operators apply by hand; app
+owners never do.
 
+- **Reviewed.** `PLAN_DIRECTORY` is a prior `instance plan` output, whose
+  receipt records a digest of each root's changes: every resource and output
+  change with its actions and its values before, after and known only after
+  apply. That plan must have succeeded for the same platform commit and stacks,
+  the same roots, and the same committed inputs and rendered variables. A root
+  whose new plan has other changes is refused (`refused_unreviewed`); plan and
+  review again.
+- **Committed.** The instance must be a clean git checkout whose `day2.json` and
+  every committed input equal their bytes at `HEAD`.
 - **Each root, in apply order:** init against its rendered backend, plan with
-  the state lock, show, then apply exactly that saved plan. OpenTofu refuses a
-  saved plan whose state changed after it was made, so what was shown is what
-  is applied.
+  the state lock, show, then apply exactly that saved plan. The saved plan's
+  digest is checked again before apply, and OpenTofu refuses a saved plan whose
+  state changed after it was made, so what was shown is what is applied.
 - **New roots.** The real backend is always initialized, and the apply creates
   the root's state. The receipt reports the root as new.
-- **Locks.** Plans and applies wait up to five minutes for a root's state lock.
+- **Locks and time.** Plans and applies wait up to five minutes for a root's
+  state lock. An apply that runs past two hours is interrupted so OpenTofu can
+  save state and release the lock, and is killed only ten minutes later.
 - **Destructive plans are refused.** A plan that deletes, replaces or forgets a
   resource is never applied; the root reports `refused_destroy` and lists those
   resources. Output removals do not count. Destructive changes need a reviewed
@@ -275,12 +288,18 @@ and applies them. Only operators apply by hand; app owners never do.
   reads their state. The host runs no root until each shared root before it has
   applied, so a failed or refused shared root stops the apply and the roots
   after it report `skipped`. An `app-edge` root reads only the shared roots, so
-  its failure stops only itself.
+  its failure stops only itself. The host also requires the roots in that order,
+  all on one state bucket with distinct prefixes.
+- **Cluster credentials.** When an apply changes the cluster root, for example
+  by creating the cluster, the kubeconfig is fetched again before the next root
+  that needs it.
 - **Mode.** The host action fixes plan or apply, and the request must name the
   same mode, so `instance plan` can never apply.
 - **Output.** As for a plan. Root statuses are `no_changes`, `applied`,
-  `refused_destroy`, `skipped` and the plan's failures plus `failed_apply`. The
-  command exits 6 if any root failed or was refused.
+  `refused_destroy`, `refused_unreviewed`, `skipped` and the plan's failures plus
+  `failed_apply`. The command exits 6 if any root failed or was refused. If the
+  output audit fails after an apply, `receipt.json` is still written, with
+  `ok: false` and the audit error.
 - **Not applied:** `day2-app` and the stacks the spec does not model yet; the
   instance's own tooling still applies those.
 

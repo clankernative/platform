@@ -2060,12 +2060,14 @@ mod tests {
         let scratch = Scratch::new();
         let instance = scratch.0.join("instance");
         let platform = scratch.0.join("platform");
+        let reviewed = scratch.0.join("plan");
         let output = scratch.0.join("apply");
         fs::create_dir(&instance).unwrap();
         fs::create_dir(&platform).unwrap();
-        let (directory, checkout, new) = (
+        let (directory, checkout, plan, new) = (
             instance.to_str().unwrap(),
             platform.to_str().unwrap(),
+            reviewed.to_str().unwrap(),
             output.to_str().unwrap(),
         );
         let apply = |args: &[&str], code: i32| {
@@ -2080,16 +2082,18 @@ mod tests {
                     .to_owned(),
             )
         };
+        // An apply names the plan that was reviewed.
         for args in [
             vec!["instance", "apply", "--agent"],
             vec!["instance", "apply", directory, checkout, "--agent"],
+            vec!["instance", "apply", directory, checkout, new, "--agent"],
         ] {
             assert_eq!(apply(args.as_slice(), 2).0, "missing_argument");
         }
         assert_eq!(
             apply(
                 &[
-                    "instance", "apply", directory, checkout, new, "--demo", "--agent"
+                    "instance", "apply", directory, checkout, plan, new, "--demo", "--agent"
                 ],
                 2
             )
@@ -2099,7 +2103,9 @@ mod tests {
         // The spec is validated before anything runs.
         assert_eq!(
             apply(
-                &["instance", "apply", directory, checkout, new, "--agent"],
+                &[
+                    "instance", "apply", directory, checkout, plan, new, "--agent"
+                ],
                 3
             )
             .0,
@@ -2119,7 +2125,9 @@ mod tests {
             fs::write(instance.join(format!("gcp/config/{inputs}.tfvars")), "").unwrap();
         }
         let (code, message) = apply(
-            &["instance", "apply", directory, checkout, new, "--agent"],
+            &[
+                "instance", "apply", directory, checkout, plan, new, "--agent",
+            ],
             6,
         );
         assert_eq!(code, "apply_failed");

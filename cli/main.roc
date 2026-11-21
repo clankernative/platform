@@ -95,7 +95,7 @@ ran! = |roots| {
 					file = Path.join(directory, "request.json")
 					Path.write_utf8!(file, request).map_err(|_| "cannot write the ${parts.mode.name()} request")?
 					Host.instance_roots!(
-						parts.mode.name(),
+						parts.mode,
 						Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?,
 					)
 				},

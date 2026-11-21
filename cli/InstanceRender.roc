@@ -189,12 +189,20 @@ InstanceRender :: [].{
 		}
 	}
 
-	## What a run of the core roots does: `instance plan` is read-only; `instance apply` applies each saved plan.
-	Mode := [Plan, Apply].{
+	## What a run of the core roots does: `instance plan` is read-only; `instance apply` applies each root's saved
+	## plan only if its changes equal the ones reviewed in a prior plan's output directory, which it carries.
+	Mode := [Plan, Apply(Str)].{
 		name : Mode -> Str
 		name = |mode| match mode {
 			Plan => "plan"
-			Apply => "apply"
+			Apply(_) => "apply"
+		}
+
+		## The reviewed plan directory an apply checks every root against; a plan has none.
+		reviewed : Mode -> Try(Str, [Null])
+		reviewed = |mode| match mode {
+			Plan => Err(Null)
+			Apply(directory) => Ok(directory)
 		}
 	}
 
@@ -205,6 +213,7 @@ InstanceRender :: [].{
 		names = spec.derived()
 		Json.to_str({
 			mode: mode.name(),
+			reviewed: mode.reviewed(),
 			instance: paths.instance,
 			checkout: paths.checkout,
 			output: paths.output,
@@ -260,6 +269,7 @@ InstanceRender :: [].{
 				inputs : { path : Str, digest : Str },
 				variables : Str,
 				status : Str,
+				review : Str,
 				changes : List({ address : Str, actions : List(Str) }),
 				plan_digest : Str,
 				show_digest : Str,
@@ -279,7 +289,15 @@ InstanceRender :: [].{
 		failures = ["failed_credentials", "failed_init", "failed_plan", "failed_show"]
 		known = match mode {
 			Mode.Plan => ["no_changes", "changes"].concat(failures)
-			Mode.Apply => ["no_changes", "applied", "skipped", "failed_apply", "refused_destroy"].concat(failures)
+			Mode.Apply(_) => [
+				"no_changes",
+				"applied",
+				"skipped",
+				"failed_apply",
+				"refused_destroy",
+				"refused_unreviewed",
+			]
+				.concat(failures)
 		}
 		failed = decoded.roots.any(|root| root.status.starts_with("failed_") or root.status.starts_with("refused_"))
 		skipped = decoded.roots.any(|root| root.status == "skipped")
@@ -412,7 +430,7 @@ receipt_sample = |status, ok|
 	\\{"format":1,"mode":"plan","ok":OK,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
 	\\"instance_commit":"","instance_clean":false,"engine":{"version":"1.12.3","digest":"sha256:e"},
 	\\"roots":[{"label":"project","stack":"project","backend":{"bucket":"b","prefix":"foundation"},"new_root":false,
-	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"STATUS",
+	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"STATUS","review":"",
 	\\"changes":[],"plan_digest":"sha256:p","show_digest":"sha256:s","logs":"/o/project"}],"directory":"/o"}
 		.replace_first("OK", if ok "true" else "false")
 		.replace_first("STATUS", status)
@@ -426,21 +444,29 @@ expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.False), Instanc
 expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.True), InstanceRender.Mode.Plan).is_err()
 expect InstanceRender.receipt(receipt_sample("no_changes", Bool.False), InstanceRender.Mode.Plan).is_err()
 expect InstanceRender.receipt(receipt_sample("planned", Bool.True), InstanceRender.Mode.Plan).is_err()
-expect InstanceRender.receipt(receipt_sample("no_changes", Bool.True), InstanceRender.Mode.Apply).is_err()
+expect InstanceRender.receipt(receipt_sample("no_changes", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
 # A plan never applies or skips; an apply's refusals and failures fail it, and it skips only after one.
 expect InstanceRender.receipt(receipt_sample("applied", Bool.True), InstanceRender.Mode.Plan).is_err()
-expect InstanceRender.receipt(apply_sample("applied", Bool.True), InstanceRender.Mode.Apply).is_ok()
-expect InstanceRender.receipt(apply_sample("refused_destroy", Bool.False), InstanceRender.Mode.Apply).is_ok()
-expect InstanceRender.receipt(apply_sample("refused_destroy", Bool.True), InstanceRender.Mode.Apply).is_err()
-expect InstanceRender.receipt(apply_sample("failed_apply", Bool.True), InstanceRender.Mode.Apply).is_err()
-expect InstanceRender.receipt(apply_sample("skipped", Bool.True), InstanceRender.Mode.Apply).is_err()
-expect InstanceRender.receipt(apply_sample("changes", Bool.True), InstanceRender.Mode.Apply).is_err()
+expect InstanceRender.receipt(apply_sample("applied", Bool.True), InstanceRender.Mode.Apply("/r")).is_ok()
+expect InstanceRender.receipt(apply_sample("refused_destroy", Bool.False), InstanceRender.Mode.Apply("/r")).is_ok()
+expect InstanceRender.receipt(apply_sample("refused_destroy", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
+expect InstanceRender.receipt(apply_sample("failed_apply", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
+expect InstanceRender.receipt(apply_sample("skipped", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
+expect InstanceRender.receipt(apply_sample("changes", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
+expect InstanceRender.receipt(apply_sample("refused_unreviewed", Bool.False), InstanceRender.Mode.Apply("/r")).is_ok()
 
 # The request carries its mode and the CLI's own rendering sources.
 expect match InstanceSpec.from_json(sample) {
 	Ok(spec) => {
-		request = InstanceRender.request(spec, InstanceRender.Mode.Apply, { instance: "i", checkout: "p", output: "o" })
-		request.contains("\"path\":\"cli/InstanceRender.roc\"") and request.contains("\"mode\":\"apply\"")
+		request =
+			InstanceRender.request(
+				spec,
+				InstanceRender.Mode.Apply("/reviewed"),
+				{ instance: "i", checkout: "p", output: "o" },
+			)
+		request.contains("\"path\":\"cli/InstanceRender.roc\"")
+			and request.contains("\"mode\":\"apply\"")
+				and request.contains("\"reviewed\":\"/reviewed\"")
 	}
 	Err(_) => Bool.False
 }
