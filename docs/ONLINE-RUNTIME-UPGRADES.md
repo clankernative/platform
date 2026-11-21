@@ -346,6 +346,8 @@ A root or manifest witness binds the inherited blob addresses directly. A
 configuration witness also requires measuring the base layers against its DiffIDs. It refuses
 changed execution settings, additional layers, links, whiteouts, extended
 permissions, writable files, extra paths and missing or altered artifact files.
+BuildKit may repeat the artifact's parent directories in the added layer. Their
+owner, group and mode must match the verified base image wherever they already exist.
 `composition.json` binds both immutable image references, the qualified native base identity, both native manifests and OCI configurations,
 the exact artifact/tree/layer, and verifier/recipe identities. It grants no
 qualification or pod attestation. The operator reviews and pins this DATA in the
