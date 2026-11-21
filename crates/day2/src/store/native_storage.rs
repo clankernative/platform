@@ -996,10 +996,13 @@ fn allowed_sql(action: AuthAction<'_>, mode: SqlMode) -> bool {
             pragma_name,
             pragma_value,
         } => {
-            (pragma_name.eq_ignore_ascii_case("foreign_key_check") && pragma_value.is_none())
+            ((pragma_name.eq_ignore_ascii_case("database_list")
+                || pragma_name.eq_ignore_ascii_case("foreign_key_check"))
+                && pragma_value.is_none())
                 || [
                     "table_info",
                     "table_xinfo",
+                    "table_list",
                     "index_list",
                     "index_info",
                     "index_xinfo",
@@ -1018,6 +1021,38 @@ fn allowed_sql(action: AuthAction<'_>, mode: SqlMode) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn credential_preflight_checks_attached_databases_under_callback_policy() -> Result<()> {
+        for mode in [SqlMode::Read, SqlMode::Write] {
+            for attached in [false, true] {
+                let mut db = Connection::open_in_memory()?;
+                db.execute_batch(
+                    "CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY) STRICT",
+                )?;
+                if attached {
+                    db.execute_batch("ATTACH DATABASE ':memory:' AS unexpected")?;
+                }
+                let callbacks = CallbackHooks::install(&mut db, mode)?;
+                let control = callbacks.control.clone();
+                let tx = callbacks.db.transaction()?;
+                let policy = CallbackPolicy::activate(&tx, control)?;
+                let result = crate::store::require_no_managed_credential_restore_state(&tx);
+                if attached {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "security_restore_preflight_required"
+                    );
+                } else {
+                    result?;
+                }
+                policy.finish()?;
+                tx.rollback()?;
+                callbacks.finish()?;
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn raw_open_refuses_initial_restored_and_traversal_native_paths_before_sqlite() -> Result<()> {
