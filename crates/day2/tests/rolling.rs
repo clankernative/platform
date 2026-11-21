@@ -1270,7 +1270,6 @@ fn blocked_source_work_can_be_abandoned_from_the_replacement() -> Result<()> {
             invocation: "source-work".into(),
             expected_artifact: world.runtime.artifact().id().into(),
             reason: "source work blocked during the rollout".into(),
-            cause: day2::recovery::Cause::Blocked,
         }],
     )?;
     assert_eq!(receipts[0].invocation, "source-work");
@@ -1591,23 +1590,7 @@ fn a_rolling_store_drains_every_kind_so_nothing_there_is_an_orphaned_request() -
         &json!({"after":"","limit":2}),
         100,
     )?;
-    let error = day2::recovery::abandon(
-        &world.runtime,
-        &operator,
-        &[day2::recovery::Request {
-            request_id: "read-as-orphan".into(),
-            invocation: "interrupted-read".into(),
-            expected_artifact: world.runtime.artifact().id().into(),
-            reason: "read cut off when the app stopped".into(),
-            cause: day2::recovery::Cause::OrphanedRequest,
-        }],
-    )
-    .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("recovery_requires_orphaned_request"),
-        "{error:#}"
-    );
-    // A migration abandons nothing here either: it waits for the scheduler.
+    // So a migration abandons nothing: it waits for the scheduler.
     let plan = day2::migration::plan(&world.runtime, world.runtime.artifact())?;
     let error = day2::migration::apply(&world.runtime, world.runtime.artifact(), &plan, &operator)
         .unwrap_err();

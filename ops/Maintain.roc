@@ -63,9 +63,8 @@ Maintain :: [].{
 				workflow!("authority-apply", host!)?
 			}
 			"recovery-abandon" => {
-				# The app is stopped, so no server holds its store: an orphaned
-				# request qualifies only now. Each listed invocation is abandoned
-				# after a verified backup and a confirmation.
+				# Each listed blocked invocation is abandoned with the app stopped,
+				# after a verified backup of the store it changes and a confirmation.
 				_ = backup!(host!)?
 				_ = Capability.call!("maintenance-confirm", "{}", host!)?
 				workflow!("recovery-abandon", host!)?

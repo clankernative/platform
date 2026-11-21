@@ -19,7 +19,6 @@ fn request(world: &World, invocation: &str, request_id: &str) -> Request {
         invocation: invocation.into(),
         expected_artifact: world.runtime.artifact().id().into(),
         reason: "send stopped by policy review".into(),
-        cause: Cause::Blocked,
     }
 }
 
@@ -390,14 +389,6 @@ fn abandon_reports_settled_and_never_admitted_effects() -> Result<()> {
     Ok(())
 }
 
-fn orphan(world: &World, invocation: &str, request_id: &str) -> Request {
-    Request {
-        reason: "request cut off when maintenance stopped the app".into(),
-        cause: Cause::OrphanedRequest,
-        ..request(world, invocation, request_id)
-    }
-}
-
 /// What every `day2-serve` holds on its store while it runs.
 fn serving_lease(world: &World) -> Result<std::fs::File> {
     let lease = std::fs::OpenOptions::new()
@@ -446,167 +437,59 @@ fn interrupted_read(world: &World, id: &str) -> Result<()> {
 }
 
 #[test]
-fn an_orphaned_request_is_abandoned_only_while_no_server_holds_the_store() -> Result<()> {
+fn an_operator_leaves_orphaned_requests_to_a_migration() -> Result<()> {
     let world = World::new()?;
     let operator = operator()?;
     interrupted_read(&world, "orphan")?;
-    assert_eq!(pending(&world)?, 1);
-    // The operator must name the cause; this read is not blocked.
+    // An orphaned request is not blocked, so an operator's request is refused,
+    // with no server holding the store, and changes nothing.
     refused(
         abandon_one(
             &world.runtime,
             &operator,
-            &request(&world, "orphan", "as-blocked"),
+            &request(&world, "orphan", "cut-off"),
         ),
         "recovery_requires_blocked_invocation",
     );
-    // While a server holds the store, its request may still be running.
-    let lease = serving_lease(&world)?;
-    for code in [
-        "recovery_requires_exclusive_store",
-        "another server owns this SQLite app",
-    ] {
-        refused(
-            abandon_one(
-                &world.runtime,
-                &operator,
-                &orphan(&world, "orphan", "cut-off"),
-            ),
-            code,
-        );
-    }
-    drop(lease);
-    // The exclusion admits only an instance operator or a policy administrator.
-    refused(
-        abandon_one(
-            &world.runtime,
-            &LocalOperator::assert_local("bob")?,
-            &orphan(&world, "orphan", "not-an-operator"),
-        ),
-        "maintenance_operator_required",
-    );
     assert_eq!((pending(&world)?, abandonments(&world)?), (1, 0));
-
-    let receipt = abandon_one(
-        &world.runtime,
-        &operator,
-        &orphan(&world, "orphan", "cut-off"),
-    )?;
+    // An operator's request names no cause: blocked is the only one it may abandon.
+    let error = serde_json::from_value::<Request>(serde_json::json!({
+        "request_id": "cut-off", "invocation": "orphan",
+        "expected_artifact": world.runtime.artifact().id(),
+        "reason": "request cut off when maintenance stopped the app",
+        "cause": "orphaned_request",
+    }))
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field `cause`"),
+        "{error}"
+    );
+    // The next migration abandons it.
     assert_eq!(
-        (receipt.invocation.as_str(), receipt.cause),
-        ("orphan", Cause::OrphanedRequest)
+        ids(&migrate(&world)?),
+        vec![("orphan", Cause::OrphanedRequest)]
     );
-    assert_eq!(evidence(&receipt), (0, 0, 0));
-    // Nothing is pending for a migration to refuse, and nothing runs it again.
-    assert_eq!(pending(&world)?, 0);
-    assert!(abandoned(&world.runtime.execute("orphan", Fault::None)?));
-    let status = invocations::status(&world.runtime, "orphan", "alice")?;
-    assert_eq!(
-        (status.status.as_str(), status.error.as_str()),
-        ("failure", "invocation_abandoned")
-    );
-    let db = rusqlite::Connection::open(world.runtime.db())?;
-    assert_eq!(
-        db.query_row(
-            "SELECT operator,json_extract(receipt,'$.cause'),json_extract(payload,'$[0].cause')
-             FROM day2_abandonments WHERE invocation='orphan'",
-            [],
-            |row| Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?
-            ))
-        )?,
-        (
-            "admin".into(),
-            "orphaned_request".into(),
-            "orphaned_request".into()
-        )
-    );
-    // A recorded request returns its receipt, even once a server holds the
-    // store again; a changed request under its key is still refused.
-    let lease = serving_lease(&world)?;
-    assert_eq!(
-        abandon_one(
-            &world.runtime,
-            &operator,
-            &orphan(&world, "orphan", "cut-off")
-        )?,
-        receipt
-    );
-    refused(
-        abandon_one(
-            &world.runtime,
-            &operator,
-            &Request {
-                reason: "a different reason".into(),
-                ..orphan(&world, "orphan", "cut-off")
-            },
-        ),
-        "recovery_request_conflict",
-    );
-    drop(lease);
-    refused(
-        abandon_one(
-            &world.runtime,
-            &operator,
-            &orphan(&world, "orphan", "again"),
-        ),
-        "recovery_already_resolved",
-    );
-    Ok(())
-}
-
-#[test]
-fn work_a_runtime_resumes_is_never_an_orphaned_request() -> Result<()> {
-    let (world, _simulation, notify) = blocked_notify(42, |_, _| Ok(()))?;
-    let operator = operator()?;
-    // A command from a direct request: the scheduler resumes it, and a client
-    // may retry it under its key.
-    world.runtime.accept(
-        "reports.submit",
-        "alice",
-        "accepted-command",
-        &serde_json::json!({"title":"x","text":"y"}),
-        100,
-    )?;
-    // A command request's child: a runtime resumes it, and no request owns it.
-    world.submit("parent", Fault::None)?;
-    let child = world.child("parent")?;
-    for (invocation, key) in [
-        ("accepted-command", "command-as-orphan"),
-        (child.as_str(), "child-as-orphan"),
-        // Blocked work is abandoned as blocked, so the cause stays exact.
-        (notify.as_str(), "blocked-as-orphan"),
-        // Finished work never qualifies.
-        ("parent", "finished-as-orphan"),
-    ] {
-        refused(
-            abandon_one(&world.runtime, &operator, &orphan(&world, invocation, key)),
-            "recovery_requires_orphaned_request",
-        );
-    }
-    assert_eq!(abandonments(&world)?, 0);
-    // The scheduler still finishes the accepted command.
-    assert_eq!(world.finish("accepted-command")?.status, "success");
-    assert_eq!(
-        abandon_one(
-            &world.runtime,
-            &operator,
-            &request(&world, &notify, "as-blocked")
-        )?
-        .cause,
-        Cause::Blocked
-    );
+    assert_eq!((pending(&world)?, abandonments(&world)?), (0, 1));
     Ok(())
 }
 
 #[test]
 fn a_list_is_abandoned_all_or_nothing_and_checked_before_any_change() -> Result<()> {
-    let (world, _simulation, notify) = blocked_notify(43, |_, _| Ok(()))?;
+    // Reads cut off before the policy change that blocks the notify are blocked
+    // with it.
+    let (world, _simulation, notify) = blocked_notify(43, |simulation, _| {
+        for id in ["first-read", "second-read"] {
+            simulation.runtime().accept(
+                "reports.list",
+                "alice",
+                id,
+                &serde_json::json!({"after":"","limit":2}),
+                100,
+            )?;
+        }
+        Ok(())
+    })?;
     let operator = operator()?;
-    interrupted_read(&world, "first-read")?;
-    interrupted_read(&world, "second-read")?;
     world.runtime.accept(
         "reports.submit",
         "alice",
@@ -621,30 +504,30 @@ fn a_list_is_abandoned_all_or_nothing_and_checked_before_any_change() -> Result<
             &world.runtime,
             &operator,
             &[
-                orphan(&world, "first-read", "first"),
-                orphan(&world, "accepted-command", "command"),
+                request(&world, "first-read", "first"),
+                request(&world, "accepted-command", "command"),
             ],
         ),
-        "recovery_requires_orphaned_request",
+        "recovery_requires_blocked_invocation",
     );
     assert_eq!((pending(&world)?, abandonments(&world)?), (before, 0));
     for (requests, code) in [
         (Vec::new(), "recovery_requests_count"),
         (
-            vec![orphan(&world, "first-read", "first"); recovery::MAX_REQUESTS + 1],
+            vec![request(&world, "first-read", "first"); recovery::MAX_REQUESTS + 1],
             "recovery_requests_count",
         ),
         (
             vec![
-                orphan(&world, "first-read", "first"),
-                orphan(&world, "first-read", "again"),
+                request(&world, "first-read", "first"),
+                request(&world, "first-read", "again"),
             ],
             "recovery_request_duplicate",
         ),
         (
             vec![
-                orphan(&world, "first-read", "same-key"),
-                orphan(&world, "second-read", "same-key"),
+                request(&world, "first-read", "same-key"),
+                request(&world, "second-read", "same-key"),
             ],
             "recovery_request_duplicate",
         ),
@@ -654,24 +537,21 @@ fn a_list_is_abandoned_all_or_nothing_and_checked_before_any_change() -> Result<
             code,
         );
     }
-    // Both causes in one list, under one exclusion and one transaction.
+    // Every listed invocation in one transaction.
     let receipts = recovery::abandon(
         &world.runtime,
         &operator,
         &[
-            orphan(&world, "first-read", "first"),
-            orphan(&world, "second-read", "second"),
-            request(&world, &notify, "blocked"),
+            request(&world, "first-read", "first"),
+            request(&world, "second-read", "second"),
+            request(&world, &notify, "notify"),
         ],
     )?;
     assert_eq!(
-        receipts
-            .iter()
-            .map(|receipt| (receipt.invocation.as_str(), receipt.cause))
-            .collect::<Vec<_>>(),
+        ids(&receipts),
         vec![
-            ("first-read", Cause::OrphanedRequest),
-            ("second-read", Cause::OrphanedRequest),
+            ("first-read", Cause::Blocked),
+            ("second-read", Cause::Blocked),
             (notify.as_str(), Cause::Blocked),
         ]
     );
@@ -807,7 +687,7 @@ fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() ->
         abandon_one(
             &world.runtime,
             &operator()?,
-            &orphan(&world, "late-read", "too-late"),
+            &request(&world, "late-read", "too-late"),
         ),
         "recovery_already_resolved",
     );
@@ -815,7 +695,7 @@ fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() ->
         abandon_one(
             &world.runtime,
             &operator()?,
-            &orphan(&world, "late-read", "migration:late-read"),
+            &request(&world, "late-read", "migration:late-read"),
         ),
         "invalid_recovery_request_id",
     );

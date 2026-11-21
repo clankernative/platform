@@ -423,7 +423,6 @@ fn an_abandoned_occurrence_is_no_longer_reported_as_blocked() -> Result<()> {
             invocation: blocked.clone(),
             expected_artifact: world.runtime.artifact().id().into(),
             reason: "occurrence blocked by a policy change".into(),
-            cause: day2::recovery::Cause::Blocked,
         }],
     )?;
     assert_eq!(status(&world, &blocked)?, "failure");

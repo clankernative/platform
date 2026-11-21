@@ -504,7 +504,7 @@ does every native action with `kubectl` and the registry API. Operations:
 | `inspect` | Reads the active authority stamp and policy | restored |
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
-| `recovery-abandon` | Backup, then `day2 recovery-abandon` for every invocation the request lists, all or nothing, after a typed `abandon` naming each invocation and cause: a pending invocation blocked by an authority change, or an orphaned request (see [operator recovery](../../docs/OPERATOR-RECOVERY.md)). With the app stopped, no `day2-serve` holds its store, which an orphaned request requires. A refused list changes nothing; rerun the same request file | restored |
+| `recovery-abandon` | Backup, then `day2 recovery-abandon` for every pending invocation blocked by an authority change that the request lists, all or nothing, after a typed `abandon` naming each invocation (see [operator recovery](../../docs/OPERATOR-RECOVERY.md)). An orphaned request is not listed: `activate`'s migration abandons it. A refused list changes nothing; rerun the same request file | restored |
 | `activate` | Backup, migration plan, the target's store admission on a rehearsed copy (journaling the requests its migration abandons as `rehearsal-abandoned`), typed `activate`, migration under the request's operator (which abandons any request a stop cut off, once nothing else is runnable; see [operator recovery](../../docs/OPERATOR-RECOVERY.md)), fresh activation of the target artifact, then the `day2.dev/activated-image` stamp naming the target image. The target may keep the running artifact (a new platform build of the same app build); its migration plan is then empty | stopped: release the target image next (release-managed), otherwise apply day2-app for the new image |
 | `mark-activated` | Recovery when `activate`'s stamp step failed for a target with a new artifact: reads the database's active artifact and, only if it is the target's, stamps the stopped StatefulSet with the target image. A target that keeps the running artifact is refused (the database proves nothing about it); rerun `activate` instead | stopped, as `activate` leaves it |
 
@@ -541,10 +541,10 @@ operations; `rollout` always selects a Deployment. `request_id` is for
 `authority-apply`, `activate`, `mark-activated` and `rollout`; `target`
 (the desired instance, e.g. rendered from the day2-app plan) is for `activate`
 and `mark-activated`, which take the same request file;
-`abandon` lists the requests for `recovery-abandon`, 1 to 16, each with its own
-`request_id`, `invocation`, `expected_artifact`, `reason` and `cause` (`blocked` or
-`orphaned_request`), each `request_id` and invocation once, and only that
-operation takes it; the list is checked before the app stops, and its tooling
+`abandon` lists the blocked invocations for `recovery-abandon`, 1 to 16, each
+with its own `request_id`, `invocation`, `expected_artifact` and `reason`, each
+`request_id` and invocation once, and only that operation takes it (`activate`
+abandons orphaned requests itself); the list is checked before the app stops, and its tooling
 image must be a build with `day2 recovery-abandon`, which may be newer than the
 running app's;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are

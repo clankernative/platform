@@ -608,11 +608,11 @@ impl Cluster for FakeCluster {
                 // Like `day2 recovery-abandon`: one refusal changes nothing.
                 ensure!(
                     !requests.iter().any(|request| Some(&request.invocation) == self.refused_invocation.as_ref()),
-                    "Error: recovery_requires_orphaned_request"
+                    "Error: recovery_requires_blocked_invocation"
                 );
                 serde_json::to_string(&requests.iter().map(|request| day2::recovery::Receipt {
                     invocation: request.invocation.clone(),
-                    cause: request.cause,
+                    cause: day2::recovery::Cause::Blocked,
                     evidence: day2::recovery::EvidenceSummary::default(),
                     children: Vec::new(),
                 }).collect::<Vec<_>>())?
@@ -669,12 +669,12 @@ impl Harness {
         }
         if operation == Operation::RecoveryAbandon {
             request["abandon"] = json!([
-                {"request_id": "abandon-orphan", "invocation": "page-orphan",
+                {"request_id": "abandon-read", "invocation": "blocked-read",
                  "expected_artifact": format!("sha256:{}", self.running.artifact_id),
-                 "reason": "request cut off when the app stopped", "cause": "orphaned_request"},
-                {"request_id": "abandon-blocked", "invocation": "blocked-sync",
+                 "reason": "read blocked by a policy change"},
+                {"request_id": "abandon-sync", "invocation": "blocked-sync",
                  "expected_artifact": format!("sha256:{}", self.running.artifact_id),
-                 "reason": "blocked by a policy change", "cause": "blocked"},
+                 "reason": "sync blocked by a policy change"},
             ]);
         }
         if operation.targeted() {
@@ -2768,16 +2768,16 @@ fn recovery_abandon_needs_a_backup_and_a_confirmation_and_restores_the_app() -> 
     session.confirm()?;
     assert_eq!(*harness.asked.borrow(), 1, "the operator confirmed once");
     let result = session.workflow("recovery-abandon")?;
-    assert_eq!(result["abandoned"][0]["invocation"], "page-orphan");
-    assert_eq!(result["abandoned"][0]["cause"], "orphaned_request");
-    assert_eq!(result["abandoned"][1]["cause"], "blocked");
+    assert_eq!(result["abandoned"][0]["invocation"], "blocked-read");
+    assert_eq!(result["abandoned"][0]["cause"], "blocked");
+    assert_eq!(result["abandoned"][1]["invocation"], "blocked-sync");
     ensure!(
         session.workflow("recovery-abandon").is_err(),
         "abandons once per session"
     );
     let receipt = session.finish()?;
     assert_eq!(receipt["replicas_restored"], true);
-    // One call carried the reviewed list exactly, with each cause and reason.
+    // One call carried the reviewed list exactly, with each reason.
     assert_eq!(abandon_calls(&harness), vec![listed(&harness)?]);
     // It ran only while the app was stopped, after the backup.
     let verbs = harness.verbs();
@@ -2866,7 +2866,7 @@ fn only_recovery_abandon_lists_invocations_and_each_once() -> Result<()> {
         ensure!(format!("{error:#}").contains(code), "{error:#}");
         Ok(())
     };
-    let changes: [RequestChange; 7] = [
+    let changes: [RequestChange; 6] = [
         (
             |request| request["abandon"] = json!([]),
             "recovery_requests_count",
@@ -2879,29 +2879,21 @@ fn only_recovery_abandon_lists_invocations_and_each_once() -> Result<()> {
             "recovery_requests_count",
         ),
         (
-            |request| request["abandon"][1]["invocation"] = "page-orphan".into(),
+            |request| request["abandon"][1]["invocation"] = "blocked-read".into(),
             "recovery_request_duplicate",
         ),
         (
-            |request| request["abandon"][1]["request_id"] = "abandon-orphan".into(),
+            |request| request["abandon"][1]["request_id"] = "abandon-read".into(),
             "recovery_request_duplicate",
         ),
         (
             |request| request["abandon"][0]["reason"] = "line\nbreak".into(),
             "invalid_recovery_reason",
         ),
+        // Only blocked work is abandoned by request, so a request names no cause.
         (
-            |request| request["abandon"][0]["cause"] = "stuck".into(),
-            "unknown variant",
-        ),
-        (
-            |request| {
-                request["abandon"][0]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("cause");
-            },
-            "missing field `cause`",
+            |request| request["abandon"][0]["cause"] = "orphaned_request".into(),
+            "unknown field `cause`",
         ),
     ];
     for (change, code) in changes {

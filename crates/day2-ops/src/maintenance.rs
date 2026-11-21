@@ -373,8 +373,8 @@ pub struct Request {
     /// controller or claim that happens to have the same name.
     #[serde(default)]
     pub placement: Option<Placement>,
-    /// The invocations `recovery-abandon` ends, each with its own idempotency
-    /// key, artifact and cause. Only that operation takes them.
+    /// The blocked invocations `recovery-abandon` ends, each with its own
+    /// idempotency key and artifact. Only that operation takes them.
     #[serde(default)]
     pub abandon: Vec<day2::recovery::Request>,
     /// Skip the typed confirmation; recorded in the journal.
@@ -4474,12 +4474,12 @@ impl Session {
                     .request
                     .abandon
                     .iter()
-                    .map(|request| format!("{} as {}", request.invocation, request.cause.as_str()))
+                    .map(|request| request.invocation.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
                 (
                     format!(
-                        "Type 'abandon' to finish {} invocation(s) of {} as abandoned ({listed}): ",
+                        "Type 'abandon' to finish {} blocked invocation(s) of {} as abandoned ({listed}): ",
                         self.request.abandon.len(),
                         self.request.app
                     ),
