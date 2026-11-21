@@ -356,7 +356,7 @@ fn canonical() -> Result<(Connection, Schema)> {
 /// The ordinary restore path has no external fence. Empty current metadata may
 /// be copied, but retained denial history cannot be laundered by removing the
 /// credential family or OAuth declarations from desired configuration.
-pub(crate) fn require_no_history(db: &Connection) -> Result<()> {
+pub(crate) fn require_no_history(db: &Connection, profile: Option<&Profile>) -> Result<()> {
     // Never install/admit on this connection: archive preflight already owns
     // its VM-step hook. Bound borrowed metadata without replacing that hook.
     let mut databases = db.prepare("PRAGMA database_list")?;
@@ -379,7 +379,14 @@ pub(crate) fn require_no_history(db: &Connection) -> Result<()> {
     if actual.is_empty() {
         return Ok(());
     }
-    let profile = Profile::prepare()?;
+    let reference;
+    let profile = match profile {
+        Some(profile) => profile,
+        None => {
+            reference = Profile::prepare()?;
+            &reference
+        }
+    };
     ensure!(
         actual
             .iter()

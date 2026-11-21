@@ -578,6 +578,7 @@ fn prepare_in_scope(
     );
     local_stores(runtime)?;
     let expected = expected_storage(runtime)?;
+    let credentials = crate::oauth::restore::Profile::prepare()?;
     runtime.sql_write(|tx| {
         runtime.check_binding(tx)?;
         let active = authority_state::current(tx)?;
@@ -595,7 +596,7 @@ fn prepare_in_scope(
             rollout::storage_shape(runtime, tx)? == expected.shape,
             "runtime_pair_store_shape_changed"
         );
-        crate::store::require_no_managed_credential_restore_state(tx)?;
+        crate::store::check_credential_restore_state(tx, Some(&credentials))?;
         let identity = match crate::runtime_generation::identity(runtime, tx)? {
             Some(installed) => installed,
             None => RuntimeIdentity::from_artifact(

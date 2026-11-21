@@ -748,7 +748,7 @@ fn complete_cut_preserves_unknown_and_known_histories_and_reopens_as_denial() ->
                 );
             }
             assert!(require_open(&db, Kind::Inbound, "old_grant").is_err());
-            assert!(require_no_history(&db).is_err());
+            assert!(require_no_history(&db, None).is_err());
             assert!(
                 db.execute("DELETE FROM main.oauth_restore_closed", [])
                     .is_err()
@@ -1077,18 +1077,18 @@ fn ordinary_restore_allows_only_empty_current_cut_metadata() -> Result<()> {
     let mut db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
     {
         let tx = db.transaction()?;
-        require_no_history(&tx)?;
+        require_no_history(&tx, None)?;
         tx.commit()?;
     }
     install(&db)?;
     {
         let tx = db.transaction()?;
-        require_no_history(&tx)?;
+        require_no_history(&tx, None)?;
         tx.commit()?;
     }
     db.execute("DELETE FROM oauth_restore_schema_version", [])?;
     let tx = db.transaction()?;
-    assert!(require_no_history(&tx).is_err());
+    assert!(require_no_history(&tx, None).is_err());
     tx.rollback()?;
     Ok(())
 }

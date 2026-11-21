@@ -642,15 +642,23 @@ fn schema_shape(
         .collect()
 }
 
-pub(crate) fn verify_storage_shape(runtime: &Runtime, actual: &Connection) -> Result<()> {
+pub(crate) fn expected_storage_shape(runtime: &Runtime) -> Result<Vec<(String, String, String)>> {
     let metadata =
         crate::store::InitialStoreMetadata::load(runtime.instance_path(), runtime.app())?;
     let mut expected = Connection::open_in_memory()?;
     let tx = expected.transaction()?;
     metadata.initialize_in_transaction(&tx)?;
     install(&tx)?;
+    storage_shape(runtime, &tx)
+}
+
+pub(crate) fn verify_storage_shape(
+    runtime: &Runtime,
+    actual: &Connection,
+    expected: &[(String, String, String)],
+) -> Result<()> {
     ensure!(
-        storage_shape(runtime, actual)? == storage_shape(runtime, &tx)?,
+        storage_shape(runtime, actual)?.as_slice() == expected,
         "rollout_store_shape_incompatible_requires_maintenance"
     );
     Ok(())
